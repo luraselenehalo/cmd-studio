@@ -1,0 +1,11 @@
+[package]
+name = "jsonc-cst-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+jsonc-parser = { version = "=0.34.0", features = ["cst", "serde"] }
+serde_json = "1"
