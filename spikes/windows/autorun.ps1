@@ -1,6 +1,7 @@
 ﻿$ErrorActionPreference = 'Stop'
 $key = 'HKCU:\Software\Microsoft\Command Processor'
-New-Item -Path $key -Force | Out-Null
+# Never New-Item -Force here: on an existing key it wipes every value and subkey.
+if (-not (Test-Path $key)) { New-Item -Path $key | Out-Null }
 $orig = (Get-ItemProperty $key -ErrorAction SilentlyContinue).AutoRun
 "original AutoRun: [$orig]"
 $dir = Join-Path $env:LOCALAPPDATA 'สปายค์ ทดสอบ & R&D'
