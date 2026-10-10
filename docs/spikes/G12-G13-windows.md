@@ -82,3 +82,73 @@ The fix is in 9592f54. **Rule for Phase 1b:** the AutoRun adapter opens the exis
 Not yet proven:
 - **Interactive `cmd` with Clink loaded:** start time, and the banner and screen clear in AutoRun mode (G4). Needs VM-A or the dev machine.
 - **A Thai Windows with a Thai user name (VM-C).** On the runner, the Thai is only in a folder name, and the probe did not record the system locale.
+
+## Stock Windows (Task 8, 2026-10-11)
+
+- **Where:** two VirtualBox VMs on the dev machine, set up by `spikes/vm` (see its README).
+  - VM-A: Windows 11 Home 26H2, build 26300.9457, with Windows Terminal 1.24.11911.0 as the default terminal.
+  - VM-B: Windows 10 Home 22H2, build 19045, with no Windows Terminal.
+- **How:** both run the same probes as CI (`spikes/vm/guest/run-ci-probe.ps1`). They run on the signed-in user's desktop session, through an interactive scheduled task, not in a service session.
+- **Raw output:** in `spikes/vm/tmp/` (not in git).
+
+### G12 on stock Windows: ✅
+
+| | VM-A Windows 11 | VM-B Windows 10 |
+|---|---|---|
+| `context:` line | `Cascadia Code preinstalled=True Cascadia Mono preinstalled=True` | `Cascadia Code preinstalled=False Cascadia Mono preinstalled=False` |
+| `family in file:` | `CaskaydiaCove NF` | `CaskaydiaCove NF` |
+| `before` / `after install` / `after uninstall` / `file deleted` | `False` / `True` / `False` / `True` | `False` / `True` / `False` / `True` |
+| Still there after a restart (`font-persist.ps1 -Install`, restart, `-Check`) | `check: visible=True file=True value=True` | `check: visible=True file=True value=True` |
+| Removal afterwards (`-Remove`) | `removed: visible=False file=False` | `removed: visible=False file=False` |
+
+The same test on VM-C (Thai Windows 11, user `ผู้ทดสอบ ไทย`) installed the font file under `C:\Users\ผู้ทดสอบ ไทย\AppData\Local\Microsoft\Windows\Fonts`, a Thai path with a space. After a restart: `check: visible=True file=True value=True`. Removal: `removed: visible=False file=False`.
+
+Settled by this:
+- **Sign-in persistence:** Windows reloads a per-user font from the HKCU value at sign-in. Both VMs showed this after a full restart with auto sign-in.
+- **Fonts preinstalled per version:** Windows 11 has Cascadia Code and Cascadia Mono, and Windows 10 has neither. A theme that needs Cascadia must install it on Windows 10.
+- **The font name in Windows Terminal (VM-A).** WT 1.24 accepts both `CaskaydiaCove NF` and `CaskaydiaCove Nerd Font` as `font.face`. The test typed `-> != <= >= www`, and both names drew Cascadia Code's ligatures (`→ ≠ ≤ ≥`).
+  - A name that does not exist (`NoSuchFont Control`) fell back to Cascadia Mono with no ligatures, and WT showed **no warning**.
+  - So the app must check the font itself; WT will not tell the user.
+  - Use `CaskaydiaCove NF`, the one name that both GDI detection and WT accept.
+
+### G13 on stock Windows: ✅
+
+The (a) to (c) results match CI on both VMs. VM-A, verbatim:
+```
+(a) file present: exit=0 stderr=[] marker=[probe ran
+]
+(b) file missing: exit=0 stderr=[]
+(c) chained: exit=0 stderr=[] marker=[foreign 
+probe ran
+]
+(e) AutoRun now: [if exist "C:\Users\tester\AppData\Local\สปายค์ ทดสอบ & R&D\clink\clink_x64.exe" "C:\Users\tester\AppData\Local\สปายค์ ทดสอบ & R&D\clink\clink_x64.exe" inject --autorun --quiet --profile "C:\Users\tester\AppData\Local\สปายค์ ทดสอบ & R&D\clink-profile"]
+(e) one run with clink: exit=0 stderr=[]
+(e) cmd /c average ms: without=56.7 with-clink=97.9
+```
+- **VM-B's timing:** `(e) cmd /c average ms: without=26.3 with-clink=50.9`.
+- **Cost:** in these VMs, AutoRun adds 25–41 ms to each `cmd /c`, against 14 ms on CI. The VMs are slower overall: the baseline is 26–57 ms against CI's 10 ms. During VM-A's run, a third VM was installing Windows at the same time.
+- **The share stays alike:** with AutoRun, a `cmd /c` takes 1.7–1.9× as long on the VMs and 2.4× on CI.
+
+### Interactive cmd with Clink (opened with Win+R)
+
+`spikes/vm/guest/proto-setup.ps1` lays out what the app will install under `%LOCALAPPDATA%`: Clink and Oh My Posh run from their full paths, plus the prototype's banner and the guarded AutoRun. `proto-report.ps1` then reads Clink's log and the timing marker.
+
+The final numbers were taken with the other VMs paused. Every number comes from these VMs, which are 2.5–5 times slower than CI, going by `cmd /c` with no AutoRun: 26–57 ms here against 10 ms on CI.
+
+| | VM-B Windows 10 (conhost) | VM-A Windows 11 (WT) | VM-C Thai Windows 11 (WT) |
+|---|---|---|---|
+| cmd's start to Clink's first input line | 564 ms | 1,575 / 1,725 / 2,022 ms | 2,511 (first) / 1,117 / 1,402 ms |
+| `oh-my-posh print primary` (average of 5) | 55 ms | 53–57 ms | 94–149 ms |
+
+To see where the time goes on VM-A, the runs were split at the inject time Clink writes to `clink.log`:
+
+| VM-A run | cmd's start to Clink's inject | Clink's inject to the first input line |
+|---|---|---|
+| 1 | 1,674 ms | 388 ms |
+| 2 | 663 ms | 393 ms |
+
+- **What CMD Studio adds:** Clink's inject, the Lua scripts and Oh My Posh's `init` cost a steady ~390 ms on this VM. Starting `clink_x64.exe` from AutoRun adds about 40 ms on top (G13 (e)).
+- **What varies (0.7–1.7 s):** the time before Clink starts. That is cmd starting and Windows handing the console to Windows Terminal. Every cmd on Windows 11 pays it, with or without CMD Studio. Windows 10's conhost does not have it.
+- **On real hardware:** the added time should be well under half a second. This is still not proven on real hardware; the founder's dev machine can measure it.
+- **VM-C:** ran with Clink through its 8.3 path. See the Clink blocker in `docs/spikes/G4-G5-G16-G17-clink.md`.
+- **G4 (the header and the banner) and G17:** see the "Stock Windows" section of `docs/spikes/G4-G5-G16-G17-clink.md`.

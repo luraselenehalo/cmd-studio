@@ -1,7 +1,7 @@
 ﻿# 'Continue', not 'Stop': in PowerShell 5.1, native stderr redirected with 2>&1
 # becomes an error record, and 'Stop' would abort before G5 records the Lua error.
+param([string] $Clink = "$env:USERPROFILE\cmd-claude-theme\clink-bin\clink_x64.exe")
 $ErrorActionPreference = 'Continue'
-$clink ="$env:USERPROFILE\cmd-claude-theme\clink-bin\clink_x64.exe"
 $root = Join-Path $PSScriptRoot 'tmp'
 Remove-Item $root -Recurse -Force -ErrorAction SilentlyContinue
 $profileDir = Join-Path $root 'profile'
