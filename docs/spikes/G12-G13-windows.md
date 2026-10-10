@@ -1,7 +1,7 @@
 # G12, G13 — Windows CI probes
 
 - **Date:** 2026-10-10.
-- **Where it ran:** GitHub Actions `windows-latest`. It reported `Microsoft Windows Server 2025 Datacenter 10.0.26100`, a server edition rather than the Windows 11 most users run. Its file system and registry are real, unlike the dev machine's shell inside the Claude app, which is MSIX-virtualized.
+- **Where it ran:** GitHub Actions `windows-latest`. It reported `Microsoft Windows Server 2025 Datacenter 10.0.26100`, a server edition rather than the Windows 11 most users run. Its file system and registry are real. The dev machine's shell is not: it runs inside an MSIX-packaged app, which virtualizes its AppData and HKCU writes.
 - **Runs:**
   - [38064746693](https://github.com/luraselenehalo/cmd-studio/actions/runs/38064746693), commit 00f966b: G12 inconclusive.
   - [38065370337](https://github.com/luraselenehalo/cmd-studio/actions/runs/38065370337), commit 9592f54: G12 rerun with a font the image does not have; G13 again.

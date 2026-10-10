@@ -4,8 +4,11 @@
 #   -Mode short  run Clink through the 8.3 short path of the same folder
 #   -Mode ascii  run a copy of Clink from C:\ProgramData\cmdstudio-spike (no user name in the path)
 param([Parameter(Mandatory)] [ValidateSet('short', 'ascii')] [string] $Mode)
+$ErrorActionPreference = 'Stop'
+if ($env:COMPUTERNAME -notlike 'CMDSTUDIO-*') { throw "VM only: $env:COMPUTERNAME is not a CMD Studio test VM, and this script rewrites the user's cmd AutoRun" }
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 $data = Join-Path $env:LOCALAPPDATA 'ai.resincore.cmdstudio-spike'
+if (-not (Test-Path (Join-Path $data 'autorun-before.json'))) { throw 'run proto-setup.ps1 -WithOmp first: it saves the AutoRun that proto-setup.ps1 -Remove puts back' }
 $profileDir = Join-Path $data 'clink-profile'
 $clinkDir = Join-Path $data 'runtime\clink-1.9.34'
 if ($Mode -eq 'short') {

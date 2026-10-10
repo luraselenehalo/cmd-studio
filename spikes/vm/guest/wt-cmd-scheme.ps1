@@ -3,12 +3,14 @@
 # changes only that scheme's background, the same edit as spikes/wt/g8-live-reload.ps1.
 param([switch] $Setup, [string] $Background, [string] $FontFace)
 $ErrorActionPreference = 'Stop'
+if ($env:COMPUTERNAME -notlike 'CMDSTUDIO-*') { throw "VM only: $env:COMPUTERNAME is not a CMD Studio test VM, and this script replaces Windows Terminal's settings.json" }
 $dir = Join-Path $env:LOCALAPPDATA 'Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState'
 $s = Join-Path $dir 'settings.json'
 $utf8 = New-Object Text.UTF8Encoding $false
 if ($Setup) {
   New-Item -ItemType Directory -Force $dir | Out-Null
-  if (Test-Path $s) { Copy-Item $s "$s.before-cmdstudio" -Force; "existing settings.json backed up" }
+  # Back up only once: a second -Setup would otherwise overwrite the user's file with our own.
+  if ((Test-Path $s) -and -not (Test-Path "$s.before-cmdstudio")) { Copy-Item $s "$s.before-cmdstudio"; "existing settings.json backed up" }
   $font = if ($FontFace) { ", `"font`": { `"face`": `"$FontFace`" }" } else { '' }
   $json = @"
 {

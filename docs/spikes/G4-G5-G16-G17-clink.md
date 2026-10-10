@@ -2,7 +2,7 @@
 
 - **Date:** 2026-10-10
 - **Where it ran:** dev machine (Windows 11 Home 26300, AtlasOS), using Clink 1.9.34 from the prototype folder.
-- **Probe profile:** lives in `spikes/clink/tmp/` inside the repo, not under AppData, so the Claude app's MSIX virtualization does not affect it.
+- **Probe profile:** lives in `spikes/clink/tmp/` inside the repo, not under AppData. The dev shell runs inside an MSIX-packaged app whose AppData writes are virtualized, so this keeps the probe out of that.
 - **Window:** the injected cmd ran as a hidden window, so it took no focus and sent no keystrokes.
 - **Raw output:** `docs/spikes/clink-probe-output.txt`. The user and computer names are redacted as `%USERPROFILE%` and `<computer>\<user>`.
 
@@ -97,7 +97,8 @@ g4 screen line 2: [(c) Microsoft Corporation. All rights reserved.]
 g4 prototype header match: true
 ```
 - **Header detection works:** in AutoRun mode, cmd prints its header before AutoRun runs, and `claude-banner.lua` cleared it. On screen, the welcome box replaced the header on VM-A, VM-B and VM-C.
-- **Thai Windows keeps the English header.** `cmd.exe.mui` exists only in `System32\en-US`; there is no `th-TH` copy. So the pattern from spec §3.6 also works for Thai users.
+- **Thai Windows keeps the English header.** With Thai installed, `cmd.exe.mui` exists only in `System32\en-US`; there is no `th-TH` copy. The listing is saved in `spikes/vm/tmp/thai-cmd-mui.txt`. So the pattern from spec §3.6 also works for Thai users.
+- **VM-C's lines, as saved:** `spikes/vm/tmp/thai-proto-report-short.txt`, rerun on 2026-10-11 for the final review with Clink through its 8.3 path. The first VM-C run's output was printed but not saved.
 
 ### G17 — `init.lua` end to end: ✅ on all three, but only once Clink itself runs (see below)
 
@@ -108,9 +109,19 @@ g4 prototype header match: true
 
 The 56 extra bytes on VM-C are the Thai path, which Oh My Posh writes into its init script as UTF-8. On a code page 874 system, `io.popen` with the doubled outer quotes runs an exe from a Thai path that has a space, and the prompt works.
 
-### New blocker: Clink 1.9.34 cannot inject from a Thai folder on Thai Windows ❌
+### New blocker: Clink 1.9.34 cannot inject from a folder whose path has a Thai user name ❌
 
-On VM-C, with Clink's own files under the Thai profile, the hidden `/k` probe and the AutoRun layout both stayed plain cmd. `clink.log`, copied as it was:
+On VM-C, with Clink's own files under the Thai profile, neither the hidden `/k` probe nor the AutoRun layout managed to inject.
+
+In AutoRun mode, **every cmd window then prints Clink's error** under the header (screenshot `spikes/vm/tmp/cmdstudio-th-proto-thai.png`):
+```
+DLL version mismatch.
+Unable to inject Clink.
+See log file for details (C:\Users\ผู้ทดสอบ ไทย\AppData\Local\ai.resincore.cmdstudio-spike\clink-profile\clink.log).
+```
+The `if exist` guard does not prevent this: the exe exists, starts, and only then fails.
+
+`clink.log`, copied as it was:
 ```
 copy_dll                  122 *** ERROR 123 ***
 copy_dll                  122 Failed to copy DLL to 'C:\Users\3607~1\AppData\Local\Temp\clink\dll_cache\1.9.34.4e8ae4_97d16ab3\clink_dll_x64.dll'
@@ -123,14 +134,15 @@ check_dll_version         154 (Error 2.  The system cannot find the file specifi
 - **What goes wrong:** Clink converts the path of its own DLL through the wrong code page, so the Thai name comes out garbled, and the file can't be found.
 - **What still works:** the profile path is passed on the command line and stays correct. `clink info` showed the Thai profile paths correctly, and G5 and G16 still worked.
 - **Upstream:** [chrisant996/clink#203](https://github.com/chrisant996/clink/issues/203) was the same symptom for a Chinese folder. It was fixed in 1.2.47 (2021). The maintainer said then that other places might still rely on the system code page being UTF-8. 1.9.34, released 2026-09-21, is the latest release.
-- **Why it blocks the design:** spec §5.3–5.4 puts the runtime under `%LOCALAPPDATA%`. A user whose Windows name is Thai would get plain cmd, with nothing in the UI to say why.
+- **Why it blocks the design:** spec §5.3–5.4 puts the runtime under `%LOCALAPPDATA%`. A user whose Windows name is Thai would get no theme, and the error above in every cmd window.
+- **English Windows too:** VM-A (code page 1252) with an added user `ผู้ทดสอบ ไทย` failed the same way. There the Thai letters turn into `?`: `Unable to get DLL version for 'C:\Users\???????? ???\AppData\Local\…\clink_dll_x64.dll'`. Raw output: `spikes/vm/tmp/win11-thai-user-cp1252.txt`. The user was added with `guest/add-thai-user.ps1`, elevated through UAC on the VM's own screen.
 
-Two workarounds were tried on VM-C. Both left 0 `ERROR` lines in `clink.log`, and both kept the profile under the Thai path:
+Two workarounds were tried on VM-C (Thai Windows), then again on VM-A (English Windows with the Thai user). Every run left 0 `ERROR` lines in `clink.log` and kept the profile under the Thai path:
 
-| Mode (`guest/thai-clink-workaround.ps1`) | Clink run from | Result |
-|---|---|---|
-| `short` | the 8.3 path of the same folder: `C:\Users\3607~1\AppData\Local\AIRESI~1.CMD\runtime\CLINK-~1.34\clink_x64.exe` | injects; G4 and G17 as above |
-| `ascii` | a copy in `C:\ProgramData\cmdstudio-spike\clink-1.9.34` | injects; G4 and G17 as above |
+| Mode (`guest/thai-clink-workaround.ps1`) | Clink run from | VM-C (code page 874) | VM-A (code page 1252) |
+|---|---|---|---|
+| `short` | the 8.3 path of the same folder: `C:\Users\3607~1\AppData\Local\AIRESI~1.CMD\runtime\CLINK-~1.34\clink_x64.exe` | injects; G4 and G17 as above | injects; `g17 init bytes: 328`, header match `true` |
+| `ascii` | a copy in `C:\ProgramData\cmdstudio-spike\clink-1.9.34` | injects; G4 and G17 as above | injects; `g17 init bytes: 328`, header match `true` |
 
 Each has a cost:
 - **`short`:** depends on 8.3 names, which can be turned off per volume.

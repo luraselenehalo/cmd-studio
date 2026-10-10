@@ -4,6 +4,7 @@
 #   -Remove   per-user removal
 param([switch] $Install, [switch] $Check, [switch] $Remove)
 $ErrorActionPreference = 'Stop'
+if ($env:COMPUTERNAME -notlike 'CMDSTUDIO-*') { throw "VM only: $env:COMPUTERNAME is not a CMD Studio test VM, and this script installs and removes a font for the signed-in user" }
 Add-Type -Namespace W -Name Font -MemberDefinition @'
 [DllImport("gdi32.dll", CharSet = CharSet.Unicode)] public static extern int AddFontResourceW(string f);
 [DllImport("gdi32.dll", CharSet = CharSet.Unicode)] public static extern bool RemoveFontResourceW(string f);

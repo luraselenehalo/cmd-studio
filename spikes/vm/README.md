@@ -15,7 +15,7 @@ The dev machine runs AtlasOS, which few users have, so it does not show what mos
 The install options matter:
 - **`ADDLOCAL=VBoxApplication`** leaves out the bridged and host-only network drivers, so the host's network doesn't drop during install. NAT needs no host driver.
 - **`--no-silent-cert`** stops silent mode from adding Oracle's certificate to the host's TrustedPublisher store.
-- **Run the installer through Windows Terminal** (`wt -w new powershell -File …`), because the Claude app's shell is MSIX-virtualized.
+- **Run the installer through Windows Terminal** (`wt -w new powershell -File …`), because the dev shell runs inside an MSIX-packaged app and is virtualized.
 
 ## Machines
 
@@ -79,6 +79,11 @@ The guest scripts live in `guest\`:
 - `thai-prefs.ps1`: on VM-C, reads or sets the Thai UI, regional format and home location. guestcontrol may not see the user's HKCU, so run it with `Invoke-GuestDesktop`.
 - `thai-clink-probes.ps1`: on VM-C, reruns `spikes/clink/run-probes.ps1` from inside the Thai profile.
 - `thai-clink-workaround.ps1`: on VM-C, points AutoRun at Clink through the 8.3 path (`short`) or a copy in `C:\ProgramData` (`ascii`). Clink 1.9.34 cannot inject from a Thai folder on Thai Windows; see `docs/spikes/G4-G5-G16-G17-clink.md`.
+
+- `add-thai-user.ps1`: adds `ผู้ทดสอบ ไทย` to a VM and switches auto-logon to it. Start it elevated through UAC on the VM's own screen. On VM-A this gives the case of a Thai user name on English Windows.
+- `guard.test.ps1`: checks on the host, without a VM, that every script that changes settings refuses to run outside a `CMDSTUDIO-*` machine. It also checks that `wt-cmd-scheme.ps1` keeps the first backup of `settings.json`.
+
+Every script that changes the user's settings starts with that guard. They are meant for these VMs only.
 
 On VM-C, the Thai keyboard is active after sign-in, and `Send-Run 'cmd'` would type `แทก`. Press Win+Space first (`keyboardputscancode e0 5b 39 b9 e0 db`), then check that the tray shows ENG.
 

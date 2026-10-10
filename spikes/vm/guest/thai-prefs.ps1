@@ -2,6 +2,7 @@
 # user's environment but not necessarily the user's HKCU, so per-user settings are made from here.
 # -Set: Thai display language, Thai regional format, home location Thailand (takes effect after sign-in).
 param([switch] $Set)
+if ($env:COMPUTERNAME -notlike 'CMDSTUDIO-*') { throw "VM only: $env:COMPUTERNAME is not a CMD Studio test VM, and this script changes the user's language settings" }
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 if ($Set) {
   Set-WinUILanguageOverride -Language th-TH

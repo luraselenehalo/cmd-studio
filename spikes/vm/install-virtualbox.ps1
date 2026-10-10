@@ -1,6 +1,6 @@
 # Installs VirtualBox for the Phase 0 test VMs (Task 8).
-# Run it through Windows Terminal (wt -w new powershell -File ...), not from the Claude app's shell:
-# that shell is MSIX-virtualized, and the installer's temp files would land where msiserver can't see them.
+# Run it through Windows Terminal (wt -w new powershell -File ...), not from a shell inside an MSIX-packaged
+# app: that shell is virtualized, and the installer's temp files would land where msiserver can't see them.
 #  - Only the main program (ADDLOCAL=VBoxApplication): no bridged or host-only network drivers,
 #    so the host's network does not drop during install. NAT needs no host driver.
 #  - --no-silent-cert: silent mode would otherwise add Oracle's certificate to the machine's

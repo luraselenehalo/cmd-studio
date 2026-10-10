@@ -2,8 +2,19 @@
 $key = 'HKCU:\Software\Microsoft\Command Processor'
 # Never New-Item -Force here: on an existing key it wipes every value and subkey.
 if (-not (Test-Path $key)) { New-Item -Path $key | Out-Null }
-$orig = (Get-ItemProperty $key -ErrorAction SilentlyContinue).AutoRun
-"original AutoRun: [$orig]"
+# Save and restore a value as stored. Get-ItemProperty expands REG_EXPAND_SZ, and writing that result
+# back would change both the text and the type (autorun-restore.test.ps1 checks this).
+function Save-Value($path, $name) {
+  $k = Get-Item $path
+  if ($k.GetValueNames() -notcontains $name) { return $null }
+  @{ Data = $k.GetValue($name, $null, 'DoNotExpandEnvironmentNames'); Kind = $k.GetValueKind($name) }
+}
+function Restore-Value($path, $name, $saved) {
+  if ($null -eq $saved) { Remove-ItemProperty $path $name -ErrorAction SilentlyContinue; return }
+  New-ItemProperty -Path $path -Name $name -Value $saved.Data -PropertyType $saved.Kind -Force | Out-Null
+}
+$orig = Save-Value $key 'AutoRun'
+"original AutoRun: [$($orig.Data)] type: $(if ($orig) { $orig.Kind } else { 'none' })"
 $dir = Join-Path $env:LOCALAPPDATA 'สปายค์ ทดสอบ & R&D'
 New-Item -ItemType Directory -Force $dir | Out-Null
 $marker = Join-Path $dir 'marker.log'
@@ -38,6 +49,7 @@ try {
   $with = (Measure-Command { 1..20 | ForEach-Object { cmd /c exit } }).TotalMilliseconds / 20
   "(e) cmd /c average ms: without=$([math]::Round($base,1)) with-clink=$([math]::Round($with,1))"
 } finally {
-  if ($null -eq $orig) { Remove-ItemProperty $key AutoRun -ErrorAction SilentlyContinue } else { Set-ItemProperty $key AutoRun $orig }
-  "AutoRun restored to: [$((Get-ItemProperty $key -ErrorAction SilentlyContinue).AutoRun)]"
+  Restore-Value $key 'AutoRun' $orig
+  $now = Save-Value $key 'AutoRun'
+  "AutoRun restored to: [$($now.Data)] type: $(if ($now) { $now.Kind } else { 'none' })"
 }

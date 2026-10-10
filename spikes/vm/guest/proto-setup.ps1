@@ -5,17 +5,33 @@
 # Scripts load in name order: 00-g4-header.lua logs the screen before claude-banner.lua clears it.
 param([switch] $WithOmp, [switch] $Remove)
 $ErrorActionPreference = 'Stop'
+if ($env:COMPUTERNAME -notlike 'CMDSTUDIO-*') { throw "VM only: $env:COMPUTERNAME is not a CMD Studio test VM, and this script rewrites the user's cmd AutoRun" }
 $key = 'HKCU:\Software\Microsoft\Command Processor'
 # Never New-Item -Force on this key: it wipes every value and subkey.
 if (-not (Test-Path $key)) { New-Item -Path $key | Out-Null }
-if ($Remove) { Remove-ItemProperty $key AutoRun -ErrorAction SilentlyContinue; 'AutoRun removed'; return }
+$data = Join-Path $env:LOCALAPPDATA 'ai.resincore.cmdstudio-spike'
+# The user's AutoRun as it was before the first setup: text unexpanded, and its type.
+$before = Join-Path $data 'autorun-before.json'
+if ($Remove) {
+  if (-not (Test-Path $before)) { 'no saved AutoRun, nothing restored'; return }
+  $saved = Get-Content -LiteralPath $before -Raw | ConvertFrom-Json
+  if ($saved.Absent) { Remove-ItemProperty $key AutoRun -ErrorAction SilentlyContinue }
+  else { New-ItemProperty -Path $key -Name AutoRun -Value $saved.Data -PropertyType $saved.Kind -Force | Out-Null }
+  Remove-Item -LiteralPath $before
+  "AutoRun restored ($(if ($saved.Absent) { 'there was none' } else { $saved.Kind }))"
+  return
+}
 
 $utf8 = New-Object Text.UTF8Encoding $false
-$data = Join-Path $env:LOCALAPPDATA 'ai.resincore.cmdstudio-spike'
 $clinkDir = Join-Path $data 'runtime\clink-1.9.34'
 $profileDir = Join-Path $data 'clink-profile'
 $scripts = Join-Path $data 'scripts'
 New-Item -ItemType Directory -Force $profileDir, $scripts | Out-Null
+if (-not (Test-Path $before)) {
+  $k = Get-Item $key
+  $saved = if ($k.GetValueNames() -contains 'AutoRun') { @{ Data = $k.GetValue('AutoRun', $null, 'DoNotExpandEnvironmentNames'); Kind = "$($k.GetValueKind('AutoRun'))" } } else { @{ Absent = $true } }
+  $saved | ConvertTo-Json | Set-Content -LiteralPath $before -Encoding UTF8
+}
 if (-not (Test-Path $clinkDir)) { Copy-Item 'C:\cmdstudio\clink-bin' $clinkDir -Recurse }
 Copy-Item (Join-Path $PSScriptRoot 'g4-header.lua') (Join-Path $scripts '00-g4-header.lua') -Force
 Copy-Item 'C:\cmdstudio\proto\clink\claude-banner.lua' $scripts -Force
