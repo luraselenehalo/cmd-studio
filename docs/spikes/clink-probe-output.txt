@@ -1,0 +1,44 @@
+== G16: clink.autoupdate
+        Name: clink.autoupdate
+ Description: Auto-update the Clink program files
+     Options: off,check,prompt,auto
+       Value: check
+     Default: check
+
+When 'off', Clink does not automatically check for updates, but you can
+use 'clink update' to check for updates.
+When 'check' (the default), Clink periodically checks for updates and
+prints a message when an update is available.
+When 'prompt', Clink periodically checks for updates and if one is
+available then it shows a window to prompt whether to install the update.
+When 'auto', Clink periodically checks for updates and also
+attempts to automatically install an update.  If elevation is needed then
+it pops up a prompt window, otherwise it automatically installs the update.
+Setting 'clink.autoupdate' set to 'off'.
+exit=0
+== G5: does a Lua error show up?
+Setting 'clink.path' set to '%USERPROFILE%\cmd-studio\spikes\clink\tmp\scripts'.
+exit=0
+output:
+%USERPROFILE%\cmd-studio\spikes\clink\tmp\scripts\bad.lua:1: cmdstudio spike: deliberate error
+        Name: clink.logo
+ Description: Controls what startup logo to show
+     Options: none,full,short
+       Value: full
+     Default: full
+
+The default is 'full' which shows the full copyright logo when Clink is
+injected.  A value of 'short' shows an abbreviated startup logo with version
+information.  A value of 'none' omits the startup logo entirely.
+clink.log tail:
+== G4 + G17: hidden injected cmd
+clink.log probe lines:
+7be8 @%USERPROFILE%\cmd-studio\spikes\clink\tmp\scripts\probe.lua   10 probe getlinetext: 6=CMDSTUDIO-PROBE-A | 7=CMDSTUDIO-PROBE-B
+7be8 @%USERPROFILE%\cmd-studio\spikes\clink\tmp\scripts\probe.lua   16 probe popen: ["one two"|"???"
+7be8 @%USERPROFILE%\cmd-studio\spikes\clink\tmp\scripts\probe.lua   19 probe popen-input (Thai file name reaches cmd?): [FOUND
+7be8 @%USERPROFILE%\cmd-studio\spikes\clink\tmp\scripts\probe.lua   22 probe popen-exe (exe under a Thai path with spaces): [<computer>\<user>
+7be8 @%USERPROFILE%\cmd-studio\spikes\clink\tmp\scripts\probe.lua   25 probe screen line 1: [Clink v1.9.34.4e8ae4]
+7be8 @%USERPROFILE%\cmd-studio\spikes\clink\tmp\scripts\probe.lua   25 probe screen line 2: [Copyright (c) 2012-2018 Martin Ridgers]
+7be8 @%USERPROFILE%\cmd-studio\spikes\clink\tmp\scripts\probe.lua   25 probe screen line 3: [Portions Copyright (c) 2020-2026 Christopher Antos]
+7be8 @%USERPROFILE%\cmd-studio\spikes\clink\tmp\scripts\probe.lua   25 probe screen line 4: [https://github.com/chrisant996/clink]
+7be8 @%USERPROFILE%\cmd-studio\spikes\clink\tmp\scripts\probe.lua   25 probe screen line 5: []
