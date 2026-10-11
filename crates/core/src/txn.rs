@@ -1356,4 +1356,311 @@ mod tests {
             Stage::RollbackIncomplete { failed: vec![1] }
         );
     }
+
+    // ---- A crash in every call ----
+
+    /// A crash simulation. The machine, the journal file and a count of the engine's calls on
+    /// them live in one `World`. A planned crash unwinds from inside one call, before it,
+    /// half-way through it or right after it, and leaves the world as it was at that instant.
+    /// The next start is a fresh engine on what is left.
+    mod crash {
+        use super::*;
+        use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
+
+        #[derive(Clone, Copy, Debug, PartialEq)]
+        enum Moment {
+            Before,
+            Half,
+            After,
+        }
+
+        /// What the unwind that stands for a crash carries.
+        struct Crashed;
+
+        fn crash() -> ! {
+            resume_unwind(Box::new(Crashed))
+        }
+
+        type Bytes = BTreeMap<String, Vec<u8>>;
+
+        #[derive(Clone, Default)]
+        struct World {
+            machine: Bytes,
+            /// `journal.json`: a save replaces it as a whole.
+            file: Option<Journal>,
+            calls: usize,
+            crash_in: Option<(usize, Moment)>,
+            last_call: String,
+            /// Applying this key fails, with the target half written.
+            fail_apply: Option<&'static str>,
+            fail_verify: bool,
+        }
+
+        impl World {
+            /// Counts one call of the engine, and says whether the crash comes in it.
+            fn call(&mut self, what: String) -> Option<Moment> {
+                let n = self.calls;
+                self.calls += 1;
+                self.last_call = what;
+                self.crash_in
+                    .filter(|&(at, _)| at == n)
+                    .map(|(_, moment)| moment)
+            }
+
+            /// Writes `value` to `key`, or removes the key for `None`. A crash comes before the
+            /// write, half-way through it (the target is garbage) or right after it. A write that
+            /// fails leaves the target half written too.
+            fn write(
+                &mut self,
+                key: String,
+                value: Option<Vec<u8>>,
+                fails: bool,
+                at: Option<Moment>,
+            ) -> Result<(), Failure> {
+                if at == Some(Moment::Before) {
+                    crash()
+                }
+                if at == Some(Moment::Half) || fails {
+                    self.machine.insert(key, b"HALF-WRITTEN".to_vec());
+                    if at == Some(Moment::Half) {
+                        crash()
+                    }
+                    return Err(failure("E_WT_WRITE", "disk said no"));
+                }
+                match value {
+                    Some(v) => self.machine.insert(key, v),
+                    None => self.machine.remove(&key),
+                };
+                if at == Some(Moment::After) {
+                    crash()
+                }
+                Ok(())
+            }
+        }
+
+        type Shared = Rc<RefCell<World>>;
+        struct Exec(Shared);
+        struct Ver(Shared);
+        struct Store(Shared);
+
+        impl Executor for Exec {
+            fn capture(&mut self, op: &Op) -> Result<Option<Vec<u8>>, Failure> {
+                let mut w = self.0.borrow_mut();
+                // Reading changes nothing, so a crash in it is the same whenever it comes.
+                if w.call(format!("capture {}", key(op))).is_some() {
+                    crash()
+                }
+                Ok(w.machine.get(&key(op)).cloned())
+            }
+            fn apply(&mut self, op: &Op) -> Result<(), Failure> {
+                let mut w = self.0.borrow_mut();
+                let k = key(op);
+                let at = w.call(format!("apply {k}"));
+                let fails = w.fail_apply == Some(k.as_str());
+                w.write(k, new_value(op), fails, at)
+            }
+            fn restore(&mut self, op: &Op, prior: &Option<Vec<u8>>) -> Result<(), Failure> {
+                let mut w = self.0.borrow_mut();
+                let k = key(op);
+                let at = w.call(format!("restore {k}"));
+                w.write(k, prior.clone(), false, at)
+            }
+        }
+
+        impl Verifier for Ver {
+            fn verify(&mut self, _: &[Op]) -> Result<(), Failure> {
+                let mut w = self.0.borrow_mut();
+                if w.call("verify".to_string()).is_some() {
+                    crash()
+                }
+                if w.fail_verify {
+                    return Err(failure("E_VERIFY_OMP", "omp exited 1"));
+                }
+                Ok(())
+            }
+        }
+
+        impl JournalStore for Store {
+            fn save(&mut self, j: &Journal) -> Result<(), Failure> {
+                let mut w = self.0.borrow_mut();
+                let at = w.call(format!("save {:?}", j.stage));
+                // A save is all or nothing: a crash before it or half-way leaves the old file,
+                // one right after it leaves the new file.
+                if matches!(at, Some(Moment::Before | Moment::Half)) {
+                    crash()
+                }
+                w.file = Some(j.clone());
+                if at.is_some() {
+                    crash()
+                }
+                Ok(())
+            }
+            fn load_unfinished(&mut self) -> Result<Option<Journal>, Failure> {
+                Ok(self.0.borrow().file.clone().filter(|j| !j.is_finished()))
+            }
+        }
+
+        #[derive(Clone, Copy, Debug)]
+        enum Session {
+            /// The engine applies the plan.
+            Run,
+            /// The engine starts and finishes what was cut off.
+            Recover,
+        }
+
+        /// One session of the engine on `world`: the world as the session leaves it, whether it
+        /// ended in a crash, and its outcome when it did not.
+        fn play(world: World, session: Session) -> (World, bool, Option<Outcome>) {
+            let shared = Rc::new(RefCell::new(world));
+            let mut exec = Exec(shared.clone());
+            let mut ver = Ver(shared.clone());
+            let mut store = Store(shared.clone());
+            let result = catch_unwind(AssertUnwindSafe(|| match session {
+                Session::Run => Some(run("sim", ops(), &mut exec, &mut ver, &mut store)),
+                Session::Recover => recover(&mut exec, &mut store),
+            }));
+            let crashed = match &result {
+                Ok(_) => false,
+                Err(payload) => {
+                    assert!(payload.is::<Crashed>(), "the engine itself panicked");
+                    true
+                }
+            };
+            let after = shared.borrow().clone();
+            (after, crashed, result.ok().flatten())
+        }
+
+        /// The next start: a new engine on what the crash left, with nothing planned to go wrong.
+        fn restart(world: &World) -> World {
+            World {
+                calls: 0,
+                crash_in: None,
+                last_call: String::new(),
+                fail_apply: None,
+                fail_verify: false,
+                ..world.clone()
+            }
+        }
+
+        /// The machine as one readable line.
+        fn text(machine: &Bytes) -> String {
+            let items: Vec<String> = machine
+                .iter()
+                .map(|(k, v)| format!("{k}={}", String::from_utf8_lossy(v)))
+                .collect();
+            items.join(", ")
+        }
+
+        struct Sim {
+            /// What the machine holds before the apply, and after one that commits.
+            original: Bytes,
+            committed: Bytes,
+            points: usize,
+            bad: Vec<String>,
+        }
+
+        impl Sim {
+            /// Crashes `session` on `start` in every call, at every moment, and checks that the
+            /// next start settles it. With `nested` it also crashes that next start the same way.
+            fn crash_everywhere(
+                &mut self,
+                start: &World,
+                session: Session,
+                nested: bool,
+                path: &str,
+            ) {
+                let (calm, crashed, _) = play(start.clone(), session);
+                assert!(!crashed, "{path}: no crash was planned");
+                for at in 0..calm.calls {
+                    for moment in [Moment::Before, Moment::Half, Moment::After] {
+                        let planned = World {
+                            crash_in: Some((at, moment)),
+                            ..start.clone()
+                        };
+                        let (after, crashed, _) = play(planned, session);
+                        if !crashed {
+                            continue; // the call failed before the crash could come
+                        }
+                        let path = format!(
+                            "{path} > {session:?} crashed {moment:?} call {at} ({})",
+                            after.last_call
+                        );
+                        self.points += 1;
+                        if let Err(why) = self.settles(&after) {
+                            self.bad.push(format!("{path}: {why}"));
+                        }
+                        if nested {
+                            self.crash_everywhere(&restart(&after), Session::Recover, false, &path);
+                        }
+                    }
+                }
+            }
+
+            /// Recovery after a crash leaves the machine as it was before the apply, or as the
+            /// apply made it when the journal says Committed. A second recovery does nothing.
+            fn settles(&self, crashed: &World) -> Result<(), String> {
+                let (settled, _, _) = play(restart(crashed), Session::Recover);
+                let want = match settled.file.as_ref().map(|j| &j.stage) {
+                    None | Some(Stage::RolledBack) => &self.original,
+                    Some(Stage::Committed) => &self.committed,
+                    Some(other) => return Err(format!("the journal is left at {other:?}")),
+                };
+                if &settled.machine != want {
+                    return Err(format!("the machine holds {}", text(&settled.machine)));
+                }
+                let (again, _, out) = play(restart(&settled), Session::Recover);
+                if out.is_some() || again.machine != settled.machine || again.file != settled.file {
+                    return Err(format!("a second recovery does something: {out:?}"));
+                }
+                Ok(())
+            }
+        }
+
+        #[test]
+        fn a_crash_in_any_call_is_settled_by_the_next_start() {
+            let original = machine_with_old_state().state;
+            let world = |fail_apply, fail_verify| World {
+                machine: original.clone(),
+                fail_apply,
+                fail_verify,
+                ..World::default()
+            };
+            let (clean, crashed, out) = play(world(None, false), Session::Run);
+            assert!(!crashed);
+            assert_eq!(out, Some(Outcome::Committed));
+            let mut sim = Sim {
+                original: original.clone(),
+                committed: clean.machine,
+                points: 0,
+                bad: Vec::new(),
+            };
+            for (name, fail_apply, fail_verify) in [
+                ("all goes well", None, false),
+                ("a.lua can't be written", Some("a.lua"), false),
+                ("wt.json can't be written", Some("wt.json"), false),
+                ("autorun can't be written", Some("autorun"), false),
+                ("the check fails", None, true),
+            ] {
+                sim.crash_everywhere(&world(fail_apply, fail_verify), Session::Run, true, name);
+            }
+            assert!(
+                sim.bad.is_empty(),
+                "{} of {} crash points are not settled, the first:\n{}",
+                sim.bad.len(),
+                sim.points,
+                sim.bad
+                    .iter()
+                    .take(8)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
+            eprintln!("crash points visited: {}", sim.points);
+            assert!(
+                sim.points > 1_000,
+                "the simulation visited only {}",
+                sim.points
+            );
+        }
+    }
 }
