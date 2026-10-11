@@ -62,7 +62,9 @@ pub enum Stage {
         from: usize,
     },
     RolledBack,
-    /// Some ops could not be restored. `failed` are their positions in [`Journal::ops`].
+    /// Some ops could not be restored. `failed` are their positions in [`Journal::ops`]. Their
+    /// errors are not kept here: a [`Failure`] can't be read back from JSON. The [`Outcome`]
+    /// that ended the run carries them.
     RollbackIncomplete {
         failed: Vec<usize>,
     },
@@ -135,12 +137,19 @@ pub enum Outcome {
     /// Some targets could not be restored. The caller must tell the user
     /// which ones and how to fix them by hand (spec §5.5); never report success.
     ///
-    /// `reason` is the failure that caused the rollback. `failed` holds the positions of the
-    /// ops that were not restored, in the order the restores were tried, the last op first.
-    /// It is empty when the journal itself could not be read.
+    /// `code` and `reason` are those of the failure that caused the rollback, as in
+    /// `RolledBack`. When the journal itself could not be read, that is the failure of the
+    /// store.
+    ///
+    /// `failed` holds each op that was not restored: its position in the transaction's ops,
+    /// and the error of its restore, so the user can be told what to fix by hand. They come
+    /// in the order the restores were tried, the last op first. An op that the journal holds
+    /// no snapshot of can't be restored at all; its error is made by the engine, with the
+    /// code `E_ROLLBACK_INCOMPLETE`. `failed` is empty when the journal could not be read.
     RollbackIncomplete {
+        code: &'static str,
         reason: String,
-        failed: Vec<usize>,
+        failed: Vec<(usize, Failure)>,
     },
 }
 
@@ -222,14 +231,15 @@ pub fn run(
 /// | `Verifying` | all |
 /// | `RollingBack { from }` | the first `from`: an earlier rollback was cut off |
 ///
-/// A journal that can't be read gives `RollbackIncomplete`: the machine may be half applied
-/// and nothing says how.
+/// A journal that can't be read gives `RollbackIncomplete`, with the store's own code: the
+/// machine may be half applied and nothing says how.
 pub fn recover(exec: &mut dyn Executor, store: &mut dyn JournalStore) -> Option<Outcome> {
     let mut j = match store.load_unfinished() {
         Ok(Some(j)) => j,
         Ok(None) => return None,
         Err(f) => {
             return Some(Outcome::RollbackIncomplete {
+                code: f.code,
                 reason: format!("cannot read the journal: {}", f.message),
                 failed: Vec::new(),
             })
@@ -253,8 +263,9 @@ pub fn recover(exec: &mut dyn Executor, store: &mut dyn JournalStore) -> Option<
 }
 
 /// Restores the first `touched` ops (at most all of them), newest first, and finishes the
-/// journal. An op with no snapshot can't be restored, so it counts as not restored: taking
-/// it for restored would report a success that did not happen.
+/// journal. An op whose restore fails is listed with the error. An op with no snapshot can't
+/// be restored, so it is listed too: taking it for restored would report a success that did
+/// not happen.
 fn rollback(
     j: &mut Journal,
     touched: usize,
@@ -269,22 +280,26 @@ fn rollback(
     let mut failed = Vec::new();
     for (index, op) in j.ops.iter().enumerate().take(touched).rev() {
         let restored = match j.snapshots.iter().find(|s| s.op_index == index) {
-            Some(snapshot) => exec.restore(op, &snapshot.prior).is_ok(),
-            None => false,
+            Some(snapshot) => exec.restore(op, &snapshot.prior),
+            None => Err(Failure {
+                code: "E_ROLLBACK_INCOMPLETE",
+                message: "the journal has no snapshot of this operation".to_string(),
+            }),
         };
-        if !restored {
-            failed.push(index);
+        if let Err(f) = restored {
+            failed.push((index, f));
         }
     }
     finish(j, store, failed, cause)
 }
 
 /// Closes the journal as `RolledBack`, or as `RollbackIncomplete` when `failed` holds ops
-/// that were not restored.
+/// that were not restored. The journal keeps their positions; the outcome also carries
+/// their errors.
 fn finish(
     j: &mut Journal,
     store: &mut dyn JournalStore,
-    failed: Vec<usize>,
+    failed: Vec<(usize, Failure)>,
     cause: Failure,
 ) -> Outcome {
     if failed.is_empty() {
@@ -296,10 +311,11 @@ fn finish(
         }
     } else {
         j.stage = Stage::RollbackIncomplete {
-            failed: failed.clone(),
+            failed: failed.iter().map(|(index, _)| *index).collect(),
         };
         let _ = store.save(j);
         Outcome::RollbackIncomplete {
+            code: cause.code,
             reason: cause.message,
             failed,
         }
@@ -320,7 +336,15 @@ mod tests {
     struct FakeMachine {
         state: BTreeMap<String, Vec<u8>>,
         fail_apply_key: Option<String>,
-        fail_restore_key: Option<String>,
+        /// Restoring one of these keys fails with the error stored for it.
+        fail_restore: BTreeMap<String, Failure>,
+    }
+
+    fn failure(code: &'static str, message: &str) -> Failure {
+        Failure {
+            code,
+            message: message.to_string(),
+        }
     }
 
     fn key(op: &Op) -> String {
@@ -364,11 +388,8 @@ mod tests {
         }
         fn restore(&mut self, op: &Op, prior: &Option<Vec<u8>>) -> Result<(), Failure> {
             let k = key(op);
-            if self.fail_restore_key.as_deref() == Some(k.as_str()) {
-                return Err(Failure {
-                    code: "E_ROLLBACK_INCOMPLETE",
-                    message: "locked".into(),
-                });
+            if let Some(failure) = self.fail_restore.get(&k) {
+                return Err(failure.clone());
             }
             match prior {
                 Some(v) => self.state.insert(k, v.clone()),
@@ -491,14 +512,16 @@ mod tests {
     fn a_failed_restore_is_reported_never_hidden() {
         let mut m = machine_with_old_state();
         m.fail_apply_key = Some("autorun".into());
-        m.fail_restore_key = Some("a.lua".into());
+        m.fail_restore
+            .insert("a.lua".into(), failure("E_ROLLBACK_INCOMPLETE", "locked"));
         let mut store = MemStore::default();
         let out = run("t4", ops(), &mut m, &mut Verify(Ok(())), &mut store);
         assert_eq!(
             out,
             Outcome::RollbackIncomplete {
+                code: "E_WT_WRITE",
                 reason: "disk said no".into(),
-                failed: vec![0]
+                failed: vec![(0, failure("E_ROLLBACK_INCOMPLETE", "locked"))]
             }
         );
         assert_eq!(
@@ -1059,9 +1082,11 @@ mod tests {
             }
         }
         // If the journal can't be read, the machine may be half applied and nothing says how.
+        // The store's own code is kept, not only its message.
         assert_eq!(
             recover(&mut machine_with_old_state(), &mut Unreadable),
             Some(Outcome::RollbackIncomplete {
+                code: "E_SNAPSHOT_WRITE",
                 reason: "cannot read the journal: journal.json is not valid JSON".into(),
                 failed: vec![]
             })
@@ -1089,8 +1114,15 @@ mod tests {
         assert_eq!(
             out,
             Outcome::RollbackIncomplete {
+                code: "E_TXN_INTERRUPTED",
                 reason: "the previous apply was interrupted".into(),
-                failed: vec![1]
+                failed: vec![(
+                    1,
+                    failure(
+                        "E_ROLLBACK_INCOMPLETE",
+                        "the journal has no snapshot of this operation"
+                    )
+                )]
             }
         );
         assert_eq!(
@@ -1122,5 +1154,85 @@ mod tests {
         };
         assert_eq!(recover(&mut m, &mut store), Some(interrupted()));
         assert_eq!(m.state, before);
+    }
+
+    // ---- When a restore fails ----
+
+    #[test]
+    fn failed_restores_are_listed_newest_first_each_with_its_own_error() {
+        // The check fails, so all 3 ops are restored, the last first. The restores of the last
+        // and the first op fail, each with its own error; the one between them works.
+        let mut m = machine_with_old_state();
+        m.fail_restore.insert(
+            "autorun".into(),
+            failure("E_AUTORUN_WRITE", "the registry key is locked"),
+        );
+        m.fail_restore.insert(
+            "a.lua".into(),
+            failure("E_ROLLBACK_INCOMPLETE", "the file is in use"),
+        );
+        let mut verify = Verify(Err(failure("E_VERIFY_OMP", "omp exited 1")));
+        let mut store = MemStore::default();
+        let out = run("t17", ops(), &mut m, &mut verify, &mut store);
+        assert_eq!(
+            out,
+            Outcome::RollbackIncomplete {
+                code: "E_VERIFY_OMP",
+                reason: "omp exited 1".into(),
+                failed: vec![
+                    (2, failure("E_AUTORUN_WRITE", "the registry key is locked")),
+                    (0, failure("E_ROLLBACK_INCOMPLETE", "the file is in use")),
+                ]
+            }
+        );
+        // A failed restore does not stop the others: wt.json is back.
+        assert_eq!(m.state["wt.json"], b"old wt");
+        assert_eq!(
+            store.saved.last().unwrap().stage,
+            Stage::RollbackIncomplete { failed: vec![2, 0] }
+        );
+    }
+
+    #[test]
+    fn a_restore_error_during_recovery_is_reported_with_its_error() {
+        // Every op had ended (Verifying), and wt.json can't be restored now.
+        let mut m = machine_with_old_state();
+        let ops = ops();
+        let snapshots = snapshots_of(&mut m, &ops);
+        for op in &ops {
+            m.apply(op).unwrap();
+        }
+        m.fail_restore.insert(
+            "wt.json".into(),
+            failure("E_WT_WRITE", "settings.json is open in another program"),
+        );
+        let mut store = MemStore {
+            saved: vec![Journal {
+                id: "t18".into(),
+                ops,
+                snapshots,
+                stage: Stage::Verifying,
+            }],
+        };
+        let out = recover(&mut m, &mut store).unwrap();
+        assert_eq!(
+            out,
+            Outcome::RollbackIncomplete {
+                code: "E_TXN_INTERRUPTED",
+                reason: "the previous apply was interrupted".into(),
+                failed: vec![(
+                    1,
+                    failure("E_WT_WRITE", "settings.json is open in another program")
+                )]
+            }
+        );
+        // The other two are back; wt.json stays as the interrupted apply left it.
+        assert_eq!(m.state["a.lua"], b"old a");
+        assert!(!m.state.contains_key("autorun"));
+        assert_eq!(m.state["wt.json"], b"{}");
+        assert_eq!(
+            store.saved.last().unwrap().stage,
+            Stage::RollbackIncomplete { failed: vec![1] }
+        );
     }
 }
