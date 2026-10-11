@@ -4,3 +4,4 @@
 pub mod color;
 pub mod oklch;
 pub mod palette;
+pub mod text;
