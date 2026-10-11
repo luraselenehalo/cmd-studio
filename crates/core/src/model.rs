@@ -272,6 +272,25 @@ fn check_schema_version(version: u64) -> Result<(), ThemeError> {
     Ok(())
 }
 
+/// The parts of a theme that are objects have to be written as objects. serde also reads a
+/// struct from a JSON list, field by field, so without this `"banner": [true, "t", [], false,
+/// false]` would parse; the format and its published schema say object. `simple` may be null,
+/// too. A part that is missing is for serde to report, so only what is there is looked at.
+fn check_objects(value: &serde_json::Value) -> Result<(), ThemeError> {
+    for part in ["colors", "terminal", "prompt", "banner"] {
+        if value.get(part).is_some_and(|v| !v.is_object()) {
+            return Err(invalid(&format!("{part}: expected an object")));
+        }
+    }
+    if value
+        .get("simple")
+        .is_some_and(|v| !v.is_null() && !v.is_object())
+    {
+        return Err(invalid("simple: expected an object or null"));
+    }
+    Ok(())
+}
+
 /// An id is a random UUID: version 4, of the RFC 4122 variant (spec §3.3).
 fn check_id(id: &uuid::Uuid) -> Result<(), ThemeError> {
     if id.get_version() != Some(uuid::Version::Random) {
@@ -376,9 +395,10 @@ impl Theme {
 /// reported as newer and not as having unknown fields. A file that does not fit the
 /// format fails with [`ThemeError::Invalid`]: the message starts with the path of the
 /// field that is wrong, for example `colors.ansi[3]: not a #rrggbb color` (spec §3.7 #5),
-/// and ends with the line and column. A key that appears twice is refused. The message
-/// quotes the file at times, so it is cleaned and cut short. Text is sanitized before the
-/// limits are checked.
+/// and ends with the line and column. A key that appears twice is refused, and so is a
+/// part that should be an object but is a list or anything else (`banner: expected an
+/// object`). The message quotes the file at times, so it is cleaned and cut short. Text is
+/// sanitized before the limits are checked.
 pub fn parse_theme(bytes: &[u8]) -> Result<Theme, ThemeError> {
     if bytes.len() > MAX_FILE_BYTES {
         return Err(ThemeError::TooLarge);
@@ -395,6 +415,7 @@ pub fn parse_theme(bytes: &[u8]) -> Result<Theme, ThemeError> {
             reason: "missing or not a whole number",
         })?;
     check_schema_version(version)?;
+    check_objects(&value)?;
     // Second pass: the theme itself, from the bytes and not from `value`. A `Value` keeps
     // the last of two equal keys and no longer knows where anything was, so it could not
     // refuse a repeated key or give a line and column. The first pass has seen the whole
@@ -1090,6 +1111,104 @@ mod tests {
         );
         t.terminal.font = format!("  {}  ", "f".repeat(64));
         assert_eq!(t.validate(), Ok(()));
+    }
+
+    // -- the parts of a theme are objects --
+
+    #[test]
+    fn the_parts_of_a_theme_must_be_objects() {
+        // serde reads a struct from a JSON list too, field by field, so each of these lists
+        // would parse as it is. The format and its published schema say object.
+        let fixture: Value = serde_json::from_str(FIXTURE).unwrap();
+        let by_position = |part: &str, fields: &[&str]| -> Value {
+            Value::Array(fields.iter().map(|f| fixture[part][*f].clone()).collect())
+        };
+        let colors = by_position(
+            "colors",
+            &[
+                "background",
+                "foreground",
+                "cursor",
+                "selection",
+                "accent",
+                "muted",
+                "frame",
+                "ansi",
+            ],
+        );
+        let terminal = by_position(
+            "terminal",
+            &[
+                "font",
+                "fontSize",
+                "cursorShape",
+                "opacity",
+                "acrylic",
+                "padding",
+            ],
+        );
+        let prompt = by_position("prompt", &["layout", "segments", "transient"]);
+        let banner = json!([true, "t", [], false, false]); // the example from the review
+        let simple = by_position("simple", &["accent", "tint"]);
+        // the premise: serde does take each of them
+        assert!(serde_json::from_value::<Colors>(colors.clone()).is_ok());
+        assert!(serde_json::from_value::<TerminalSettings>(terminal.clone()).is_ok());
+        assert!(serde_json::from_value::<PromptSettings>(prompt.clone()).is_ok());
+        assert!(serde_json::from_value::<BannerSettings>(banner.clone()).is_ok());
+        assert!(serde_json::from_value::<SimpleRecipe>(simple.clone()).is_ok());
+        for (key, list) in [
+            ("colors", colors),
+            ("terminal", terminal),
+            ("prompt", prompt),
+            ("banner", banner.clone()),
+        ] {
+            for bad in [
+                list,
+                json!("x"),
+                json!(5),
+                json!(true),
+                json!(null),
+                json!([]),
+            ] {
+                let text = invalid_text_with(|v| v[key] = bad.clone());
+                assert_eq!(text, format!("{key}: expected an object"), "{key} = {bad}");
+            }
+        }
+        // `simple` may be an object or null, and may be left out; nothing else
+        for bad in [simple, json!("x"), json!(5), json!(true), json!([])] {
+            let text = invalid_text_with(|v| v["simple"] = bad.clone());
+            assert_eq!(text, "simple: expected an object or null", "simple = {bad}");
+        }
+        // the message is the usual one, with its usual start
+        let error = with(|v| v["banner"] = banner).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "not a valid theme file: banner: expected an object"
+        );
+        assert_eq!(error.code(), "E_THEME_INVALID");
+    }
+
+    #[test]
+    fn objects_still_parse_and_a_newer_file_is_still_reported_first() {
+        // the fixture has all five parts as objects
+        assert!(parse_theme(FIXTURE.as_bytes()).is_ok());
+        assert!(with(|v| v["simple"] = json!(null)).is_ok());
+        // a missing part is serde's to report, and so is an object with the wrong insides
+        let missing = message(|v| {
+            v.as_object_mut().unwrap().remove("banner");
+        });
+        assert!(missing.contains("missing field `banner`"), "{missing}");
+        let hollow = message(|v| v["banner"] = json!({}));
+        assert!(
+            hollow.contains("banner: missing field `enabled`"),
+            "{hollow}"
+        );
+        // the version is read before the parts, so a newer file is a newer file
+        let newer = with(|v| {
+            v["schemaVersion"] = json!(2);
+            v["banner"] = json!([true]);
+        });
+        assert_eq!(newer.unwrap_err(), ThemeError::NewerSchema(2));
     }
 
     // -- an optional "$schema" line is read and dropped --
