@@ -3,6 +3,9 @@ name = "cmdstudio-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+# Built into CMD Studio only. presets.rs embeds files from outside this crate's folder
+# (`/presets`), which a published crate could not hold.
+publish = false
 
 [lints]
 workspace = true

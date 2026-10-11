@@ -53,9 +53,12 @@ impl Paths {
 pub struct Machine {
     /// settings.json of every Windows Terminal variant found.
     pub wt_settings: Vec<PathBuf>,
-    /// Current HKCU AutoRun value.
+    /// Current HKCU AutoRun value as the registry holds it: the raw text, never expanded, so a
+    /// `%USERPROFILE%` in it stays as written. `None` when there is no value, or one that is
+    /// not text.
     pub autorun_hkcu: Option<String>,
-    /// Current HKLM AutoRun value (read only; CMD Studio never writes HKLM).
+    /// Current HKLM AutoRun value, raw in the same way (read only; CMD Studio never writes
+    /// HKLM).
     pub autorun_hklm: Option<String>,
     /// Family names of the installed fonts, as GDI lists them. Whether the
     /// fonts packaged inside Windows Terminal count is decided in Phase 1b.
@@ -132,13 +135,18 @@ pub enum Op {
         path: PathBuf,
         contents: String,
     },
+    /// Writes the `CMD Studio` scheme and the cmd profile's keys into one settings.json. A key
+    /// whose value is an object (`font`) is merged into the user's object key by key, so keys
+    /// of the user's own in it, such as `font.weight`, stay.
     WtApply {
         settings: PathBuf,
         scheme: Value,
         profile: Map<String, Value>,
         set_default: bool,
     },
-    /// The complete new HKCU AutoRun value; `None` deletes it.
+    /// The complete new HKCU AutoRun value, raw as the registry holds it (never expanded);
+    /// `None` deletes it. Writing it keeps the value's registry type: a `REG_EXPAND_SZ` stays
+    /// `REG_EXPAND_SZ`, and a value that was not there is written as `REG_SZ` (spec §5.4).
     SetAutoRun {
         value: Option<String>,
     },
