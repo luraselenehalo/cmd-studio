@@ -257,6 +257,9 @@ pub fn program_data_dir(program_data: &Path, sid: &str) -> PathBuf {
 #[cfg(any(test, feature = "fake"))]
 pub mod fake;
 
+#[cfg(windows)]
+pub mod windows;
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,0 +1,359 @@
+//! Files on the real disk, with atomic replacement (spec §5.4 `Fs`).
+use super::io_err;
+use crate::adapters::{AdapterError, DirEntry, Fs};
+use std::io::{ErrorKind, Write};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+/// Windows error codes worth a short retry: another process (Windows
+/// Terminal, an antivirus scanner) has the file open for a moment.
+const ERROR_ACCESS_DENIED: i32 = 5;
+const ERROR_SHARING_VIOLATION: i32 = 32;
+const RETRIES: u32 = 20;
+const RETRY_DELAY: Duration = Duration::from_millis(50);
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct WinFs;
+
+/// The path to write: a symbolic link's target, so a settings.json that is a
+/// link into the user's dotfiles stays a link.
+fn write_target(path: &Path) -> Result<PathBuf, AdapterError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => {
+            std::fs::canonicalize(path).map_err(|e| io_err("resolve link", path, &e))
+        }
+        _ => Ok(path.to_path_buf()),
+    }
+}
+
+fn busy(e: &std::io::Error) -> bool {
+    matches!(
+        e.raw_os_error(),
+        Some(ERROR_ACCESS_DENIED | ERROR_SHARING_VIOLATION)
+    )
+}
+
+/// `std::fs::rename` replaces an existing file in one step on Windows
+/// (`MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`, or the POSIX-semantics
+/// rename on newer builds). Retries while another process holds the file.
+fn replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    let mut attempt = 0;
+    loop {
+        match std::fs::rename(from, to) {
+            Err(e) if busy(&e) && attempt < RETRIES => {
+                attempt += 1;
+                std::thread::sleep(RETRY_DELAY);
+            }
+            other => return other,
+        }
+    }
+}
+
+impl Fs for WinFs {
+    fn read(&self, path: &Path) -> Result<Option<Vec<u8>>, AdapterError> {
+        match std::fs::read(path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(io_err("read", path, &e)),
+        }
+    }
+
+    fn write_atomic(&self, path: &Path, bytes: &[u8]) -> Result<(), AdapterError> {
+        let target = write_target(path)?;
+        let dir = target
+            .parent()
+            .ok_or_else(|| AdapterError::new(path.display().to_string(), "has no parent folder"))?;
+        std::fs::create_dir_all(dir).map_err(|e| io_err("create folder", dir, &e))?;
+        let name = target
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let tmp = dir.join(format!(
+            ".{name}.{}.cmdstudio-tmp",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let written = (|| -> std::io::Result<()> {
+            let mut f = std::fs::File::create_new(&tmp)?;
+            f.write_all(bytes)?;
+            // FlushFileBuffers: the bytes are on disk before the rename makes them visible.
+            f.sync_all()
+        })();
+        let result = written.and_then(|()| replace(&tmp, &target));
+        if let Err(e) = result {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(io_err("write", path, &e));
+        }
+        Ok(())
+    }
+
+    fn remove_file(&self, path: &Path) -> Result<(), AdapterError> {
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(io_err("delete", path, &e)),
+        }
+    }
+
+    fn exists(&self, path: &Path) -> bool {
+        path.exists()
+    }
+
+    fn is_dir(&self, path: &Path) -> bool {
+        path.is_dir()
+    }
+
+    fn create_dir_all(&self, path: &Path) -> Result<(), AdapterError> {
+        std::fs::create_dir_all(path).map_err(|e| io_err("create folder", path, &e))
+    }
+
+    fn remove_dir(&self, path: &Path) -> Result<(), AdapterError> {
+        match std::fs::remove_dir(path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(io_err("delete folder", path, &e)),
+        }
+    }
+
+    fn remove_dir_all(&self, path: &Path) -> Result<(), AdapterError> {
+        match std::fs::remove_dir_all(path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(io_err("delete folder", path, &e)),
+        }
+    }
+
+    fn rename(&self, from: &Path, to: &Path) -> Result<(), AdapterError> {
+        if to.exists() {
+            return Err(AdapterError::new(
+                format!("rename to {}", to.display()),
+                "it already exists",
+            ));
+        }
+        std::fs::rename(from, to).map_err(|e| io_err("rename", from, &e))
+    }
+
+    fn list_dir(&self, path: &Path) -> Result<Vec<DirEntry>, AdapterError> {
+        let entries = match std::fs::read_dir(path) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(io_err("list", path, &e)),
+        };
+        let mut out = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|e| io_err("list", path, &e))?;
+            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            out.push(DirEntry {
+                path: entry.path(),
+                is_dir,
+            });
+        }
+        out.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_atomic_replaces_creates_parents_and_leaves_no_temp_file() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 1;
+        // Review Focus 4: a folder with Thai letters and a space.
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("ไทย dir").join("settings.json");
+        WinFs.write_atomic(&f, b"one").unwrap();
+        WinFs.write_atomic(&f, b"two").unwrap();
+        assert_eq!(WinFs.read(&f).unwrap(), Some(b"two".to_vec()));
+        let names: Vec<_> = std::fs::read_dir(f.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("settings.json")]);
+
+        // Another program that has the file open for a moment (without FILE_SHARE_DELETE) only
+        // delays the write: the rename is retried until it lets go. While it waits, the new bytes
+        // sit in a temp file beside the target, named as the adapter promises.
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&f)
+            .unwrap();
+        let dir = f.parent().unwrap().to_owned();
+        let watcher = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let seen: Vec<String> = std::fs::read_dir(&dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            drop(held);
+            seen
+        });
+        WinFs.write_atomic(&f, b"three").unwrap();
+        let seen = watcher.join().unwrap();
+        assert_eq!(WinFs.read(&f).unwrap(), Some(b"three".to_vec()));
+        let waiting: Vec<_> = seen.iter().filter(|n| *n != "settings.json").collect();
+        assert!(
+            matches!(waiting.as_slice(), [n] if n.starts_with(".settings.json.") && n.ends_with(".cmdstudio-tmp")),
+            "while it waited there was one temp file beside the target: {seen:?}"
+        );
+        assert_eq!(
+            std::fs::read_dir(f.parent().unwrap()).unwrap().count(),
+            1,
+            "temp file left behind"
+        );
+    }
+
+    #[test]
+    fn a_failed_write_keeps_the_old_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A folder where the file should go makes the rename fail.
+        let f = tmp.path().join("x.json");
+        std::fs::create_dir(&f).unwrap();
+        std::fs::write(f.join("inner"), b"keep").unwrap();
+        assert!(WinFs.write_atomic(&f, b"new").is_err());
+        assert_eq!(std::fs::read(f.join("inner")).unwrap(), b"keep");
+        assert_eq!(
+            std::fs::read_dir(tmp.path()).unwrap().count(),
+            1,
+            "temp file left behind"
+        );
+    }
+
+    #[test]
+    fn writing_through_a_symlink_keeps_the_link() {
+        // Review Focus 5: settings.json linked into the user's dotfiles.
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("dotfiles-settings.json");
+        std::fs::write(&real, b"old").unwrap();
+        let link = tmp.path().join("settings.json");
+        if let Err(e) = std::os::windows::fs::symlink_file(&real, &link) {
+            // Creating links needs Developer Mode or admin rights; CI runners and
+            // the test VMs have them, so there the test must run, not skip.
+            assert!(
+                std::env::var_os("CMDSTUDIO_SYSTEM_TESTS").is_none(),
+                "cannot create a symlink: {e}"
+            );
+            println!("SKIPPED writing_through_a_symlink_keeps_the_link: cannot create a symlink here ({e})");
+            return;
+        }
+        WinFs.write_atomic(&link, b"new").unwrap();
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read(&real).unwrap(), b"new");
+    }
+
+    #[test]
+    fn missing_things_are_not_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gone = tmp.path().join("gone");
+        assert_eq!(WinFs.read(&gone).unwrap(), None);
+        WinFs.remove_file(&gone).unwrap();
+        WinFs.remove_dir(&gone).unwrap();
+        WinFs.remove_dir_all(&gone).unwrap();
+        assert!(WinFs.list_dir(&gone).unwrap().is_empty());
+        assert!(!WinFs.exists(&gone) && !WinFs.is_dir(&gone));
+
+        // Things that are there are another matter: `remove_dir` takes an empty folder only,
+        // never a file or a folder with something inside (the fake disk refuses those too).
+        let full = tmp.path().join("full");
+        let inner = full.join("inner.txt");
+        WinFs.write_atomic(&inner, b"keep").unwrap();
+        assert!(WinFs.exists(&inner) && !WinFs.is_dir(&inner));
+        assert!(WinFs.exists(&full) && WinFs.is_dir(&full));
+        assert!(
+            WinFs.remove_dir(&full).is_err(),
+            "a folder with something inside is not empty"
+        );
+        assert!(WinFs.remove_dir(&inner).is_err(), "a file is not a folder");
+        assert_eq!(
+            WinFs.read(&inner).unwrap(),
+            Some(b"keep".to_vec()),
+            "refused calls delete nothing"
+        );
+        WinFs.remove_file(&inner).unwrap();
+        assert_eq!(WinFs.read(&inner).unwrap(), None);
+        WinFs.remove_dir(&full).unwrap();
+        assert!(!WinFs.exists(&full));
+    }
+
+    #[test]
+    fn rename_refuses_to_overwrite_and_lists_sorted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (a, b) = (tmp.path().join("b-dir"), tmp.path().join("a-dir"));
+        WinFs.create_dir_all(&a).unwrap();
+        WinFs.create_dir_all(&b).unwrap();
+        assert!(WinFs.rename(&a, &b).is_err());
+        WinFs.write_atomic(&tmp.path().join("c.txt"), b"c").unwrap();
+        let listed: Vec<_> = WinFs
+            .list_dir(tmp.path())
+            .unwrap()
+            .into_iter()
+            .map(|e| (e.path.file_name().unwrap().to_owned(), e.is_dir))
+            .collect();
+        assert_eq!(
+            listed,
+            vec![
+                ("a-dir".into(), true),
+                ("b-dir".into(), true),
+                ("c.txt".into(), false)
+            ]
+        );
+        WinFs.rename(&a, &tmp.path().join("z-dir")).unwrap();
+        assert!(!a.exists());
+
+        // The folder that is to hold the new name must exist, and so must the source. A
+        // refused rename changes nothing and makes no folder (the fake disk refuses these too).
+        let c = tmp.path().join("c.txt");
+        assert!(WinFs
+            .rename(&c, &tmp.path().join("nowhere").join("c.txt"))
+            .is_err());
+        assert_eq!(WinFs.read(&c).unwrap(), Some(b"c".to_vec()));
+        assert!(!tmp.path().join("nowhere").exists());
+        assert!(WinFs
+            .rename(&tmp.path().join("no-such"), &tmp.path().join("other"))
+            .is_err());
+        assert!(!tmp.path().join("other").exists());
+
+        // The listing is sorted by path (capital letters first), not left in the disk's order:
+        // NTFS lists names alphabetically, so only a name like this one tells the two apart.
+        WinFs
+            .write_atomic(&tmp.path().join("Upper.txt"), b"u")
+            .unwrap();
+        let order: Vec<_> = WinFs
+            .list_dir(tmp.path())
+            .unwrap()
+            .into_iter()
+            .map(|e| e.path.file_name().unwrap().to_owned())
+            .collect();
+        assert_eq!(order, vec!["Upper.txt", "a-dir", "c.txt", "z-dir"]);
+    }
+
+    /// Real-data seam: the files scripts\fetch-resources.ps1 put in resources\
+    /// match their pins, read through the real adapter. Reads only.
+    #[test]
+    fn the_fetched_resources_match_their_pins() {
+        use crate::plan::Component;
+        use crate::resources::{check_bundle, Resources};
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("resources");
+        if !root.join("manifest.json").is_file() {
+            assert!(
+                std::env::var_os("CMDSTUDIO_SYSTEM_TESTS").is_none(),
+                "run scripts/fetch-resources.ps1 first"
+            );
+            println!("SKIPPED the_fetched_resources_match_their_pins: no resources folder yet");
+            return;
+        }
+        let res = Resources { root };
+        let m = res.manifest(&WinFs).unwrap();
+        check_bundle(&WinFs, &res.dir(Component::Omp), &m.omp).unwrap();
+        check_bundle(&WinFs, &res.dir(Component::Clink), &m.clink).unwrap();
+        check_bundle(&WinFs, &res.root.join("fonts"), &m.fonts).unwrap();
+    }
+}
