@@ -3,3 +3,4 @@
 //! side effects go through the traits in `txn`.
 pub mod color;
 pub mod oklch;
+pub mod palette;
