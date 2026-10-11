@@ -569,13 +569,25 @@ fn hostile_lines_stay_literal_too() -> mlua::Result<()> {
         r"'single' \027[0m \n \\",
         "%s %d {Time} {USER}",
     ];
-    for lang in LANGS {
-        let out = run(&with_lines(&hostile), lang, &[], |_| Ok(()))?;
-        // `\027` and `\n` stay the characters they are written with: had the first become an
-        // escape character, strip_ansi would take it out together with `[0m`
-        let shown = plain_rows(&out[0]).join("\n");
-        for line in hostile {
-            assert!(shown.contains(line), "{lang:?}: {line:?} in {shown}");
+    // Thai and emoji, which spec §3.7 #4 names beside the others: on their own, next to a
+    // variable, and as joined sequences (a family, a heart with its variation selector)
+    let thai_and_emoji = [
+        "สวัสดี 👋 {user}",
+        "👨\u{200d}👩\u{200d}👧 ❤\u{fe0f} {host}",
+        "ไทย \u{b7} \u{2713} ผู้ใช้",
+    ];
+    for lines in [&hostile[..], &thai_and_emoji[..]] {
+        for lang in LANGS {
+            let out = run(&with_lines(lines), lang, &[], |_| Ok(()))?;
+            // `\027` and `\n` stay the characters they are written with: had the first become
+            // an escape character, strip_ansi would take it out together with `[0m`
+            let shown = plain_rows(&out[0]).join("\n");
+            for line in lines {
+                // the variables are the only part that changes: the stand-in user is ทดสอบ and
+                // the stand-in host is PC-01
+                let want = line.replace("{user}", "ทดสอบ").replace("{host}", "PC-01");
+                assert!(shown.contains(&want), "{lang:?}: {want:?} in {shown}");
+            }
         }
     }
     Ok(())
@@ -590,6 +602,11 @@ fn control_characters_in_a_theme_never_reach_the_terminal() -> mlua::Result<()> 
     t.banner.title = "hi\u{1b}]0;evil\u{7}\n{user}".to_string();
     for lang in LANGS {
         let out = run(&t, lang, &[], |_| Ok(()))?;
+        // strip_ansi drops every escape character it meets, together with what follows it up
+        // to the next `m`, so the rows below cannot show one. In the raw output, with only the
+        // generator's own colors taken off, no escape character may be left.
+        let raw = without_our_colors(&out[0]);
+        assert!(!raw.contains('\u{1b}'), "{lang:?}: an escape in {raw:?}");
         let rows = plain_rows(&out[0]);
         for row in &rows {
             for bad in ['\u{1b}', '\u{7}', '\r', '\u{202e}'] {
