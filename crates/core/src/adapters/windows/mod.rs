@@ -5,6 +5,7 @@ use super::AdapterError;
 use std::path::Path;
 
 pub mod fs;
+pub mod registry;
 
 pub(crate) fn io_err(op: &str, path: &Path, e: &std::io::Error) -> AdapterError {
     AdapterError::new(format!("{op} {}", path.display()), e.to_string())

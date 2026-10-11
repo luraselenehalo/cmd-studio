@@ -23,6 +23,10 @@ thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 schemars = { version = "1", features = ["uuid1"] }
 
+# The registry adapter (`adapters::windows::registry`); `adapters::windows` is cfg(windows) too.
+[target.'cfg(windows)'.dependencies]
+winreg = "=0.56.0"
+
 [dev-dependencies]
 proptest = "1"
 mlua = { version = "0.10", features = ["lua52", "vendored"] }
