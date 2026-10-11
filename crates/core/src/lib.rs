@@ -6,6 +6,7 @@ pub mod generate;
 pub mod model;
 pub mod oklch;
 pub mod palette;
+pub mod plan;
 pub mod presets;
 pub mod schema;
 pub mod text;
