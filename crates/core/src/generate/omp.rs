@@ -132,14 +132,19 @@ fn path(layout: Layout) -> Value {
 fn git(layout: Layout) -> Value {
     // The branch, then `*` when something changed or `✓` when nothing did (spec §3.5).
     let state = ["{{ .HEAD }}", IF_CHANGED, " *{{ else }} \u{2713}{{ end }}"].concat();
+    // Oh My Posh uses the first color template that gives a non-empty result, and the plain
+    // color when none does. So the segment is `p:ok` while nothing has changed, and this
+    // template makes it `p:dirty` once something has.
+    let dirty_color = [IF_CHANGED, "p:dirty{{ end }}"].concat();
     let seg = match layout {
-        Layout::Box => {
-            let dirty_color = [IF_CHANGED, "p:dirty{{ end }}"].concat();
-            Seg::plain("git", "p:ok", &format!("<p:muted>\u{b7} </>{state} "))
-                .set("foreground_templates", json!([dirty_color]))
-        }
-        Layout::Line => Seg::plain("git", "p:dirty", &format!("{state} ")),
-        Layout::Powerline => Seg::powerline("git", "p:dirty", "p:bg", &format!(" {state} ")),
+        Layout::Box => Seg::plain("git", "p:ok", &format!("<p:muted>\u{b7} </>{state} "))
+            .set("foreground_templates", json!([dirty_color])),
+        Layout::Line => Seg::plain("git", "p:ok", &format!("{state} "))
+            .set("foreground_templates", json!([dirty_color])),
+        // Here the block behind the text changes color. The text stays `p:bg`, which reads
+        // on `p:ok` and on `p:dirty` alike.
+        Layout::Powerline => Seg::powerline("git", "p:ok", "p:bg", &format!(" {state} "))
+            .set("background_templates", json!([dirty_color])),
     };
     seg.set("options", git_options(layout)).into()
 }
@@ -236,11 +241,13 @@ fn has_time(theme: &Theme) -> bool {
 fn box_blocks(theme: &Theme) -> Vec<Value> {
     let mut left = vec![text("p:frame", "\u{256d}\u{2500} ")];
     left.extend(left_segments(theme));
-    let mut right = Vec::new();
-    if has_time(theme) {
-        right.push(time(Layout::Box));
-    }
-    right.push(text("p:frame", " \u{2500}\u{256e}"));
+    // With time, a space sets the closing corner off from it. Without time only the filler
+    // comes before the corner, and a space there would show as a gap.
+    let right = if has_time(theme) {
+        vec![time(Layout::Box), text("p:frame", " \u{2500}\u{256e}")]
+    } else {
+        vec![text("p:frame", "\u{2500}\u{256e}")]
+    };
     vec![
         json!({ "type": "prompt", "alignment": "left", "segments": left }),
         json!({ "type": "prompt", "alignment": "right", "filler": "<p:frame>\u{2500}</>", "segments": right }),
@@ -259,6 +266,8 @@ fn single_line(theme: &Theme, prompt_char: &str) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::color::{contrast_ratio, Rgb};
+    use crate::palette::MIN_TEXT_CONTRAST;
     use crate::presets::terracotta;
 
     /// Every segment a theme can list, once.
@@ -276,9 +285,10 @@ mod tests {
 
     /// The only strings a `text` segment may hold: the frame and prompt characters the
     /// generator draws itself (spec §3.5).
-    const FRAME_GLYPHS: [&str; 7] = [
+    const FRAME_GLYPHS: [&str; 8] = [
         "\u{256d}\u{2500} ",
         " \u{2500}\u{256e}",
+        "\u{2500}\u{256e}",
         "\u{2502} ",
         ">",
         "\u{2502}",
@@ -381,6 +391,7 @@ mod tests {
         // what is in each block: the left side without time, time on the right
         assert_eq!(types(&blocks[0]), ["text", "path", "git"]);
         assert_eq!(types(&blocks[1]), ["time", "text"]);
+        assert_eq!(blocks[1]["segments"][1]["template"], " \u{2500}\u{256e}");
         assert_eq!(types(&blocks[2]), ["text", "text"]);
         assert_eq!(types(&blocks[3]), ["text"]);
     }
@@ -536,6 +547,34 @@ mod tests {
     }
 
     #[test]
+    fn the_box_closes_with_a_space_before_the_corner_only_when_time_comes_before_it() {
+        // with time the line ends `── 16:47 ─╮`, exactly as the prototype draws it; without
+        // time the filler runs straight into `─╮` and leaves no gap before the corner
+        let c = config(&themed(Layout::Box, &[Segment::Path, Segment::Time]));
+        let right = &c["blocks"][1];
+        assert_eq!(types(right), ["time", "text"]);
+        assert_eq!(
+            right["segments"][0]["template"],
+            " {{ .CurrentDate | date .Format }}"
+        );
+        assert_eq!(right["segments"][1]["template"], " \u{2500}\u{256e}");
+        let without_time: [&[Segment]; 3] = [
+            &[Segment::Path],
+            &[Segment::Path, Segment::Git, Segment::Status],
+            &[],
+        ];
+        for list in without_time {
+            let c = config(&themed(Layout::Box, list));
+            let right = &c["blocks"][1];
+            assert_eq!(types(right), ["text"], "{list:?}");
+            assert_eq!(
+                right["segments"][0]["template"], "\u{2500}\u{256e}",
+                "{list:?}"
+            );
+        }
+    }
+
+    #[test]
     fn in_the_box_layout_time_is_on_the_right_side() {
         // the right block holds time and then the closing frame, wherever time is listed
         for list in [
@@ -629,14 +668,43 @@ mod tests {
             // without `fetch_status` Oh My Posh never reads the state, and `*` never shows
             assert_eq!(git["options"]["fetch_status"], true, "{layout:?}");
         }
-        // the box layout also colors the segment: green, and yellow while dirty
-        let c = config(&themed(Layout::Box, &[Segment::Git]));
-        let git = segment_of(&c, "git");
-        assert_eq!(git["foreground"], "p:ok");
-        assert_eq!(
-            git["foreground_templates"],
-            json!(["{{ if or .Working.Changed .Staging.Changed }}p:dirty{{ end }}"])
-        );
+    }
+
+    #[test]
+    fn git_is_ok_colored_while_clean_and_dirty_colored_while_changed_in_every_layout() {
+        // Oh My Posh takes the first color template that is not empty, and the plain color
+        // otherwise: the plain color is `p:ok`, and the template gives `p:dirty` when changed
+        let when_changed = json!(["{{ if or .Working.Changed .Staging.Changed }}p:dirty{{ end }}"]);
+        for layout in LAYOUTS {
+            let c = config(&themed(layout, &[Segment::Git]));
+            let git = segment_of(&c, "git");
+            match layout {
+                // the text is colored
+                Layout::Box | Layout::Line => {
+                    assert_eq!(git["foreground"], "p:ok", "{layout:?}");
+                    assert_eq!(git["foreground_templates"], when_changed, "{layout:?}");
+                    assert!(git.get("background").is_none(), "{layout:?}");
+                    assert!(git.get("background_templates").is_none(), "{layout:?}");
+                }
+                // the block behind the text is colored, and the text stays `p:bg`
+                Layout::Powerline => {
+                    assert_eq!(git["background"], "p:ok");
+                    assert_eq!(git["background_templates"], when_changed);
+                    assert_eq!(git["foreground"], "p:bg");
+                    assert!(git.get("foreground_templates").is_none());
+                    // `p:bg` is readable text on both of the backgrounds
+                    let color =
+                        |name: &str| c["palette"][name].as_str().unwrap().parse::<Rgb>().unwrap();
+                    for background in ["ok", "dirty"] {
+                        let ratio = contrast_ratio(color("bg"), color(background));
+                        assert!(
+                            ratio >= MIN_TEXT_CONTRAST,
+                            "p:bg on p:{background}: {ratio}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
