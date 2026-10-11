@@ -482,7 +482,9 @@ cmd-studio/
 
 **Clink**
 - `clink-profile\clink_settings` ตั้งค่าดังนี้: `clink.logo = none`, `prompt.transient = always` หรือ `off` ตามธีม, `clink.path = <data>\generated` และ `clink.autoupdate = off` ✅ (G16)
-- `generated\init.lua` โหลด OMP โดยใช้ path เต็มของ `runtime\omp-<ver>\oh-my-posh.exe` ไม่พึ่ง PATH ✅ (G17) ใช้รูปแบบ `'""' .. exe .. '" init cmd --config "' .. config .. '""'` และฝัง path ตอนสร้างไฟล์ผ่านฟังก์ชัน escape ตัวเดียวตาม §3.7
+- `generated\init.lua` โหลด OMP โดยใช้ path เต็มของ `runtime\omp-<ver>\oh-my-posh.exe` ไม่พึ่ง PATH ✅ (G17) ใช้รูปแบบ `'""' .. exe .. '" init cmd --config "' .. config .. '" 2>nul"'` และฝัง path ตอนสร้างไฟล์ผ่านฟังก์ชัน escape ตัวเดียวตาม §3.7
+  - ` 2>nul` (phase 1a) กันไม่ให้ข้อความ error ของ cmd หรือ OMP โผล่ในทุกหน้าต่างเมื่อไฟล์ OMP หาย เพราะ `io.popen` อ่านแค่ stdout ส่วนปัญหานั้น D2 รายงานแทน ⬜ ต้องลองซ้ำบน VM ใน phase 1b
+  - สคริปต์ที่ OMP สร้างรันใต้ `pcall` ถ้าพังให้บันทึกลง log ไม่พิมพ์ error ใส่ทุกหน้าต่าง (phase 1a)
 
 **ฟอนต์ (`Fonts`)**
 - ติดตั้งแบบรายผู้ใช้ตาม G12 ✅ และติดตั้งเฉพาะเมื่อธีมต้องใช้ (คือ Nerd Font ที่แนบมา)
