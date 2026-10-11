@@ -179,10 +179,12 @@ pub enum PlanError {
     NoClinkPath(PathBuf),
     #[error("could not build the Oh My Posh config: {0}")]
     Generate(String),
-    /// AutoRun holds a command of ours combined with another one (a pipe, parentheses or an
-    /// unclosed quote), so taking ours out would change theirs. The user edits it by hand.
+    /// AutoRun holds a command that the plan would take out, ours or another Clink the user
+    /// agreed to turn off, combined with other commands by a pipe, parentheses or an unclosed
+    /// quote, so taking it out would change them too. `part` is that command. The user edits
+    /// AutoRun by hand.
     #[error(
-        "AutoRun holds a command combined with ours that CMD Studio can't safely change: {part}"
+        "AutoRun holds a command combined with others that CMD Studio can't safely change: {part}"
     )]
     AutoRunNeedsHandEdit { part: String },
 }
@@ -437,15 +439,14 @@ fn take_out(value: &mut String, pick: impl Fn(&str) -> bool) -> bool {
 ///    [`Part`]) is not taken apart: the plan fails with `E_AUTORUN_WRITE`, and the user
 ///    edits AutoRun by hand.
 /// 2. Another command that runs Clink fails the plan, unless the user agreed to turn it off
-///    (`replace_foreign`); then it goes too.
+///    (`replace_foreign`); then it goes too. When it is combined with another command, it
+///    is not taken apart either: the plan fails with `E_AUTORUN_WRITE`.
 /// 3. For `Target::All` our entry is added with ` & `: after the value when the value ends
 ///    cleanly (see [`Scan::clean_end`]), and in front of it, as `<entry> & <value>`, when it
 ///    does not. When nothing else is left, our entry is the whole value.
 ///
-/// Limits: a command of another program that runs Clink goes whole once the user agrees, so
-/// a command piped into it goes with it, and taking it out of parentheses that a separator
-/// splits can leave them unbalanced. Text joined to our entry with no separator at all, as
-/// in `echo ^& <ours>`, goes with our entry.
+/// Limit: text joined to a command that goes with no separator at all, as in
+/// `echo ^& <ours>`, goes with it.
 fn edit_autorun(
     current: &str,
     target: Target,
@@ -470,6 +471,12 @@ fn edit_autorun(
                 existing: existing.text,
             });
         }
+    }
+    if let Some(part) = parts(&value)
+        .into_iter()
+        .find(|p| p.combined && foreign(&p.text))
+    {
+        return Err(PlanError::AutoRunNeedsHandEdit { part: part.text });
     }
     let replaced = take_out(&mut value, foreign);
     if target == Target::All {
@@ -514,8 +521,8 @@ fn wt_font(theme: &Theme, machine: &Machine, warnings: &mut Vec<Warning>) -> Str
 /// is touched, with `E_CLINK_PATH` when cmd or Clink can't take a path (see
 /// [`clink_launch`] and [`autorun_entry`]), with `E_AUTORUN_FOREIGN_CLINK` when another
 /// Clink runs from AutoRun and the user has not agreed to turn it off, and with
-/// `E_AUTORUN_WRITE` when AutoRun holds a command combined with ours that can't be taken
-/// apart safely.
+/// `E_AUTORUN_WRITE` when a command it would take out of AutoRun, ours or that other Clink,
+/// is combined with others in a way it can't take apart safely.
 pub fn plan(
     theme: &Theme,
     req: &Request,
@@ -1336,6 +1343,45 @@ mod tests {
             }
         );
         assert!(err.to_string().contains("can't safely change"), "{err}");
+    }
+
+    #[test]
+    fn a_combined_foreign_clink_is_left_for_a_hand_edit() {
+        for (current, part) in [
+            ("x | clink inject", "x | clink inject"),
+            ("clink inject | more", "clink inject | more"),
+            ("(a & clink inject)", "clink inject)"),
+            (
+                r#"if exist "C:\c\clink.bat" ("C:\c\clink.bat" inject)"#,
+                r#"if exist "C:\c\clink.bat" ("C:\c\clink.bat" inject)"#,
+            ),
+            // An unclosed quote runs `x.bat` into the other Clink.
+            (r#""C:\x.bat & clink inject"#, r#""C:\x.bat & clink inject"#),
+        ] {
+            let mut m = machine();
+            m.autorun_hkcu = Some(current.to_string());
+            for target in [Target::All, Target::Wt] {
+                // Without the user's agreement, the question about the other Clink comes first.
+                let err = plan(&terracotta(), &req(target), &m, &paths()).unwrap_err();
+                assert_eq!(
+                    err,
+                    PlanError::ForeignClink {
+                        existing: part.to_string()
+                    }
+                );
+                let mut r = req(target);
+                r.replace_foreign_clink = true;
+                let err = plan(&terracotta(), &r, &m, &paths()).unwrap_err();
+                assert_eq!(
+                    err,
+                    PlanError::AutoRunNeedsHandEdit {
+                        part: part.to_string()
+                    },
+                    "{current}"
+                );
+                assert_eq!(err.code(), "E_AUTORUN_WRITE");
+            }
+        }
     }
 
     #[test]
