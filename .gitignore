@@ -1,3 +1,4 @@
 /target/
 spikes/**/target/
 spikes/**/tmp/
+/resources/

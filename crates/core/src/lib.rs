@@ -9,6 +9,7 @@ pub mod oklch;
 pub mod palette;
 pub mod plan;
 pub mod presets;
+pub mod resources;
 pub mod schema;
 pub mod text;
 pub mod txn;
