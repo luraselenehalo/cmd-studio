@@ -44,8 +44,13 @@ pub fn scheme(theme: &Theme) -> Value {
 
 /// Keys CMD Studio sets on the cmd profile. With `Target::Wt`, cmd loads
 /// Clink through `/k`. The whole command is wrapped in one more pair of
-/// quotes because `cmd /k` strips the outermost pair. `clink_launch` is
-/// `<clink-launch>` from the planner: all ASCII (spec §5.4, G19).
+/// quotes because `cmd /k` strips the outermost pair.
+///
+/// Both paths are trusted as given. `%` and `"` are written unescaped, and a
+/// path that is not Unicode becomes U+FFFD through `Path::display`. Callers
+/// must refuse those first with E_CLINK_PATH: `plan::clink_launch` and
+/// `plan::autorun_entry` must do that before this is called. `clink_launch`
+/// is `<clink-launch>`, which is all ASCII for `Target::Wt` (spec §5.4, G19).
 pub fn profile_values(
     theme: &Theme,
     target: Target,
@@ -55,7 +60,7 @@ pub fn profile_values(
     let t = &theme.terminal;
     let cursor = match t.cursor_shape {
         CursorShape::FilledBox => "filledBox",
-        // bar and underscore are documented by WT; they are verified on the Phase 1b VMs.
+        // G6 proved only filledBox; bar and underscore are documented by Windows Terminal and still to be verified on the Phase 1b VMs.
         CursorShape::Bar => "bar",
         CursorShape::Underscore => "underscore",
     };
@@ -127,5 +132,63 @@ mod tests {
             p["commandline"],
             r#"%SystemRoot%\System32\cmd.exe /k ""C:\Users\3607~1\x\clink_x64.exe" inject --quiet --profile "C:\Users\ผู้ทดสอบ ไทย\x\clink-profile"""#
         );
+    }
+
+    #[test]
+    fn the_scheme_is_exactly_the_wt_object() {
+        let mut t = terracotta();
+        // distinct from accent and ansi[15], so the source field of each is observable
+        t.colors.cursor = "#010203".parse().unwrap();
+        t.colors.foreground = "#040506".parse().unwrap();
+        assert_eq!(
+            scheme(&t),
+            json!({
+                "name": "CMD Studio",
+                "background": "#1f1e1d", "foreground": "#040506",
+                "cursorColor": "#010203", "selectionBackground": "#4a4845",
+                "black": "#3a3936", "red": "#e5736a", "green": "#8fbf7f", "yellow": "#e3b66b",
+                "blue": "#7fa7d9", "purple": "#b79bdb", "cyan": "#7fc1b8", "white": "#d8d6cf",
+                "brightBlack": "#8a8780", "brightRed": "#f0907f", "brightGreen": "#a8d196",
+                "brightYellow": "#eecb8a", "brightBlue": "#9bbde8", "brightPurple": "#cbb4e8",
+                "brightCyan": "#9dd3cb", "brightWhite": "#faf9f5"
+            })
+        );
+    }
+
+    #[test]
+    fn the_cmd_profile_holds_exactly_these_keys() {
+        let p = profile_values(&terracotta(), Target::All, Path::new("x"), Path::new("y"));
+        assert_eq!(
+            Value::Object(p),
+            json!({
+                "colorScheme": "CMD Studio",
+                "font": { "face": "Cascadia Mono", "size": 12 },
+                "cursorShape": "filledBox",
+                "opacity": 96,
+                "useAcrylic": true,
+                "padding": "14, 10",
+                "icon": "\u{273b}",
+                "commandline": r"%SystemRoot%\System32\cmd.exe"
+            })
+        );
+    }
+
+    #[test]
+    fn every_cursor_shape_has_its_wt_name() {
+        for (shape, name) in [
+            (CursorShape::FilledBox, "filledBox"),
+            (CursorShape::Bar, "bar"),
+            (CursorShape::Underscore, "underscore"),
+        ] {
+            let mut t = terracotta();
+            t.terminal.cursor_shape = shape;
+            let p = profile_values(&t, Target::All, Path::new("x"), Path::new("y"));
+            assert_eq!(p["cursorShape"], name);
+        }
+    }
+
+    #[test]
+    fn the_cmd_profile_guid_is_the_stock_one() {
+        assert_eq!(CMD_PROFILE_GUID, "{0caa0dad-35be-5f56-a8ff-afceeeaa6101}");
     }
 }
