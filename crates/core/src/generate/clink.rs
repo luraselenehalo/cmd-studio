@@ -2,8 +2,14 @@
 use std::path::Path;
 
 /// The text of `clink_settings`: the logo off, the transient prompt as the theme wants it,
-/// `scripts_dir` as the only folder Clink loads scripts from, and no self-update (G16: the
+/// `scripts_dir` as the folder Clink loads Lua scripts from, and no self-update (G16: the
 /// runtime is ours, and Clink must not replace it).
+///
+/// `clink.path` does not add a folder to the ones Clink reads. It takes their place: with it
+/// set, Clink loads no script from the folder of its program or from the profile folder
+/// (checked on 1.9.34, and Clink's own help for the setting says the same). The Lua API that
+/// is built into Clink is there as always. The setting is a list delimited by semicolons, so
+/// `scripts_dir` must not contain one.
 ///
 /// This is Clink's own `name = value` format and not Lua, so the path is written as it is
 /// and `lua_str` does not apply. A path that is not valid Unicode is written with U+FFFD in
