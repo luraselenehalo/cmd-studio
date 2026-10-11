@@ -3,7 +3,8 @@
 //! (ค)). Pure, like the rest of the planner.
 //!
 //! Phase 1b reuses it: the uninstaller's cleanup takes our entries out with [`remove_ours`]
-//! (spec §6.3), and the doctor reads the value with [`scan`] and [`is_our_entry`] (D4, D5).
+//! (spec §6.3), and the doctor reads the value with [`scan`], [`is_our_entry`] (D4) and
+//! [`runs_clink`] (D5).
 use super::PlanError;
 use crate::model::Target;
 use std::ops::Range;
@@ -334,9 +335,70 @@ fn holds_ours(text: &str, profile: &str) -> bool {
     text.to_lowercase().contains(&profile.to_lowercase())
 }
 
-/// Whether `text` runs another Clink: it says `clink` and is not ours.
+/// The file names that start Clink: its launcher script, its program, and `clink` alone.
+const CLINK_LAUNCHERS: [&str; 7] = [
+    "clink",
+    "clink.bat",
+    "clink.cmd",
+    "clink.exe",
+    "clink_x64.exe",
+    "clink_x86.exe",
+    "clink_arm64.exe",
+];
+
+/// Whether `command` injects Clink into cmd: a word that names one of [`CLINK_LAUNCHERS`],
+/// with or without a folder, quoted or not, and after it the word `inject`, both in any case.
+/// Only `inject` loads Clink into cmd, so a call of Clink without it (`clink.bat set
+/// clink.logo none`) is not an injection, and a command that only mentions Clink, such as
+/// `doskey /macrofile="C:\tools\clink\macros.txt"` or `cd /d C:\clink-notes`, is another
+/// program's own. The AutoRun editor (another Clink, asked about and taken out with the user's
+/// agreement) and the warning about Clink in HKLM both read commands this way.
+pub(crate) fn runs_clink(command: &str) -> bool {
+    let words = command_words(command);
+    words
+        .iter()
+        .position(|word| {
+            let name = word.rsplit(['\\', '/']).next().unwrap_or(word);
+            CLINK_LAUNCHERS.iter().any(|l| name.eq_ignore_ascii_case(l))
+        })
+        .is_some_and(|launcher| {
+            words
+                .iter()
+                .skip(launcher + 1)
+                .any(|word| word.eq_ignore_ascii_case("inject"))
+        })
+}
+
+/// The words of a command as cmd splits them: at spaces and tabs, and at `<`, `>`, `|`, `(`
+/// and `)`, none of them quoted or escaped. Quotes group a word and are not part of it, a `^`
+/// makes the character after it plain, and the `@` that may start a command is dropped.
+fn command_words(command: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut quoted = false;
+    let mut chars = command.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => quoted = !quoted,
+            '^' if !quoted => word.extend(chars.next()),
+            ' ' | '\t' | '<' | '>' | '|' | '(' | ')' if !quoted => {
+                if !word.is_empty() {
+                    words.push(std::mem::take(&mut word));
+                }
+            }
+            '@' if !quoted && word.is_empty() && words.is_empty() => {}
+            c => word.push(c),
+        }
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    words
+}
+
+/// Whether `text` runs another Clink: it injects Clink (see [`runs_clink`]) and is not ours.
 fn is_foreign(text: &str, profile: &str) -> bool {
-    !holds_ours(text, profile) && text.to_ascii_lowercase().contains("clink")
+    !holds_ours(text, profile) && runs_clink(text)
 }
 
 fn hand_edit(part: &str) -> PlanError {
@@ -387,9 +449,11 @@ pub(crate) fn remove_ours(current: &str, profile: &str) -> Result<AutoRunEdit, P
 /// 1. A value that cmd itself rejects, or where a command holds our profile path without
 ///    being one of our entries, is not edited: the plan fails with `E_AUTORUN_WRITE`, and the
 ///    user edits AutoRun by hand (see `check`).
-/// 2. Another command that runs Clink fails the plan with `E_AUTORUN_FOREIGN_CLINK`, naming
-///    every such command, unless the user agreed to turn them off; one of them that is
-///    combined with others (see [`Part::combined`]) fails it with `E_AUTORUN_WRITE`.
+/// 2. Another command that injects Clink (see [`runs_clink`]) fails the plan with
+///    `E_AUTORUN_FOREIGN_CLINK`, naming every such command, unless the user agreed to turn
+///    them off; one of them that is combined with others (see [`Part::combined`]) fails it
+///    with `E_AUTORUN_WRITE`. A command that only mentions Clink is neither asked about nor
+///    taken out.
 /// 3. Our entries go, old and current, and with the user's agreement the other Clink's.
 /// 4. For `Target::All` our entry goes in front, as `<entry> & <value>`, or is the whole value
 ///    when nothing else is left. In front and in parentheses, it is never part of another
@@ -758,18 +822,82 @@ mod tests {
     fn every_command_of_another_clink_is_named_before_any_goes() {
         let doskey = r#"doskey /macrofile="C:\tools\clink\macros.txt""#;
         let clink = r#""C:\clink\clink.bat" inject --autorun"#;
-        let current = format!("{doskey} & {clink} & echo hi");
+        let x64 = r"C:\clink\clink_x64.exe inject --quiet";
+        let current = format!("{doskey} & {clink} & echo hi & {x64}");
         for target in [Target::All, Target::Wt] {
             assert_eq!(
                 refusal(&current, target, false),
                 PlanError::ForeignClink {
-                    existing: vec![doskey.to_string(), clink.to_string()]
+                    existing: vec![clink.to_string(), x64.to_string()]
                 }
             );
         }
+        // The doskey line only names a folder called clink: it is not asked about, and stays.
         let e = edit_autorun(&current, Target::All, &entry(), &profile(), true).unwrap();
-        assert_eq!(e.value, format!("{} & echo hi", entry()));
+        assert_eq!(e.value, format!("{} & {doskey} & echo hi", entry()));
         assert!(e.removed_foreign && !e.removed_ours);
+    }
+
+    #[test]
+    fn only_a_command_that_injects_clink_is_another_clink() {
+        // A launcher of Clink as a whole word, with or without a folder, quoted or not, and
+        // after it the word `inject`, in any case.
+        for command in [
+            "clink inject",
+            r#""C:\x\clink.bat" inject --autorun"#,
+            "clink_x64.exe inject",
+            r#""C:\Program Files (x86)\clink\clink.bat" inject --autorun"#,
+            r"C:\c\clink.exe inject",
+            r#""C:\c\clink_arm64.exe" inject --profile "C:\p""#,
+            "clink_x86.exe inject",
+            "CLINK.CMD INJECT",
+            "@clink inject",
+            r#"call "C:\c\clink.bat" inject"#,
+            r#"if exist "C:\c\clink.bat" ("C:\c\clink.bat" inject)"#,
+            "x | clink inject",
+            "clink inject>nul",
+            r#""C:\clink\clink.bat" inject --autorun >nul 2>&1"#,
+        ] {
+            assert!(runs_clink(command), "{command}");
+        }
+        // Commands that only mention Clink are other programs' own; so is a call of Clink that
+        // does not inject it into cmd.
+        for command in [
+            r#"doskey /macrofile="C:\tools\clink\macros.txt""#,
+            r"cd /d C:\clink-notes",
+            r#""C:\clink\clink.bat" set clink.logo none"#,
+            "clink.bat set clink.logo",
+            "notclink.bat inject",
+            r"C:\clink\clink.bat.old inject",
+            "inject clink.bat",
+            "echo clinker inject",
+            // Inside an unclosed quote cmd runs no Clink: the quote holds the whole rest.
+            r#""C:\x.bat & clink inject"#,
+        ] {
+            assert!(!runs_clink(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn a_command_that_only_mentions_clink_stays() {
+        // Doctrine guard (ค): only another Clink's injection may go, and only with the user's
+        // agreement. A command that merely names a folder or file called clink is not asked
+        // about and is never taken out.
+        for v in [
+            r#"doskey /macrofile="C:\tools\clink\macros.txt""#,
+            r"cd /d C:\clink-notes",
+            r#""C:\clink\clink.bat" set clink.logo none"#,
+            r#""C:\x.bat & clink inject"#,
+        ] {
+            for replace_foreign in [false, true] {
+                let e = edit_autorun(v, Target::All, &entry(), &profile(), replace_foreign);
+                let e = e.unwrap();
+                assert_eq!(e.value, format!("{} & {v}", entry()), "{v}");
+                assert!(!e.removed_foreign, "{v}");
+                let e = edit_autorun(v, Target::Wt, &entry(), &profile(), replace_foreign);
+                assert_eq!(e.unwrap(), AutoRunEdit::unchanged(v), "{v}");
+            }
+        }
     }
 
     #[test]
@@ -782,8 +910,10 @@ mod tests {
                 r#"if exist "C:\c\clink.bat" ("C:\c\clink.bat" inject)"#,
                 r#"if exist "C:\c\clink.bat" ("C:\c\clink.bat" inject)"#,
             ),
-            // An unclosed quote runs `x.bat` into the other Clink.
-            (r#""C:\x.bat & clink inject"#, r#""C:\x.bat & clink inject"#),
+            (
+                r#"x | "C:\c\clink_x64.exe" inject"#,
+                r#"x | "C:\c\clink_x64.exe" inject"#,
+            ),
         ] {
             for target in [Target::All, Target::Wt] {
                 // Without the user's agreement, the question about the other Clink comes first.

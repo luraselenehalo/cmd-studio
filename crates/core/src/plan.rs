@@ -372,11 +372,14 @@ pub fn plan(
         }
     }
 
-    if machine
-        .autorun_hklm
-        .as_deref()
-        .is_some_and(|v| v.to_ascii_lowercase().contains("clink"))
-    {
+    // A Clink that cmd injects for every user of the machine, in any command of the value; a
+    // command that only mentions Clink is none (see `autorun::runs_clink`).
+    if machine.autorun_hklm.as_deref().is_some_and(|v| {
+        autorun::scan(v)
+            .parts
+            .iter()
+            .any(|p| autorun::runs_clink(&p.text))
+    }) {
         warnings.push(Warning::MachineWideClink);
     }
 
@@ -703,10 +706,34 @@ mod tests {
 
     #[test]
     fn machine_wide_clink_is_flagged() {
+        let clink = r#""C:\Program Files\clink\clink.bat" inject --autorun"#;
         let mut m = machine();
-        m.autorun_hklm = Some(r#""C:\Program Files\clink\clink.bat" inject --autorun"#.to_string());
-        let p = plan(&terracotta(), &req(Target::All), &m, &paths()).unwrap();
-        assert!(p.warnings.contains(&Warning::MachineWideClink));
+        for v in [clink.to_string(), format!("echo hi & {clink}")] {
+            m.autorun_hklm = Some(v.clone());
+            let p = plan(&terracotta(), &req(Target::All), &m, &paths()).unwrap();
+            assert!(p.warnings.contains(&Warning::MachineWideClink), "{v}");
+        }
+        // A value that only mentions Clink runs no Clink for the whole machine.
+        for v in [
+            r#"doskey /macrofile="C:\tools\clink\macros.txt""#,
+            r"cd /d C:\clink-notes",
+        ] {
+            m.autorun_hklm = Some(v.to_string());
+            let p = plan(&terracotta(), &req(Target::All), &m, &paths()).unwrap();
+            assert!(!p.warnings.contains(&Warning::MachineWideClink), "{v}");
+        }
+    }
+
+    #[test]
+    fn a_value_that_only_mentions_clink_does_not_stop_the_plan() {
+        // Nothing to ask about and nothing to take out: Windows Terminal only leaves the value
+        // alone, and every cmd window gets our entry in front of it.
+        let doskey = r#"doskey /macrofile="C:\tools\clink\macros.txt""#;
+        assert_eq!(set_autorun(Some(doskey), Target::Wt), None);
+        assert_eq!(
+            set_autorun(Some(doskey), Target::All),
+            Some(Some(format!("{} & {doskey}", entry())))
+        );
     }
 
     #[test]
