@@ -1,0 +1,23 @@
+{
+  "background": "#1f1e1d",
+  "black": "#3a3936",
+  "blue": "#7fa7d9",
+  "brightBlack": "#8a8780",
+  "brightBlue": "#9bbde8",
+  "brightCyan": "#9dd3cb",
+  "brightGreen": "#a8d196",
+  "brightPurple": "#cbb4e8",
+  "brightRed": "#f0907f",
+  "brightWhite": "#faf9f5",
+  "brightYellow": "#eecb8a",
+  "cursorColor": "#d97757",
+  "cyan": "#7fc1b8",
+  "foreground": "#faf9f5",
+  "green": "#8fbf7f",
+  "name": "CMD Studio",
+  "purple": "#b79bdb",
+  "red": "#e5736a",
+  "selectionBackground": "#4a4845",
+  "white": "#d8d6cf",
+  "yellow": "#e3b66b"
+}

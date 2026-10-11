@@ -1,0 +1,73 @@
+{
+  "$schema": "https://raw.githubusercontent.com/JanDeDobbeleer/oh-my-posh/main/themes/schema.json",
+  "blocks": [
+    {
+      "alignment": "left",
+      "segments": [
+        {
+          "background": "p:frame",
+          "foreground": "p:fg",
+          "options": {
+            "home_icon": "~",
+            "style": "full"
+          },
+          "powerline_symbol": "",
+          "style": "powerline",
+          "template": " {{ .Path }} ",
+          "type": "path"
+        },
+        {
+          "background": "p:ok",
+          "background_templates": [
+            "{{ if or .Working.Changed .Staging.Changed }}p:dirty{{ end }}"
+          ],
+          "foreground": "p:bg",
+          "options": {
+            "fetch_status": true
+          },
+          "powerline_symbol": "",
+          "style": "powerline",
+          "template": " {{ .HEAD }}{{ if or .Working.Changed .Staging.Changed }} *{{ else }} ✓{{ end }} ",
+          "type": "git"
+        },
+        {
+          "background": "p:frame",
+          "foreground": "p:fg",
+          "options": {
+            "time_format": "15:04"
+          },
+          "powerline_symbol": "",
+          "style": "powerline",
+          "template": " {{ .CurrentDate | date .Format }} ",
+          "type": "time"
+        },
+        {
+          "foreground": "p:accent",
+          "style": "plain",
+          "template": " ❯",
+          "type": "text"
+        }
+      ],
+      "type": "prompt"
+    }
+  ],
+  "console_title_template": "{{ .Folder }}",
+  "final_space": true,
+  "palette": {
+    "accent": "#d97757",
+    "bg": "#1f1e1d",
+    "blue": "#7fa7d9",
+    "dirty": "#e3b66b",
+    "fg": "#faf9f5",
+    "frame": "#5f5d58",
+    "muted": "#8a8780",
+    "ok": "#8fbf7f",
+    "red": "#e5736a"
+  },
+  "transient_prompt": {
+    "background": "transparent",
+    "foreground": "p:accent",
+    "template": "> "
+  },
+  "version": 4
+}

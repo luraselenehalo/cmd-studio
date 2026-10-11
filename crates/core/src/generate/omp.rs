@@ -269,6 +269,7 @@ mod tests {
     use crate::color::{contrast_ratio, Rgb};
     use crate::palette::MIN_TEXT_CONTRAST;
     use crate::presets::terracotta;
+    use std::collections::{BTreeSet, HashSet};
 
     /// Every segment a theme can list, once.
     const ALL: [Segment; 7] = [
@@ -282,6 +283,24 @@ mod tests {
     ];
 
     const LAYOUTS: [Layout; 3] = [Layout::Box, Layout::Line, Layout::Powerline];
+
+    /// The types of block this generator draws (spec §3.5). A block is never of a type in
+    /// `ALLOWED_TYPES`, and a segment is never of one of these.
+    const BLOCK_TYPES: [&str; 2] = ["prompt", "rprompt"];
+
+    /// The keys of the top level of the config, and no others. Oh My Posh reads more keys than
+    /// these, and one of them, `tooltips`, holds segments that it renders when a word is typed.
+    /// A key added to the config has to be added here by someone who has looked at what it
+    /// holds, so that nothing gets into the config where the guard does not look.
+    const TOP_LEVEL_KEYS: [&str; 7] = [
+        "$schema",
+        "blocks",
+        "console_title_template",
+        "final_space",
+        "palette",
+        "transient_prompt",
+        "version",
+    ];
 
     /// The only strings a `text` segment may hold: the frame and prompt characters the
     /// generator draws itself (spec §3.5).
@@ -304,9 +323,9 @@ mod tests {
         t
     }
 
-    /// Every subset of the seven segments, each in the order of `ALL`.
+    /// Every subset of the segments in `ALL`, each in the order of `ALL`.
     fn subsets() -> impl Iterator<Item = Vec<Segment>> {
-        (0u8..128).map(|mask| {
+        (0u32..1 << ALL.len()).map(|mask| {
             ALL.iter()
                 .enumerate()
                 .filter(|(i, _)| mask & (1 << i) != 0)
@@ -315,9 +334,10 @@ mod tests {
         })
     }
 
-    /// Every segment found anywhere under `v`: the items of each `segments` list, however
-    /// deep the list sits. The guard walks the whole config this way and not only the
-    /// blocks we expect, so a segment added anywhere is seen.
+    /// Every segment found in a `segments` list anywhere under `v`, however deep the list
+    /// sits. The tests below that read the template or the options of a segment use it. The
+    /// whitelist guard does not: `typed_objects` also sees a segment that is not in a list
+    /// named `segments`, and a block.
     fn all_segments(v: &Value, out: &mut Vec<Value>) {
         if let Some(segs) = v.get("segments").and_then(Value::as_array) {
             out.extend(segs.iter().cloned());
@@ -336,14 +356,90 @@ mod tests {
         all.into_iter().find(|s| s["type"] == kind).unwrap()
     }
 
-    /// The segment types in `config` that are not on the whitelist.
+    /// What an object of the config stands for: a block, which is an item of the top-level
+    /// `blocks`, or a segment, which is anything else that has a type.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Role {
+        Block,
+        Segment,
+    }
+
+    /// An object of the config that has a `type`, or that sits where one is needed.
+    struct Typed {
+        /// Where it is, as a JSON pointer.
+        place: String,
+        role: Role,
+        /// Its `type`; `None` when there is none, or when it is not a string.
+        ty: Option<String>,
+    }
+
+    /// Every object under `v`, however deep, that has a `type` or is an item of a list where
+    /// each item needs one: the top-level `blocks` (its items are blocks) and any list named
+    /// `segments` (its items are segments). An object with a type anywhere else is taken for a
+    /// segment, so a list that Oh My Posh renders and this generator never writes, such as
+    /// `tooltips`, is held to the whitelist as well. `role` is what `v` is, when it is an item of
+    /// such a list.
+    fn typed_objects(v: &Value, place: &str, role: Option<Role>, out: &mut Vec<Typed>) {
+        match v {
+            Value::Object(map) => {
+                if role.is_some() || map.contains_key("type") {
+                    out.push(Typed {
+                        place: place.to_string(),
+                        role: role.unwrap_or(Role::Segment),
+                        ty: map.get("type").and_then(Value::as_str).map(String::from),
+                    });
+                }
+                for (key, child) in map {
+                    let items = match key.as_str() {
+                        "blocks" if place.is_empty() => Some(Role::Block),
+                        "segments" => Some(Role::Segment),
+                        _ => None,
+                    };
+                    let place = format!("{place}/{key}");
+                    match child {
+                        Value::Array(list) => {
+                            for (i, item) in list.iter().enumerate() {
+                                typed_objects(item, &format!("{place}/{i}"), items, out);
+                            }
+                        }
+                        other => typed_objects(other, &place, None, out),
+                    }
+                }
+            }
+            Value::Array(list) => {
+                for (i, item) in list.iter().enumerate() {
+                    typed_objects(item, &format!("{place}/{i}"), None, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The types in `config` that are not allowed, each with its place (`command at
+    /// /tooltips/0`): a block that is not of a type in `BLOCK_TYPES`, a segment that is not of
+    /// one in `ALLOWED_TYPES`, and an object that needs a type and has none (`<missing>`).
     fn outside_the_whitelist(config: &Value) -> Vec<String> {
-        let mut all = Vec::new();
-        all_segments(config, &mut all);
-        all.iter()
-            .map(|s| s["type"].as_str().unwrap_or("<missing>").to_string())
-            .filter(|ty| !ALLOWED_TYPES.contains(&ty.as_str()))
+        let mut found = Vec::new();
+        typed_objects(config, "", None, &mut found);
+        found
+            .iter()
+            .filter(|typed| {
+                let allowed: &[&str] = match typed.role {
+                    Role::Block => &BLOCK_TYPES,
+                    Role::Segment => ALLOWED_TYPES,
+                };
+                !typed.ty.as_deref().is_some_and(|ty| allowed.contains(&ty))
+            })
+            .map(|typed| {
+                let ty = typed.ty.as_deref().unwrap_or("<missing>");
+                format!("{ty} at {}", typed.place)
+            })
             .collect()
+    }
+
+    /// The keys of the top level of `config`.
+    fn top_level_keys(config: &Value) -> BTreeSet<String> {
+        config.as_object().unwrap().keys().cloned().collect()
     }
 
     /// The `type` of each segment in a block, in order.
@@ -398,7 +494,8 @@ mod tests {
 
     #[test]
     fn never_emits_a_segment_type_outside_the_whitelist() {
-        // spec §7 doctrine guard (ข): every layout × every subset of segments, every block
+        // spec §7 doctrine guard (ข): every layout × every subset of segments, every object
+        // of the config that has a type
         for layout in LAYOUTS {
             for segments in subsets() {
                 let c = config(&themed(layout, &segments));
@@ -408,15 +505,63 @@ mod tests {
                 // looking at nothing
                 let mut found = Vec::new();
                 all_segments(&c, &mut found);
-                let listed: usize = c["blocks"]
-                    .as_array()
-                    .unwrap()
+                let blocks = c["blocks"].as_array().unwrap();
+                let listed: usize = blocks
                     .iter()
                     .map(|b| b["segments"].as_array().unwrap().len())
                     .sum();
                 assert!(listed > 0, "{layout:?} {segments:?}");
                 assert_eq!(found.len(), listed, "{layout:?} {segments:?}");
+                // and the guard sees the blocks and those segments, and no other object with
+                // a type, anywhere in the config
+                let mut typed = Vec::new();
+                typed_objects(&c, "", None, &mut typed);
+                let block_count = typed.iter().filter(|t| t.role == Role::Block).count();
+                assert_eq!(block_count, blocks.len(), "{layout:?} {segments:?}");
+                assert_eq!(
+                    typed.len(),
+                    blocks.len() + listed,
+                    "{layout:?} {segments:?}"
+                );
             }
+        }
+    }
+
+    #[test]
+    fn the_top_level_of_the_config_has_exactly_these_keys() {
+        // the other half of the guard: a key that nobody has looked at is refused as a key,
+        // whatever it holds
+        let want: BTreeSet<String> = TOP_LEVEL_KEYS.iter().map(|k| k.to_string()).collect();
+        for layout in LAYOUTS {
+            for segments in subsets() {
+                let keys = top_level_keys(&config(&themed(layout, &segments)));
+                assert_eq!(keys, want, "{layout:?} {segments:?}");
+            }
+        }
+        // it can fail: add `tooltips`, or any other key
+        for extra in ["tooltips", "anything"] {
+            let mut planted = config(&terracotta());
+            planted[extra] = json!([]);
+            assert_ne!(top_level_keys(&planted), want, "{extra}");
+        }
+        // and a key that is taken away
+        let mut planted = config(&terracotta());
+        planted.as_object_mut().unwrap().remove("palette");
+        assert_ne!(top_level_keys(&planted), want);
+    }
+
+    #[test]
+    fn subsets_lists_every_combination_of_all_once() {
+        // the guards loop over it, so a range that fell short would leave out the
+        // combinations with the last segment in them, and nothing would show it
+        let all: Vec<Vec<Segment>> = subsets().collect();
+        let distinct: HashSet<&Vec<Segment>> = all.iter().collect();
+        assert_eq!(distinct.len(), all.len(), "a combination comes twice");
+        assert!(all.contains(&Vec::new()), "the empty list");
+        assert!(all.contains(&ALL.to_vec()), "the list of all");
+        for segment in ALL {
+            let with = all.iter().filter(|s| s.contains(&segment)).count();
+            assert_eq!(with * 2, all.len(), "{segment:?} is in half of them");
         }
     }
 
@@ -430,9 +575,86 @@ mod tests {
                 { "type": "rprompt", "segments": [{ "type": "command" }] }
             ]
         });
-        assert_eq!(outside_the_whitelist(&planted), ["command"]);
-        let untyped = json!({ "blocks": [{ "segments": [{ "style": "plain" }] }] });
-        assert_eq!(outside_the_whitelist(&untyped), ["<missing>"]);
+        assert_eq!(
+            outside_the_whitelist(&planted),
+            ["command at /blocks/1/segments/0"]
+        );
+        let untyped =
+            json!({ "blocks": [{ "type": "prompt", "segments": [{ "style": "plain" }] }] });
+        assert_eq!(
+            outside_the_whitelist(&untyped),
+            ["<missing> at /blocks/0/segments/0"]
+        );
+    }
+
+    #[test]
+    fn the_guard_catches_a_forbidden_type_wherever_the_config_puts_it() {
+        // The first version of the guard read only the lists named `segments`. Oh My Posh also
+        // renders the segments of a top-level `tooltips` list, so a `command` in one of them
+        // passed. The guard reads every object that has a type, and every item of `blocks`
+        // and of `segments`.
+        for (what, planted, want) in [
+            (
+                "a tooltip",
+                json!({ "blocks": [], "tooltips": [{ "type": "command", "tips": ["git"] }] }),
+                "command at /tooltips/0",
+            ),
+            (
+                "the transient prompt",
+                json!({ "blocks": [], "transient_prompt": { "type": "command" } }),
+                "command at /transient_prompt",
+            ),
+            (
+                "inside the options of a segment",
+                json!({ "blocks": [{ "type": "prompt", "segments": [
+                    { "type": "path", "options": { "more": { "type": "command" } } }
+                ] }] }),
+                "command at /blocks/0/segments/0/options/more",
+            ),
+            (
+                "a list of segments inside a segment",
+                json!({ "blocks": [{ "type": "prompt", "segments": [
+                    { "type": "path", "segments": [{ "type": "command" }] }
+                ] }] }),
+                "command at /blocks/0/segments/0/segments/0",
+            ),
+            (
+                "a block of the wrong type",
+                json!({ "blocks": [{ "type": "command", "segments": [] }] }),
+                "command at /blocks/0",
+            ),
+            (
+                "a block of a segment type",
+                json!({ "blocks": [{ "type": "text", "segments": [] }] }),
+                "text at /blocks/0",
+            ),
+            (
+                "a segment of a block type",
+                json!({ "blocks": [{ "type": "prompt", "segments": [{ "type": "rprompt" }] }] }),
+                "rprompt at /blocks/0/segments/0",
+            ),
+            (
+                "a block with no type",
+                json!({ "blocks": [{ "segments": [] }] }),
+                "<missing> at /blocks/0",
+            ),
+            (
+                "a type that is not a string",
+                json!({ "blocks": [{ "type": "prompt", "segments": [{ "type": 5 }] }] }),
+                "<missing> at /blocks/0/segments/0",
+            ),
+        ] {
+            assert_eq!(outside_the_whitelist(&planted), [want], "{what}");
+        }
+        // and the guard lets the shapes of the config through
+        let fine = json!({
+            "blocks": [
+                { "type": "prompt", "segments": [{ "type": "path" }, { "type": "text" }] },
+                { "type": "rprompt", "segments": [{ "type": "time" }] }
+            ],
+            "transient_prompt": { "template": "> " }
+        });
+        assert!(outside_the_whitelist(&fine).is_empty());
     }
 
     #[test]
