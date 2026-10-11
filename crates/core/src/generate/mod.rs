@@ -2,3 +2,4 @@
 pub mod clink;
 pub mod lua;
 pub mod omp;
+pub mod wt;
