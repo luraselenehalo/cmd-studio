@@ -31,9 +31,10 @@ fn schema() -> Value {
 fn schema_file_matches_the_rust_types() {
     let generated = schema_text();
     let path = schema_path();
-    // A plain run only reads the committed file. It is rewritten when UPDATE_SCHEMA is set, and
-    // then only to hold exactly what the types generate.
-    if std::env::var_os("UPDATE_SCHEMA").is_some() {
+    // A plain run only reads the committed file. It is rewritten when UPDATE_SCHEMA is 1, and
+    // then only to hold exactly what the types generate. Only the exact value `1` does it, as
+    // with UPDATE_GOLDEN, so that UPDATE_SCHEMA=0 cannot rewrite it by mistake.
+    if std::env::var("UPDATE_SCHEMA").is_ok_and(|value| value == "1") {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, &generated).unwrap();
     }
@@ -44,6 +45,16 @@ fn schema_file_matches_the_rust_types() {
         generated,
         "schema file is stale: rerun with UPDATE_SCHEMA=1 and commit it"
     );
+}
+
+#[test]
+fn the_schema_line_is_a_plain_string() {
+    // An editor may hide or flag a writeOnly property, and in a file a person writes it means
+    // nothing: the line is only read and dropped.
+    let schema = schema();
+    let line = schema.pointer("/properties/$schema").unwrap();
+    assert_eq!(line.get("type"), Some(&json!("string")));
+    assert_eq!(line.get("writeOnly"), None, "{line}");
 }
 
 #[test]

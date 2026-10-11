@@ -173,9 +173,9 @@ fn is_unsafe(c: char) -> bool {
     )
 }
 
-/// The longest refusal: spec §3.3 allows a message 300 characters, and `E_THEME_INVALID` puts
-/// "not a valid theme file: " (24 characters) in front of it.
-const MAX_REFUSAL_CHARS: usize = 300 + 24;
+/// The longest refusal: spec §3.3 allows a message 300 characters, the "not a valid theme
+/// file: " (24 characters) that `E_THEME_INVALID` puts in front of the reader's text included.
+const MAX_REFUSAL_CHARS: usize = 300;
 
 /// A refusal is printed on a screen and written to a log, and it can quote the file.
 fn assert_safe_to_print(name: &str, error: &ThemeError) {
@@ -654,10 +654,10 @@ fn a_hostile_key_of_400_letters_gives_a_message_that_is_clean_and_cut_short() {
     let ThemeError::Invalid(text) = &error else {
         panic!("not an Invalid refusal: {error:?}");
     };
-    // the escape sequence is cut out of the key, the key is the path, and the message is cut
-    // at 300 characters with three dots
+    // the escape sequence is cut out of the key, the key is the path, and the reader's text is
+    // cut at 276 characters with three dots, so that the whole message is 300
     assert!(text.starts_with("red0;pwnedkkkk"), "{text}");
-    assert_eq!(text.chars().count(), 300, "{text}");
+    assert_eq!(text.chars().count(), 276, "{text}");
     assert!(text.ends_with("..."), "{text}");
     assert_eq!(error.to_string().chars().count(), MAX_REFUSAL_CHARS);
     assert_safe_to_print("hostile-key", &error);

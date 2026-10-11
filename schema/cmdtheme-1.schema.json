@@ -5,8 +5,7 @@
   "properties": {
     "$schema": {
       "description": "Where editors find the JSON Schema of this file. Optional; CMD Studio reads it,\nignores it and does not write it back.",
-      "type": "string",
-      "writeOnly": true
+      "type": "string"
     },
     "author": {
       "type": "string",
