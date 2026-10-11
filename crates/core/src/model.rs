@@ -16,10 +16,9 @@ pub const MAX_FILE_BYTES: usize = 64 * 1024;
 /// [`Theme::validate`] reads them to enforce them, so the schema and the parser cannot
 /// drift apart. Lengths count characters (Unicode code points), as JSON Schema does.
 ///
-/// The schema describes the file as written. On import `validate` is the judge of the
-/// text that is kept, after `sanitize` has cleaned it and trimmed the name, the author
-/// and the font, and that is a little more lenient than the schema where the file has
-/// control characters or blanks at the ends of those.
+/// The schema describes the file as written. `validate` judges the name, the author and
+/// the font as import keeps them, cleaned and trimmed, and that is a little more lenient
+/// than the schema where the file has control characters or blanks around those.
 pub mod limits {
     /// `name`: at least this many characters.
     pub const NAME_MIN_CHARS: usize = 1;
@@ -261,6 +260,13 @@ fn invalid(message: &str) -> ThemeError {
     ThemeError::Invalid(cut)
 }
 
+/// A name, an author or a font as import keeps it: cleaned of escape sequences and control
+/// characters (see [`sanitize_text`]) and trimmed. `Theme::sanitize` stores this, and
+/// `Theme::validate` judges it, so there is one definition of what import makes of the text.
+fn cleaned(text: &str) -> String {
+    sanitize_text(text).trim().to_string()
+}
+
 /// 0 is not a version, and a number above ours comes from a newer CMD Studio.
 fn check_schema_version(version: u64) -> Result<(), ThemeError> {
     if version == 0 {
@@ -316,10 +322,9 @@ impl Theme {
     /// a name of nothing but blanks is empty and fails [`Theme::validate`]. The banner
     /// is laid out by its text, so its spaces stay.
     pub fn sanitize(&mut self) {
-        let clean = |text: &str| sanitize_text(text).trim().to_string();
-        self.name = clean(&self.name);
-        self.author = clean(&self.author);
-        self.terminal.font = clean(&self.terminal.font);
+        self.name = cleaned(&self.name);
+        self.author = cleaned(&self.author);
+        self.terminal.font = cleaned(&self.terminal.font);
         self.banner.title = sanitize_text(&self.banner.title);
         for line in &mut self.banner.lines {
             *line = sanitize_text(line);
@@ -327,16 +332,21 @@ impl Theme {
     }
 
     /// Checks every rule of spec §3.3 that the types do not already enforce, so a theme
-    /// built in code is held to the same rules as a parsed one. Run it after
-    /// [`Theme::sanitize`]: lengths are counted on the text that is kept.
+    /// built in code is held to the same rules as a parsed one.
+    ///
+    /// Name, author and font are judged as import keeps them, cleaned and trimmed, so the
+    /// answer is the same before and after [`Theme::sanitize`], and a theme that passes
+    /// is one that `parse_theme` takes back (a name of nothing but blanks, or an author
+    /// that is 65 characters once its control characters are gone, does not pass). The banner
+    /// is judged as it is: import only cleans it, which cannot make it longer.
     pub fn validate(&self) -> Result<(), ThemeError> {
         check_schema_version(u64::from(self.schema_version))?;
         check_id(&self.id)?;
-        let name_len = self.name.chars().count();
+        let name_len = cleaned(&self.name).chars().count();
         if !(limits::NAME_MIN_CHARS..=limits::NAME_MAX_CHARS).contains(&name_len) {
             return field("name", "must be 1–64 characters");
         }
-        if self.author.chars().count() > limits::AUTHOR_MAX_CHARS {
+        if cleaned(&self.author).chars().count() > limits::AUTHOR_MAX_CHARS {
             return field("author", "must be at most 64 characters");
         }
         if let Some(s) = &self.simple {
@@ -345,8 +355,7 @@ impl Theme {
             }
         }
         let t = &self.terminal;
-        // trimmed here as well as in `sanitize`, so a font of blanks built in code is refused too
-        let font_len = t.font.trim().chars().count();
+        let font_len = cleaned(&t.font).chars().count();
         if !(limits::FONT_MIN_CHARS..=limits::FONT_MAX_CHARS).contains(&font_len) {
             return field("terminal.font", "must be 1–64 characters");
         }
@@ -377,14 +386,20 @@ impl Theme {
         Ok(())
     }
 
-    /// The bytes written when the theme is exported or saved. A theme that does not
-    /// [`validate`](Theme::validate) is refused with the error `validate` gives, so the
-    /// file is one that `parse_theme` takes. (`serde_json` writes a NaN tint as `null`,
-    /// which nobody could read back.)
+    /// The bytes written when the theme is exported or saved. This never writes a file that
+    /// `parse_theme` refuses: a theme that does not [`validate`](Theme::validate) is refused
+    /// with the error `validate` gives (`serde_json` would write a NaN tint as `null`, which
+    /// nobody could read back), and a file over the size limit is [`ThemeError::TooLarge`]
+    /// (blanks and control characters around a name do not count for `validate`, but they
+    /// are bytes in the file). The file holds the theme as it is, so a name with blanks
+    /// around it is written with them and reads back trimmed.
     pub fn to_file_bytes(&self) -> Result<Vec<u8>, ThemeError> {
         self.validate()?;
         let mut bytes = serde_json::to_vec_pretty(self).map_err(|e| invalid(&e.to_string()))?;
         bytes.push(b'\n');
+        if bytes.len() > MAX_FILE_BYTES {
+            return Err(ThemeError::TooLarge);
+        }
         Ok(bytes)
     }
 }
@@ -1111,6 +1126,217 @@ mod tests {
         );
         t.terminal.font = format!("  {}  ", "f".repeat(64));
         assert_eq!(t.validate(), Ok(()));
+    }
+
+    // -- validate judges name, author and font as import would keep them --
+
+    /// Every concatenation of up to `max` of `pieces`, shortest first.
+    fn combos(pieces: &[&str], max: usize) -> Vec<String> {
+        let mut all = vec![String::new()];
+        let mut level = vec![String::new()];
+        for _ in 0..max {
+            level = level
+                .iter()
+                .flat_map(|prefix| pieces.iter().map(move |piece| format!("{prefix}{piece}")))
+                .collect();
+            all.extend(level.iter().cloned());
+        }
+        all
+    }
+
+    #[test]
+    fn validate_judges_name_author_and_font_as_import_would_keep_them() {
+        let good = parse_theme(FIXTURE.as_bytes()).unwrap();
+        let name_err = field_err("name", "must be 1–64 characters");
+        let font_err = field_err("terminal.font", "must be 1–64 characters");
+        let author_err = field_err("author", "must be at most 64 characters");
+        // nothing is left of these once they are cleaned and trimmed
+        for blank in [
+            "   ",
+            "\u{7}",
+            "\u{a0}\u{3000}",
+            "\u{1b}[31m",
+            "\u{202e}\u{2028}",
+            "\t \n",
+        ] {
+            let mut t = good.clone();
+            t.name = blank.to_string();
+            assert_eq!(t.validate(), Err(name_err.clone()), "name {blank:?}");
+            assert_eq!(t.to_file_bytes(), Err(name_err.clone()), "name {blank:?}");
+            let mut t = good.clone();
+            t.terminal.font = blank.to_string();
+            assert_eq!(t.validate(), Err(font_err.clone()), "font {blank:?}");
+            assert_eq!(t.to_file_bytes(), Err(font_err.clone()), "font {blank:?}");
+            // an author may be empty, so there is nothing to refuse
+            let mut t = good.clone();
+            t.author = blank.to_string();
+            assert_eq!(t.validate(), Ok(()), "author {blank:?}");
+            assert!(t.to_file_bytes().is_ok(), "author {blank:?}");
+        }
+        // what counts is the length after cleaning: 65 are too many however they are padded
+        // or interleaved, and 64 are fine whatever surrounds them
+        let a64 = "a".repeat(64);
+        let too_long = [
+            "a".repeat(65),
+            format!("\u{7}  {}b\u{1b}[0m", a64),
+            format!(" {}\u{7}b", a64),
+        ];
+        let fine = [
+            a64.clone(),
+            format!("\u{7}  {a64}\u{1b}[0m\u{3000}"),
+            format!("{a64}{}", "\u{7}".repeat(100)),
+        ];
+        for text in too_long {
+            let mut t = good.clone();
+            t.author = text.clone();
+            assert_eq!(t.validate(), Err(author_err.clone()), "author {text:?}");
+            assert_eq!(
+                t.to_file_bytes(),
+                Err(author_err.clone()),
+                "author {text:?}"
+            );
+            let mut t = good.clone();
+            t.name = text.clone();
+            assert_eq!(t.validate(), Err(name_err.clone()), "name {text:?}");
+            let mut t = good.clone();
+            t.terminal.font = text.clone();
+            assert_eq!(t.validate(), Err(font_err.clone()), "font {text:?}");
+        }
+        for text in fine {
+            let mut t = good.clone();
+            t.author = text.clone();
+            t.name = text.clone();
+            t.terminal.font = text.clone();
+            assert_eq!(t.validate(), Ok(()), "{text:?}");
+            assert!(t.to_file_bytes().is_ok(), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn validate_and_import_agree_about_name_author_and_font() {
+        // validate() on a theme built in code and parse_theme() on that theme's own JSON must
+        // say the same, so that a theme that passes can be saved and read back, and one that
+        // does not could not have been read
+        let thirty = "x".repeat(30);
+        let pieces = [
+            "a",
+            " ",
+            "\u{7}",
+            "\u{1b}[31m",
+            "\u{202e}",
+            "ก",
+            "\u{3000}",
+            thirty.as_str(),
+        ];
+        let good = parse_theme(FIXTURE.as_bytes()).unwrap();
+        let mut checked = 0;
+        for text in combos(&pieces, 3) {
+            for which in ["name", "author", "font"] {
+                let mut t = good.clone();
+                match which {
+                    "name" => t.name = text.clone(),
+                    "author" => t.author = text.clone(),
+                    _ => t.terminal.font = text.clone(),
+                }
+                let imported = parse_theme(&serde_json::to_vec(&t).unwrap());
+                let why = format!("{which} = {text:?}");
+                assert_eq!(t.validate().is_ok(), imported.is_ok(), "{why}");
+                let mut cleaned = t.clone();
+                cleaned.sanitize();
+                if let Ok(imported) = imported {
+                    assert_eq!(imported, cleaned, "{why}");
+                    // saved, it reads back as the cleaned theme
+                    let back = parse_theme(&t.to_file_bytes().unwrap()).unwrap();
+                    assert_eq!(back, cleaned, "{why}");
+                } else {
+                    assert!(t.to_file_bytes().is_err(), "{why}");
+                }
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 585 * 3);
+    }
+
+    #[test]
+    fn what_is_saved_reads_back_equal() {
+        // a theme from a file reads back equal, whatever it is
+        for (what, edit) in [
+            (
+                "as it is",
+                Box::new(|_: &mut Value| {}) as Box<dyn FnOnce(&mut Value)>,
+            ),
+            (
+                "without simple inputs",
+                Box::new(|v: &mut Value| v["simple"] = json!(null)),
+            ),
+            (
+                "a long Thai name",
+                Box::new(|v: &mut Value| v["name"] = json!("ก".repeat(64))),
+            ),
+            (
+                "every segment, another layout",
+                Box::new(|v: &mut Value| {
+                    v["prompt"]["layout"] = json!("powerline");
+                    v["prompt"]["segments"] =
+                        json!(["path", "git", "time", "user", "host", "status", "duration"]);
+                }),
+            ),
+            (
+                "a full banner",
+                Box::new(|v: &mut Value| {
+                    v["banner"]["title"] = json!("t".repeat(80));
+                    v["banner"]["lines"] = json!(["  indented", "l".repeat(80), "", "👋"]);
+                }),
+            ),
+            (
+                "with a schema line",
+                Box::new(|v: &mut Value| v["$schema"] = json!("https://x")),
+            ),
+        ] {
+            let t = with(edit).unwrap();
+            assert_eq!(
+                parse_theme(&t.to_file_bytes().unwrap()).unwrap(),
+                t,
+                "{what}"
+            );
+        }
+        // one built in code that is not clean reads back as its cleaned self
+        let mut dirty = parse_theme(FIXTURE.as_bytes()).unwrap();
+        dirty.name = "  Mine\u{7} ".to_string();
+        dirty.author = "\u{1b}[0mAda ".to_string();
+        dirty.terminal.font = " Cascadia Mono\t".to_string();
+        let back = parse_theme(&dirty.to_file_bytes().unwrap()).unwrap();
+        assert_eq!(back.name, "Mine");
+        assert_eq!(back.author, "Ada");
+        assert_eq!(back.terminal.font, "Cascadia Mono");
+    }
+
+    #[test]
+    fn saving_refuses_a_file_that_would_be_too_large_to_read_back() {
+        // blanks around the name do not count for validate(), but they are bytes in the file,
+        // and parse_theme refuses a file over 64 KB
+        let mut t = parse_theme(FIXTURE.as_bytes()).unwrap();
+        let base = t.to_file_bytes().unwrap().len();
+        t.name = format!("{}{}", " ".repeat(MAX_FILE_BYTES - base), t.name);
+        let bytes = t.to_file_bytes().unwrap();
+        assert_eq!(bytes.len(), MAX_FILE_BYTES);
+        assert_eq!(
+            parse_theme(&bytes).unwrap().name,
+            "Terracotta ของฉัน",
+            "exactly the limit reads back"
+        );
+        t.name.insert(0, ' ');
+        assert_eq!(t.validate(), Ok(()));
+        assert_eq!(t.to_file_bytes(), Err(ThemeError::TooLarge));
+        // the file it would have been, written the same way, is refused on the way back in
+        let mut would_be = serde_json::to_vec_pretty(&t).unwrap();
+        would_be.push(b'\n');
+        assert_eq!(would_be.len(), MAX_FILE_BYTES + 1);
+        assert_eq!(
+            parse_theme(&would_be).unwrap_err(),
+            ThemeError::TooLarge,
+            "and that is the error a file like it gets"
+        );
     }
 
     // -- the parts of a theme are objects --
