@@ -10,11 +10,19 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-10-cmd-studio-design.md`
 
-**Prerequisite:** Phase 0 Task 1 (Rust installed and pinned). This plan touches no gated API, so it can run while the other Phase 0 tasks are still open.
+**Prerequisite:** Phase 0 Task 1 (Rust installed and pinned). This plan touches no gated API. Phase 0 closed on 2026-10-11 (G1–G18 ✅, G19 ❌ with a chosen workaround); its Task 6 (G7 and G8 on the dev machine) is still open and does not block this plan.
+
+**Revised 2026-10-11 after Phase 0:**
+- Task 11 starts Clink through `<clink-launch>` (spec §5.4, G19). Clink 1.9.34 fails to inject when its own path has non-ASCII letters, and every cmd window then shows an error.
+- Task 11 falls back to the bundled Nerd Font when the theme's font is not installed (spec §3.3). The Nerd Font's family name is `CaskaydiaCove NF` (G12).
+- Task 10's Windows Terminal test now passes an ASCII Clink path, as the planner always will.
 
 **Not in this plan:**
-- **Phase 1b plan** (depends on Phase 0 results): the adapters (`WtSettings`, `AutoRun`, `Fonts`, `Fs`), `detect`, `doctor`, the on-disk snapshot store, the CLI, and the byte-identical `settings.json` guard test (spec §7 (ง)).
-- **Waits for the license check (G14):** the upstream presets (Tokyo Night and the rest).
+- **Phase 1b plan:**
+  - the adapters (`WtSettings`, `AutoRun`, `Fonts`, `Fs`), `detect`, `doctor`, the on-disk snapshot store, the CLI, and the byte-identical `settings.json` guard test (spec §7 (ง));
+  - filling `plan::Machine` for real, including `data_short`, `program_data_dir` (with the ownership and permission check of spec §5.4) and `fonts`;
+  - recording `Plan::launch` in `state.json`, and removing the user's ProgramData folder on uninstall (spec §6.3).
+- **Upstream presets** (Tokyo Night and the rest of spec §3.2): G14 passed on 2026-10-11, so nothing blocks them now. They go into the Phase 2 plan with the theme screens.
 - **Phase 2 plan** (built alongside the theme screens): our own Retro green, Daylight and Paper presets, the preview emulator, advanced-mode editing, drafts, and undo.
 
 ## Global Constraints
@@ -32,10 +40,17 @@
   - Banner variables are `{user} {host} {cwd} {date} {time}`; anything else stays literal.
 - Oh My Posh config uses `"version": 4` and `options`. It may emit only these segment types: `path git time session status executiontime text`. Never `command`. `text` holds only frame glyphs that the generator itself sets.
 - Windows Terminal: scheme name `CMD Studio`; cmd profile guid `{0caa0dad-35be-5f56-a8ff-afceeeaa6101}`. With target `all`, `commandline` is exactly `%SystemRoot%\System32\cmd.exe`.
+- Clink is always started through `<clink-launch>`, never from a path with non-ASCII letters (spec §5.4, G19). The first of these that is all ASCII wins:
+  1. the real path `<data>\runtime\clink-<ver>\clink_x64.exe`;
+  2. the 8.3 path of `<data>` joined to `runtime\clink-<ver>\clink_x64.exe`;
+  3. `<the user's ProgramData folder>\clink-<ver>\clink_x64.exe`. Clink's runtime is then installed there and not under `<data>`.
+
+  If none is ASCII, the plan fails with `E_CLINK_PATH`. The Clink profile stays at `<data>\clink-profile`, whatever letters it holds.
 - AutoRun:
-  - Our entry is `if exist "<exe>" "<exe>" inject --autorun --quiet --profile "<dir>"`.
+  - Our entry is `if exist "<clink-launch>" "<clink-launch>" inject --autorun --quiet --profile "<data>\clink-profile"`.
   - It is appended with ` & `. Other programs' parts are never changed.
-  - Paths that contain `%` or `"` are refused.
+- A Clink path or profile path that contains `%` or `"` fails the plan with `E_CLINK_PATH`, for both targets.
+- Fonts: the bundled Nerd Font's family name is `CaskaydiaCove NF`. Fonts are planned only when Windows Terminal is installed, because nothing else uses the theme's font. When the theme's font is not installed, Windows Terminal gets `CaskaydiaCove NF` instead, the plan installs it if it is missing, and the user is told (spec §3.3).
 - Banner:
   - It is printed only from `clink.oninject`, guarded by the env flag `CMDSTUDIO_BANNER`.
   - The last printed line is one space, never an empty line.
@@ -50,7 +65,7 @@
 
 1. A theme file saved by Notepad with a UTF-8 BOM must import; a UTF-16 file must fail with `E_THEME_INVALID`, not crash. Pinned in Task 5.
 2. Achromatic accents (`#000000`, `#ffffff`, `#808080`) must give a valid palette with no NaN. Pinned in Task 3.
-3. Data paths with spaces, Thai letters or `&` must work in AutoRun. Paths with `%` or `"` must be refused with `UnsupportedPath`, never written as a broken cmd line. Pinned in Task 11.
+3. A Windows user name with Thai letters, spaces or `&` must work. Clink must start from an all-ASCII path (G19) while the profile path keeps its Thai letters. Paths with `%` or `"` must fail with `E_CLINK_PATH`, never be written as a broken cmd line. Pinned in Task 11.
 4. A theme with no prompt segments, with the banner off, or with no banner lines must still generate a valid config and valid Lua. Pinned in Tasks 8 and 9.
 5. Theme names that Windows forbids as file names (`CON`, `a/b`, trailing dots) must export to safe names. Pinned in Task 4.
 
@@ -72,7 +87,7 @@ crates/core/src/generate/omp.rs    Oh My Posh config
 crates/core/src/generate/lua.rs    init.lua and banner.lua
 crates/core/src/generate/clink.rs  clink_settings
 crates/core/src/generate/wt.rs     WT scheme and profile values
-crates/core/src/plan.rs            Paths, Machine, Request, Op, plan(), AutoRun chain
+crates/core/src/plan.rs            Paths, Machine, ClinkLaunch, Request, Op, plan(), AutoRun chain
 crates/core/src/txn.rs             Journal, Stage, traits, run(), recover()
 crates/core/tests/palette_props.rs
 crates/core/tests/schema_file.rs
@@ -2470,7 +2485,7 @@ git commit -F .git/CMDSTUDIO_COMMIT_MSG
   - `generate::wt::CMD_PROFILE_GUID = "{0caa0dad-35be-5f56-a8ff-afceeeaa6101}"`
   - `generate::wt::CMD_EXE = r"%SystemRoot%\System32\cmd.exe"`
   - `generate::wt::scheme(&Theme) -> serde_json::Value`
-  - `generate::wt::profile_values(&Theme, Target, clink_exe: &Path, clink_profile: &Path) -> serde_json::Map<String, Value>`
+  - `generate::wt::profile_values(&Theme, Target, clink_launch: &Path, clink_profile: &Path) -> serde_json::Map<String, Value>`. `clink_launch` is `<clink-launch>` (spec §5.4), which Task 11 picks.
 
 - [ ] **Step 1: Write the failing tests** in a new `crates/core/src/generate/wt.rs`, and add `pub mod wt;` to `generate/mod.rs`:
 ```rust
@@ -2510,12 +2525,13 @@ mod tests {
 
     #[test]
     fn wt_target_wraps_the_inject_command_for_cmd_k() {
-        let exe = Path::new(r"C:\Users\ทดสอบ ผู้ใช้\x\clink_x64.exe");
-        let prof = Path::new(r"C:\Users\ทดสอบ ผู้ใช้\x\clink-profile");
-        let p = profile_values(&terracotta(), Target::Wt, exe, prof);
+        // <clink-launch> is always ASCII (G19); the profile path may hold Thai letters.
+        let launch = Path::new(r"C:\Users\3607~1\x\clink_x64.exe");
+        let prof = Path::new(r"C:\Users\ผู้ทดสอบ ไทย\x\clink-profile");
+        let p = profile_values(&terracotta(), Target::Wt, launch, prof);
         assert_eq!(
             p["commandline"],
-            r#"%SystemRoot%\System32\cmd.exe /k ""C:\Users\ทดสอบ ผู้ใช้\x\clink_x64.exe" inject --quiet --profile "C:\Users\ทดสอบ ผู้ใช้\x\clink-profile"""#
+            r#"%SystemRoot%\System32\cmd.exe /k ""C:\Users\3607~1\x\clink_x64.exe" inject --quiet --profile "C:\Users\ผู้ทดสอบ ไทย\x\clink-profile"""#
         );
     }
 }
@@ -2560,8 +2576,9 @@ pub fn scheme(theme: &Theme) -> Value {
 
 /// Keys CMD Studio sets on the cmd profile. With `Target::Wt`, cmd loads
 /// Clink through `/k`. The whole command is wrapped in one more pair of
-/// quotes because `cmd /k` strips the outermost pair.
-pub fn profile_values(theme: &Theme, target: Target, clink_exe: &Path, clink_profile: &Path) -> Map<String, Value> {
+/// quotes because `cmd /k` strips the outermost pair. `clink_launch` is
+/// `<clink-launch>` from the planner: all ASCII (spec §5.4, G19).
+pub fn profile_values(theme: &Theme, target: Target, clink_launch: &Path, clink_profile: &Path) -> Map<String, Value> {
     let t = &theme.terminal;
     let cursor = match t.cursor_shape {
         CursorShape::FilledBox => "filledBox",
@@ -2573,7 +2590,7 @@ pub fn profile_values(theme: &Theme, target: Target, clink_exe: &Path, clink_pro
         Target::Wt => format!(
             r#"{} /k ""{}" inject --quiet --profile "{}"""#,
             CMD_EXE,
-            clink_exe.display(),
+            clink_launch.display(),
             clink_profile.display()
         ),
     };
@@ -2606,18 +2623,22 @@ git commit -F .git/CMDSTUDIO_COMMIT_MSG
 
 ---
 
-### Task 11: The planner and AutoRun composition
+### Task 11: The planner, `<clink-launch>` and AutoRun composition
 
 **Files:**
 - Create: `crates/core/src/plan.rs`
 - Modify: `crates/core/src/lib.rs` (add `pub mod plan;`)
 
 **Interfaces:**
-- Consumes: `generate::{omp, lua, clink, wt}`, `model::{Theme, Target, Layout}`
+- Consumes:
+  - `generate::{omp, lua, clink, wt}`, including `wt::profile_values(&Theme, Target, clink_launch: &Path, clink_profile: &Path)` from Task 10
+  - `model::{Theme, Target}`
 - Produces:
-  - `plan::OMP_VERSION = "31.5.0"`, `plan::CLINK_VERSION = "1.9.34"`, `plan::NERD_FONT_FAMILY = "CaskaydiaCove Nerd Font Mono"`
+  - `plan::OMP_VERSION = "31.5.0"`, `plan::CLINK_VERSION = "1.9.34"`, `plan::NERD_FONT_FAMILY = "CaskaydiaCove NF"`
   - `plan::Paths { data: PathBuf }`, with methods `generated()`, `clink_profile()`, `omp_dir()`, `clink_dir()`, `omp_exe()`, `clink_exe()`, `omp_config()`, each returning `PathBuf`.
-  - `plan::Machine { wt_settings: Vec<PathBuf>, autorun_hkcu: Option<String>, autorun_hklm: Option<String>, nerd_font_installed: bool }`
+  - `plan::Machine { wt_settings: Vec<PathBuf>, autorun_hkcu: Option<String>, autorun_hklm: Option<String>, fonts: Vec<String>, data_short: Option<PathBuf>, program_data_dir: Option<PathBuf> }`, with `Default`.
+  - `plan::ClinkLaunch { Direct(PathBuf), ShortPath(PathBuf), ProgramData { dir: PathBuf } }`, with `exe() -> PathBuf` and `runtime_dir(&Paths) -> PathBuf`.
+  - `plan::clink_launch(&Paths, &Machine) -> Result<ClinkLaunch, PlanError>`
   - `plan::Request { target: Target, set_wt_default_profile: bool, lang: lua::Lang, replace_foreign_clink: bool }`
   - `plan::Component { Omp, Clink }`
   - `plan::Op` (serde, tag `kind`), with variants:
@@ -2626,11 +2647,26 @@ git commit -F .git/CMDSTUDIO_COMMIT_MSG
     - `WtApply { settings, scheme: Value, profile: Map<String, Value>, set_default }`
     - `SetAutoRun { value: Option<String> }`
     - `InstallFont { family }`
-  - `plan::Warning { NoWindowsTerminal, MachineWideClink }`
-  - `plan::Plan { ops: Vec<Op>, summary_th: Vec<&'static str>, summary_en: Vec<&'static str>, warnings: Vec<Warning> }`
-  - `plan::PlanError { ForeignClink { existing }, UnsupportedPath(PathBuf), Generate(String) }`, with `code()`.
-  - `plan::autorun_entry(&Paths) -> Result<String, PlanError>`
+  - `plan::Warning { NoWindowsTerminal, MachineWideClink, FontFallback { wanted: String } }`
+  - `plan::Plan { ops: Vec<Op>, summary_th: Vec<&'static str>, summary_en: Vec<&'static str>, warnings: Vec<Warning>, launch: ClinkLaunch }`
+  - `plan::PlanError { ForeignClink { existing }, UnsupportedPath(PathBuf), NoClinkPath(PathBuf), Generate(String) }`, with `code()`.
+  - `plan::autorun_entry(&ClinkLaunch, &Paths) -> Result<String, PlanError>`
   - `plan::plan(&Theme, &Request, &Machine, &Paths) -> Result<Plan, PlanError>`
+
+**Rules this task pins** (spec §3.3 and §5.4; G12, G13 and G19):
+- `<clink-launch>` is the first all-ASCII path of these three:
+  1. `Paths::clink_exe()`;
+  2. the same layout under `Machine::data_short`;
+  3. `Machine::program_data_dir` joined to `clink-<ver>\clink_x64.exe`. Clink's runtime is then installed only there.
+
+  If none is all ASCII, the plan fails with `NoClinkPath`.
+- `%` or `"` in the launch path or the profile path fails with `UnsupportedPath`, for both targets. Both errors have the code `E_CLINK_PATH`.
+- The profile always stays at `<data>\clink-profile`. Our older AutoRun entries are found by that profile path.
+- Fonts matter only when Windows Terminal is installed:
+  - When the theme's font is installed (ignoring ASCII case), Windows Terminal gets it in the machine's spelling.
+  - Otherwise Windows Terminal gets `NERD_FONT_FAMILY`, with `Warning::FontFallback`. A theme that names the bundled font itself gets no warning.
+  - `InstallFont` is added whenever `NERD_FONT_FAMILY` is used and not installed.
+- The switch to the Nerd Font when a user picks the powerline layout belongs to the theme editor (spec §3.4, Phase 2). The planner only checks that the font exists.
 
 - [ ] **Step 1: Write the failing tests** in a new `crates/core/src/plan.rs`, and add `pub mod plan;` to `lib.rs`:
 ```rust
@@ -2638,11 +2674,18 @@ git commit -F .git/CMDSTUDIO_COMMIT_MSG
 mod tests {
     use super::*;
     use crate::generate::lua::Lang;
-    use crate::model::{Layout, Target};
+    use crate::model::Target;
     use std::path::PathBuf;
 
+    // The Thai user name and the 8.3 names that VM-C gave
+    // (docs/spikes/G4-G5-G16-G17-clink.md, G19).
+    const DATA: &str = r"C:\Users\ผู้ทดสอบ ไทย\AppData\Local\ai.resincore.cmdstudio";
+    const DATA_SHORT: &str = r"C:\Users\3607~1\AppData\Local\AIRESI~1.CMD";
+    const SHORT_EXE: &str = r"C:\Users\3607~1\AppData\Local\AIRESI~1.CMD\runtime\clink-1.9.34\clink_x64.exe";
+    const PROGRAM_DATA: &str = r"C:\ProgramData\ai.resincore.cmdstudio-S-1-5-21-1-2-3-1001";
+
     fn paths() -> Paths {
-        Paths { data: PathBuf::from(r"C:\Users\ทดสอบ ผู้ใช้\AppData\Local\ai.resincore.cmdstudio") }
+        Paths { data: PathBuf::from(DATA) }
     }
 
     fn req(target: Target) -> Request {
@@ -2650,11 +2693,21 @@ mod tests {
     }
 
     fn machine() -> Machine {
-        Machine { wt_settings: vec![PathBuf::from(r"C:\wt\settings.json")], ..Machine::default() }
+        Machine {
+            wt_settings: vec![PathBuf::from(r"C:\wt\settings.json")],
+            fonts: vec!["Cascadia Mono".to_string()],
+            data_short: Some(PathBuf::from(DATA_SHORT)),
+            ..Machine::default()
+        }
     }
 
     fn theme() -> crate::model::Theme {
         crate::presets::builtin().unwrap().remove(0).1
+    }
+
+    /// Our entry for `paths()` on `machine()`, built without `clink_launch`.
+    fn entry() -> String {
+        autorun_entry(&ClinkLaunch::ShortPath(PathBuf::from(SHORT_EXE)), &paths()).unwrap()
     }
 
     fn autorun(p: &Plan) -> Option<Option<String>> {
@@ -2664,17 +2717,71 @@ mod tests {
         })
     }
 
+    fn wt_profile(p: &Plan) -> Map<String, Value> {
+        p.ops
+            .iter()
+            .find_map(|o| match o {
+                Op::WtApply { profile, .. } => Some(profile.clone()),
+                _ => None,
+            })
+            .unwrap()
+    }
+
     #[test]
     fn clean_machine_gets_runtime_files_wt_and_autorun() {
         let p = plan(&theme(), &req(Target::All), &machine(), &paths()).unwrap();
-        let entry = autorun_entry(&paths()).unwrap();
-        assert_eq!(autorun(&p), Some(Some(entry.clone())));
-        assert!(entry.starts_with(r#"if exist "C:\Users\ทดสอบ ผู้ใช้\AppData\Local\ai.resincore.cmdstudio\runtime\clink-1.9.34\clink_x64.exe" "#));
-        assert!(entry.ends_with(r#"--profile "C:\Users\ทดสอบ ผู้ใช้\AppData\Local\ai.resincore.cmdstudio\clink-profile""#));
+        assert_eq!(
+            entry(),
+            format!(r#"if exist "{SHORT_EXE}" "{SHORT_EXE}" inject --autorun --quiet --profile "{DATA}\clink-profile""#)
+        );
+        assert_eq!(autorun(&p), Some(Some(entry())));
         assert_eq!(p.ops.iter().filter(|o| matches!(o, Op::WtApply { .. })).count(), 1);
         assert_eq!(p.ops.iter().filter(|o| matches!(o, Op::WriteFile { .. })).count(), 4);
         assert!(p.summary_th.contains(&"ให้ cmd ทุกหน้าต่างโหลดธีมตอนเปิด"));
         assert!(p.warnings.is_empty());
+    }
+
+    #[test]
+    fn an_ascii_data_path_runs_clink_from_its_real_path() {
+        let p = Paths { data: PathBuf::from(r"C:\Users\tester\AppData\Local\ai.resincore.cmdstudio") };
+        assert_eq!(clink_launch(&p, &machine()), Ok(ClinkLaunch::Direct(p.clink_exe())));
+    }
+
+    #[test]
+    fn a_thai_user_name_runs_clink_through_the_8_3_path() {
+        // Review Focus 3, G19
+        let p = plan(&theme(), &req(Target::All), &machine(), &paths()).unwrap();
+        assert_eq!(p.launch, ClinkLaunch::ShortPath(PathBuf::from(SHORT_EXE)));
+        assert!(p.ops.contains(&Op::InstallRuntime { component: Component::Clink, dir: paths().clink_dir() }));
+    }
+
+    #[test]
+    fn without_an_8_3_name_clink_goes_to_the_users_program_data_folder() {
+        let mut m = machine();
+        // A volume that makes no 8.3 names gives back the long path.
+        m.data_short = Some(PathBuf::from(DATA));
+        m.program_data_dir = Some(PathBuf::from(PROGRAM_DATA));
+        let p = plan(&theme(), &req(Target::All), &m, &paths()).unwrap();
+        let dir = PathBuf::from(PROGRAM_DATA).join("clink-1.9.34");
+        assert_eq!(p.launch, ClinkLaunch::ProgramData { dir: dir.clone() });
+        assert!(p.ops.contains(&Op::InstallRuntime { component: Component::Clink, dir: dir.clone() }));
+        assert!(!p.ops.contains(&Op::InstallRuntime { component: Component::Clink, dir: paths().clink_dir() }));
+        let value = autorun(&p).unwrap().unwrap();
+        assert!(value.starts_with(&format!(r#"if exist "{PROGRAM_DATA}\clink-1.9.34\clink_x64.exe" "#)));
+        assert!(p.summary_en.contains(&"Put Clink under ProgramData, because this account's folder has letters Clink can't use"));
+    }
+
+    #[test]
+    fn no_ascii_path_for_clink_fails_the_plan() {
+        // G19: never write a command that makes every cmd window show an error.
+        let mut m = machine();
+        m.data_short = None;
+        assert_eq!(plan(&theme(), &req(Target::All), &m, &paths()).unwrap_err().code(), "E_CLINK_PATH");
+        // Each candidate must itself be all ASCII (spec §5.4).
+        m.data_short = Some(PathBuf::from(r"C:\Users\ÉTÉ~1\AppData\Local\AIRESI~1.CMD"));
+        m.program_data_dir = Some(PathBuf::from(r"D:\ข้อมูล\ai.resincore.cmdstudio-S-1-5-21-1-2-3-1001"));
+        assert_eq!(clink_launch(&paths(), &m), Err(PlanError::NoClinkPath(paths().clink_exe())));
+        assert_eq!(plan(&theme(), &req(Target::Wt), &m, &paths()).unwrap_err().code(), "E_CLINK_PATH");
     }
 
     #[test]
@@ -2683,23 +2790,22 @@ mod tests {
         let mut m = machine();
         m.autorun_hkcu = Some(anaconda.to_string());
         let p = plan(&theme(), &req(Target::All), &m, &paths()).unwrap();
-        assert_eq!(autorun(&p), Some(Some(format!("{anaconda} & {}", autorun_entry(&paths()).unwrap()))));
+        assert_eq!(autorun(&p), Some(Some(format!("{anaconda} & {}", entry()))));
     }
 
     #[test]
     fn replaces_our_older_entry_instead_of_adding_another() {
-        let d = paths().data.display().to_string();
-        let old = format!(r#"if exist "{d}\runtime\clink-1.9.0\clink_x64.exe" "{d}\runtime\clink-1.9.0\clink_x64.exe" inject --autorun --quiet --profile "{d}\clink-profile""#);
+        let old = format!(r#"if exist "{DATA}\runtime\clink-1.9.0\clink_x64.exe" "{DATA}\runtime\clink-1.9.0\clink_x64.exe" inject --autorun --quiet --profile "{DATA}\clink-profile""#);
         let mut m = machine();
         m.autorun_hkcu = Some(format!("echo hi & {old}"));
         let p = plan(&theme(), &req(Target::All), &m, &paths()).unwrap();
-        assert_eq!(autorun(&p), Some(Some(format!("echo hi & {}", autorun_entry(&paths()).unwrap()))));
+        assert_eq!(autorun(&p), Some(Some(format!("echo hi & {}", entry()))));
     }
 
     #[test]
     fn nothing_to_do_when_autorun_is_already_ours() {
         let mut m = machine();
-        m.autorun_hkcu = Some(autorun_entry(&paths()).unwrap());
+        m.autorun_hkcu = Some(entry());
         let p = plan(&theme(), &req(Target::All), &m, &paths()).unwrap();
         assert_eq!(autorun(&p), None);
     }
@@ -2714,38 +2820,39 @@ mod tests {
         let mut r = req(Target::All);
         r.replace_foreign_clink = true;
         let p = plan(&theme(), &r, &m, &paths()).unwrap();
-        assert_eq!(autorun(&p), Some(Some(autorun_entry(&paths()).unwrap())));
+        assert_eq!(autorun(&p), Some(Some(entry())));
         assert!(p.summary_en.contains(&"Turn off the other Clink set up in cmd (can be undone)"));
     }
 
     #[test]
     fn wt_target_removes_our_entry_and_injects_from_the_profile() {
         let mut m = machine();
-        m.autorun_hkcu = Some(format!("echo hi & {}", autorun_entry(&paths()).unwrap()));
+        m.autorun_hkcu = Some(format!("echo hi & {}", entry()));
         let p = plan(&theme(), &req(Target::Wt), &m, &paths()).unwrap();
         assert_eq!(autorun(&p), Some(Some("echo hi".to_string())));
-        let profile = p.ops.iter().find_map(|o| match o {
-            Op::WtApply { profile, .. } => Some(profile.clone()),
-            _ => None,
-        });
-        let commandline = profile.unwrap()["commandline"].as_str().unwrap().to_string();
-        assert!(commandline.starts_with(r"%SystemRoot%\System32\cmd.exe /k "));
+        assert_eq!(
+            wt_profile(&p)["commandline"],
+            format!(r#"%SystemRoot%\System32\cmd.exe /k ""{SHORT_EXE}" inject --quiet --profile "{DATA}\clink-profile"""#)
+        );
     }
 
     #[test]
     fn wt_target_with_only_our_entry_deletes_the_value() {
         let mut m = machine();
-        m.autorun_hkcu = Some(autorun_entry(&paths()).unwrap());
+        m.autorun_hkcu = Some(entry());
         let p = plan(&theme(), &req(Target::Wt), &m, &paths()).unwrap();
         assert_eq!(autorun(&p), Some(None));
     }
 
     #[test]
     fn missing_windows_terminal_is_a_warning_not_an_error() {
-        let m = Machine::default();
+        let mut m = machine();
+        m.wt_settings.clear();
+        m.fonts.clear();
         let p = plan(&theme(), &req(Target::All), &m, &paths()).unwrap();
+        // Without Windows Terminal there is no font to set, so no font is installed.
         assert_eq!(p.warnings, vec![Warning::NoWindowsTerminal]);
-        assert!(!p.ops.iter().any(|o| matches!(o, Op::WtApply { .. })));
+        assert!(!p.ops.iter().any(|o| matches!(o, Op::WtApply { .. } | Op::InstallFont { .. })));
     }
 
     #[test]
@@ -2761,15 +2868,30 @@ mod tests {
         // Review Focus 3
         for bad in [r"C:\Users\50%off\x", r#"C:\Users\a"b\x"#] {
             let p = Paths { data: PathBuf::from(bad) };
-            assert!(matches!(autorun_entry(&p), Err(PlanError::UnsupportedPath(_))), "{bad}");
+            let launch = clink_launch(&p, &Machine::default()).unwrap();
+            assert!(matches!(autorun_entry(&launch, &p), Err(PlanError::UnsupportedPath(_))), "{bad}");
         }
+        // The profile path is checked too, even when Clink runs from the 8.3 path.
+        let p = Paths { data: PathBuf::from(r"C:\Users\ผู้ใช้ 100%\x") };
+        let m = Machine { data_short: Some(PathBuf::from(r"C:\Users\E0B8~1\x")), ..Machine::default() };
+        let launch = clink_launch(&p, &m).unwrap();
+        assert!(matches!(autorun_entry(&launch, &p), Err(PlanError::UnsupportedPath(_))));
+    }
+
+    #[test]
+    fn wt_target_refuses_those_paths_too() {
+        // Review Focus 3: the profile's `/k` line runs the same command.
+        let p = Paths { data: PathBuf::from(r"C:\Users\50%off\x") };
+        let err = plan(&theme(), &req(Target::Wt), &machine(), &p).unwrap_err();
+        assert_eq!(err.code(), "E_CLINK_PATH");
     }
 
     #[test]
     fn ampersand_and_spaces_in_paths_are_quoted_and_stay_one_part() {
         // Review Focus 3
         let p = Paths { data: PathBuf::from(r"C:\Users\R&D Team\x") };
-        let entry = autorun_entry(&p).unwrap();
+        let launch = clink_launch(&p, &Machine::default()).unwrap();
+        let entry = autorun_entry(&launch, &p).unwrap();
         assert!(entry.contains(r#""C:\Users\R&D Team\x\runtime\clink-1.9.34\clink_x64.exe""#));
         assert_eq!(parse_chain(&entry).parts.len(), 1);
     }
@@ -2779,15 +2901,48 @@ mod tests {
         let mut m = machine();
         m.autorun_hkcu = Some("a && b".to_string());
         let p = plan(&theme(), &req(Target::All), &m, &paths()).unwrap();
-        assert_eq!(autorun(&p), Some(Some(format!("a && b & {}", autorun_entry(&paths()).unwrap()))));
+        assert_eq!(autorun(&p), Some(Some(format!("a && b & {}", entry()))));
     }
 
     #[test]
-    fn powerline_without_the_nerd_font_installs_it() {
+    fn a_missing_font_falls_back_to_the_bundled_nerd_font() {
+        // spec §3.3
+        let mut m = machine();
+        m.fonts.clear();
+        let p = plan(&theme(), &req(Target::All), &m, &paths()).unwrap();
+        assert_eq!(p.warnings, vec![Warning::FontFallback { wanted: "Cascadia Mono".to_string() }]);
+        assert!(p.ops.contains(&Op::InstallFont { family: NERD_FONT_FAMILY.to_string() }));
+        assert_eq!(wt_profile(&p)["font"]["face"], NERD_FONT_FAMILY);
+    }
+
+    #[test]
+    fn the_fallback_font_is_not_installed_twice() {
+        let mut m = machine();
+        m.fonts = vec![NERD_FONT_FAMILY.to_string()];
+        let p = plan(&theme(), &req(Target::All), &m, &paths()).unwrap();
+        assert_eq!(p.warnings, vec![Warning::FontFallback { wanted: "Cascadia Mono".to_string() }]);
+        assert!(!p.ops.iter().any(|o| matches!(o, Op::InstallFont { .. })));
+        assert_eq!(wt_profile(&p)["font"]["face"], NERD_FONT_FAMILY);
+    }
+
+    #[test]
+    fn an_installed_font_is_kept_in_the_machines_spelling() {
+        let mut m = machine();
+        m.fonts = vec!["CASCADIA MONO".to_string()];
+        let p = plan(&theme(), &req(Target::All), &m, &paths()).unwrap();
+        assert_eq!(wt_profile(&p)["font"]["face"], "CASCADIA MONO");
+        assert!(!p.ops.iter().any(|o| matches!(o, Op::InstallFont { .. })));
+        assert!(p.warnings.is_empty());
+    }
+
+    #[test]
+    fn a_theme_that_names_the_bundled_font_gets_it_without_a_warning() {
         let mut t = theme();
-        t.prompt.layout = Layout::Powerline;
+        t.terminal.font = NERD_FONT_FAMILY.to_string();
         let p = plan(&t, &req(Target::All), &machine(), &paths()).unwrap();
         assert!(p.ops.contains(&Op::InstallFont { family: NERD_FONT_FAMILY.to_string() }));
+        assert!(p.warnings.is_empty());
+        assert_eq!(wt_profile(&p)["font"]["face"], NERD_FONT_FAMILY);
     }
 
     #[test]
@@ -2811,15 +2966,17 @@ Expected: compile errors.
 //! operations to run and a plain-language summary (spec §4.2 page 5).
 //! Pure: it reads nothing and writes nothing.
 use crate::generate::{clink, lua, omp, wt};
-use crate::model::{Layout, Target, Theme};
+use crate::model::{Target, Theme};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub const OMP_VERSION: &str = "31.5.0";
 pub const CLINK_VERSION: &str = "1.9.34";
-/// Family name of the bundled Nerd Font. Confirm it when the font is bundled (spec §6.6).
-pub const NERD_FONT_FAMILY: &str = "CaskaydiaCove Nerd Font Mono";
+/// GDI family name of the bundled Nerd Font: the name detect looks for, the
+/// `font.face` written to Windows Terminal, and the fallback font
+/// (spec §3.3, §5.4, G12).
+pub const NERD_FONT_FAMILY: &str = "CaskaydiaCove NF";
 
 /// Where CMD Studio keeps its data (spec §5.3).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2860,7 +3017,45 @@ pub struct Machine {
     pub autorun_hkcu: Option<String>,
     /// Current HKLM AutoRun value (read only; CMD Studio never writes HKLM).
     pub autorun_hklm: Option<String>,
-    pub nerd_font_installed: bool,
+    /// Family names of the installed fonts, as GDI lists them. Whether the
+    /// fonts packaged inside Windows Terminal count is decided in Phase 1b.
+    pub fonts: Vec<String>,
+    /// `GetShortPathNameW` of `Paths::data`. On a volume that makes no 8.3
+    /// names it is the long path itself (G19).
+    pub data_short: Option<PathBuf>,
+    /// `%ProgramData%\ai.resincore.cmdstudio-<SID>`, given only when it does
+    /// not exist yet or passed the owner and permission check (spec §5.4).
+    pub program_data_dir: Option<PathBuf>,
+}
+
+/// `<clink-launch>`: the path cmd uses to start Clink (spec §5.4). Clink
+/// 1.9.34 cannot inject from a path with non-ASCII letters (G19), so every
+/// variant holds an all-ASCII path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ClinkLaunch {
+    /// The real path under the data folder.
+    Direct(PathBuf),
+    /// The data folder's 8.3 path joined to the long ASCII rest.
+    ShortPath(PathBuf),
+    /// Clink installed in the user's own folder under `%ProgramData%`.
+    ProgramData { dir: PathBuf },
+}
+
+impl ClinkLaunch {
+    pub fn exe(&self) -> PathBuf {
+        match self {
+            ClinkLaunch::Direct(exe) | ClinkLaunch::ShortPath(exe) => exe.clone(),
+            ClinkLaunch::ProgramData { dir } => dir.join("clink_x64.exe"),
+        }
+    }
+
+    /// Where Clink's runtime is installed.
+    pub fn runtime_dir(&self, paths: &Paths) -> PathBuf {
+        match self {
+            ClinkLaunch::ProgramData { dir } => dir.clone(),
+            ClinkLaunch::Direct(_) | ClinkLaunch::ShortPath(_) => paths.clink_dir(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2890,10 +3085,13 @@ pub enum Op {
     InstallFont { family: String },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Warning {
     NoWindowsTerminal,
     MachineWideClink,
+    /// The theme's font is not installed, so Windows Terminal gets
+    /// `NERD_FONT_FAMILY` instead (spec §3.3).
+    FontFallback { wanted: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2902,6 +3100,8 @@ pub struct Plan {
     pub summary_th: Vec<&'static str>,
     pub summary_en: Vec<&'static str>,
     pub warnings: Vec<Warning>,
+    /// The `<clink-launch>` this plan uses. Phase 1b records it in `state.json`.
+    pub launch: ClinkLaunch,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -2910,6 +3110,8 @@ pub enum PlanError {
     ForeignClink { existing: String },
     #[error("cmd can't safely quote this path: {0:?}")]
     UnsupportedPath(PathBuf),
+    #[error("Clink can't start from {0:?}, and no 8.3 or ProgramData path is available instead")]
+    NoClinkPath(PathBuf),
     #[error("could not build the Oh My Posh config: {0}")]
     Generate(String),
 }
@@ -2919,23 +3121,53 @@ impl PlanError {
     pub fn code(&self) -> &'static str {
         match self {
             PlanError::ForeignClink { .. } => "E_AUTORUN_FOREIGN_CLINK",
-            PlanError::UnsupportedPath(_) => "E_AUTORUN_WRITE",
+            PlanError::UnsupportedPath(_) | PlanError::NoClinkPath(_) => "E_CLINK_PATH",
             PlanError::Generate(_) => "E_THEME_INVALID",
         }
     }
 }
 
-/// Our AutoRun entry. Paths with `%` or `"` are refused: cmd would expand or
-/// split them and every cmd window would show an error (spec §5.4, G13).
-pub fn autorun_entry(paths: &Paths) -> Result<String, PlanError> {
-    let exe = paths.clink_exe();
-    let profile = paths.clink_profile();
-    for p in [&exe, &profile] {
-        let s = p.to_string_lossy();
-        if s.contains('%') || s.contains('"') {
-            return Err(PlanError::UnsupportedPath(p.clone()));
+fn is_ascii(p: &Path) -> bool {
+    p.to_str().is_some_and(str::is_ascii)
+}
+
+/// Picks `<clink-launch>`: the first all-ASCII path in the order of spec §5.4.
+pub fn clink_launch(paths: &Paths, machine: &Machine) -> Result<ClinkLaunch, PlanError> {
+    let real = paths.clink_exe();
+    if is_ascii(&real) {
+        return Ok(ClinkLaunch::Direct(real));
+    }
+    if let Some(short) = &machine.data_short {
+        let exe = Paths { data: short.clone() }.clink_exe();
+        if is_ascii(&exe) {
+            return Ok(ClinkLaunch::ShortPath(exe));
         }
     }
+    if let Some(base) = &machine.program_data_dir {
+        let dir = base.join(format!("clink-{CLINK_VERSION}"));
+        if is_ascii(&dir) {
+            return Ok(ClinkLaunch::ProgramData { dir });
+        }
+    }
+    Err(PlanError::NoClinkPath(real))
+}
+
+/// Paths with `%` or `"` are refused: cmd would expand or split them, and
+/// every cmd window would show an error (spec §5.4, G13).
+fn quotable(p: &Path) -> Result<(), PlanError> {
+    let s = p.to_string_lossy();
+    if s.contains('%') || s.contains('"') {
+        return Err(PlanError::UnsupportedPath(p.to_path_buf()));
+    }
+    Ok(())
+}
+
+/// Our AutoRun entry (spec §5.4).
+pub fn autorun_entry(launch: &ClinkLaunch, paths: &Paths) -> Result<String, PlanError> {
+    let exe = launch.exe();
+    let profile = paths.clink_profile();
+    quotable(&exe)?;
+    quotable(&profile)?;
     Ok(format!(
         r#"if exist "{e}" "{e}" inject --autorun --quiet --profile "{p}""#,
         e = exe.display(),
@@ -3027,8 +3259,9 @@ impl Chain {
     }
 }
 
-/// The next AutoRun value, and whether another Clink was removed.
-fn next_autorun(current: Option<&str>, target: Target, paths: &Paths, replace_foreign: bool) -> Result<(Option<String>, bool), PlanError> {
+/// The next AutoRun value, and whether another Clink was removed. Our older
+/// entries are found by the profile path, which every form of our entry holds.
+fn next_autorun(current: Option<&str>, target: Target, entry: &str, paths: &Paths, replace_foreign: bool) -> Result<(Option<String>, bool), PlanError> {
     let ours = paths.clink_profile().display().to_string();
     let mut chain = parse_chain(current.unwrap_or(""));
     chain.remove_where(|p| p.contains(&ours));
@@ -3040,16 +3273,40 @@ fn next_autorun(current: Option<&str>, target: Target, paths: &Paths, replace_fo
     }
     let replaced = chain.remove_where(foreign) > 0;
     if target == Target::All {
-        chain.push(autorun_entry(paths)?);
+        chain.push(entry.to_string());
     }
     Ok((chain.render(), replaced))
 }
 
+/// The installed family that matches `family`, ignoring ASCII case, in the
+/// machine's own spelling.
+fn installed_font<'a>(machine: &'a Machine, family: &str) -> Option<&'a str> {
+    let family = family.trim();
+    machine.fonts.iter().map(|f| f.trim()).find(|f| f.eq_ignore_ascii_case(family))
+}
+
+/// The font face for Windows Terminal (spec §3.3): the theme's font when it is
+/// installed, otherwise the bundled Nerd Font with a warning.
+fn wt_font(theme: &Theme, machine: &Machine, warnings: &mut Vec<Warning>) -> String {
+    let wanted = theme.terminal.font.trim();
+    if let Some(installed) = installed_font(machine, wanted) {
+        return installed.to_string();
+    }
+    if !wanted.eq_ignore_ascii_case(NERD_FONT_FAMILY) {
+        warnings.push(Warning::FontFallback { wanted: wanted.to_string() });
+    }
+    NERD_FONT_FAMILY.to_string()
+}
+
 pub fn plan(theme: &Theme, req: &Request, machine: &Machine, paths: &Paths) -> Result<Plan, PlanError> {
+    let launch = clink_launch(paths, machine)?;
+    // Built for both targets: it also checks the paths that the WT-only
+    // target's `/k` line uses.
+    let entry = autorun_entry(&launch, paths)?;
     let omp_text = omp::config_text(theme).map_err(|e| PlanError::Generate(e.to_string()))?;
     let mut ops = vec![
         Op::InstallRuntime { component: Component::Omp, dir: paths.omp_dir() },
-        Op::InstallRuntime { component: Component::Clink, dir: paths.clink_dir() },
+        Op::InstallRuntime { component: Component::Clink, dir: launch.runtime_dir(paths) },
         Op::WriteFile { path: paths.omp_config(), contents: omp_text },
         Op::WriteFile { path: paths.generated().join("init.lua"), contents: lua::init_lua(&paths.omp_exe(), &paths.omp_config()) },
         Op::WriteFile { path: paths.generated().join("banner.lua"), contents: lua::banner_lua(theme, req.lang) },
@@ -3062,17 +3319,24 @@ pub fn plan(theme: &Theme, req: &Request, machine: &Machine, paths: &Paths) -> R
     let mut en = vec!["Update the prompt and the welcome box"];
     let mut warnings = Vec::new();
 
-    if theme.prompt.layout == Layout::Powerline && !machine.nerd_font_installed {
-        ops.push(Op::InstallFont { family: NERD_FONT_FAMILY.to_string() });
-        th.push("ติดตั้งฟอนต์ 1 ตัว (เฉพาะบัญชีนี้)");
-        en.push("Install 1 font for this account only");
+    if matches!(launch, ClinkLaunch::ProgramData { .. }) {
+        th.push("วาง Clink ไว้ใต้ ProgramData เพราะ path ของบัญชีนี้มีอักษรที่ Clink ใช้ไม่ได้");
+        en.push("Put Clink under ProgramData, because this account's folder has letters Clink can't use");
     }
 
     if machine.wt_settings.is_empty() {
         warnings.push(Warning::NoWindowsTerminal);
     } else {
-        let scheme = wt::scheme(theme);
-        let profile = wt::profile_values(theme, req.target, &paths.clink_exe(), &paths.clink_profile());
+        let font = wt_font(theme, machine, &mut warnings);
+        if font == NERD_FONT_FAMILY && installed_font(machine, NERD_FONT_FAMILY).is_none() {
+            ops.push(Op::InstallFont { family: NERD_FONT_FAMILY.to_string() });
+            th.push("ติดตั้งฟอนต์ 1 ตัว (เฉพาะบัญชีนี้)");
+            en.push("Install 1 font for this account only");
+        }
+        let mut wt_theme = theme.clone();
+        wt_theme.terminal.font = font;
+        let scheme = wt::scheme(&wt_theme);
+        let profile = wt::profile_values(&wt_theme, req.target, &launch.exe(), &paths.clink_profile());
         for settings in &machine.wt_settings {
             ops.push(Op::WtApply {
                 settings: settings.clone(),
@@ -3093,7 +3357,7 @@ pub fn plan(theme: &Theme, req: &Request, machine: &Machine, paths: &Paths) -> R
         warnings.push(Warning::MachineWideClink);
     }
 
-    let (next, replaced) = next_autorun(machine.autorun_hkcu.as_deref(), req.target, paths, req.replace_foreign_clink)?;
+    let (next, replaced) = next_autorun(machine.autorun_hkcu.as_deref(), req.target, &entry, paths, req.replace_foreign_clink)?;
     if replaced {
         th.push("ปิด Clink ตัวเดิมที่ตั้งไว้ใน cmd (ย้อนกลับได้)");
         en.push("Turn off the other Clink set up in cmd (can be undone)");
@@ -3112,25 +3376,29 @@ pub fn plan(theme: &Theme, req: &Request, machine: &Machine, paths: &Paths) -> R
         ops.push(Op::SetAutoRun { value: next });
     }
 
-    Ok(Plan { ops, summary_th: th, summary_en: en, warnings })
+    Ok(Plan { ops, summary_th: th, summary_en: en, warnings, launch })
 }
 ```
 
 - [ ] **Step 4: Run the tests and confirm they pass**
 
 Run: `cargo test -p cmdstudio-core plan`
-Expected: 14 passed.
+Expected: 22 passed.
 
 - [ ] **Step 5: Commit**
 
 Message:
 ```text
-feat(core): plan an apply and compose cmd's AutoRun safely
+feat(core): plan an apply, pick <clink-launch> and compose AutoRun
 
 The plan lists every operation plus the plain-language summary the
-wizard shows. AutoRun keeps other programs' parts verbatim, replaces
-our older entries, asks before removing a foreign Clink, and refuses
-paths that cmd cannot quote.
+wizard shows. Clink always starts from an all-ASCII path: its real
+path, the data folder's 8.3 path, or the user's own ProgramData
+folder, because Clink 1.9.34 cannot inject from a Thai path (G19).
+AutoRun keeps other programs' parts verbatim, replaces our older
+entries, asks before removing a foreign Clink, and refuses paths that
+cmd cannot quote. A missing theme font falls back to the bundled
+CaskaydiaCove NF.
 ```
 ```bash
 git add -- crates/core/src/plan.rs crates/core/src/lib.rs
