@@ -1,6 +1,7 @@
-//! CMD Studio core: theme model, palette, generators, planner and the
-//! transactional apply engine. Nothing here touches the machine directly;
-//! side effects go through the traits in `txn`.
+//! CMD Studio core: theme model, palette, generators, planner, the transactional apply
+//! engine, and what runs it on a real machine. Only `adapters::windows` touches the machine;
+//! everything else goes through the adapter traits in `adapters`.
+pub mod adapters;
 pub mod color;
 pub mod generate;
 pub mod model;
