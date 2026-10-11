@@ -144,6 +144,10 @@ Two workarounds were tried on VM-C (Thai Windows), then again on VM-A (English W
 | `short` | the 8.3 path of the same folder: `C:\Users\3607~1\AppData\Local\AIRESI~1.CMD\runtime\CLINK-~1.34\clink_x64.exe` | injects; G4 and G17 as above | injects; `g17 init bytes: 328`, header match `true` |
 | `ascii` | a copy in `C:\ProgramData\cmdstudio-spike\clink-1.9.34` | injects; G4 and G17 as above | injects; `g17 init bytes: 328`, header match `true` |
 
+A third form was tried on VM-C after the founder chose the 8.3 route. It joins the data folder's 8.3 path to the long ASCII rest: `C:\Users\3607~1\AppData\Local\AIRESI~1.CMD\runtime\clink-1.9.34\clink_x64.exe`. Result: `g17 init bytes: 328`, header match `true`, and 0 `ERROR` lines in `clink.log`. Raw output: `spikes/vm/tmp/thai-mixed-path.txt`.
+
+This form matters because `GetShortPathNameW` works only on paths that exist. The data folder exists before the first apply, but the runtime folder does not.
+
 Each has a cost:
 - **`short`:** depends on 8.3 names, which can be turned off per volume.
 - **`ascii`:** moves part of a per-user app out of the user's own folders.

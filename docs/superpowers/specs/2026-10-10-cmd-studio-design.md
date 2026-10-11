@@ -444,7 +444,9 @@ cmd-studio/
 - **ส่วนของเรา:** `if exist "<clink-launch>" "<clink-launch>" inject --autorun --quiet --profile "<data>\clink-profile"` (G13 ✅ ทำให้ `cmd /c` ช้าลงราว 14 ms บน CI)
 - **path ที่ใช้เรียก Clink (`<clink-launch>`, G19, founder เลือก 2026-10-11):** ตัวเชื่อมเลือกตามลำดับนี้ทุกครั้งที่ใช้ธีมหรืออัปเดต runtime แล้วบันทึกไว้ใน `state.json`
   1. path จริง `<data>\runtime\clink-<ver>\clink_x64.exe` ถ้ามีแต่อักษร ASCII
-  2. ถ้าไม่ใช่ ใช้ path แบบ 8.3 ของไฟล์เดียวกัน (`GetShortPathNameW`) ถ้าได้ path ที่เป็น ASCII ล้วน ✅ (ลองแล้วบน VM ภาษาไทยและภาษาอังกฤษ)
+  2. ถ้าไม่ใช่ ให้ใช้ path แบบ 8.3 ของโฟลเดอร์ข้อมูล `<data>` (`GetShortPathNameW`) ต่อด้วย `runtime\clink-<ver>\clink_x64.exe` ถ้าผลเป็น ASCII ล้วน
+     - ต้องใช้ของโฟลเดอร์ข้อมูล ไม่ใช่ของไฟล์ exe เพราะ `GetShortPathNameW` ใช้ได้กับของที่มีอยู่แล้วเท่านั้น และตอนวางแผนครั้งแรก runtime ยังไม่ได้ติดตั้ง
+     - ✅ ลองแล้ว: path แบบ 8.3 ทั้งเส้นใช้ได้บน VM ภาษาไทยและภาษาอังกฤษ ส่วนแบบผสม (`C:\Users\3607~1\AppData\Local\AIRESI~1.CMD\runtime\clink-1.9.34\clink_x64.exe`) ลองบน VM ภาษาไทยเมื่อ 2026-10-11 แล้ว inject ได้
   3. ถ้า volume ไม่มีชื่อแบบ 8.3 ให้ติดตั้งสำเนา runtime ของ Clink ไว้ที่ `%ProgramData%\CMD Studio\<SID ของผู้ใช้>\clink-<ver>\` แล้วใช้ path นั้น ✅ (ลองแล้วว่า Clink จาก `C:\ProgramData` inject ได้) SID เป็น ASCII และแยกโฟลเดอร์ต่อผู้ใช้จึงไม่ชนกัน
   - profile ยังอยู่ที่ `<data>\clink-profile` แม้ path มีอักษรไทย ✅
   - ถ้าทั้ง 3 ข้อยังใช้ไม่ได้ D3 จะจับได้
