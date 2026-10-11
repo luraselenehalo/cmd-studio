@@ -36,7 +36,6 @@
     "schemaVersion": {
       "description": "The version of the file format.",
       "type": "integer",
-      "format": "uint32",
       "maximum": 1,
       "minimum": 1
     },
@@ -217,7 +216,6 @@
         },
         "tint": {
           "type": "number",
-          "format": "double",
           "maximum": 0.3,
           "minimum": 0.0
         }
@@ -245,13 +243,11 @@
         },
         "fontSize": {
           "type": "integer",
-          "format": "uint8",
           "maximum": 32,
           "minimum": 8
         },
         "opacity": {
           "type": "integer",
-          "format": "uint8",
           "maximum": 100,
           "minimum": 30
         },
@@ -260,7 +256,6 @@
           "type": "array",
           "items": {
             "type": "integer",
-            "format": "uint8",
             "maximum": 40,
             "minimum": 0
           },

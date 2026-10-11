@@ -47,6 +47,25 @@ fn schema_file_matches_the_rust_types() {
 }
 
 #[test]
+fn serde_json_keeps_its_keys_sorted() {
+    // `schemars` writes the properties of the schema in the order of serde_json's maps. That is
+    // alphabetical until some dependency turns serde_json's `preserve_order` feature on for the
+    // whole build. Then the properties come out in the order the fields are declared, the file
+    // above no longer matches, and rerunning with UPDATE_SCHEMA=1 would only move the problem
+    // to the builds that do not have the feature. This test says what is wrong before that.
+    let mut keys = serde_json::Map::new();
+    keys.insert("b".to_string(), Value::Null);
+    keys.insert("a".to_string(), Value::Null);
+    assert_eq!(
+        keys.keys().next().map(String::as_str),
+        Some("a"),
+        "serde_json preserve_order is on: the schema file's key order would change. Rerunning \
+         with UPDATE_SCHEMA=1 does not fix that; find what turns the feature on, or sort the keys \
+         in schema::theme_schema_json"
+    );
+}
+
+#[test]
 fn schema_is_strict_and_requires_the_version() {
     let schema = schema();
     assert_eq!(schema["additionalProperties"], json!(false));
@@ -141,20 +160,22 @@ fn object_types<'a>(node: &'a Value, place: &str, found: &mut Vec<(String, &'a V
     }
 }
 
-/// The target of every `$ref` in `node`.
-fn references<'a>(node: &'a Value, found: &mut Vec<&'a str>) {
+/// The text of every `keyword` in `node`, at any depth: the targets of `$ref`, say, or the names
+/// of the `format`s. A property that is called like the keyword has a schema for its value, not
+/// a string, so it is walked into and not taken for the keyword.
+fn string_values<'a>(node: &'a Value, keyword: &str, found: &mut Vec<&'a str>) {
     match node {
         Value::Object(map) => {
             for (key, child) in map {
-                match (key.as_str(), child) {
-                    ("$ref", Value::String(target)) => found.push(target),
-                    _ => references(child, found),
+                match child {
+                    Value::String(text) if key.as_str() == keyword => found.push(text),
+                    _ => string_values(child, keyword, found),
                 }
             }
         }
         Value::Array(items) => {
             for child in items {
-                references(child, found);
+                string_values(child, keyword, found);
             }
         }
         _ => {}
@@ -213,8 +234,34 @@ fn every_object_type_refuses_unknown_properties() {
 
 #[test]
 fn the_schema_names_exactly_the_fields_of_the_format() {
+    // The fields of each part, as the spec's example lists them. A part has no optional field:
+    // a file that leaves one out is refused, so the fields it must have are all of them.
+    const RECIPE: &[&str] = &["accent", "tint"];
+    const COLORS: &[&str] = &[
+        "accent",
+        "ansi",
+        "background",
+        "cursor",
+        "foreground",
+        "frame",
+        "muted",
+        "selection",
+    ];
+    const TERMINAL: &[&str] = &[
+        "acrylic",
+        "cursorShape",
+        "font",
+        "fontSize",
+        "opacity",
+        "padding",
+    ];
+    const PROMPT: &[&str] = &["layout", "segments", "transient"];
+    const BANNER: &[&str] = &["clearLogo", "enabled", "lines", "tips", "title"];
     let schema = schema();
-    let objects: [(&str, &[&str]); 6] = [
+    // (the object, all its fields, the fields a file must have.) The top level has three that
+    // may be left out: `author` (which defaults to empty), `simple` (which may be null) and the
+    // optional `$schema` line.
+    let objects: [(&str, &[&str], &[&str]); 6] = [
         (
             "",
             &[
@@ -230,64 +277,35 @@ fn the_schema_names_exactly_the_fields_of_the_format() {
                 "terminal",
                 "tone",
             ],
-        ),
-        ("/$defs/SimpleRecipe", &["accent", "tint"]),
-        (
-            "/$defs/Colors",
             &[
-                "accent",
-                "ansi",
-                "background",
-                "cursor",
-                "foreground",
-                "frame",
-                "muted",
-                "selection",
+                "banner",
+                "colors",
+                "id",
+                "name",
+                "prompt",
+                "schemaVersion",
+                "terminal",
+                "tone",
             ],
         ),
-        (
-            "/$defs/TerminalSettings",
-            &[
-                "acrylic",
-                "cursorShape",
-                "font",
-                "fontSize",
-                "opacity",
-                "padding",
-            ],
-        ),
-        (
-            "/$defs/PromptSettings",
-            &["layout", "segments", "transient"],
-        ),
-        (
-            "/$defs/BannerSettings",
-            &["clearLogo", "enabled", "lines", "tips", "title"],
-        ),
+        ("/$defs/SimpleRecipe", RECIPE, RECIPE),
+        ("/$defs/Colors", COLORS, COLORS),
+        ("/$defs/TerminalSettings", TERMINAL, TERMINAL),
+        ("/$defs/PromptSettings", PROMPT, PROMPT),
+        ("/$defs/BannerSettings", BANNER, BANNER),
     ];
-    for (object, fields) in objects {
+    for (object, fields, required) in objects {
         assert_eq!(
             keys_at(&schema, &format!("{object}/properties")),
             words(fields),
             "the fields of the object at {object:?}"
         );
+        assert_eq!(
+            strings_at(&schema, &format!("{object}/required")),
+            words(required),
+            "the fields that the object at {object:?} must have"
+        );
     }
-    // Without `author` (which defaults to empty), `simple` (which may be null) and the optional
-    // `$schema` line, every field of a theme file has to be there.
-    assert_eq!(
-        strings_at(&schema, "/required"),
-        words(&[
-            "banner",
-            "colors",
-            "id",
-            "name",
-            "prompt",
-            "schemaVersion",
-            "terminal",
-            "tone",
-        ]),
-        "the fields a theme file must have"
-    );
     // `$schema` is a string, nothing more: its text is dropped unread.
     assert_eq!(
         text_at(&schema, "/properties/$schema/type"),
@@ -437,6 +455,21 @@ fn the_schema_states_every_limit_of_the_format() {
             "{field} {keyword}"
         );
     }
+    // Where the spec gives only a maximum, the schema gives no minimum at all. `author` is 0-64,
+    // so the spec's own example, which has `"author": ""`, has to pass. A banner may have no
+    // lines, and its title and each of its lines may be empty.
+    for (field, keyword) in [
+        ("/properties/author", "minLength"),
+        ("/$defs/BannerSettings/properties/title", "minLength"),
+        ("/$defs/BannerSettings/properties/lines", "minItems"),
+        ("/$defs/BannerSettings/properties/lines/items", "minLength"),
+    ] {
+        assert_eq!(
+            schema.pointer(&format!("{field}/{keyword}")),
+            None,
+            "{field} has a {keyword}, but spec §3.3 gives it only a maximum"
+        );
+    }
     // The tint is the one limit that is not a whole number.
     let tint = "/$defs/SimpleRecipe/properties/tint";
     assert_eq!(
@@ -566,7 +599,7 @@ fn the_schema_states_the_color_the_id_and_the_allowed_words() {
 fn every_reference_resolves_inside_the_file() {
     let schema = schema();
     let mut targets = Vec::new();
-    references(&schema, &mut targets);
+    string_values(&schema, "$ref", &mut targets);
     assert!(!targets.is_empty());
     for target in targets {
         let pointer = target
@@ -577,4 +610,19 @@ fn every_reference_resolves_inside_the_file() {
             "{target} points at nothing"
         );
     }
+}
+
+#[test]
+fn the_only_format_in_the_schema_is_uuid() {
+    // `schemars` also writes `uint8`, `uint32` and `double` for the number types. Those are not
+    // formats of JSON Schema, and a validator that does not know a format can refuse the whole
+    // schema (Ajv does by default), so the published file keeps only what the standard defines.
+    let schema = schema();
+    let mut formats = Vec::new();
+    string_values(&schema, "format", &mut formats);
+    assert!(!formats.is_empty(), "the id should keep its uuid format");
+    assert!(
+        formats.iter().all(|format| *format == "uuid"),
+        "the schema has formats other than uuid: {formats:?}"
+    );
 }
