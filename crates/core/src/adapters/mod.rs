@@ -45,11 +45,11 @@ pub trait Fs {
     fn exists(&self, path: &Path) -> bool;
     fn is_dir(&self, path: &Path) -> bool;
     fn create_dir_all(&self, path: &Path) -> Result<(), AdapterError>;
-    /// Deletes an empty folder; `Ok` when it is gone; an error when it is not empty.
+    /// Deletes an empty folder; `Ok` when it is gone; an error when it is not empty or is a file.
     fn remove_dir(&self, path: &Path) -> Result<(), AdapterError>;
     /// Deletes a folder and everything in it; `Ok` when it is already gone.
     fn remove_dir_all(&self, path: &Path) -> Result<(), AdapterError>;
-    /// Renames a file or folder; `to` must not exist.
+    /// Renames a file or folder; `to` must not exist, and the folder that is to hold it must.
     fn rename(&self, from: &Path, to: &Path) -> Result<(), AdapterError>;
     /// The entries directly inside a folder, sorted by path; empty when the folder does not exist.
     fn list_dir(&self, path: &Path) -> Result<Vec<DirEntry>, AdapterError>;

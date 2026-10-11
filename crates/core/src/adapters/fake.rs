@@ -58,7 +58,9 @@ impl FakeFs {
             .insert(path.as_ref().to_path_buf());
     }
 
-    /// Makes every later removal of `path` (file or folder) fail, as when a file is in use.
+    /// Makes every later removal of `path` fail, as when a file is in use: `remove_file` or
+    /// `remove_dir` of that path, and `remove_dir_all` or `rename` of that path or of a folder
+    /// above it.
     pub fn fail_removes_of(&self, path: impl AsRef<Path>) {
         self.state
             .borrow_mut()
@@ -73,6 +75,13 @@ fn add_parents(dirs: &mut BTreeSet<PathBuf>, path: &Path) {
             dirs.insert(a.to_path_buf());
         }
     }
+}
+
+/// Whether the folder that would hold `path` exists. A folder with no name of its own always
+/// does: a volume root, the current folder (`.`, or what a bare file name leaves) and `..`.
+fn parent_exists(dirs: &BTreeSet<PathBuf>, path: &Path) -> bool {
+    path.parent()
+        .is_none_or(|p| p.file_name().is_none() || dirs.contains(p))
 }
 
 impl Fs for FakeFs {
@@ -123,6 +132,12 @@ impl Fs for FakeFs {
 
     fn remove_dir(&self, path: &Path) -> Result<(), AdapterError> {
         let mut s = self.state.borrow_mut();
+        if s.fail_removes.contains(path) {
+            return Err(err(path, "folder is in use (injected)"));
+        }
+        if s.files.contains_key(path) {
+            return Err(err(path, "is a file, not a folder"));
+        }
         let busy = s.files.keys().any(|f| f.parent() == Some(path))
             || s.dirs.iter().any(|d| d.parent() == Some(path));
         if busy {
@@ -147,10 +162,22 @@ impl Fs for FakeFs {
         if s.files.contains_key(to) || s.dirs.contains(to) {
             return Err(err(to, "already exists"));
         }
+        if !parent_exists(&s.dirs, to) {
+            return Err(err(to, "parent folder not found"));
+        }
         if s.fail_removes.iter().any(|f| f.starts_with(from)) {
             return Err(err(from, "in use (injected)"));
         }
-        let moved = |p: &Path| p.strip_prefix(from).ok().map(|rest| to.join(rest));
+        // The renamed root becomes `to` itself; `to.join("")` would end in a separator.
+        let moved = |p: &Path| {
+            p.strip_prefix(from).ok().map(|rest| {
+                if rest.as_os_str().is_empty() {
+                    to.to_path_buf()
+                } else {
+                    to.join(rest)
+                }
+            })
+        };
         let files: Vec<(PathBuf, Vec<u8>)> = s
             .files
             .iter()
@@ -162,6 +189,7 @@ impl Fs for FakeFs {
         }
         s.files.retain(|p, _| !p.starts_with(from));
         s.dirs.retain(|p| !p.starts_with(from));
+        // The folder of `to` exists, so this only records a volume root.
         add_parents(&mut s.dirs, to);
         s.files.extend(files);
         s.dirs.extend(dirs);
@@ -596,6 +624,71 @@ mod tests {
         fs.remove_file(f).unwrap();
         fs.fail_writes_to(f);
         assert!(fs.write_atomic(f, b"x").is_err());
+
+        // The fake is as strict as the disk. A renamed folder or file is listed under the name
+        // it was given, with no trailing separator.
+        fs.put(r"C:\g\old\x.txt", b"x");
+        fs.rename(Path::new(r"C:\g\old"), Path::new(r"C:\g\new"))
+            .unwrap();
+        fs.rename(Path::new(r"C:\g\new\x.txt"), Path::new(r"C:\g\new\y.txt"))
+            .unwrap();
+        let listed = |dir: &str| -> Vec<String> {
+            fs.list_dir(Path::new(dir))
+                .unwrap()
+                .iter()
+                .map(|e| e.path.display().to_string())
+                .collect()
+        };
+        assert_eq!(
+            listed(r"C:\g"),
+            [r"C:\g\new"],
+            "a renamed folder keeps the name it was given"
+        );
+        assert_eq!(
+            listed(r"C:\g\new"),
+            [r"C:\g\new\y.txt"],
+            "a renamed file keeps the name it was given"
+        );
+
+        // A folder that is in use is not removed, and stays.
+        let busy = Path::new(r"C:\busy");
+        fs.create_dir_all(busy).unwrap();
+        fs.fail_removes_of(busy);
+        assert!(
+            fs.remove_dir(busy).is_err(),
+            "a folder that is in use is not removed"
+        );
+        assert!(fs.is_dir(busy), "and it is still there");
+
+        // A file is not an empty folder.
+        assert!(
+            fs.remove_dir(Path::new(r"C:\g\new\y.txt")).is_err(),
+            "a file is not a folder"
+        );
+        assert_eq!(
+            fs.file(r"C:\g\new\y.txt"),
+            Some(b"x".to_vec()),
+            "and it is still there"
+        );
+
+        // A rename needs the folder of the new name to exist; a refused one changes nothing.
+        assert!(
+            fs.rename(Path::new(r"C:\g\new\y.txt"), Path::new(r"C:\nowhere\y.txt"))
+                .is_err(),
+            "the folder of the new name must exist"
+        );
+        assert_eq!(
+            fs.file(r"C:\g\new\y.txt"),
+            Some(b"x".to_vec()),
+            "a refused rename leaves the source alone"
+        );
+        assert!(!fs.exists(Path::new(r"C:\nowhere")), "and makes no folder");
+
+        // A name with no folder part is in the current folder, which is always there.
+        fs.put("loose.txt", b"l");
+        fs.rename(Path::new("loose.txt"), Path::new("kept.txt"))
+            .unwrap();
+        assert_eq!(fs.file("kept.txt"), Some(b"l".to_vec()));
     }
 
     #[test]
