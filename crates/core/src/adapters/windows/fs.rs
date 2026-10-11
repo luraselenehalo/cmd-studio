@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Windows error codes worth a short retry: another process (Windows
-/// Terminal, an antivirus scanner) has the file open for a moment.
+/// Terminal, an antivirus scanner, the search indexer) has the file, or a file
+/// inside the folder being renamed, open for a moment.
 const ERROR_ACCESS_DENIED: i32 = 5;
 const ERROR_SHARING_VIOLATION: i32 = 32;
 const RETRIES: u32 = 20;
@@ -36,6 +37,8 @@ fn busy(e: &std::io::Error) -> bool {
 /// `std::fs::rename` replaces an existing file in one step on Windows
 /// (`MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`, or the POSIX-semantics
 /// rename on newer builds). Retries while another process holds the file.
+/// `write_atomic` relies on the replacing; `Fs::rename` checks that `to` is
+/// free first and uses this only for the retry.
 fn replace(from: &Path, to: &Path) -> std::io::Result<()> {
     let mut attempt = 0;
     loop {
@@ -129,7 +132,7 @@ impl Fs for WinFs {
                 "it already exists",
             ));
         }
-        std::fs::rename(from, to).map_err(|e| io_err("rename", from, &e))
+        replace(from, to).map_err(|e| io_err("rename", from, &e))
     }
 
     fn list_dir(&self, path: &Path) -> Result<Vec<DirEntry>, AdapterError> {
@@ -155,11 +158,71 @@ impl Fs for WinFs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Instant;
+
+    /// `FILE_SHARE_READ` alone: others may read the file, but nobody may rename or delete it.
+    const FILE_SHARE_READ: u32 = 1;
+    /// How long a retry scenario waits for the operation under test to get going. Generous, so
+    /// that a slow runner is not mistaken for a failure; a miss fails the test, loudly.
+    const DEADLINE: Duration = Duration::from_secs(10);
+    /// How long the file stays held once the operation is under way: several retries (50 ms
+    /// apart) and well inside the 20 x 50 ms the adapter waits.
+    const HOLD: Duration = Duration::from_millis(200);
+
+    fn names_in(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// The temp file `write_atomic` leaves beside `file` while it works.
+    fn is_temp_of(file: &str, name: &str) -> bool {
+        name.starts_with(&format!(".{file}.")) && name.ends_with(".cmdstudio-tmp")
+    }
+
+    /// Opens `path` the way a virus scanner might: others may read it, nobody may rename it.
+    fn hold_open(path: &Path) -> std::fs::File {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(path)
+            .unwrap()
+    }
+
+    /// The helper thread of a retry scenario. It keeps `held` open until `ready()` says the
+    /// operation under test is under way (polled for up to `DEADLINE`), keeps holding for `HOLD`
+    /// more, runs `look`, then lets go. `Err` says why it never got going: a runner too slow to
+    /// start the operation in time fails the test with a message, instead of letting it pass
+    /// without the retry having been tried.
+    fn hold_then_release<T>(
+        held: std::fs::File,
+        ready: impl Fn() -> Result<bool, String>,
+        look: impl FnOnce() -> T,
+    ) -> Result<T, String> {
+        let deadline = Instant::now() + DEADLINE;
+        let outcome = loop {
+            match ready() {
+                Ok(true) => break Ok(()),
+                Err(why) => break Err(why),
+                Ok(false) if Instant::now() >= deadline => {
+                    break Err(format!("nothing happened within {DEADLINE:?}"))
+                }
+                Ok(false) => std::thread::sleep(Duration::from_millis(5)),
+            }
+        };
+        if outcome.is_ok() {
+            std::thread::sleep(HOLD);
+        }
+        let seen = look();
+        drop(held);
+        outcome.map(|()| seen)
+    }
 
     #[test]
     fn write_atomic_replaces_creates_parents_and_leaves_no_temp_file() {
-        use std::os::windows::fs::OpenOptionsExt;
-        const FILE_SHARE_READ: u32 = 1;
         // Review Focus 4: a folder with Thai letters and a space.
         let tmp = tempfile::tempdir().unwrap();
         let f = tmp.path().join("ไทย dir").join("settings.json");
@@ -174,35 +237,44 @@ mod tests {
 
         // Another program that has the file open for a moment (without FILE_SHARE_DELETE) only
         // delays the write: the rename is retried until it lets go. While it waits, the new bytes
-        // sit in a temp file beside the target, named as the adapter promises.
-        let held = std::fs::OpenOptions::new()
-            .read(true)
-            .share_mode(FILE_SHARE_READ)
-            .open(&f)
-            .unwrap();
-        let dir = f.parent().unwrap().to_owned();
-        let watcher = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(200));
-            let seen: Vec<String> = std::fs::read_dir(&dir)
-                .unwrap()
-                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-                .collect();
-            drop(held);
-            seen
+        // sit in a temp file beside the target, named as the adapter promises. The helper lets
+        // go `HOLD` after that temp file shows up (not after a fixed time), so a slow runner
+        // still gives the retry its chance.
+        let dir = f.parent().unwrap();
+        let held = hold_open(&f);
+        let finished = AtomicBool::new(false);
+        let (written, watched) = std::thread::scope(|s| {
+            let helper = s.spawn(|| {
+                hold_then_release(
+                    held,
+                    || {
+                        if names_in(dir).iter().any(|n| is_temp_of("settings.json", n)) {
+                            Ok(true)
+                        } else if finished.load(Ordering::SeqCst) {
+                            Err(
+                                "the write ended without leaving a temp file beside the target"
+                                    .to_string(),
+                            )
+                        } else {
+                            Ok(false)
+                        }
+                    },
+                    || names_in(dir),
+                )
+            });
+            let written = WinFs.write_atomic(&f, b"three");
+            finished.store(true, Ordering::SeqCst);
+            (written, helper.join().unwrap())
         });
-        WinFs.write_atomic(&f, b"three").unwrap();
-        let seen = watcher.join().unwrap();
+        written.unwrap();
+        let seen = watched.unwrap_or_else(|why| panic!("the helper thread gave up: {why}"));
         assert_eq!(WinFs.read(&f).unwrap(), Some(b"three".to_vec()));
         let waiting: Vec<_> = seen.iter().filter(|n| *n != "settings.json").collect();
         assert!(
-            matches!(waiting.as_slice(), [n] if n.starts_with(".settings.json.") && n.ends_with(".cmdstudio-tmp")),
+            waiting.len() == 1 && is_temp_of("settings.json", waiting[0]),
             "while it waited there was one temp file beside the target: {seen:?}"
         );
-        assert_eq!(
-            std::fs::read_dir(f.parent().unwrap()).unwrap().count(),
-            1,
-            "temp file left behind"
-        );
+        assert_eq!(names_in(dir).len(), 1, "temp file left behind");
     }
 
     #[test]
@@ -212,13 +284,28 @@ mod tests {
         let f = tmp.path().join("x.json");
         std::fs::create_dir(&f).unwrap();
         std::fs::write(f.join("inner"), b"keep").unwrap();
+        let started = Instant::now();
         assert!(WinFs.write_atomic(&f, b"new").is_err());
+        // "Access denied" is retried for the whole 20 x 50 ms before the write gives up.
+        // `thread::sleep` never sleeps less than asked, so this lower bound cannot flake (900,
+        // not 1000, leaves room for clock rounding).
+        let took = started.elapsed();
+        assert!(
+            took >= Duration::from_millis(900),
+            "gave up after {took:?}, not after the full 20 x 50 ms of retries"
+        );
         assert_eq!(std::fs::read(f.join("inner")).unwrap(), b"keep");
         assert_eq!(
             std::fs::read_dir(tmp.path()).unwrap().count(),
             1,
             "temp file left behind"
         );
+
+        // Which errors are worth a retry: access denied (5) and a sharing violation (32), but
+        // not "file not found" (2).
+        assert!(busy(&std::io::Error::from_raw_os_error(5)));
+        assert!(busy(&std::io::Error::from_raw_os_error(32)));
+        assert!(!busy(&std::io::Error::from_raw_os_error(2)));
     }
 
     #[test]
@@ -278,6 +365,13 @@ mod tests {
         assert_eq!(WinFs.read(&inner).unwrap(), None);
         WinFs.remove_dir(&full).unwrap();
         assert!(!WinFs.exists(&full));
+
+        // `remove_dir_all` takes a whole populated tree with it.
+        let deep = full.join("sub").join("x.txt");
+        WinFs.write_atomic(&deep, b"x").unwrap();
+        assert!(WinFs.exists(&deep));
+        WinFs.remove_dir_all(&full).unwrap();
+        assert!(!WinFs.exists(&full));
     }
 
     #[test]
@@ -330,6 +424,43 @@ mod tests {
             .map(|e| e.path.file_name().unwrap().to_owned())
             .collect();
         assert_eq!(order, vec!["Upper.txt", "a-dir", "c.txt", "z-dir"]);
+
+        // A file does not replace a file either: the rename is refused and both keep their bytes.
+        let (one, two) = (tmp.path().join("one.txt"), tmp.path().join("two.txt"));
+        WinFs.write_atomic(&one, b"1").unwrap();
+        WinFs.write_atomic(&two, b"2").unwrap();
+        assert!(WinFs.rename(&one, &two).is_err());
+        assert_eq!(WinFs.read(&one).unwrap(), Some(b"1".to_vec()));
+        assert_eq!(WinFs.read(&two).unwrap(), Some(b"2".to_vec()));
+
+        // Installing a runtime copies its files into a ".partial" folder and renames the folder
+        // into place. A scanner that holds one of the new files for a moment (without
+        // FILE_SHARE_DELETE) must only delay the rename. Whether the rename has begun cannot
+        // be seen from outside, so the helper lets go `HOLD` after this thread signals that it
+        // is about to call it.
+        let staging = tempfile::tempdir().unwrap();
+        let partial = staging.path().join("runtime.partial");
+        let inside = partial.join("clink_x64.exe");
+        WinFs.write_atomic(&inside, b"bytes").unwrap();
+        let moved = staging.path().join("runtime-1");
+        let held = hold_open(&inside);
+        let about_to_rename = AtomicBool::new(false);
+        let (renamed, watched) = std::thread::scope(|s| {
+            let helper = s.spawn(|| {
+                hold_then_release(held, || Ok(about_to_rename.load(Ordering::SeqCst)), || ())
+            });
+            about_to_rename.store(true, Ordering::SeqCst);
+            let renamed = WinFs.rename(&partial, &moved);
+            (renamed, helper.join().unwrap())
+        });
+        renamed.unwrap();
+        watched.unwrap_or_else(|why| panic!("the helper thread gave up: {why}"));
+        assert!(!partial.exists(), "the folder is gone from its old name");
+        assert_eq!(
+            WinFs.read(&moved.join("clink_x64.exe")).unwrap(),
+            Some(b"bytes".to_vec()),
+            "and is at the new name with its file"
+        );
     }
 
     /// Real-data seam: the files scripts\fetch-resources.ps1 put in resources\
