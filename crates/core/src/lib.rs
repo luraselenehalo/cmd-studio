@@ -5,4 +5,5 @@ pub mod color;
 pub mod model;
 pub mod oklch;
 pub mod palette;
+pub mod schema;
 pub mod text;
