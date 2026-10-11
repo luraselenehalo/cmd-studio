@@ -21,14 +21,19 @@ impl FromStr for Rgb {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let err = || ParseColorError(s.to_string());
         let hex = s.strip_prefix('#').ok_or_else(err)?;
+        // Exactly six ASCII hex digits: `u8::from_str_radix` alone would also take a leading '+'.
         if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(err());
         }
-        let channel = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).map_err(|_| err());
+        let channel = |digits: std::ops::Range<usize>| {
+            hex.get(digits)
+                .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+                .ok_or_else(err)
+        };
         Ok(Rgb {
-            r: channel(0)?,
-            g: channel(2)?,
-            b: channel(4)?,
+            r: channel(0..2)?,
+            g: channel(2..4)?,
+            b: channel(4..6)?,
         })
     }
 }
@@ -117,7 +122,19 @@ mod tests {
 
     #[test]
     fn rejects_malformed_colors() {
-        for s in ["d97757", "#d9775", "#d977577", "#gg0000", "", "#"] {
+        // The last two have six bytes after the '#', so the length check lets them through and
+        // only the ASCII-hex check rejects them: `u8::from_str_radix` accepts a leading '+',
+        // and U+00E9 is two bytes wide, so it straddles a byte pair.
+        for s in [
+            "d97757",
+            "#d9775",
+            "#d977577",
+            "#gg0000",
+            "",
+            "#",
+            "#+12345",
+            "#1\u{e9}345",
+        ] {
             assert!(s.parse::<Rgb>().is_err(), "{s:?} should not parse");
         }
     }
