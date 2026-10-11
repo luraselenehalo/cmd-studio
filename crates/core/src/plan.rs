@@ -179,12 +179,19 @@ pub enum PlanError {
     NoClinkPath(PathBuf),
     #[error("could not build the Oh My Posh config: {0}")]
     Generate(String),
+    /// AutoRun holds a command of ours combined with another one (a pipe, parentheses or an
+    /// unclosed quote), so taking ours out would change theirs. The user edits it by hand.
+    #[error(
+        "AutoRun holds a command combined with ours that CMD Studio can't safely change: {part}"
+    )]
+    AutoRunNeedsHandEdit { part: String },
 }
 
 impl PlanError {
     /// Stable code shown to users (spec §5.9).
     pub fn code(&self) -> &'static str {
         match self {
+            PlanError::AutoRunNeedsHandEdit { .. } => "E_AUTORUN_WRITE",
             PlanError::ForeignClink { .. } => "E_AUTORUN_FOREIGN_CLINK",
             PlanError::UnsupportedPath(_) | PlanError::NoClinkPath(_) => "E_CLINK_PATH",
             PlanError::Generate(_) => "E_THEME_INVALID",
@@ -246,17 +253,21 @@ pub fn autorun_entry(launch: &ClinkLaunch, paths: &Paths) -> Result<String, Plan
     ))
 }
 
-/// One command in an AutoRun value, as [`parts`] finds it.
+/// One command in an AutoRun value, as [`scan`] finds it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Part {
     /// The command, without the whitespace around it.
     pub(crate) text: String,
     /// Where `text` is in the value, in bytes.
     span: Range<usize>,
-    /// The `&` or `&&` before the command, with the one space or tab right before it.
+    /// The separator before the command, if any, with the one space or tab right before it.
     before: Option<Range<usize>>,
-    /// The `&` or `&&` after the command, with the one space or tab right after it.
+    /// The separator after the command, if any, with the one space or tab right after it.
     after: Option<Range<usize>>,
+    /// The command is combined with others in a way this reading does not take apart: it
+    /// holds a pipe or a parenthesis that is not quoted or escaped, or an unclosed quote runs
+    /// it into the rest of the value.
+    combined: bool,
 }
 
 impl Part {
@@ -264,10 +275,20 @@ impl Part {
     /// separator next to it with the whitespace between them, and one space or tab on the far
     /// side of that separator, where our own ` & ` puts one. The separator is the one before
     /// the command, or for the first command the one after it. Every other byte stays as it
-    /// was, so taking out an entry that was appended with ` & ` gives back the value as it was
-    /// before.
-    fn cut(&self) -> Range<usize> {
+    /// was, so taking out an entry that was added with ` & `, after the value or in front of
+    /// it, gives back the value as it was before.
+    ///
+    /// One exception keeps the commands that are left as cmd read them: when taking out the
+    /// separator before would put a `|` right before the `|` of a `||` after the command,
+    /// cmd would pair the two, so the separator after the command goes instead.
+    fn cut(&self, value: &str) -> Range<usize> {
+        let bar_at = |i: Option<usize>| i.and_then(|i| value.as_bytes().get(i)) == Some(&b'|');
         match (&self.before, &self.after) {
+            (Some(before), Some(after))
+                if bar_at(before.start.checked_sub(1)) && bar_at(Some(self.span.end)) =>
+            {
+                self.span.start..after.end
+            }
             (Some(before), _) => before.start..self.span.end,
             (None, Some(after)) => self.span.start..after.end,
             (None, None) => self.span.clone(),
@@ -275,25 +296,40 @@ impl Part {
     }
 }
 
-/// The commands of an AutoRun value, read the way cmd reads them: `"` starts and ends quoted
-/// text; outside quotes `^` makes the character after it plain text, so `^&` and `^"` are
-/// text; and outside quotes `&` and `&&` separate commands. Each command is trimmed of the
-/// whitespace around it (quoted or escaped whitespace is text), and an empty command, as in
-/// `a & & b`, is no part.
-pub(crate) fn parts(value: &str) -> Vec<Part> {
+/// An AutoRun value as cmd reads it (see [`scan`]).
+pub(crate) struct Scan {
+    /// The commands, in order.
+    pub(crate) parts: Vec<Part>,
+    /// The value ends cleanly: not inside quotes, not with a lone `^`, and not with a
+    /// separator. Text added after a value that does not would be quoted, escaped, or read
+    /// after an empty command.
+    pub(crate) clean_end: bool,
+}
+
+/// Reads an AutoRun value the way cmd reads it: `"` starts and ends quoted text; outside
+/// quotes `^` makes the character after it plain text, so `^&`, `^|` and `^"` are text; and
+/// outside quotes `&`, `&&` and `||` separate commands, while a single `|` is a pipe inside
+/// one command. Each command is trimmed of the whitespace around it (quoted or escaped
+/// whitespace is text), and an empty command, as in `a & & b`, is no part.
+pub(crate) fn scan(value: &str) -> Scan {
     let mut parts = Vec::new();
     let mut chars = value.char_indices().peekable();
     let mut quoted = false;
-    // Where the text of the command being read is, and the separator before it.
+    // The command being read: where its text is, the separator before it, and whether it
+    // holds a pipe or a parenthesis.
     let mut span: Option<Range<usize>> = None;
     let mut before = None;
+    let mut combined = false;
     // Whether the last character read is a space or tab between words: not quoted, not
     // escaped.
     let mut blank = false;
+    let mut lone_caret = false;
     while let Some((i, c)) = chars.next() {
-        if c == '&' && !quoted {
+        // `&&` or `||`.
+        let doubled = chars.peek().is_some_and(|&(_, next)| next == c);
+        if !quoted && (c == '&' || (c == '|' && doubled)) {
             let mut end = i + 1;
-            if let Some(&(_, '&')) = chars.peek() {
+            if doubled {
                 chars.next();
                 end += 1;
             }
@@ -301,8 +337,16 @@ pub(crate) fn parts(value: &str) -> Vec<Part> {
             // A space or tab is one byte, so it starts one byte before the separator.
             let start = i - usize::from(blank);
             let after = i..end + usize::from(blank_after);
-            push_part(&mut parts, value, span.take(), before.take(), Some(after));
+            push_part(
+                &mut parts,
+                value,
+                span.take(),
+                before.take(),
+                Some(after),
+                combined,
+            );
             before = Some(start..end);
+            combined = false;
             blank = false;
             continue;
         }
@@ -313,9 +357,14 @@ pub(crate) fn parts(value: &str) -> Vec<Part> {
                 true
             }
             '^' if !quoted => {
-                if let Some((j, escaped)) = chars.next() {
-                    end = j + escaped.len_utf8();
+                match chars.next() {
+                    Some((j, escaped)) => end = j + escaped.len_utf8(),
+                    None => lone_caret = true,
                 }
+                true
+            }
+            '|' | '(' | ')' if !quoted => {
+                combined = true;
                 true
             }
             _ => quoted || !c.is_whitespace(),
@@ -325,8 +374,15 @@ pub(crate) fn parts(value: &str) -> Vec<Part> {
             span = Some(span.map_or(i..end, |s| s.start..end));
         }
     }
-    push_part(&mut parts, value, span, before, None);
-    parts
+    let clean_end = !quoted && !lone_caret && (span.is_some() || before.is_none());
+    // An unclosed quote runs the last command into whatever the quote holds.
+    push_part(&mut parts, value, span, before, None, combined || quoted);
+    Scan { parts, clean_end }
+}
+
+/// The commands of an AutoRun value (see [`scan`]).
+pub(crate) fn parts(value: &str) -> Vec<Part> {
+    scan(value).parts
 }
 
 /// Adds the command at `span` to `parts`, when there is one.
@@ -336,15 +392,17 @@ fn push_part(
     span: Option<Range<usize>>,
     before: Option<Range<usize>>,
     after: Option<Range<usize>>,
+    combined: bool,
 ) {
     if let Some(span) = span {
-        // `parts` puts both ends of `span` on character boundaries, so `get` finds the text.
+        // `scan` puts both ends of `span` on character boundaries, so `get` finds the text.
         let text = value.get(span.clone()).unwrap_or_default().to_string();
         parts.push(Part {
             text,
             span,
             before,
             after,
+            combined,
         });
     }
 }
@@ -364,7 +422,7 @@ fn without(value: &str, cut: &Range<usize>) -> String {
 fn take_out(value: &mut String, pick: impl Fn(&str) -> bool) -> bool {
     let mut took = false;
     while let Some(part) = parts(value).into_iter().find(|p| pick(&p.text)) {
-        *value = without(value, &part.cut());
+        *value = without(value, &part.cut(value));
         took = true;
     }
     took
@@ -374,16 +432,20 @@ fn take_out(value: &mut String, pick: impl Fn(&str) -> bool) -> bool {
 /// (spec §5.4). The value is edited where it stands, not taken apart and written again, so
 /// every byte of other programs' commands stays as it was (spec §7, doctrine guard (ค)):
 /// 1. Our entries go, old and current: they are the commands that hold `ours`, our profile
-///    path, which every form of our entry holds.
+///    path, in any mix of upper and lower case, as Windows reads paths. A command of ours
+///    that is combined with another one (a pipe, parentheses or an unclosed quote; see
+///    [`Part`]) is not taken apart: the plan fails with `E_AUTORUN_WRITE`, and the user
+///    edits AutoRun by hand.
 /// 2. Another command that runs Clink fails the plan, unless the user agreed to turn it off
 ///    (`replace_foreign`); then it goes too.
-/// 3. For `Target::All` our entry is appended with ` & `, or is the whole value when nothing
-///    else is left.
+/// 3. For `Target::All` our entry is added with ` & `: after the value when the value ends
+///    cleanly (see [`Scan::clean_end`]), and in front of it, as `<entry> & <value>`, when it
+///    does not. When nothing else is left, our entry is the whole value.
 ///
-/// Limits: cmd's `|`, `||` and parentheses are not read, so a command joined to ours by `|`
-/// or `||` goes with it, and taking ours out of parentheses can leave them unbalanced. A
-/// value that ends inside quotes, after a lone `^` or after a separator gets the entry
-/// appended all the same.
+/// Limits: a command of another program that runs Clink goes whole once the user agrees, so
+/// a command piped into it goes with it, and taking it out of parentheses that a separator
+/// splits can leave them unbalanced. Text joined to our entry with no separator at all, as
+/// in `echo ^& <ours>`, goes with our entry.
 fn edit_autorun(
     current: &str,
     target: Target,
@@ -391,8 +453,16 @@ fn edit_autorun(
     ours: &str,
     replace_foreign: bool,
 ) -> Result<(String, bool), PlanError> {
+    let ours = ours.to_lowercase();
+    let is_ours = |p: &str| p.to_lowercase().contains(&ours);
+    if let Some(part) = parts(current)
+        .into_iter()
+        .find(|p| p.combined && is_ours(&p.text))
+    {
+        return Err(PlanError::AutoRunNeedsHandEdit { part: part.text });
+    }
     let mut value = current.to_string();
-    take_out(&mut value, |p| p.contains(ours));
+    take_out(&mut value, is_ours);
     let foreign = |p: &str| p.to_ascii_lowercase().contains("clink");
     if !replace_foreign {
         if let Some(existing) = parts(&value).into_iter().find(|p| foreign(&p.text)) {
@@ -405,8 +475,10 @@ fn edit_autorun(
     if target == Target::All {
         value = if value.trim().is_empty() {
             entry.to_string()
-        } else {
+        } else if scan(&value).clean_end {
             format!("{value} & {entry}")
+        } else {
+            format!("{entry} & {value}")
         };
     }
     Ok((value, replaced))
@@ -440,8 +512,10 @@ fn wt_font(theme: &Theme, machine: &Machine, warnings: &mut Vec<Warning>) -> Str
 
 /// Plans applying `theme` to `machine` (spec §5.2). It fails, before anything on the machine
 /// is touched, with `E_CLINK_PATH` when cmd or Clink can't take a path (see
-/// [`clink_launch`] and [`autorun_entry`]), and with `E_AUTORUN_FOREIGN_CLINK` when another
-/// Clink runs from AutoRun and the user has not agreed to turn it off.
+/// [`clink_launch`] and [`autorun_entry`]), with `E_AUTORUN_FOREIGN_CLINK` when another
+/// Clink runs from AutoRun and the user has not agreed to turn it off, and with
+/// `E_AUTORUN_WRITE` when AutoRun holds a command combined with ours that can't be taken
+/// apart safely.
 pub fn plan(
     theme: &Theme,
     req: &Request,
@@ -545,8 +619,8 @@ pub fn plan(
     if next != current {
         match req.target {
             Target::All => {
-                th.push("ให้ cmd ทุกหน้าต่างโหลดธีมตอนเปิด");
-                en.push("Load the theme in every cmd window");
+                th.push("ให้ cmd ทุกหน้าต่างใช้ธีมนี้");
+                en.push("Use this theme in every cmd window");
             }
             Target::Wt => {
                 th.push("หยุดโหลดธีมในหน้าต่าง cmd นอก Windows Terminal");
@@ -673,7 +747,8 @@ mod tests {
                 .count(),
             4
         );
-        assert!(p.summary_th.contains(&"ให้ cmd ทุกหน้าต่างโหลดธีมตอนเปิด"));
+        assert!(p.summary_th.contains(&"ให้ cmd ทุกหน้าต่างใช้ธีมนี้"));
+        assert!(p.summary_en.contains(&"Use this theme in every cmd window"));
         assert!(p.warnings.is_empty());
     }
 
@@ -1094,8 +1169,10 @@ mod tests {
             "cls  ",
             "  cls",
             "x||y",
+            "x || y",
             "a | b",
             "(echo a & echo b)",
+            r#"if exist "C:\x.bat" (call "C:\x.bat")"#,
             r#"echo สวัสดี & cd /d "D:\งาน""#,
         ];
         for v in foreign {
@@ -1128,6 +1205,167 @@ mod tests {
         assert_eq!(texts("a & & b"), ["a", "b"]);
         assert!(texts("").is_empty());
         assert!(texts(" \t ").is_empty());
+        // `||` separates commands like `&&`; a single `|` is a pipe inside one command.
+        assert_eq!(texts("a||b || c"), ["a", "b", "c"]);
+        assert_eq!(texts("a | b & c"), ["a | b", "c"]);
+        assert_eq!(texts("a ^|| b"), ["a ^|| b"]);
+    }
+
+    #[test]
+    fn scan_tells_whether_a_value_ends_cleanly() {
+        for v in [
+            "",
+            "  ",
+            "a",
+            "a & b",
+            "a ^& b",
+            r#""a & b""#,
+            "a^^",
+            "a|b",
+            "a || b",
+        ] {
+            assert!(scan(v).clean_end, "{v}");
+        }
+        // Inside an unclosed quote, after a lone caret, or after a separator.
+        for v in [
+            r#""a"#,
+            r#"a "b & c"#,
+            "a ^",
+            "^",
+            "a &",
+            "a&&",
+            "a && \t",
+            "a ||",
+            "&",
+        ] {
+            assert!(!scan(v).clean_end, "{v}");
+        }
+    }
+
+    #[test]
+    fn a_value_that_does_not_end_cleanly_gets_our_entry_in_front() {
+        // Text after such a value would be quoted, escaped or read after an empty command,
+        // so our entry goes first and the value stays as it was, byte for byte.
+        for v in [
+            r#""C:\x.bat"#,
+            r#"call "C:\my tools\x.bat"#,
+            "a &",
+            "a && \t",
+            "a ||",
+            "echo hi ^",
+        ] {
+            let all = format!("{} & {v}", entry());
+            assert_eq!(
+                set_autorun(Some(v), Target::All),
+                Some(Some(all.clone())),
+                "{v}"
+            );
+            assert_eq!(set_autorun(Some(&all), Target::All), None, "again: {v}");
+            assert_eq!(
+                set_autorun(Some(&all), Target::Wt),
+                Some(Some(v.to_string())),
+                "{v}"
+            );
+            // An older entry of ours in front gives way to the current one.
+            let old = format!("{} & {v}", old_entry());
+            assert_eq!(
+                set_autorun(Some(&old), Target::All),
+                Some(Some(all)),
+                "old: {v}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_double_bar_next_to_our_entry_goes_with_it() {
+        let ours = entry();
+        for (current, next) in [
+            (format!("x || {ours}"), "x"),
+            (format!("{ours} || y"), "y"),
+            (format!("x||{ours}||y"), "x||y"),
+        ] {
+            assert_eq!(
+                set_autorun(Some(&current), Target::Wt),
+                Some(Some(next.to_string())),
+                "{current}"
+            );
+        }
+    }
+
+    #[test]
+    fn taking_ours_out_never_pairs_a_bar_with_another() {
+        // Were the `&` before ours taken out, the `|` of `x|` would meet the `||` after ours,
+        // and cmd would read `x||` and `|y`. The separator after ours goes instead.
+        let current = format!("x|&{}||y", entry());
+        assert_eq!(
+            set_autorun(Some(&current), Target::Wt),
+            Some(Some("x|&y".to_string()))
+        );
+        assert_eq!(texts("x|&y"), ["x|", "y"]);
+    }
+
+    #[test]
+    fn ours_combined_with_another_command_is_left_for_a_hand_edit() {
+        let ours = entry();
+        for current in [
+            format!("x | {ours}"),
+            format!("{ours} | more"),
+            format!("(a & {ours})"),
+            format!("if defined X ({ours})"),
+            // An unclosed quote runs `y.bat` into ours.
+            format!(r#""C:\y.bat & {ours}"#),
+        ] {
+            for target in [Target::All, Target::Wt] {
+                let mut m = machine();
+                m.autorun_hkcu = Some(current.clone());
+                let err = plan(&terracotta(), &req(target), &m, &paths()).unwrap_err();
+                assert!(
+                    matches!(err, PlanError::AutoRunNeedsHandEdit { .. }),
+                    "{current}: {err:?}"
+                );
+                assert_eq!(err.code(), "E_AUTORUN_WRITE");
+            }
+        }
+        let mut m = machine();
+        m.autorun_hkcu = Some(format!("x | {ours}"));
+        let err = plan(&terracotta(), &req(Target::Wt), &m, &paths()).unwrap_err();
+        assert_eq!(
+            err,
+            PlanError::AutoRunNeedsHandEdit {
+                part: format!("x | {ours}")
+            }
+        );
+        assert!(err.to_string().contains("can't safely change"), "{err}");
+    }
+
+    #[test]
+    fn parentheses_in_our_own_paths_are_quoted_and_do_not_count() {
+        // A user folder may be named `John (Work)`; our entry quotes its paths.
+        let p = Paths {
+            data: PathBuf::from(r"C:\Users\John (Work)\AppData\Local\ai.resincore.cmdstudio"),
+        };
+        let mut m = machine();
+        let ours = autorun_entry(&clink_launch(&p, &m).unwrap(), &p).unwrap();
+        m.autorun_hkcu = Some(format!("x & {ours}"));
+        let planned = plan(&terracotta(), &req(Target::Wt), &m, &p).unwrap();
+        assert_eq!(autorun(&planned), Some(Some("x".to_string())));
+    }
+
+    #[test]
+    fn our_older_entry_is_found_whatever_the_case_of_its_profile_path() {
+        // Windows reads `...\CLINK-PROFILE` and `...\clink-profile` as one folder.
+        let profile = format!(r"{DATA}\clink-profile");
+        let old = old_entry().replace(&profile, &profile.to_uppercase());
+        assert_ne!(old, old_entry());
+        let current = format!("echo hi & {old}");
+        assert_eq!(
+            set_autorun(Some(&current), Target::All),
+            Some(Some(format!("echo hi & {}", entry())))
+        );
+        assert_eq!(
+            set_autorun(Some(&current), Target::Wt),
+            Some(Some("echo hi".to_string()))
+        );
     }
 
     #[test]
