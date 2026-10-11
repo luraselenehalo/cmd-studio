@@ -125,6 +125,20 @@ pub trait JournalStore {
 }
 
 /// How a run, or the recovery of a cut-off run, ended.
+///
+/// It must be looked at: dropping it could hide a `RollbackIncomplete`, and success must never
+/// be reported then (spec §5.5). The compiler warns about a dropped outcome; this example
+/// turns the warning into an error:
+///
+/// ```compile_fail
+/// #![deny(unused_must_use)]
+/// use cmdstudio_core::txn::{run, Executor, JournalStore, Verifier};
+///
+/// fn apply(exec: &mut dyn Executor, verifier: &mut dyn Verifier, store: &mut dyn JournalStore) {
+///     run("t", Vec::new(), exec, verifier, store);
+/// }
+/// ```
+#[must_use = "an outcome that is not looked at can hide a RollbackIncomplete"]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
     Committed,
@@ -233,6 +247,19 @@ pub fn run(
 ///
 /// A journal that can't be read gives `RollbackIncomplete`, with the store's own code: the
 /// machine may be half applied and nothing says how.
+///
+/// The result must be looked at, like an [`Outcome`]: the compiler warns about a dropped one,
+/// and this example turns the warning into an error:
+///
+/// ```compile_fail
+/// #![deny(unused_must_use)]
+/// use cmdstudio_core::txn::{recover, Executor, JournalStore};
+///
+/// fn start_up(exec: &mut dyn Executor, store: &mut dyn JournalStore) {
+///     recover(exec, store);
+/// }
+/// ```
+#[must_use = "a recovery that ended in RollbackIncomplete must reach the user"]
 pub fn recover(exec: &mut dyn Executor, store: &mut dyn JournalStore) -> Option<Outcome> {
     let mut j = match store.load_unfinished() {
         Ok(Some(j)) => j,
