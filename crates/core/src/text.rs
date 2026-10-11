@@ -5,6 +5,13 @@
 /// never drive the terminal. ESC and `[` start a CSI sequence, which ends at its
 /// final character (U+0040-U+007E); ESC and any other character is a
 /// two-character escape. A sequence that never ends takes the rest of the text.
+///
+/// Two more groups go as well, because they are line breaks and bidirectional
+/// controls that are not C0/C1: the line and paragraph separators U+2028 and
+/// U+2029, and the bidi embeddings, overrides and isolates U+202A-U+202E and
+/// U+2066-U+2069. With them gone, a field has one line and reads in the order it
+/// is stored. Other invisible characters (the joiners that emoji and Thai need,
+/// U+200D and U+FE0F) stay.
 pub fn sanitize_text(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
@@ -23,7 +30,10 @@ pub fn sanitize_text(s: &str) -> String {
             }
             continue;
         }
-        if !matches!(u32::from(ch), 0x00..=0x1F | 0x7F..=0x9F) {
+        if !matches!(
+            u32::from(ch),
+            0x00..=0x1F | 0x7F..=0x9F | 0x2028 | 0x2029 | 0x202A..=0x202E | 0x2066..=0x2069
+        ) {
             out.push(ch);
         }
     }
@@ -196,6 +206,40 @@ mod tests {
             let s = format!("a{c}b");
             assert_eq!(sanitize_text(&s), s, "U+{:04X}", u32::from(c));
         }
+    }
+
+    #[test]
+    fn line_separators_and_bidi_controls_are_removed() {
+        // spec §3.7 #3 allows no line break inside a field, and U+2028 and U+2029 are the
+        // line and paragraph separators of Unicode. The bidi controls make a name read in
+        // another order than it is stored, which is how a file name is made to look like
+        // another one (U+202E) or an import preview is made to lie.
+        let removed: Vec<u32> = [0x2028, 0x2029]
+            .into_iter()
+            .chain(0x202A..=0x202E)
+            .chain(0x2066..=0x2069)
+            .collect();
+        assert_eq!(removed.len(), 11);
+        for code in removed {
+            let c = char::from_u32(code).unwrap();
+            assert_eq!(sanitize_text(&format!("a{c}b")), "ab", "U+{code:04X}");
+        }
+        // the characters next to those ranges stay: U+2027 and U+202F on either side of the
+        // first two, U+2065 and U+206A on either side of the third
+        for c in ['\u{2027}', '\u{202f}', '\u{2065}', '\u{206a}'] {
+            let s = format!("a{c}b");
+            assert_eq!(sanitize_text(&s), s, "U+{:04X}", u32::from(c));
+        }
+        // and they go together with the sequences that were already removed
+        assert_eq!(
+            sanitize_text("a\u{1b}[31m\u{202e}b\u{2028}\nc\u{2066}"),
+            "abc"
+        );
+        // Thai, emoji and the joiners that glue them stay
+        assert_eq!(
+            sanitize_text("ไทย 👋 👨\u{200d}👩 ❤\u{fe0f}"),
+            "ไทย 👋 👨\u{200d}👩 ❤\u{fe0f}"
+        );
     }
 
     #[test]
