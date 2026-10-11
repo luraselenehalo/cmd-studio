@@ -15,36 +15,8 @@ use cmdstudio_core::presets;
 use mlua::{Function, Lua, Table, Value};
 use std::path::Path;
 
-const PRELUDE: &str = r#"
-__out = {}
-__env = {}
-__lines = {}
-NONL = {}
-clink = {
-  print = function(s, flag)
-    if flag == NONL then s = "<NONL>" .. s end
-    __out[#__out + 1] = s
-  end,
-  oninject = function(f) __oninject = f end,
-}
-console = {
-  cellcount = function(s)
-    local plain = s:gsub("\27%[[%d;]*m", "")
-    local _, n = plain:gsub("[^\128-\191]", "")
-    return n
-  end,
-  getlinetext = function(n) return __lines[n] end,
-}
-os.getenv = function(k)
-  if __env[k] ~= nil then return __env[k] end
-  if k == "USERNAME" then return "ทดสอบ" end
-  if k == "COMPUTERNAME" then return "PC-01" end
-  return nil
-end
-os.setenv = function(k, v) __env[k] = v end
-os.getcwd = function() return "C:\\Users\\ทดสอบ" end
-log = { info = function() end }
-"#;
+mod common;
+use common::PRELUDE;
 
 /// The Terracotta preset, picked by its key. This file is a crate of its own, so it cannot
 /// see the test-only helper inside `cmdstudio-core`.

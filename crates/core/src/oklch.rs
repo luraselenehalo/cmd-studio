@@ -121,6 +121,22 @@ mod tests {
     }
 
     #[test]
+    fn hue_is_always_from_0_up_to_360() {
+        // atan2 gives -180 to 180 degrees; the hues below 0 are moved up by a full turn. Blue's
+        // is one of them: 264.05 in CSS Color 4, -95.95 without the turn.
+        let blue = Oklch::from_rgb(c("#0000ff"));
+        assert!((blue.h - 264.05).abs() < 0.05, "{blue:?}");
+        for r in (0..=255u8).step_by(17) {
+            for g in (0..=255u8).step_by(17) {
+                for b in (0..=255u8).step_by(17) {
+                    let o = Oklch::from_rgb(Rgb { r, g, b });
+                    assert!((0.0..360.0).contains(&o.h), "#{r:02x}{g:02x}{b:02x}: {o:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn round_trips_within_one_step_per_channel() {
         let d = |x: u8, y: u8| (i16::from(x) - i16::from(y)).abs();
         for r in (0..=255u8).step_by(17) {

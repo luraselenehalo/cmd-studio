@@ -236,11 +236,17 @@ golden_tests! {
     thai_banner: "terracotta.banner.th.lua" = lua::banner_lua(&terracotta(), Lang::Th);
     english_banner: "terracotta.banner.en.lua" = lua::banner_lua(&terracotta(), Lang::En);
     clink_settings: "terracotta.clink_settings" = clink::settings(true, &under_data("generated"));
+    clink_settings_without_transient: "terracotta.no-transient.clink_settings" =
+        clink::settings(false, &under_data("generated"));
 
     // the Windows Terminal values, spec §5.4
     wt_scheme: "terracotta.wt.scheme.json" = json_text(&wt::scheme(&terracotta()));
     wt_profile_for_every_cmd_window: "terracotta.wt.profile.all.json" = wt_profile(Target::All);
     wt_profile_for_windows_terminal_only: "terracotta.wt.profile.wt.json" = wt_profile(Target::Wt);
+
+    // the theme file itself, spec §3.3: what saving and exporting write
+    saved_theme_file: "terracotta.cmdtheme" =
+        String::from_utf8(terracotta().to_file_bytes().unwrap()).unwrap();
 }
 
 #[test]
