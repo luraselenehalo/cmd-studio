@@ -1,5 +1,16 @@
 //! Text helpers shared by the theme model and the generators (spec §3.7).
 
+/// The line and paragraph separators (U+2028, U+2029) and the bidirectional embeddings,
+/// overrides and isolates (U+202A-U+202E, U+2066-U+2069): line breaks and reordering
+/// controls that are not C0/C1 controls. `sanitize_text` removes them and
+/// `safe_file_stem` replaces them, so there is one list of them.
+fn is_separator_or_bidi(c: char) -> bool {
+    matches!(
+        u32::from(c),
+        0x2028 | 0x2029 | 0x202A..=0x202E | 0x2066..=0x2069
+    )
+}
+
 /// Removes escape sequences and every C0/C1 control character (U+0000-U+001F
 /// and U+007F-U+009F, newlines included), so text from a shared theme file can
 /// never drive the terminal. ESC and `[` start a CSI sequence, which ends at its
@@ -30,10 +41,7 @@ pub fn sanitize_text(s: &str) -> String {
             }
             continue;
         }
-        if !matches!(
-            u32::from(ch),
-            0x00..=0x1F | 0x7F..=0x9F | 0x2028 | 0x2029 | 0x202A..=0x202E | 0x2066..=0x2069
-        ) {
+        if !matches!(u32::from(ch), 0x00..=0x1F | 0x7F..=0x9F) && !is_separator_or_bidi(ch) {
             out.push(ch);
         }
     }
@@ -94,9 +102,15 @@ fn cut(s: &str) -> String {
 }
 
 /// Turns a theme name into a file name stem that Windows accepts: at most 100
-/// characters, none of `< > : " / \ | ? *` or a control character, no dot or
-/// space at the end, and not a device name. A name with nothing usable left
-/// becomes `theme`.
+/// characters, none of `< > : " / \ | ? *`, a control character, a line or
+/// paragraph separator or a bidirectional control (U+2028, U+2029, U+202A-U+202E,
+/// U+2066-U+2069), no dot or space at the end, and not a device name. A name with
+/// nothing usable left becomes `theme`.
+///
+/// The bidirectional controls matter most here: a right-to-left override
+/// (U+202E) makes the end of one file name read as the end of another in a file
+/// manager. A name from a theme file has been cleaned of them already, but a name
+/// built in code has not.
 ///
 /// Windows opens `CON`, `nul.txt` and `com1.tar.gz` as devices, so a stem whose
 /// part before the first dot is a device name gets an underscore right after
@@ -108,6 +122,7 @@ pub fn safe_file_stem(name: &str) -> String {
         .map(|c| {
             if matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
                 || u32::from(c) < 0x20
+                || is_separator_or_bidi(c)
             {
                 '_'
             } else {
@@ -335,6 +350,36 @@ mod tests {
     }
 
     #[test]
+    fn line_separators_and_bidi_controls_become_underscores_in_a_file_stem() {
+        // Defense in depth: names are cleaned on import, but a name built in code is not, and a
+        // right-to-left override (U+202E) in a file name is the classic way to make the end of
+        // one name read as the end of another in a file manager.
+        let codes: Vec<u32> = [0x2028, 0x2029]
+            .into_iter()
+            .chain(0x202A..=0x202E)
+            .chain(0x2066..=0x2069)
+            .collect();
+        assert_eq!(codes.len(), 11);
+        for code in codes {
+            let c = char::from_u32(code).unwrap();
+            assert_eq!(safe_file_stem(&format!("a{c}b")), "a_b", "U+{code:04X}");
+        }
+        // the characters on either side of the ranges stay, and so do the joiners
+        for c in [
+            '\u{2027}', '\u{202f}', '\u{2065}', '\u{206a}', '\u{200d}', '\u{fe0f}',
+        ] {
+            let s = format!("a{c}b");
+            assert_eq!(safe_file_stem(&s), s, "U+{:04X}", u32::from(c));
+        }
+        assert_eq!(safe_file_stem("report\u{202e}fdp.exe"), "report_fdp.exe");
+        // a name of nothing else is underscores, like one of any other forbidden character
+        assert_eq!(safe_file_stem("\u{202e}\u{2028}"), "__");
+        // and it stays a stem Windows accepts: no dot or space left at the end
+        assert_eq!(safe_file_stem("name.\u{202e}"), "name._");
+        assert_eq!(safe_file_stem("CON\u{2066}.txt"), "CON_.txt");
+    }
+
+    #[test]
     fn a_name_with_nothing_usable_left_becomes_theme() {
         for name in ["", "   ", ".", "..", " . ", ". . ."] {
             assert_eq!(safe_file_stem(name), "theme", "{name:?}");
@@ -432,6 +477,8 @@ mod tests {
             "/",
             "\t",
             "ก",
+            "\u{202e}",
+            "\u{2028}",
             long.as_str(),
         ];
         let devices = device_names();
@@ -441,8 +488,12 @@ mod tests {
             assert!(!out.is_empty(), "empty: {why}");
             assert!(out.chars().count() <= 100, "too long: {why}");
             assert!(
-                !out.chars()
-                    .any(|c| "<>:\"/\\|?*".contains(c) || u32::from(c) < 0x20),
+                !out.chars().any(|c| "<>:\"/\\|?*".contains(c)
+                    || u32::from(c) < 0x20
+                    || matches!(
+                        u32::from(c),
+                        0x2028 | 0x2029 | 0x202A..=0x202E | 0x2066..=0x2069
+                    )),
                 "forbidden character: {why}"
             );
             assert!(!out.ends_with(['.', ' ']), "ends in a dot or space: {why}");
