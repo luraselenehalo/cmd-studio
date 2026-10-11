@@ -706,11 +706,14 @@ mod tests {
         }
     }
 
-    /// A `MemStore` that writes down each save, and that can fail the n-th save (from 1).
+    /// Whether a save fails, given its number (from 1) and the stage it holds.
+    type FailsSave = Box<dyn Fn(usize, &Stage) -> bool>;
+
+    /// A `MemStore` that writes down each save, and that fails the saves `fail_save` picks.
     #[derive(Default)]
     struct TracedStore {
         saved: Vec<Journal>,
-        fail_save: Option<usize>,
+        fail_save: Option<FailsSave>,
         calls: usize,
         trace: Trace,
     }
@@ -719,7 +722,11 @@ mod tests {
         fn save(&mut self, j: &Journal) -> Result<(), Failure> {
             self.calls += 1;
             self.trace.borrow_mut().push(format!("save {:?}", j.stage));
-            if self.fail_save == Some(self.calls) {
+            if self
+                .fail_save
+                .as_ref()
+                .is_some_and(|fails| fails(self.calls, &j.stage))
+            {
                 return Err(Failure {
                     code: "E_SNAPSHOT_WRITE",
                     message: "journal said no".into(),
@@ -819,7 +826,7 @@ mod tests {
     }
 
     #[test]
-    fn only_committed_and_rolled_back_journals_are_finished() {
+    fn committed_rolled_back_and_incomplete_journals_are_finished() {
         let finished: Vec<bool> = all_stages()
             .into_iter()
             .map(|(stage, _)| journal_in(stage).is_finished())
@@ -932,7 +939,7 @@ mod tests {
         for fail_at in 1..=clean_store.calls {
             let (mut exec, mut store, trace) = traced(machine_with_old_state());
             let before = exec.machine.state.clone();
-            store.fail_save = Some(fail_at);
+            store.fail_save = Some(Box::new(move |n, _| n == fail_at));
             let out = run("t10", ops(), &mut exec, &mut Verify(Ok(())), &mut store);
             assert_eq!(
                 out,
@@ -967,6 +974,93 @@ mod tests {
         assert!(!applied_anything(&trace));
         // The journal is closed, so the next start does not report an interrupted apply.
         assert_eq!(store.saved.last().unwrap().stage, Stage::RolledBack);
+    }
+
+    // ---- A rollback whose own journal saves fail ----
+
+    /// A case: its name, which saves fail, the stage the journal on disk ends in, and what the
+    /// next start reports.
+    type SaveCase = (&'static str, fn(&Stage) -> bool, Stage, Option<Outcome>);
+
+    #[test]
+    fn a_rollback_goes_on_when_its_own_journal_saves_fail() {
+        // A failed apply of wt.json saves planned, snapshotted, applying 1, rolling back 2 and
+        // rolled back. What the journal on disk says in the end decides what the next start does.
+        let cases: [SaveCase; 3] = [
+            (
+                "the rolling-back save fails",
+                |s| matches!(s, Stage::RollingBack { .. }),
+                Stage::RolledBack,
+                None,
+            ),
+            (
+                "the final save fails",
+                |s| matches!(s, Stage::RolledBack),
+                Stage::RollingBack { from: 2 },
+                Some(interrupted()),
+            ),
+            (
+                "both fail",
+                |s| matches!(s, Stage::RollingBack { .. } | Stage::RolledBack),
+                Stage::Applying { done: 1 },
+                Some(interrupted()),
+            ),
+        ];
+        for (name, fails, on_disk, next_start) in cases {
+            let (mut exec, mut store, _) = traced(machine_with_old_state());
+            let before = exec.machine.state.clone();
+            exec.machine.fail_apply_key = Some("wt.json".into());
+            store.fail_save = Some(Box::new(move |_, stage| fails(stage)));
+            let out = run("t19", ops(), &mut exec, &mut Verify(Ok(())), &mut store);
+            // The outcome and the machine don't depend on the journal being written.
+            assert_eq!(
+                out,
+                Outcome::RolledBack {
+                    code: "E_WT_WRITE",
+                    reason: "disk said no".into()
+                },
+                "{name}"
+            );
+            assert_eq!(exec.machine.state, before, "{name}");
+            assert_eq!(store.saved.last().unwrap().stage, on_disk, "{name}");
+            // The next start finishes what the journal left open, and changes nothing more.
+            store.fail_save = None;
+            assert_eq!(recover(&mut exec, &mut store), next_start, "{name}");
+            assert_eq!(exec.machine.state, before, "{name}");
+        }
+    }
+
+    #[test]
+    fn an_incomplete_rollback_that_cannot_be_journaled_is_tried_again_at_the_next_start() {
+        let (mut exec, mut store, _) = traced(machine_with_old_state());
+        let before = exec.machine.state.clone();
+        exec.machine.fail_apply_key = Some("wt.json".into());
+        exec.machine
+            .fail_restore
+            .insert("a.lua".into(), failure("E_ROLLBACK_INCOMPLETE", "locked"));
+        store.fail_save = Some(Box::new(|_, stage| {
+            matches!(stage, Stage::RollbackIncomplete { .. })
+        }));
+        let out = run("t20", ops(), &mut exec, &mut Verify(Ok(())), &mut store);
+        // The outcome is still the truth: a.lua was not restored.
+        assert_eq!(
+            out,
+            Outcome::RollbackIncomplete {
+                code: "E_WT_WRITE",
+                reason: "disk said no".into(),
+                failed: vec![(0, failure("E_ROLLBACK_INCOMPLETE", "locked"))]
+            }
+        );
+        // The journal could not be closed, so it still says RollingBack and the next start
+        // tries again. By then the lock is gone.
+        assert_eq!(
+            store.saved.last().unwrap().stage,
+            Stage::RollingBack { from: 2 }
+        );
+        store.fail_save = None;
+        exec.machine.fail_restore.clear();
+        assert_eq!(recover(&mut exec, &mut store), Some(interrupted()));
+        assert_eq!(exec.machine.state, before);
     }
 
     // ---- What `recover` restores ----
