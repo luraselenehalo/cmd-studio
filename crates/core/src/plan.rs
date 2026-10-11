@@ -170,8 +170,10 @@ pub struct Plan {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PlanError {
-    #[error("another Clink runs from cmd's AutoRun: {existing}")]
-    ForeignClink { existing: String },
+    /// Another Clink runs from AutoRun. `existing` is every command that turning it off takes
+    /// out, so the user sees all of them before agreeing.
+    #[error("another Clink runs from cmd's AutoRun, in these commands: {existing:?}")]
+    ForeignClink { existing: Vec<String> },
     /// A path that would go into a cmd command or into Clink's settings holds `%`, `"` or
     /// `;`, or is not Unicode (spec §5.4).
     #[error("cmd or Clink can't take this path: it holds %, a double quote, ; or text that is not Unicode: {0:?}")]
@@ -180,13 +182,12 @@ pub enum PlanError {
     NoClinkPath(PathBuf),
     #[error("could not build the Oh My Posh config: {0}")]
     Generate(String),
-    /// AutoRun holds a command that the plan would take out, ours or another Clink the user
-    /// agreed to turn off, combined with other commands by a pipe, parentheses or an unclosed
-    /// quote, so taking it out would change them too. `part` is that command. The user edits
-    /// AutoRun by hand.
-    #[error(
-        "AutoRun holds a command combined with others that CMD Studio can't safely change: {part}"
-    )]
+    /// AutoRun can't be changed safely, so the user edits it by hand. `part` is the command at
+    /// fault: one that holds our profile path without being one of our entries, or another
+    /// Clink the user agreed to turn off that a pipe, parentheses or an unclosed quote combine
+    /// with other commands. It is the whole value when cmd itself rejects the value: nothing
+    /// in it runs then, and our entry in front of it would not run either.
+    #[error("AutoRun holds a command that CMD Studio can't safely change, so it needs a hand edit: {part}")]
     AutoRunNeedsHandEdit { part: String },
 }
 
@@ -243,16 +244,22 @@ fn checked(p: &Path) -> Result<&str, PlanError> {
     }
 }
 
-/// Our AutoRun entry (spec §5.4). It refuses the paths that cmd or Clink can't take (see
-/// `checked`): `<clink-launch>`, and the profile path. The profile path stands for every
-/// path under `<data>` that the generated files hold (`generated`, `runtime\omp-<ver>`),
-/// because what follows `<data>` in each of them is fixed ASCII.
+/// Our AutoRun entry (spec §5.4):
+/// `(if exist "<clink-launch>" "<clink-launch>" inject --autorun --quiet --profile "<profile>")`.
+/// cmd's `if` takes the rest of its line as its body, so the parentheses end ours: placed in
+/// front of other programs' commands, it neither takes them into its `if` nor becomes part of
+/// theirs.
+///
+/// It refuses the paths that cmd or Clink can't take (see `checked`): `<clink-launch>`, and
+/// the profile path. The profile path stands for every path under `<data>` that the generated
+/// files hold (`generated`, `runtime\omp-<ver>`), because what follows `<data>` in each of
+/// them is fixed ASCII.
 pub fn autorun_entry(launch: &ClinkLaunch, paths: &Paths) -> Result<String, PlanError> {
     let (exe_path, profile_path) = (launch.exe(), paths.clink_profile());
     let exe = checked(&exe_path)?;
     let profile = checked(&profile_path)?;
     Ok(format!(
-        r#"if exist "{exe}" "{exe}" inject --autorun --quiet --profile "{profile}""#
+        r#"(if exist "{exe}" "{exe}" inject --autorun --quiet --profile "{profile}")"#
     ))
 }
 
@@ -286,8 +293,7 @@ fn wt_font(theme: &Theme, machine: &Machine, warnings: &mut Vec<Warning>) -> Str
 /// is touched, with `E_CLINK_PATH` when cmd or Clink can't take a path (see
 /// [`clink_launch`] and [`autorun_entry`]), with `E_AUTORUN_FOREIGN_CLINK` when another
 /// Clink runs from AutoRun and the user has not agreed to turn it off, and with
-/// `E_AUTORUN_WRITE` when a command it would take out of AutoRun, ours or that other Clink,
-/// is combined with others in a way it can't take apart safely.
+/// `E_AUTORUN_WRITE` when AutoRun can't be changed safely (see `autorun::edit_autorun`).
 pub fn plan(
     theme: &Theme,
     req: &Request,
@@ -377,30 +383,32 @@ pub fn plan(
     let current = machine.autorun_hkcu.as_deref().unwrap_or_default();
     // `autorun_entry` has refused a profile path cmd can't take; this gets its text.
     let profile = paths.clink_profile();
-    let (next, replaced) = autorun::edit_autorun(
+    let edit = autorun::edit_autorun(
         current,
         req.target,
         &entry,
         checked(&profile)?,
         req.replace_foreign_clink,
     )?;
-    if replaced {
+    if edit.removed_foreign {
         th.push("ปิดส่วนเสริมของ cmd ตัวเดิมที่ติดตั้งไว้ก่อน (ย้อนกลับได้)");
         en.push("Turn off the cmd add-on that was set up before (can be undone)");
     }
-    if next != current {
+    if edit.value != current {
         match req.target {
             Target::All => {
                 th.push("ให้ cmd ทุกหน้าต่างใช้ธีมนี้");
                 en.push("Use this theme in every cmd window");
             }
-            Target::Wt => {
+            // Only when ours goes: taking out another Clink stops no theme of ours.
+            Target::Wt if edit.removed_ours => {
                 th.push("หยุดโหลดธีมในหน้าต่าง cmd นอก Windows Terminal");
                 en.push("Stop loading the theme in cmd windows outside Windows Terminal");
             }
+            Target::Wt => {}
         }
         // A value with nothing but whitespace left is deleted.
-        let value = (!next.trim().is_empty()).then_some(next);
+        let value = (!edit.value.trim().is_empty()).then_some(edit.value);
         ops.push(Op::SetAutoRun { value });
     }
 
@@ -415,7 +423,7 @@ pub fn plan(
 
 #[cfg(test)]
 mod tests {
-    use super::autorun::{parts, scan};
+    use super::autorun::scan;
     use super::*;
     use crate::generate::lua::Lang;
     use crate::model::Target;
@@ -459,7 +467,8 @@ mod tests {
         autorun_entry(&ClinkLaunch::ShortPath(PathBuf::from(SHORT_EXE)), &paths()).unwrap()
     }
 
-    /// Our entry as an older version wrote it: Clink 1.9.0, run from its real path.
+    /// Our entry as an earlier build wrote it: no parentheses, and Clink 1.9.0 from its real
+    /// path.
     fn old_entry() -> String {
         format!(
             r#"if exist "{DATA}\runtime\clink-1.9.0\clink_x64.exe" "{DATA}\runtime\clink-1.9.0\clink_x64.exe" inject --autorun --quiet --profile "{DATA}\clink-profile""#
@@ -491,18 +500,15 @@ mod tests {
             .unwrap()
     }
 
-    /// The commands `parts` finds in `value`.
-    fn texts(value: &str) -> Vec<String> {
-        parts(value).into_iter().map(|p| p.text).collect()
-    }
-
     #[test]
     fn clean_machine_gets_runtime_files_wt_and_autorun() {
         let p = plan(&terracotta(), &req(Target::All), &machine(), &paths()).unwrap();
+        // In parentheses, so that no `if` or `for` of another program around it takes it in,
+        // and its own `if` takes in nothing after it.
         assert_eq!(
             entry(),
             format!(
-                r#"if exist "{SHORT_EXE}" "{SHORT_EXE}" inject --autorun --quiet --profile "{DATA}\clink-profile""#
+                r#"(if exist "{SHORT_EXE}" "{SHORT_EXE}" inject --autorun --quiet --profile "{DATA}\clink-profile")"#
             )
         );
         assert_eq!(autorun(&p), Some(Some(entry())));
@@ -566,7 +572,7 @@ mod tests {
         }));
         let value = autorun(&p).unwrap().unwrap();
         assert!(value.starts_with(&format!(
-            r#"if exist "{PROGRAM_DATA}\clink-1.9.34\clink_x64.exe" "#
+            r#"(if exist "{PROGRAM_DATA}\clink-1.9.34\clink_x64.exe" "#
         )));
         assert!(p
             .summary_th
@@ -610,7 +616,7 @@ mod tests {
         let mut m = machine();
         m.autorun_hkcu = Some(anaconda.to_string());
         let p = plan(&terracotta(), &req(Target::All), &m, &paths()).unwrap();
-        assert_eq!(autorun(&p), Some(Some(format!("{anaconda} & {}", entry()))));
+        assert_eq!(autorun(&p), Some(Some(format!("{} & {anaconda}", entry()))));
     }
 
     #[test]
@@ -619,7 +625,7 @@ mod tests {
         let mut m = machine();
         m.autorun_hkcu = Some(format!("echo hi & {old}"));
         let p = plan(&terracotta(), &req(Target::All), &m, &paths()).unwrap();
-        assert_eq!(autorun(&p), Some(Some(format!("echo hi & {}", entry()))));
+        assert_eq!(autorun(&p), Some(Some(format!("{} & echo hi", entry()))));
     }
 
     #[test]
@@ -640,8 +646,12 @@ mod tests {
         assert_eq!(
             err,
             PlanError::ForeignClink {
-                existing: foreign.to_string()
+                existing: vec![foreign.to_string()]
             }
+        );
+        assert_eq!(
+            err.to_string(),
+            r#"another Clink runs from cmd's AutoRun, in these commands: ["\"C:\\Program Files (x86)\\clink\\clink.bat\" inject --autorun"]"#
         );
         let mut r = req(Target::All);
         r.replace_foreign_clink = true;
@@ -658,7 +668,7 @@ mod tests {
     #[test]
     fn wt_target_removes_our_entry_and_injects_from_the_profile() {
         let mut m = machine();
-        m.autorun_hkcu = Some(format!("echo hi & {}", entry()));
+        m.autorun_hkcu = Some(format!("{} & echo hi", entry()));
         let p = plan(&terracotta(), &req(Target::Wt), &m, &paths()).unwrap();
         assert_eq!(autorun(&p), Some(Some("echo hi".to_string())));
         assert_eq!(
@@ -807,7 +817,9 @@ mod tests {
         let launch = clink_launch(&p, &Machine::default()).unwrap();
         let entry = autorun_entry(&launch, &p).unwrap();
         assert!(entry.contains(r#""C:\Users\R&D Team\x\runtime\clink-1.9.34\clink_x64.exe""#));
-        assert_eq!(parts(&entry).len(), 1);
+        let read = scan(&entry);
+        assert_eq!(read.parts.len(), 1);
+        assert!(!read.rejected);
     }
 
     #[test]
@@ -815,82 +827,7 @@ mod tests {
         let mut m = machine();
         m.autorun_hkcu = Some("a && b".to_string());
         let p = plan(&terracotta(), &req(Target::All), &m, &paths()).unwrap();
-        assert_eq!(autorun(&p), Some(Some(format!("a && b & {}", entry()))));
-    }
-
-    #[test]
-    fn a_caret_escaped_ampersand_is_not_a_separator() {
-        // cmd reads `^&` as a plain `&`, so `echo a ^& b` is one command, kept as written.
-        assert_eq!(
-            set_autorun(Some("echo a ^& b"), Target::All),
-            Some(Some(format!("echo a ^& b & {}", entry())))
-        );
-    }
-
-    #[test]
-    fn other_programs_separators_keep_their_spacing() {
-        for foreign in ["a&&b", "a&b", "a  &   b"] {
-            assert_eq!(
-                set_autorun(Some(foreign), Target::All),
-                Some(Some(format!("{foreign} & {}", entry()))),
-                "{foreign}"
-            );
-        }
-    }
-
-    #[test]
-    fn our_older_entry_is_replaced_wherever_it_stands() {
-        let (old, new) = (old_entry(), entry());
-        for (current, next) in [
-            (format!("{old} & y"), format!("y & {new}")),
-            (format!("x & {old} & y"), format!("x & y & {new}")),
-            (format!("x & {old}"), format!("x & {new}")),
-            (format!("x&&{old}&y"), format!("x&y & {new}")),
-        ] {
-            assert_eq!(
-                set_autorun(Some(&current), Target::All),
-                Some(Some(next)),
-                "{current}"
-            );
-        }
-    }
-
-    #[test]
-    fn wt_target_takes_our_entry_out_wherever_it_stands() {
-        let ours = entry();
-        for (current, next) in [
-            (format!("x & {ours} & y"), "x & y"),
-            (format!("{ours} & y"), "y"),
-            (format!("x & {ours}"), "x"),
-            (format!("x && {ours}"), "x"),
-            (format!("x & {}", old_entry()), "x"),
-        ] {
-            assert_eq!(
-                set_autorun(Some(&current), Target::Wt),
-                Some(Some(next.to_string())),
-                "{current}"
-            );
-        }
-    }
-
-    #[test]
-    fn an_ampersand_inside_quotes_does_not_split_a_command() {
-        let current = format!(r#""C:\a&b\x.bat" & {}"#, entry());
-        assert_eq!(
-            set_autorun(Some(&current), Target::Wt),
-            Some(Some(r#""C:\a&b\x.bat""#.to_string()))
-        );
-    }
-
-    #[test]
-    fn a_caret_escaped_quote_does_not_start_quoting() {
-        // Were `^"` to open a quote, the `&` after it would be quoted, our entry would be one
-        // command with `echo`, and taking ours out would take `echo` with it.
-        let current = format!(r#"echo ^"a & {}"#, entry());
-        assert_eq!(
-            set_autorun(Some(&current), Target::Wt),
-            Some(Some(r#"echo ^"a"#.to_string()))
-        );
+        assert_eq!(autorun(&p), Some(Some(format!("{} & a && b", entry()))));
     }
 
     #[test]
@@ -901,283 +838,39 @@ mod tests {
 
     #[test]
     fn wt_target_leaves_a_value_without_ours_alone() {
-        for current in [None, Some(""), Some("  "), Some("echo hi"), Some("a&&b")] {
+        // A value cmd rejects included: with nothing to take out, it is not ours to fix.
+        for current in [
+            None,
+            Some(""),
+            Some("  "),
+            Some("echo hi"),
+            Some("a&&b"),
+            Some("a & & b"),
+        ] {
             assert_eq!(set_autorun(current, Target::Wt), None, "{current:?}");
         }
     }
 
     #[test]
-    fn a_foreign_clink_goes_without_touching_the_parts_around_it() {
-        let clink = r#""C:\Program Files (x86)\clink\clink.bat" inject --autorun"#;
-        let mut m = machine();
-        m.autorun_hkcu = Some(format!("x&&{clink} & echo a ^& b"));
-        let mut r = req(Target::All);
+    fn wt_target_says_it_stops_loading_the_theme_only_when_our_entry_goes() {
+        let stop_th = "หยุดโหลดธีมในหน้าต่าง cmd นอก Windows Terminal";
+        let stop_en = "Stop loading the theme in cmd windows outside Windows Terminal";
+        let mut r = req(Target::Wt);
         r.replace_foreign_clink = true;
+        // Only another Clink goes: nothing of ours was loading the theme there.
+        let mut m = machine();
+        m.autorun_hkcu = Some(r#""C:\clink\clink.bat" inject & echo hi"#.to_string());
         let p = plan(&terracotta(), &r, &m, &paths()).unwrap();
-        assert_eq!(
-            autorun(&p),
-            Some(Some(format!("x & echo a ^& b & {}", entry())))
-        );
-    }
-
-    #[test]
-    fn all_then_wt_gives_back_every_foreign_value() {
-        // Doctrine guard (ค), spec §7: the AutoRun writer never removes or changes a part that
-        // is not ours. Applying a theme to every cmd window and then to Windows Terminal only
-        // gives back what other programs wrote, byte for byte.
-        let foreign = [
-            r#""C:\ProgramData\anaconda3\condabin\conda_hook.bat""#,
-            r#"if exist "C:\Users\me\miniconda3\condabin\conda_hook.bat" "C:\Users\me\miniconda3\condabin\conda_hook.bat""#,
-            "echo a ^& b",
-            r#"echo ^"a"#,
-            r#""C:\a^"&b"#,
-            "a&&b",
-            "a && b",
-            "a&b",
-            "a\t&\tb",
-            r#""C:\a&b\x.bat""#,
-            "@chcp 65001>nul",
-            r#"doskey /macrofile="C:\Users\me\macros.txt" & cls"#,
-            "prompt $p$g",
-            "cls  ",
-            "  cls",
-            "x||y",
-            "x || y",
-            "a | b",
-            "(echo a & echo b)",
-            r#"if exist "C:\x.bat" (call "C:\x.bat")"#,
-            r#"echo สวัสดี & cd /d "D:\งาน""#,
-        ];
-        for v in foreign {
-            let all = format!("{v} & {}", entry());
-            assert_eq!(
-                set_autorun(Some(v), Target::All),
-                Some(Some(all.clone())),
-                "{v}"
-            );
-            assert_eq!(set_autorun(Some(&all), Target::All), None, "again: {v}");
-            assert_eq!(
-                set_autorun(Some(&all), Target::Wt),
-                Some(Some(v.to_string())),
-                "{v}"
-            );
-        }
-    }
-
-    #[test]
-    fn parts_follow_cmds_quotes_and_carets() {
-        assert_eq!(texts("a & b && c"), ["a", "b", "c"]);
-        assert_eq!(texts("a&b&&c"), ["a", "b", "c"]);
-        assert_eq!(texts(r#""x & y" & z"#), [r#""x & y""#, "z"]);
-        assert_eq!(texts("echo a ^& b"), ["echo a ^& b"]);
-        assert_eq!(texts(r#"echo ^"a & b"#), [r#"echo ^"a"#, "b"]);
-        // Inside quotes a caret is plain text, so the quote after it still closes.
-        assert_eq!(texts(r#""a^" & b"#), [r#""a^""#, "b"]);
-        assert_eq!(texts(" \ta  b \t& b"), ["a  b", "b"]);
-        // An empty command is no part.
-        assert_eq!(texts("a & & b"), ["a", "b"]);
-        assert!(texts("").is_empty());
-        assert!(texts(" \t ").is_empty());
-        // `||` separates commands like `&&`; a single `|` is a pipe inside one command.
-        assert_eq!(texts("a||b || c"), ["a", "b", "c"]);
-        assert_eq!(texts("a | b & c"), ["a | b", "c"]);
-        assert_eq!(texts("a ^|| b"), ["a ^|| b"]);
-    }
-
-    #[test]
-    fn scan_tells_whether_a_value_ends_cleanly() {
-        for v in [
-            "",
-            "  ",
-            "a",
-            "a & b",
-            "a ^& b",
-            r#""a & b""#,
-            "a^^",
-            "a|b",
-            "a || b",
-        ] {
-            assert!(scan(v).clean_end, "{v}");
-        }
-        // Inside an unclosed quote, after a lone caret, or after a separator.
-        for v in [
-            r#""a"#,
-            r#"a "b & c"#,
-            "a ^",
-            "^",
-            "a &",
-            "a&&",
-            "a && \t",
-            "a ||",
-            "&",
-        ] {
-            assert!(!scan(v).clean_end, "{v}");
-        }
-    }
-
-    #[test]
-    fn a_value_that_does_not_end_cleanly_gets_our_entry_in_front() {
-        // Text after such a value would be quoted, escaped or read after an empty command,
-        // so our entry goes first and the value stays as it was, byte for byte.
-        for v in [
-            r#""C:\x.bat"#,
-            r#"call "C:\my tools\x.bat"#,
-            "a &",
-            "a && \t",
-            "a ||",
-            "echo hi ^",
-        ] {
-            let all = format!("{} & {v}", entry());
-            assert_eq!(
-                set_autorun(Some(v), Target::All),
-                Some(Some(all.clone())),
-                "{v}"
-            );
-            assert_eq!(set_autorun(Some(&all), Target::All), None, "again: {v}");
-            assert_eq!(
-                set_autorun(Some(&all), Target::Wt),
-                Some(Some(v.to_string())),
-                "{v}"
-            );
-            // An older entry of ours in front gives way to the current one.
-            let old = format!("{} & {v}", old_entry());
-            assert_eq!(
-                set_autorun(Some(&old), Target::All),
-                Some(Some(all)),
-                "old: {v}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_double_bar_next_to_our_entry_goes_with_it() {
-        let ours = entry();
-        for (current, next) in [
-            (format!("x || {ours}"), "x"),
-            (format!("{ours} || y"), "y"),
-            (format!("x||{ours}||y"), "x||y"),
-        ] {
-            assert_eq!(
-                set_autorun(Some(&current), Target::Wt),
-                Some(Some(next.to_string())),
-                "{current}"
-            );
-        }
-    }
-
-    #[test]
-    fn taking_ours_out_never_pairs_a_bar_with_another() {
-        // Were the `&` before ours taken out, the `|` of `x|` would meet the `||` after ours,
-        // and cmd would read `x||` and `|y`. The separator after ours goes instead.
-        let current = format!("x|&{}||y", entry());
-        assert_eq!(
-            set_autorun(Some(&current), Target::Wt),
-            Some(Some("x|&y".to_string()))
-        );
-        assert_eq!(texts("x|&y"), ["x|", "y"]);
-    }
-
-    #[test]
-    fn ours_combined_with_another_command_is_left_for_a_hand_edit() {
-        let ours = entry();
-        for current in [
-            format!("x | {ours}"),
-            format!("{ours} | more"),
-            format!("(a & {ours})"),
-            format!("if defined X ({ours})"),
-            // An unclosed quote runs `y.bat` into ours.
-            format!(r#""C:\y.bat & {ours}"#),
-        ] {
-            for target in [Target::All, Target::Wt] {
-                let mut m = machine();
-                m.autorun_hkcu = Some(current.clone());
-                let err = plan(&terracotta(), &req(target), &m, &paths()).unwrap_err();
-                assert!(
-                    matches!(err, PlanError::AutoRunNeedsHandEdit { .. }),
-                    "{current}: {err:?}"
-                );
-                assert_eq!(err.code(), "E_AUTORUN_WRITE");
-            }
-        }
-        let mut m = machine();
-        m.autorun_hkcu = Some(format!("x | {ours}"));
-        let err = plan(&terracotta(), &req(Target::Wt), &m, &paths()).unwrap_err();
-        assert_eq!(
-            err,
-            PlanError::AutoRunNeedsHandEdit {
-                part: format!("x | {ours}")
-            }
-        );
-        assert!(err.to_string().contains("can't safely change"), "{err}");
-    }
-
-    #[test]
-    fn a_combined_foreign_clink_is_left_for_a_hand_edit() {
-        for (current, part) in [
-            ("x | clink inject", "x | clink inject"),
-            ("clink inject | more", "clink inject | more"),
-            ("(a & clink inject)", "clink inject)"),
-            (
-                r#"if exist "C:\c\clink.bat" ("C:\c\clink.bat" inject)"#,
-                r#"if exist "C:\c\clink.bat" ("C:\c\clink.bat" inject)"#,
-            ),
-            // An unclosed quote runs `x.bat` into the other Clink.
-            (r#""C:\x.bat & clink inject"#, r#""C:\x.bat & clink inject"#),
-        ] {
-            let mut m = machine();
-            m.autorun_hkcu = Some(current.to_string());
-            for target in [Target::All, Target::Wt] {
-                // Without the user's agreement, the question about the other Clink comes first.
-                let err = plan(&terracotta(), &req(target), &m, &paths()).unwrap_err();
-                assert_eq!(
-                    err,
-                    PlanError::ForeignClink {
-                        existing: part.to_string()
-                    }
-                );
-                let mut r = req(target);
-                r.replace_foreign_clink = true;
-                let err = plan(&terracotta(), &r, &m, &paths()).unwrap_err();
-                assert_eq!(
-                    err,
-                    PlanError::AutoRunNeedsHandEdit {
-                        part: part.to_string()
-                    },
-                    "{current}"
-                );
-                assert_eq!(err.code(), "E_AUTORUN_WRITE");
-            }
-        }
-    }
-
-    #[test]
-    fn parentheses_in_our_own_paths_are_quoted_and_do_not_count() {
-        // A user folder may be named `John (Work)`; our entry quotes its paths.
-        let p = Paths {
-            data: PathBuf::from(r"C:\Users\John (Work)\AppData\Local\ai.resincore.cmdstudio"),
-        };
-        let mut m = machine();
-        let ours = autorun_entry(&clink_launch(&p, &m).unwrap(), &p).unwrap();
-        m.autorun_hkcu = Some(format!("x & {ours}"));
-        let planned = plan(&terracotta(), &req(Target::Wt), &m, &p).unwrap();
-        assert_eq!(autorun(&planned), Some(Some("x".to_string())));
-    }
-
-    #[test]
-    fn our_older_entry_is_found_whatever_the_case_of_its_profile_path() {
-        // Windows reads `...\CLINK-PROFILE` and `...\clink-profile` as one folder.
-        let profile = format!(r"{DATA}\clink-profile");
-        let old = old_entry().replace(&profile, &profile.to_uppercase());
-        assert_ne!(old, old_entry());
-        let current = format!("echo hi & {old}");
-        assert_eq!(
-            set_autorun(Some(&current), Target::All),
-            Some(Some(format!("echo hi & {}", entry())))
-        );
-        assert_eq!(
-            set_autorun(Some(&current), Target::Wt),
-            Some(Some("echo hi".to_string()))
-        );
+        assert_eq!(autorun(&p), Some(Some("echo hi".to_string())));
+        assert!(!p.summary_th.contains(&stop_th) && !p.summary_en.contains(&stop_en));
+        assert!(p
+            .summary_en
+            .contains(&"Turn off the cmd add-on that was set up before (can be undone)"));
+        // Our entry goes.
+        m.autorun_hkcu = Some(format!("{} & echo hi", entry()));
+        let p = plan(&terracotta(), &r, &m, &paths()).unwrap();
+        assert_eq!(autorun(&p), Some(Some("echo hi".to_string())));
+        assert!(p.summary_th.contains(&stop_th) && p.summary_en.contains(&stop_en));
     }
 
     #[test]
@@ -1188,7 +881,8 @@ mod tests {
         m.data_short = None;
         m.program_data_dir = Some(PathBuf::from(PROGRAM_DATA));
         m.fonts.clear();
-        m.autorun_hkcu = Some(r#""C:\clink\clink.bat" inject"#.to_string());
+        // An older entry of ours and another Clink: every AutoRun line, for both targets.
+        m.autorun_hkcu = Some(format!(r#"{} & "C:\clink\clink.bat" inject"#, entry()));
         let mut lines = std::collections::BTreeSet::new();
         for target in [Target::All, Target::Wt] {
             let mut r = req(target);
