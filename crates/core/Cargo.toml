@@ -26,6 +26,24 @@ schemars = { version = "1", features = ["uuid1"] }
 # The registry adapter (`adapters::windows::registry`); `adapters::windows` is cfg(windows) too.
 [target.'cfg(windows)'.dependencies]
 winreg = "=0.56.0"
+# host.rs: Foundation, Globalization, Security(+Authorization), Storage_FileSystem,
+# Storage_Packaging_Appx, System_Com, System_SystemInformation, System_SystemServices,
+# System_Threading, UI_Shell. fonts.rs: Foundation, Graphics_Gdi, UI_WindowsAndMessaging.
+windows-sys = { version = "=0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_Storage_Packaging_Appx",
+    "Win32_System_Com",
+    "Win32_System_SystemInformation",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [dev-dependencies]
 proptest = "1"

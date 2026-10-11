@@ -7,9 +7,13 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
 [workspace.lints.clippy]
 unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"
 indexing_slicing = "deny"
 string_slice = "deny"
+undocumented_unsafe_blocks = "deny"
