@@ -725,11 +725,13 @@ fn every_theme_prints_one_valid_box_once_per_session() -> mlua::Result<()> {
 // ---- init.lua (spec §5.4, G17) ----
 
 /// A stand-in for `io.popen` that records each command and answers `__popen_result`, or nil
-/// when that is unset, which is what `io.popen` gives when the command cannot start.
+/// when that is unset, which is what `io.popen` gives when the command cannot start. `print`
+/// is a stand-in too, so that anything init.lua prints shows up in `printed` like `clink.print`.
 const INIT_STUBS: &str = r#"
 __popen_cmds = {}
 __logs = {}
 log = { info = function(s) __logs[#__logs + 1] = s end }
+print = function(...) __out[#__out + 1] = "<print>" .. table.concat({...}, " ") end
 io.popen = function(cmd)
   __popen_cmds[#__popen_cmds + 1] = cmd
   if __popen_result == nil then return nil end
@@ -763,7 +765,9 @@ fn strings(lua: &Lua, global: &str) -> mlua::Result<Vec<String>> {
 #[test]
 fn init_runs_oh_my_posh_by_its_full_path_in_the_form_cmd_needs() -> mlua::Result<()> {
     // `cmd /c` drops the outer quotes of what io.popen gives it, so the command is
-    // `""<exe>" init cmd --config "<config>""` (G17), whatever the two paths hold
+    // `""<exe>" init cmd --config "<config>" 2>nul"` (G17), whatever the two paths hold. The
+    // redirect is inside the outer quotes: io.popen pipes stdout only, so cmd's own error text
+    // (a missing exe) would otherwise be printed in every window.
     for (exe, config) in [
         (
             r"C:\Users\ทดสอบ ผู้ใช้\AppData\Local\ai.resincore.cmdstudio\runtime\omp-31.5.0\oh-my-posh.exe",
@@ -776,11 +780,12 @@ fn init_runs_oh_my_posh_by_its_full_path_in_the_form_cmd_needs() -> mlua::Result
         (r"E:\100 percent\'it's'\omp.exe", r"E:\[=[ ]=]\t.json"),
     ] {
         let lua = load_init(exe, config, Some("__prompt = 'loaded'"))?;
-        let want = format!("\"\"{exe}\" init cmd --config \"{config}\"\"");
+        let want = format!("\"\"{exe}\" init cmd --config \"{config}\" 2>nul\"");
         assert_eq!(strings(&lua, "__popen_cmds")?, [want]);
         // what Oh My Posh printed was loaded and run
         assert_eq!(lua.globals().get::<String>("__prompt")?, "loaded");
         assert_eq!(strings(&lua, "__logs")?, ["cmdstudio: prompt loaded"]);
+        assert!(printed(&lua)?.is_empty());
     }
     Ok(())
 }
@@ -803,6 +808,35 @@ fn init_gives_up_quietly_when_oh_my_posh_prints_nothing_or_nonsense() -> mlua::R
         assert!(logs[0].starts_with(logged), "{result:?}: {logs:?}");
         let prompt: Value = lua.globals().get("__prompt")?;
         assert!(prompt.is_nil(), "{result:?}");
+        assert!(printed(&lua)?.is_empty(), "{result:?}");
+    }
+    Ok(())
+}
+
+#[test]
+fn init_logs_and_prints_nothing_when_the_oh_my_posh_script_raises() -> mlua::Result<()> {
+    // The script parses, so `load` accepts it, and then it raises while it runs. That must not
+    // reach the window as an error: init.lua runs in every cmd window, so it only logs. The
+    // failures are not all strings: `error({})` and `error(nil)` must not break the log line.
+    for (script, detail) in [
+        (
+            "error('boom from the init script')",
+            "boom from the init script",
+        ),
+        ("local missing = nil\nmissing()", "attempt to call"),
+        ("__prompt = 'half done'\nerror('late boom')", "late boom"),
+        ("error({})", "table:"),
+        ("error(nil)", "nil"),
+    ] {
+        let lua = load_init(r"C:\omp.exe", r"C:\t.json", Some(script))?;
+        let logs = strings(&lua, "__logs")?;
+        assert_eq!(logs.len(), 1, "{script:?}: {logs:?}");
+        assert!(
+            logs[0].starts_with("cmdstudio: oh-my-posh init failed: "),
+            "{script:?}: {logs:?}"
+        );
+        assert!(logs[0].contains(detail), "{script:?}: {logs:?}");
+        assert!(printed(&lua)?.is_empty(), "{script:?}");
     }
     Ok(())
 }
