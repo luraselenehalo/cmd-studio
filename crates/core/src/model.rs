@@ -16,9 +16,10 @@ pub const MAX_FILE_BYTES: usize = 64 * 1024;
 /// [`Theme::validate`] reads them to enforce them, so the schema and the parser cannot
 /// drift apart. Lengths count characters (Unicode code points), as JSON Schema does.
 ///
-/// The schema describes the file as written. `validate` judges the name, the author and
-/// the font as import keeps them, cleaned and trimmed, and that is a little more lenient
-/// than the schema where the file has control characters or blanks around those.
+/// The schema describes the file as written. `validate` judges every text as import keeps
+/// it, cleaned (and, for the name, the author and the font, trimmed), and that is a little
+/// more lenient than the schema where a file has control characters or blanks in those.
+/// The files `to_file_bytes` writes never do: they hold the cleaned form.
 pub mod limits {
     /// `name`: at least this many characters.
     pub const NAME_MIN_CHARS: usize = 1;
@@ -267,6 +268,16 @@ fn cleaned(text: &str) -> String {
     sanitize_text(text).trim().to_string()
 }
 
+/// A file of more than `MAX_FILE_BYTES` is refused (spec §3.7 #5). `parse_theme` applies this
+/// to what it is given and `to_file_bytes` to what it writes, so the two cannot disagree
+/// about the limit.
+fn check_size(len: usize) -> Result<(), ThemeError> {
+    if len > MAX_FILE_BYTES {
+        return Err(ThemeError::TooLarge);
+    }
+    Ok(())
+}
+
 /// 0 is not a version, and a number above ours comes from a newer CMD Studio.
 fn check_schema_version(version: u64) -> Result<(), ThemeError> {
     if version == 0 {
@@ -334,11 +345,12 @@ impl Theme {
     /// Checks every rule of spec §3.3 that the types do not already enforce, so a theme
     /// built in code is held to the same rules as a parsed one.
     ///
-    /// Name, author and font are judged as import keeps them, cleaned and trimmed, so the
-    /// answer is the same before and after [`Theme::sanitize`], and a theme that passes
-    /// is one that `parse_theme` takes back (a name of nothing but blanks, or an author
-    /// that is 65 characters once its control characters are gone, does not pass). The banner
-    /// is judged as it is: import only cleans it, which cannot make it longer.
+    /// Every text is judged as import keeps it, so the answer is the same before and after
+    /// [`Theme::sanitize`], and a theme that passes is one that `parse_theme` takes back
+    /// and `to_file_bytes` writes. Name, author and font are cleaned and trimmed (a name of
+    /// nothing but blanks, or an author that is 65 characters once its control characters
+    /// are gone, does not pass); the banner texts are cleaned only, because a banner is
+    /// laid out by its spaces.
     pub fn validate(&self) -> Result<(), ThemeError> {
         check_schema_version(u64::from(self.schema_version))?;
         check_id(&self.id)?;
@@ -372,34 +384,38 @@ impl Theme {
         if !self.prompt.segments.iter().all(|s| seen.insert(*s)) {
             return field("prompt.segments", "must not repeat");
         }
-        if self.banner.title.chars().count() > limits::TITLE_MAX_CHARS {
+        if sanitize_text(&self.banner.title).chars().count() > limits::TITLE_MAX_CHARS {
             return field("banner.title", "must be at most 80 characters");
         }
         let lines = &self.banner.lines;
         if lines.len() > limits::LINES_MAX
             || lines
                 .iter()
-                .any(|l| l.chars().count() > limits::LINE_MAX_CHARS)
+                .any(|l| sanitize_text(l).chars().count() > limits::LINE_MAX_CHARS)
         {
             return field("banner.lines", "at most 4 lines of at most 80 characters");
         }
         Ok(())
     }
 
-    /// The bytes written when the theme is exported or saved. This never writes a file that
-    /// `parse_theme` refuses: a theme that does not [`validate`](Theme::validate) is refused
-    /// with the error `validate` gives (`serde_json` would write a NaN tint as `null`, which
-    /// nobody could read back), and a file over the size limit is [`ThemeError::TooLarge`]
-    /// (blanks and control characters around a name do not count for `validate`, but they
-    /// are bytes in the file). The file holds the theme as it is, so a name with blanks
-    /// around it is written with them and reads back trimmed.
+    /// The bytes written when the theme is exported or saved. The file holds the theme as
+    /// import would keep it: a copy of it that has been through [`Theme::sanitize`], so
+    /// every text in the file is clean and within the limits the published schema states
+    /// (a name that is 64 characters once cleaned is 64 in the file, whatever padding or
+    /// control characters it had). The theme itself is not changed.
+    ///
+    /// This never writes a file that `parse_theme` refuses. A theme that does not
+    /// [`validate`](Theme::validate) is refused with the error `validate` gives
+    /// (`serde_json` would write a NaN tint as `null`, which nobody could read back), and
+    /// a file over the size limit is [`ThemeError::TooLarge`]. The size check is a guard:
+    /// every text is cut to its limit, so no theme that validates comes near it.
     pub fn to_file_bytes(&self) -> Result<Vec<u8>, ThemeError> {
-        self.validate()?;
-        let mut bytes = serde_json::to_vec_pretty(self).map_err(|e| invalid(&e.to_string()))?;
+        let mut clean = self.clone();
+        clean.sanitize();
+        clean.validate()?;
+        let mut bytes = serde_json::to_vec_pretty(&clean).map_err(|e| invalid(&e.to_string()))?;
         bytes.push(b'\n');
-        if bytes.len() > MAX_FILE_BYTES {
-            return Err(ThemeError::TooLarge);
-        }
+        check_size(bytes.len())?;
         Ok(bytes)
     }
 }
@@ -415,9 +431,7 @@ impl Theme {
 /// object`). The message quotes the file at times, so it is cleaned and cut short. Text is
 /// sanitized before the limits are checked.
 pub fn parse_theme(bytes: &[u8]) -> Result<Theme, ThemeError> {
-    if bytes.len() > MAX_FILE_BYTES {
-        return Err(ThemeError::TooLarge);
-    }
+    check_size(bytes.len())?;
     let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
     // First pass: is it JSON (and only one value of it), and which version does it say it is?
     let value: serde_json::Value =
@@ -1213,10 +1227,11 @@ mod tests {
     }
 
     #[test]
-    fn validate_and_import_agree_about_name_author_and_font() {
+    fn validate_and_import_agree_about_every_text() {
         // validate() on a theme built in code and parse_theme() on that theme's own JSON must
         // say the same, so that a theme that passes can be saved and read back, and one that
-        // does not could not have been read
+        // does not could not have been read. What is saved is the cleaned theme: the file
+        // holds its texts, and saving the theme or its cleaned self gives the same file.
         let thirty = "x".repeat(30);
         let pieces = [
             "a",
@@ -1231,12 +1246,14 @@ mod tests {
         let good = parse_theme(FIXTURE.as_bytes()).unwrap();
         let mut checked = 0;
         for text in combos(&pieces, 3) {
-            for which in ["name", "author", "font"] {
+            for which in ["name", "author", "font", "title", "line"] {
                 let mut t = good.clone();
                 match which {
                     "name" => t.name = text.clone(),
                     "author" => t.author = text.clone(),
-                    _ => t.terminal.font = text.clone(),
+                    "font" => t.terminal.font = text.clone(),
+                    "title" => t.banner.title = text.clone(),
+                    _ => t.banner.lines = vec![text.clone()],
                 }
                 let imported = parse_theme(&serde_json::to_vec(&t).unwrap());
                 let why = format!("{which} = {text:?}");
@@ -1245,16 +1262,60 @@ mod tests {
                 cleaned.sanitize();
                 if let Ok(imported) = imported {
                     assert_eq!(imported, cleaned, "{why}");
-                    // saved, it reads back as the cleaned theme
-                    let back = parse_theme(&t.to_file_bytes().unwrap()).unwrap();
-                    assert_eq!(back, cleaned, "{why}");
+                    let bytes = t.to_file_bytes().unwrap();
+                    assert_eq!(parse_theme(&bytes).unwrap(), cleaned, "{why}");
+                    assert_eq!(bytes, cleaned.to_file_bytes().unwrap(), "{why}");
+                    let file: Value = serde_json::from_slice(&bytes).unwrap();
+                    assert_eq!(file["name"], json!(cleaned.name), "{why}");
+                    assert_eq!(file["author"], json!(cleaned.author), "{why}");
+                    assert_eq!(
+                        file["terminal"]["font"],
+                        json!(cleaned.terminal.font),
+                        "{why}"
+                    );
+                    assert_eq!(
+                        file["banner"]["title"],
+                        json!(cleaned.banner.title),
+                        "{why}"
+                    );
+                    assert_eq!(
+                        file["banner"]["lines"],
+                        json!(cleaned.banner.lines),
+                        "{why}"
+                    );
                 } else {
                     assert!(t.to_file_bytes().is_err(), "{why}");
                 }
                 checked += 1;
             }
         }
-        assert_eq!(checked, 585 * 3);
+        assert_eq!(checked, 585 * 5);
+    }
+
+    #[test]
+    fn validate_judges_the_banner_as_import_keeps_it() {
+        // import cleans the banner texts without trimming them, so validate() counts them
+        // that way: the same answer before and after sanitize, as for the other texts
+        let good = parse_theme(FIXTURE.as_bytes()).unwrap();
+        let title_err = field_err("banner.title", "must be at most 80 characters");
+        let lines_err = field_err("banner.lines", "at most 4 lines of at most 80 characters");
+        // 80 characters with controls around them are 80 once cleaned
+        let mut t = good.clone();
+        t.banner.title = format!("\u{7}{}\u{202e}", "t".repeat(80));
+        t.banner.lines = vec![format!("\u{1b}[0m{}\u{2028}", "l".repeat(80)); 4];
+        assert_eq!(t.validate(), Ok(()));
+        // 81 once cleaned are too many, whatever surrounds them
+        t.banner.title = format!("\u{7}{}\u{202e}", "t".repeat(81));
+        assert_eq!(t.validate(), Err(title_err.clone()));
+        t.banner.title = "ok".to_string();
+        t.banner.lines = vec![format!("\u{1b}[0m{}\u{2028}", "l".repeat(81))];
+        assert_eq!(t.validate(), Err(lines_err.clone()));
+        // a banner is laid out by its spaces, so blanks around a text are part of its length
+        t.banner.lines = vec![format!(" {}", "l".repeat(80))];
+        assert_eq!(t.validate(), Err(lines_err));
+        t.banner.lines = vec![];
+        t.banner.title = format!("{} ", "t".repeat(80));
+        assert_eq!(t.validate(), Err(title_err));
     }
 
     #[test]
@@ -1312,31 +1373,142 @@ mod tests {
     }
 
     #[test]
-    fn saving_refuses_a_file_that_would_be_too_large_to_read_back() {
-        // blanks around the name do not count for validate(), but they are bytes in the file,
-        // and parse_theme refuses a file over 64 KB
+    fn saving_writes_the_cleaned_form() {
         let mut t = parse_theme(FIXTURE.as_bytes()).unwrap();
-        let base = t.to_file_bytes().unwrap().len();
-        t.name = format!("{}{}", " ".repeat(MAX_FILE_BYTES - base), t.name);
+        t.name = "  \u{7}Name\u{202e}  ".to_string();
+        t.author = "\u{1b}[0m Ada\u{2028} ".to_string();
+        t.terminal.font = " Cascadia\u{7} Mono\t".to_string();
+        t.banner.title = "  hi\u{2028}  ".to_string();
+        t.banner.lines = vec!["a\u{7}b".to_string(), "  \u{202e}c".to_string()];
+        let before = t.clone();
         let bytes = t.to_file_bytes().unwrap();
-        assert_eq!(bytes.len(), MAX_FILE_BYTES);
-        assert_eq!(
-            parse_theme(&bytes).unwrap().name,
-            "Terracotta ของฉัน",
-            "exactly the limit reads back"
+        // the theme itself is left as it was
+        assert_eq!(t, before);
+        // the file holds the cleaned text, and nothing of what was cleaned away
+        let text = String::from_utf8(bytes.clone()).unwrap();
+        for want in [
+            "\"name\": \"Name\",",
+            "\"author\": \"Ada\",",
+            "\"font\": \"Cascadia Mono\",",
+            "\"title\": \"  hi  \",", // a banner keeps its spaces
+            "\"ab\"",
+            "\"  c\"",
+        ] {
+            assert!(text.contains(want), "{want} missing from {text}");
+        }
+        for gone in ['\u{202e}', '\u{2028}', '\u{7}', '\u{1b}', '\t'] {
+            assert!(!text.contains(gone), "{gone:?} in {text}");
+        }
+        assert!(!text.contains("\\u00") && !text.contains("\\t"), "{text}");
+        // and it reads back equal to the cleaned theme
+        let mut cleaned = before.clone();
+        cleaned.sanitize();
+        assert_eq!(parse_theme(&bytes).unwrap(), cleaned);
+        assert_eq!(cleaned.name, "Name");
+    }
+
+    #[test]
+    fn a_saved_file_is_within_the_published_limits() {
+        // 64 characters once cleaned and 70 with their padding: the file holds the 64, which is
+        // what the published schema's maxLength lets it hold. Same for the others.
+        let schema = serde_json::to_value(schemars::schema_for!(Theme)).unwrap();
+        let limit = |pointer: &str| {
+            schema
+                .pointer(pointer)
+                .and_then(Value::as_u64)
+                .unwrap_or_else(|| panic!("no number at {pointer}")) as usize
+        };
+        let name_max = limit("/properties/name/maxLength");
+        let author_max = limit("/properties/author/maxLength");
+        let font_max = limit("/$defs/TerminalSettings/properties/font/maxLength");
+        let title_max = limit("/$defs/BannerSettings/properties/title/maxLength");
+        let lines_max = limit("/$defs/BannerSettings/properties/lines/maxItems");
+        let line_max = limit("/$defs/BannerSettings/properties/lines/items/maxLength");
+        let mut t = parse_theme(FIXTURE.as_bytes()).unwrap();
+        t.name = format!("   {}   ", "n".repeat(name_max));
+        t.author = format!("\u{7}\u{7}{}\u{1b}[0m  ", "a".repeat(author_max));
+        t.terminal.font = format!(" \t{}  ", "f".repeat(font_max));
+        t.banner.title = format!("{}\u{202e}\u{7}\u{2028}", "t".repeat(title_max));
+        t.banner.lines = vec![format!("\u{7}{}\u{2066}", "l".repeat(line_max)); lines_max];
+        assert_eq!(t.name.chars().count(), 70, "the premise: 64 and padding");
+        assert!(t.banner.title.chars().count() > title_max);
+        let file: Value = serde_json::from_slice(&t.to_file_bytes().unwrap()).unwrap();
+        let chars = |pointer: &str| {
+            file.pointer(pointer)
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| panic!("no text at {pointer}"))
+                .chars()
+                .count()
+        };
+        assert_eq!(chars("/name"), name_max);
+        assert_eq!(chars("/author"), author_max);
+        assert_eq!(chars("/terminal/font"), font_max);
+        assert_eq!(chars("/banner/title"), title_max);
+        let lines = file
+            .pointer("/banner/lines")
+            .and_then(Value::as_array)
+            .unwrap();
+        assert_eq!(lines.len(), lines_max);
+        for line in lines {
+            assert_eq!(line.as_str().unwrap().chars().count(), line_max);
+        }
+    }
+
+    #[test]
+    fn blanks_around_a_name_never_reach_the_file() {
+        // what is written is the cleaned form, so a name padded with 70,000 blanks and bells
+        // makes the very file the plain name makes, and the size limit has nothing to do with it
+        let plain = parse_theme(FIXTURE.as_bytes()).unwrap();
+        let mut padded = plain.clone();
+        padded.name = format!(
+            "{}{}{}",
+            " ".repeat(70_000),
+            plain.name,
+            "\u{7}".repeat(70_000)
         );
-        t.name.insert(0, ' ');
-        assert_eq!(t.validate(), Ok(()));
-        assert_eq!(t.to_file_bytes(), Err(ThemeError::TooLarge));
-        // the file it would have been, written the same way, is refused on the way back in
-        let mut would_be = serde_json::to_vec_pretty(&t).unwrap();
-        would_be.push(b'\n');
-        assert_eq!(would_be.len(), MAX_FILE_BYTES + 1);
         assert_eq!(
-            parse_theme(&would_be).unwrap_err(),
-            ThemeError::TooLarge,
-            "and that is the error a file like it gets"
+            padded.to_file_bytes().unwrap(),
+            plain.to_file_bytes().unwrap()
         );
+        assert_eq!(
+            padded.name.chars().count(),
+            140_000 + plain.name.chars().count()
+        );
+    }
+
+    #[test]
+    fn reading_and_writing_share_one_size_limit() {
+        // spec §3.7 #5, "at most 64 KB": exactly that many bytes is fine and one more is not
+        assert_eq!(check_size(0), Ok(()));
+        assert_eq!(check_size(MAX_FILE_BYTES), Ok(()));
+        assert_eq!(check_size(MAX_FILE_BYTES + 1), Err(ThemeError::TooLarge));
+        assert_eq!(check_size(usize::MAX), Err(ThemeError::TooLarge));
+    }
+
+    #[test]
+    fn the_largest_theme_that_validates_is_far_below_the_size_limit() {
+        // Every text is cut to its limit when it is saved, so a saved file is small however
+        // the theme was built, and the size check in to_file_bytes() is a guard for a limit
+        // that is raised one day. This is the worst case: every text at its limit, in
+        // four-byte characters, all seven segments and the most lines.
+        let mut t = parse_theme(FIXTURE.as_bytes()).unwrap();
+        t.name = "👋".repeat(64);
+        t.author = "👋".repeat(64);
+        t.terminal.font = "👋".repeat(64);
+        t.banner.title = "👋".repeat(80);
+        t.banner.lines = vec!["👋".repeat(80); 4];
+        t.prompt.segments = vec![
+            Segment::Path,
+            Segment::Git,
+            Segment::Time,
+            Segment::User,
+            Segment::Host,
+            Segment::Status,
+            Segment::Duration,
+        ];
+        let bytes = t.to_file_bytes().unwrap();
+        assert!(bytes.len() < MAX_FILE_BYTES / 8, "{} bytes", bytes.len());
+        assert_eq!(parse_theme(&bytes).unwrap(), t);
     }
 
     // -- the parts of a theme are objects --
