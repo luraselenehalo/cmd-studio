@@ -319,7 +319,7 @@ mod tests {
             // Creating links needs Developer Mode or admin rights; CI runners and
             // the test VMs have them, so there the test must run, not skip.
             assert!(
-                std::env::var_os("CMDSTUDIO_SYSTEM_TESTS").is_none(),
+                std::env::var("CMDSTUDIO_SYSTEM_TESTS").as_deref() != Ok("1"),
                 "cannot create a symlink: {e}"
             );
             println!("SKIPPED writing_through_a_symlink_keeps_the_link: cannot create a symlink here ({e})");
@@ -475,7 +475,7 @@ mod tests {
             .join("resources");
         if !root.join("manifest.json").is_file() {
             assert!(
-                std::env::var_os("CMDSTUDIO_SYSTEM_TESTS").is_none(),
+                std::env::var("CMDSTUDIO_SYSTEM_TESTS").as_deref() != Ok("1"),
                 "run scripts/fetch-resources.ps1 first"
             );
             println!("SKIPPED the_fetched_resources_match_their_pins: no resources folder yet");

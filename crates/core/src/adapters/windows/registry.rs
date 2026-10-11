@@ -236,19 +236,33 @@ impl TestKey {
 #[cfg(test)]
 impl Drop for TestKey {
     fn drop(&mut self) {
-        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
         // `delete_subkey_all` removes a whole tree, so it only ever runs on a key below our own folder.
-        if self
+        let ours = self
             .subkey
             .strip_prefix(TEST_ROOT)
-            .is_some_and(|rest| rest.starts_with('\\'))
-        {
-            let _ = hkcu.delete_subkey_all(&self.subkey);
+            .is_some_and(|rest| rest.starts_with('\\'));
+        if !ours {
+            eprintln!(
+                "TestKey: not deleting HKCU\\{}, it is not below HKCU\\{TEST_ROOT}",
+                self.subkey
+            );
+            return;
         }
-        // Controller ruling Q7: the folder goes too once it is empty. `RegDeleteKeyExW` refuses a key
-        // that still has subkeys, so while another test's key lives (tests run in parallel) this fails
-        // and nothing is lost; that error is expected and ignored.
-        let _ = hkcu.delete_subkey(TEST_ROOT);
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        // Only "already gone" is fine: any other error leaves a key behind, so it is said out loud.
+        match hkcu.delete_subkey_all(&self.subkey) {
+            Ok(()) => {}
+            Err(e) if e.kind() == ErrorKind::NotFound => {}
+            Err(e) => eprintln!("TestKey: could not delete HKCU\\{}: {e}", self.subkey),
+        }
+        // The folder goes too once it is empty. `RegDeleteKeyExW` refuses a key that still has
+        // subkeys ("access denied"), so while another test's key lives (tests run in parallel) that
+        // refusal is expected, and so is a folder another test has already removed.
+        match hkcu.delete_subkey(TEST_ROOT) {
+            Ok(()) => {}
+            Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::PermissionDenied) => {}
+            Err(e) => eprintln!("TestKey: could not delete HKCU\\{TEST_ROOT}: {e}"),
+        }
     }
 }
 
@@ -267,7 +281,12 @@ mod tests {
         let a = adapter(&t);
         assert!(!a.user_key_exists().unwrap());
         assert_eq!(a.read_user().unwrap(), None);
+        assert_eq!(a.read_machine().unwrap(), None);
         a.delete_user().unwrap();
+        // Reading and deleting on a missing key leave it missing: doctor reads the real AutoRun,
+        // and a read must never create a key.
+        assert!(!a.user_key_exists().unwrap());
+        assert!(!t.location("Machine").exists().unwrap());
         a.write_user(&RegValue::from_text(SZ, "echo hi")).unwrap();
         assert!(a.user_key_exists().unwrap());
         assert_eq!(
@@ -384,29 +403,69 @@ mod tests {
             Some("clink inject")
         );
         assert_eq!(a.read_user().unwrap(), None);
+        // real() wires the same two keys to the real places: the user's under HKCU, the machine's
+        // under HKLM, both at the one path cmd reads AutoRun from. This only compares locations;
+        // it opens nothing.
+        let real = WinAutoRun::real();
+        assert_eq!(real.user, RegLocation::user(COMMAND_PROCESSOR));
+        assert_eq!(real.machine, RegLocation::machine(COMMAND_PROCESSOR));
+        assert_eq!(real.user.hive, Hive::CurrentUser);
+        assert_eq!(real.machine.hive, Hive::LocalMachine);
+        assert_eq!(COMMAND_PROCESSOR, r"Software\Microsoft\Command Processor");
+        assert_eq!(AUTORUN, "AutoRun");
     }
 
     /// Real-location check: reads the user's real AutoRun and writes the same
     /// bytes back. Runs only with CMDSTUDIO_SYSTEM_TESTS=1 (CI and test VMs).
     #[test]
     fn system_real_autorun_round_trips() {
-        if std::env::var_os("CMDSTUDIO_SYSTEM_TESTS").is_none() {
+        // Puts the user's AutoRun back however the test ends, so a failed assert or unwrap can
+        // never leave the probe as the real AutoRun.
+        struct Restore<'a> {
+            a: &'a WinAutoRun,
+            existed: bool,
+            before: Option<&'a RegValue>,
+        }
+        impl Drop for Restore<'_> {
+            fn drop(&mut self) {
+                let value = match self.before {
+                    Some(v) => self.a.write_user(v),
+                    None => self.a.delete_user(),
+                };
+                // A key this run created goes again; one that was there stays.
+                let key = if self.existed {
+                    Ok(())
+                } else {
+                    self.a.delete_user_key_if_empty()
+                };
+                for e in [value, key].into_iter().filter_map(Result::err) {
+                    eprintln!(
+                        "COULD NOT PUT THE USER'S AutoRun BACK: {e}. It was {:?}",
+                        self.before
+                    );
+                }
+            }
+        }
+
+        // Only the value 1 enables this: CMDSTUDIO_SYSTEM_TESTS=0 or an empty value does not.
+        if std::env::var("CMDSTUDIO_SYSTEM_TESTS").as_deref() != Ok("1") {
             println!("SKIPPED system_real_autorun_round_trips: set CMDSTUDIO_SYSTEM_TESTS=1");
             return;
         }
         let a = WinAutoRun::real();
         let existed = a.user_key_exists().unwrap();
         let before = a.read_user().unwrap();
+        let restore = Restore {
+            a: &a,
+            existed,
+            before: before.as_ref(),
+        };
         let probe = RegValue::from_text(SZ, "rem cmdstudio system test");
         a.write_user(&probe).unwrap();
-        assert_eq!(a.read_user().unwrap(), Some(probe));
-        match &before {
-            Some(v) => a.write_user(v).unwrap(),
-            None => a.delete_user().unwrap(),
-        }
-        if !existed {
-            a.delete_user_key_if_empty().unwrap();
-        }
+        assert_eq!(a.read_user().unwrap(), Some(probe.clone()));
+        // The probe went to HKCU: the machine value (read only) is not it.
+        assert_ne!(a.read_machine().unwrap(), Some(probe));
+        drop(restore);
         assert_eq!(a.read_user().unwrap(), before);
         assert_eq!(a.user_key_exists().unwrap(), existed);
     }
