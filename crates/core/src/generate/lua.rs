@@ -93,14 +93,32 @@ const DATE_EN: DateStyle = DateStyle {
 /// The Lua behind the banner variables, the same for both languages. It reads the `DAYS`,
 /// `MONTHS`, `DATE_FORMAT` and `YEAR_OFFSET` that [`vars_lua`] puts in front of it. The only
 /// things it asks `os.date` for are numbers and the digits of `%H:%M`.
-const VARS_BODY: &str = r#"local function today()
+///
+/// The user name, the computer name and the folder are read when the box is printed, and
+/// nobody has cleaned them: a folder can be named with U+202E or a C1 control, and `{cwd}` is
+/// the folder cmd was opened in. `clean` drops what could drive the terminal or reorder the
+/// text after it: C0 controls and DEL, C1 controls (UTF-8 C2 80 to C2 9F), U+2028 and U+2029,
+/// and the bidirectional embeddings, overrides and isolates U+202A to U+202E and U+2066 to
+/// U+2069. That is the set `sanitize_text` drops from the text of a theme, except that
+/// `sanitize_text` takes a whole escape sequence: here the escape character goes and the
+/// rest of the sequence stays as plain text. Each pattern starts at a lead byte, or at a
+/// byte (C0, DEL) that never occurs inside a multi-byte character, so on UTF-8 none of them
+/// can match in the middle of another character.
+const VARS_BODY: &str = r#"local function clean(s)
+  s = s:gsub("[%z\1-\31\127]", "")
+  s = s:gsub("\194[\128-\159]", "")
+  s = s:gsub("\226\128[\168-\174]", "")
+  s = s:gsub("\226\129[\166-\169]", "")
+  return s
+end
+local function today()
   local t = os.date("*t")
   return string.format(DATE_FORMAT, DAYS[t.wday], t.day, MONTHS[t.month], t.year + YEAR_OFFSET)
 end
 local V = {
-  user = function() return os.getenv("USERNAME") or "" end,
-  host = function() return os.getenv("COMPUTERNAME") or "" end,
-  cwd = function() return os.getcwd() end,
+  user = function() return clean(os.getenv("USERNAME") or "") end,
+  host = function() return clean(os.getenv("COMPUTERNAME") or "") end,
+  cwd = function() return clean(os.getcwd() or "") end,
   date = today,
   time = function() return os.date("%H:%M") end,
 }
@@ -266,7 +284,9 @@ pub fn init_lua(omp_exe: &Path, omp_config: &Path) -> String {
 ///
 /// The texts of the theme go through `sanitize_text` and then `lua_str`. Import has cleaned
 /// them already, but a theme built in code has not been through that, and an escape
-/// sequence in the title would otherwise reach the terminal.
+/// sequence in the title would otherwise reach the terminal. The user name, the computer
+/// name and the folder are not in the theme: the script reads them when it prints and
+/// cleans them itself (see `VARS_BODY`).
 pub fn banner_lua(theme: &Theme, lang: Lang) -> String {
     let b = &theme.banner;
     let mut s = String::from(HEADER);

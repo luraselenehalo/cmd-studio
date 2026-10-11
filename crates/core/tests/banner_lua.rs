@@ -213,6 +213,12 @@ fn set_env(lua: &Lua, key: &str, value: &str) -> mlua::Result<()> {
     env.set(key, value)
 }
 
+/// Makes the stand-in `os.getcwd` answer `dir`: the folder cmd was opened in.
+fn set_cwd(lua: &Lua, dir: &str) -> mlua::Result<()> {
+    lua.globals().set("__cwd", dir)?;
+    lua.load("os.getcwd = function() return __cwd end").exec()
+}
+
 /// The clock of a script. `os.date` then answers only "*t" (numbers) and "%H:%M" (digits).
 /// Any other format would give names in the language of Windows and not of the app, which is
 /// what the generator must not depend on (spec §3.6), so the stand-in raises an error.
@@ -263,6 +269,17 @@ const FRIDAY: Clock = Clock {
 /// The rows of the box, with the colors taken off.
 fn plain_rows(shown: &str) -> Vec<String> {
     shown.split('\n').map(strip_ansi).collect()
+}
+
+/// The printed box with the sequences the generator writes itself taken off: the accent and
+/// muted colors of Terracotta and the reset. Whatever escape character is left in it came from
+/// somewhere else. `strip_ansi` cannot show that, because it drops every escape character it
+/// meets together with what follows it up to the next `m`.
+fn without_our_colors(shown: &str) -> String {
+    shown
+        .replace(ACCENT_SGR, "")
+        .replace(MUTED_SGR, "")
+        .replace("\u{1b}[0m", "")
 }
 
 /// A theme with these lines and nothing else changed.
@@ -467,6 +484,78 @@ fn a_missing_variable_is_an_empty_text_and_not_an_error() -> mlua::Result<()> {
         lua.load("os.getenv = function() return nil end").exec()
     })?;
     assert!(plain_rows(&out[0]).join("\n").contains("[][]"));
+    Ok(())
+}
+
+#[test]
+fn user_host_and_folder_lose_control_and_direction_characters() -> mlua::Result<()> {
+    // The text of the theme is cleaned at import (spec §3.7 #3), but these three are read when
+    // the box is printed. A folder can be named with U+202E or a C1 control, and {cwd} is the
+    // folder cmd was opened in. Nothing that drives the terminal or reorders the text after it
+    // may reach the screen.
+    let mut t = with_lines(&["{user}|{host}|{cwd}"]);
+    t.banner.title = "{user}".to_string();
+    for lang in LANGS {
+        let out = run(&t, lang, &[], |lua| {
+            set_env(lua, "USERNAME", "ad\u{202e}min\u{85}x\u{1b}[31mred")?;
+            set_env(lua, "COMPUTERNAME", "PC\u{2066}-\u{1b}01\u{7}")?;
+            set_cwd(lua, "C:\\work\u{202e}fdp.exe\\\u{85}proj\u{1b}")
+        })?;
+        let shown = without_our_colors(&out[0]);
+        for bad in ['\u{1b}', '\u{7}', '\u{85}', '\u{202e}', '\u{2066}'] {
+            assert!(!shown.contains(bad), "{lang:?}: {bad:?} in {shown:?}");
+        }
+        // what is left is the text around the dropped characters; the `[31m` that followed an
+        // escape character is plain text without it
+        let rows: Vec<&str> = shown.split('\n').collect();
+        assert!(rows[1].contains("adminx[31mred"), "{lang:?}: {}", rows[1]);
+        assert!(
+            rows[3].contains("adminx[31mred|PC-01|C:\\workfdp.exe\\proj"),
+            "{lang:?}: {}",
+            rows[3]
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn exactly_the_control_and_direction_characters_are_dropped() -> mlua::Result<()> {
+    // C0 and DEL, C1 (U+0080 to U+009F, which UTF-8 writes as C2 80 to C2 9F), the line and
+    // paragraph separators, and the bidirectional embeddings, overrides and isolates
+    let dropped: Vec<char> = (0x00..=0x1F)
+        .chain(0x7F..=0x9F)
+        .chain([0x2028, 0x2029])
+        .chain(0x202A..=0x202E)
+        .chain(0x2066..=0x2069)
+        .filter_map(char::from_u32)
+        .collect();
+    assert_eq!(dropped.len(), 32 + 33 + 2 + 5 + 4);
+    // The characters next to those ranges stay, and so do Thai, emoji and the joiners that glue
+    // them. U+00C2 is C3 82 in UTF-8 and U+00A2 is C2 A2, so neither looks like a C1 control.
+    let kept = [
+        ' ', '~', '\u{a0}', '\u{a1}', '\u{a2}', '\u{c2}', '\u{2027}', '\u{202f}', '\u{2065}',
+        '\u{206a}', 'ก', '\u{e31}', '👋', '\u{200d}', '\u{fe0f}', '\u{feff}',
+    ];
+    let mut t = with_lines(&[]);
+    t.banner.title = "{user}".to_string();
+    t.banner.tips = false;
+    for (chars, stays) in [(&dropped[..], false), (&kept[..], true)] {
+        for &c in chars {
+            let user = format!("a{c}b");
+            let out = run(&t, Lang::En, &[], |lua| set_env(lua, "USERNAME", &user))?;
+            let shown = without_our_colors(&out[0]);
+            let rows: Vec<&str> = shown.split('\n').collect();
+            // top, title, bottom and the closing space: a line break that stayed would add a row
+            assert_eq!(rows.len(), 4, "U+{:04X}: {rows:?}", u32::from(c));
+            let want = if stays { user.as_str() } else { "ab" };
+            assert!(
+                rows[1].contains(&format!("* {want} ")),
+                "U+{:04X}: {}",
+                u32::from(c),
+                rows[1]
+            );
+        }
+    }
     Ok(())
 }
 
