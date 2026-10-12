@@ -805,16 +805,20 @@ fn d9(sys: System<'_>, state: &Result<State, StateError>) -> Check {
                     "CMD Studio's record (state.json) was written by a newer CMD Studio. Use that \
                      version, or update CMD Studio",
                 ),
-                // "Revert everything" is a button of the app; the command line's way is
-                // `--cleanup`, which also deletes CMD Studio's data but the themes.
+                // "Revert everything" is a button of the app. On the command line `--cleanup`
+                // reverts the same way, but with a damaged state.json it keeps the records (the
+                // damaged copy and the restore points), so it ends with a failed step and does
+                // so on every later run (`cleanup::cleanup`).
                 StateError::Invalid(_) => (
                     "บันทึกของ CMD Studio (state.json) เสียหรือถูกแก้ ให้ใช้ \"ย้อนทุกอย่าง\" ในแอป \
-                     (ในบรรทัดคำสั่ง ให้รัน `cmdstudio --cleanup` ซึ่งจะลบข้อมูลของ CMD Studio \
-                     ด้วย ยกเว้นธีม) แล้วใช้ธีมใหม่",
+                     แล้วใช้ธีมใหม่ ในบรรทัดคำสั่ง `cmdstudio --cleanup` จะย้อนแบบเดียวกัน \
+                     แต่เก็บบันทึกของ CMD Studio ไว้ (state.json ที่เสียกับจุดย้อนกลับ) \
+                     และจบด้วยขั้นที่ไม่สำเร็จซึ่งบอกว่าต้องทำอะไรต่อ",
                     "CMD Studio's record (state.json) is damaged or was edited. Use Revert \
-                     everything in the app (on the command line, run `cmdstudio --cleanup`, \
-                     which also deletes CMD Studio's data but your themes), then apply a theme \
-                     again",
+                     everything in the app, then apply a theme again. On the command line, \
+                     `cmdstudio --cleanup` reverts the same way, but keeps CMD Studio's records \
+                     (the damaged state.json and the restore points) and ends with a failed step \
+                     that says what to do",
                 ),
             };
             return check("D9", Status::Fail, Some(e.code()), th, en, e.to_string());
@@ -1625,6 +1629,19 @@ mod tests {
             "{d9:?}"
         );
         assert!(d9.message_th.contains("\"ย้อนทุกอย่าง\" ในแอป"), "{d9:?}");
+        // What --cleanup does then: it keeps the records (the damaged copy and the restore
+        // points) and ends with a failed step; it does not delete the data.
+        assert!(
+            d9.message_en.contains("keeps CMD Studio's records")
+                && d9.message_en.contains("failed step"),
+            "{d9:?}"
+        );
+        assert!(!d9.message_en.contains("deletes"), "{d9:?}");
+        assert!(
+            d9.message_th.contains("เก็บบันทึกของ CMD Studio ไว้")
+                && d9.message_th.contains("ขั้นที่ไม่สำเร็จ"),
+            "{d9:?}"
+        );
     }
 
     #[test]
