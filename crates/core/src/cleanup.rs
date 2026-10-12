@@ -214,9 +214,11 @@ pub fn revert_all(sys: System<'_>, ctx: &Ctx) -> Result<Report, ActionError> {
 /// - A state.json that cannot be used stops only the revert (a failed step); the folders still
 ///   go, but the data folder stays whole while it holds a state.json from a newer CMD Studio.
 /// - It never deletes the only record of what the user's settings were: while something is not
-///   put back (state.json could not be used, a settings.json or a font or AutoRun is left as it
-///   is, a rollback record names a target that is still CMD Studio's), state.json, its damaged
-///   copies and the restore points stay, and a failed step says so and how to finish by hand.
+///   put back or cannot be known to be (state.json could not be used, or its AutoRun original
+///   is damaged; a settings.json or a font or AutoRun is left as it is; a rollback record names
+///   a target that is still CMD Studio's; the start could not read every record, or found a
+///   restore point it cannot read), state.json, its damaged copies and the restore points stay,
+///   and a failed step says so and how to finish by hand.
 /// - The folders are worked out from `Paths` and the user's SID, not from state.json; a
 ///   ProgramData folder state.json names besides goes only when it is directly in the
 ///   ProgramData folder, private, and named like CMD Studio's. A folder that someone else may
@@ -225,18 +227,25 @@ pub fn revert_all(sys: System<'_>, ctx: &Ctx) -> Result<Report, ActionError> {
 ///   the way the lock opens it.
 pub fn cleanup(sys: System<'_>, ctx: &Ctx, remove_themes: bool) -> Result<Report, ActionError> {
     let (lock, start) = begin(sys, ctx)?;
+    // What the start could not read, a record or a restore point, may be the only copy of the
+    // user's values: its code, when there is such a thing.
+    let unread = start
+        .problems
+        .first()
+        .map(|f| f.code)
+        .or_else(|| (!start.unreadable.is_empty()).then_some("E_SNAPSHOT_READ"));
     let mut report = Report::new(start);
     let mut state = None;
-    // The code of what kept state.json from use, when something did.
+    // The code of what kept state.json from use, or damaged a part of it, when something did.
     let mut unusable = None;
     let mut newer_state = false;
     let unresolved;
     match load_state(sys, ctx, &mut report) {
         Ok((loaded, damaged)) => {
-            if damaged {
+            let reverted = revert_steps(sys, ctx, loaded, &mut report);
+            if damaged || reverted.damaged {
                 unusable = Some("E_STATE_INVALID");
             }
-            let reverted = revert_steps(sys, ctx, loaded, &mut report);
             unresolved = reverted.unresolved;
             match reverted.state {
                 Some(next) => state = Some(next),
@@ -279,15 +288,15 @@ pub fn cleanup(sys: System<'_>, ctx: &Ctx, remove_themes: bool) -> Result<Report
     let not_back = state
         .as_ref()
         .is_some_and(|s| holds_what_is_not_back(&s.baseline));
-    let keep_records = unusable.is_some() || not_back || unresolved;
+    let keep_records = unusable.is_some() || unread.is_some() || not_back || unresolved;
     remove_data(sys, ctx, remove_themes, keep_records, &mut report);
     if keep_records {
         report.fail(
             format!("Delete {}", data.display()),
-            unusable.unwrap_or("E_ROLLBACK_INCOMPLETE"),
+            unusable.or(unread).unwrap_or("E_ROLLBACK_INCOMPLETE"),
             format!(
-                "state.json and the restore points were kept in {}: not everything is back as \
-                 it was before CMD Studio, and they record what it was",
+                "state.json and the restore points were kept in {}: not everything is known to \
+                 be back as it was before CMD Studio, and they record what it was",
                 data.display()
             ),
             Some(records_by_hand(data)),
@@ -356,6 +365,8 @@ struct Reverted {
     state: Option<State>,
     /// A step of the pending rollback record names a target that is still CMD Studio's.
     unresolved: bool,
+    /// state.json's copy of the AutoRun original was damaged (see [`original_damaged`]).
+    damaged: bool,
 }
 
 /// Steps 1–3 with `state` loaded: the AutoRun and settings.json transaction, the applies marked
@@ -382,11 +393,13 @@ fn revert_steps(sys: System<'_>, ctx: &Ctx, state: State, report: &mut Report) -
             left.wt.push(file.clone());
         }
     }
+    let damaged = original_damaged(base);
     let ran = transaction(sys, ctx, ops, report);
     if !ran.committed {
         return Reverted {
             state: None,
             unresolved: settle_record(sys, ctx, ran.id.as_deref(), report),
+            damaged,
         };
     }
     if autorun_done && base.autorun.as_ref().is_some_and(|a| !a.key_existed) {
@@ -404,6 +417,7 @@ fn revert_steps(sys: System<'_>, ctx: &Ctx, state: State, report: &mut Report) -
     Reverted {
         state: Some(next),
         unresolved,
+        damaged,
     }
 }
 
@@ -453,12 +467,7 @@ fn autorun_step(
             if let Some(value) = next {
                 ops.push(Op::SetAutoRun { value });
             }
-            let damaged = base
-                .autorun
-                .as_ref()
-                .and_then(|a| a.value.as_ref())
-                .is_some_and(|record| record.to_reg().is_none());
-            if damaged {
+            if original_damaged(base) {
                 report.fail(
                     WHAT,
                     "E_STATE_INVALID",
@@ -484,6 +493,15 @@ fn autorun_step(
             false
         }
     }
+}
+
+/// Whether state.json's copy of what AutoRun held before CMD Studio is damaged (not hex). The
+/// restore point of the apply that recorded it still holds a whole copy.
+fn original_damaged(base: &Baseline) -> bool {
+    base.autorun
+        .as_ref()
+        .and_then(|a| a.value.as_ref())
+        .is_some_and(|record| record.to_reg().is_none())
 }
 
 /// The text of a string value that is not valid UTF-16, with U+FFFD in place of what is not, to
@@ -3033,5 +3051,150 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// --cleanup kept state.json and the restore points, said so with how to finish, and
+    /// deleted the rest.
+    fn assert_records_kept(m: &FakeMachine, ctx: &Ctx, report: &Report) {
+        assert!(!report.ok(), "{report:?}");
+        assert!(m.fs.exists(&ctx.paths.state_file()), "{report:?}");
+        assert!(m.fs.exists(&ctx.paths.snapshots()), "{report:?}");
+        let data = format!("Delete {}", ctx.paths.data.display());
+        assert!(
+            report.steps.iter().any(|s| !s.ok
+                && s.what == data
+                && s.fix
+                    .as_ref()
+                    .is_some_and(|f| f.en.contains("state.json") && f.th.contains("state.json"))),
+            "{report:?}"
+        );
+        assert!(!m.fs.exists(&ctx.paths.runtime_root()), "{report:?}");
+        assert!(!m.fs.exists(&ctx.paths.lock_file()), "{report:?}");
+    }
+
+    /// Where restore point `id` keeps the prior state of its first op that `pick` chooses.
+    fn payload_of(ctx: &Ctx, m: &FakeMachine, id: &str, pick: fn(&Op) -> bool) -> PathBuf {
+        let root = ctx.paths.snapshots();
+        let store = SnapshotStore::new(&m.fs, &root);
+        let index = store
+            .journal(id)
+            .unwrap()
+            .ops
+            .iter()
+            .position(pick)
+            .unwrap();
+        store.payload_path(id, index)
+    }
+
+    #[test]
+    fn cleanup_keeps_the_records_while_a_font_or_autorun_is_left_as_it_is() {
+        // A font whose registration cannot be read stays installed.
+        let (m, ctx) = machine();
+        apply(&m, &ctx, Target::All);
+        m.fonts.fail_registration_of(&font_value());
+        let report = cleanup(m.system(), &later(&ctx, 1), true).unwrap();
+        assert!(
+            m.fonts.snapshot().0.contains_key(&font_value()),
+            "still registered"
+        );
+        assert_records_kept(&m, &ctx, &report);
+        assert_eq!(state(&m, &ctx).baseline.fonts.len(), 1);
+
+        // AutoRun needs a hand edit.
+        let (m, ctx) = machine();
+        apply(&m, &ctx, Target::All);
+        let ours = autorun_text(&m).unwrap();
+        m.autorun
+            .write_user(&RegValue::from_text(REG_SZ, &format!("echo ^& {ours}")))
+            .unwrap();
+        let report = cleanup(m.system(), &later(&ctx, 1), true).unwrap();
+        assert!(!failed(&report, "E_AUTORUN_WRITE").is_empty(), "{report:?}");
+        assert_records_kept(&m, &ctx, &report);
+        assert!(state(&m, &ctx).baseline.autorun.is_some());
+    }
+
+    #[test]
+    fn cleanup_keeps_the_records_when_the_autorun_original_cannot_be_read_back() {
+        // The apply turned off another Clink. state.json's copy of what AutoRun held is not
+        // hex, but the apply's restore point still holds it whole.
+        let (m, ctx) = machine();
+        m.autorun
+            .write_user(&RegValue::from_text(
+                REG_SZ,
+                r#""C:\clink\clink.bat" inject --autorun"#,
+            ))
+            .unwrap();
+        let replace = crate::plan::Request {
+            replace_foreign_clink: true,
+            ..request(Target::All)
+        };
+        let p = prepare_apply(m.system(), &ctx, &terracotta(), &replace).unwrap();
+        let id = p.manifest.id.clone();
+        assert_eq!(run_apply(m.system(), &ctx, p), Outcome::Committed);
+        let mut s = state(&m, &ctx);
+        s.baseline.autorun = Some(AutoRunRecord {
+            key_existed: true,
+            value: Some(RegValueRecord {
+                kind: REG_SZ,
+                data_hex: "zz".into(),
+            }),
+        });
+        m.fs.put(ctx.paths.state_file(), s.to_bytes().unwrap());
+        let prior = payload_of(&ctx, &m, &id, |o| matches!(o, Op::SetAutoRun { .. }));
+        let report = cleanup(m.system(), &later(&ctx, 1), true).unwrap();
+        assert_records_kept(&m, &ctx, &report);
+        let held: AutoRunRecord = serde_json::from_slice(&m.fs.file(&prior).unwrap()).unwrap();
+        assert_eq!(
+            held.value
+                .and_then(|v| v.to_reg())
+                .and_then(|v| v.text())
+                .as_deref(),
+            Some(r#""C:\clink\clink.bat" inject --autorun"#),
+            "the restore point still holds what AutoRun was"
+        );
+        assert!(
+            report.steps.iter().any(|s| !s.ok
+                && s.code == Some("E_STATE_INVALID")
+                && s.what.starts_with("Delete")),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn cleanup_keeps_the_records_when_the_start_could_not_read_them_all() {
+        // The record of a rollback that did not finish is damaged: nothing says what it left,
+        // and the restore point holds the only copy of the user's settings.json.
+        let (m, ctx) = machine();
+        let id = apply_whose_settings_cannot_go_back(&m, &ctx);
+        m.fs.put(
+            ctx.paths.snapshots().join(&id).join("incomplete.json"),
+            b"{ damaged",
+        );
+        let copy = payload_of(&ctx, &m, &id, |o| matches!(o, Op::WtApply { .. }));
+        let report = cleanup(m.system(), &later(&ctx, 1), true).unwrap();
+        assert!(!failed(&report, "E_SNAPSHOT_READ").is_empty(), "{report:?}");
+        assert_records_kept(&m, &ctx, &report);
+        assert_eq!(
+            m.fs.file(&copy).as_deref(),
+            Some(SETTINGS.as_bytes()),
+            "the only copy of the user's settings.json is still there"
+        );
+
+        // A restore point the start finds damaged, and sets aside.
+        let (m, ctx) = machine();
+        let id = apply_id(&m, &ctx, Target::All);
+        m.fs.put(ctx.paths.snapshots().join(&id).join("manifest.json"), b"{");
+        let report = cleanup(m.system(), &later(&ctx, 1), true).unwrap();
+        assert!(
+            report.start.unreadable.iter().any(|u| u.point.id == id),
+            "{report:?}"
+        );
+        assert_records_kept(&m, &ctx, &report);
+        assert!(
+            report.steps.iter().any(|s| !s.ok
+                && s.code == Some("E_SNAPSHOT_READ")
+                && s.what.starts_with("Delete")),
+            "{report:?}"
+        );
     }
 }
