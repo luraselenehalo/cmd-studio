@@ -127,11 +127,13 @@ pub fn check_parses(text: &str) -> Result<(), WtError> {
 
 /// Writes CMD Studio's scheme, cmd profile keys and (when asked) the default
 /// profile. Records every touched key's value before and after. `edit.scheme`
-/// is `generate::wt::scheme`'s object; anything else is refused as `Shape`.
+/// is `generate::wt::scheme`'s object; anything else is refused as `Shape`, and
+/// so is a key CMD Studio owns that the file writes twice.
 pub fn apply_edit(text: &str, edit: &WtEdit<'_>) -> Result<WtEdited, WtError> {
     let (bom, body) = split_bom(text);
     let root = parse(body)?;
     let obj = root_object(&root)?;
+    check_top_level(&obj)?;
     let mut changes = Vec::new();
     let mut created = Vec::new();
 
@@ -216,29 +218,19 @@ pub fn apply_edit(text: &str, edit: &WtEdit<'_>) -> Result<WtEdited, WtError> {
     })
 }
 
-/// The current value of one owned key; `None` when it is absent.
+/// The current value of one owned key; `None` when it is absent. A key CMD
+/// Studio owns that the file writes twice on the way to it is refused (`Shape`).
 pub fn read_value(text: &str, key: &WtKey) -> Result<Option<Value>, WtError> {
     let (_, body) = split_bom(text);
     let root = parse(body)?;
     let obj = root_object(&root)?;
+    check_top_level(&obj)?;
     Ok(match key {
         WtKey::Scheme => obj
             .array_value("schemes")
             .and_then(|s| s.elements().into_iter().find_map(|e| our_scheme(&e)))
             .and_then(|o| o.to_serde_value()),
-        WtKey::DefaultProfile => obj
-            .get("defaultProfile")
-            .and_then(|p| p.value())
-            .and_then(|v| v.to_serde_value()),
-        WtKey::Profile { key } => existing_profile(&obj)
-            .and_then(|p| p.get(key))
-            .and_then(|p| p.value())
-            .and_then(|v| v.to_serde_value()),
-        WtKey::ProfileSub { key, sub } => existing_profile(&obj)
-            .and_then(|p| p.object_value(key))
-            .and_then(|o| o.get(sub))
-            .and_then(|p| p.value())
-            .and_then(|v| v.to_serde_value()),
+        _ => holder(&obj, key)?.and_then(|(owner, name)| current(&owner, name)),
     })
 }
 
@@ -247,7 +239,8 @@ pub fn read_value(text: &str, key: &WtKey) -> Result<Option<Value>, WtError> {
 /// original back (or is removed when it was absent); a key the user changed
 /// since keeps the user's value; containers CMD Studio created go when
 /// nothing of the user's is left in them. The maps may cover several applies:
-/// each key's first original and last write.
+/// each key's first original and last write. A key CMD Studio owns that the
+/// file writes twice is refused (`Shape`) rather than restored in one copy.
 pub fn revert(
     text: &str,
     originals: &BTreeMap<WtKey, Option<Value>>,
@@ -257,6 +250,7 @@ pub fn revert(
     let (bom, body) = split_bom(text);
     let root = parse(body)?;
     let obj = root_object(&root)?;
+    check_top_level(&obj)?;
 
     if let Some(schemes) = obj.array_value("schemes") {
         for scheme in schemes
@@ -276,24 +270,14 @@ pub fn revert(
         let Some(last) = written.get(key) else {
             continue;
         };
-        match key {
-            WtKey::Scheme => {}
-            WtKey::DefaultProfile => restore_prop(&obj, "defaultProfile", original, last),
-            WtKey::Profile { key } => {
-                if let Some(profile) = existing_profile(&obj) {
-                    restore_prop(&profile, key, original, last);
-                }
-            }
-            WtKey::ProfileSub { key, sub } => {
-                if let Some(parent) = existing_profile(&obj).and_then(|p| p.object_value(key)) {
-                    restore_prop(&parent, sub, original, last);
-                }
-            }
+        // `Scheme` has no holder: every CMD Studio scheme is already gone.
+        if let Some((owner, name)) = holder(&obj, key)? {
+            restore_prop(&owner, name, original, last);
         }
     }
 
     if created.contains(&WtCreated::CmdProfile) {
-        if let Some(profile) = existing_profile(&obj) {
+        if let Some(profile) = existing_profile(&obj)? {
             let only_ours = profile
                 .properties()
                 .iter()
@@ -305,6 +289,7 @@ pub fn revert(
     }
     if created.contains(&WtCreated::ProfileList) {
         if let Some(profiles) = obj.object_value("profiles") {
+            once(&profiles, "list", PROFILES)?;
             remove_if_empty(&profiles, "list");
         }
     }
@@ -411,6 +396,7 @@ fn profiles_list(obj: &CstObject, created: &mut Vec<WtCreated>) -> Result<CstArr
         Some(node) => match (node.as_array(), node.as_object()) {
             (Some(list), _) => Ok(list),
             (None, Some(profiles)) => {
+                once(&profiles, "list", PROFILES)?;
                 if profiles.get("list").is_none() {
                     created.push(WtCreated::ProfileList);
                 }
@@ -455,13 +441,87 @@ fn find_cmd_profile(list: &CstArray) -> Option<CstObject> {
         })
 }
 
-fn existing_profile(obj: &CstObject) -> Option<CstObject> {
-    let node = obj.get("profiles")?.value()?;
-    let list = match node.as_array() {
-        Some(list) => list,
-        None => node.as_object()?.array_value("list")?,
+/// The cmd profile, when the file has one. Call `check_top_level` first.
+fn existing_profile(obj: &CstObject) -> Result<Option<CstObject>, WtError> {
+    let Some(node) = obj.get("profiles").and_then(|p| p.value()) else {
+        return Ok(None);
     };
-    find_cmd_profile(&list)
+    let list = match (node.as_array(), node.as_object()) {
+        (Some(list), _) => Some(list),
+        (None, Some(profiles)) => {
+            once(&profiles, "list", PROFILES)?;
+            profiles.array_value("list")
+        }
+        (None, None) => None,
+    };
+    Ok(list.and_then(|list| find_cmd_profile(&list)))
+}
+
+/// Where messages say a repeated key is.
+const TOP_LEVEL: &str = "the top level";
+const PROFILES: &str = "\"profiles\"";
+const CMD_PROFILE: &str = "the cmd profile";
+
+/// Refuses a key CMD Studio owns that `obj` writes more than once: Windows
+/// Terminal would read one copy while CMD Studio read or changed another.
+fn once(obj: &CstObject, name: &str, place: &str) -> Result<(), WtError> {
+    let copies = obj
+        .properties()
+        .iter()
+        .filter(|p| p.decoded_name().as_deref() == Some(name))
+        .count();
+    if copies < 2 {
+        return Ok(());
+    }
+    let times = match copies {
+        2 => "twice".to_string(),
+        n => format!("{n} times"),
+    };
+    Err(WtError::Shape(format!(
+        "{place} has {name:?} {times}; fix settings.json by hand"
+    )))
+}
+
+/// The top-level keys CMD Studio owns, each written at most once.
+fn check_top_level(obj: &CstObject) -> Result<(), WtError> {
+    for name in ["defaultProfile", "profiles", "schemes"] {
+        once(obj, name, TOP_LEVEL)?;
+    }
+    Ok(())
+}
+
+/// The object that holds an owned key, and the key's name in it, after checking
+/// that no key on the way is written twice; `None` when that object is missing,
+/// and for `Scheme`, which is a list element, not a key. Call `check_top_level` first.
+fn holder<'k>(obj: &CstObject, key: &'k WtKey) -> Result<Option<(CstObject, &'k str)>, WtError> {
+    let found = match key {
+        WtKey::Scheme => None,
+        WtKey::DefaultProfile => Some((obj.clone(), "defaultProfile", TOP_LEVEL.to_string())),
+        WtKey::Profile { key } => {
+            existing_profile(obj)?.map(|p| (p, key.as_str(), CMD_PROFILE.to_string()))
+        }
+        WtKey::ProfileSub { key, sub } => match existing_profile(obj)? {
+            Some(profile) => {
+                once(&profile, key, CMD_PROFILE)?;
+                profile
+                    .object_value(key)
+                    .map(|o| (o, sub.as_str(), in_profile_object(key)))
+            }
+            None => None,
+        },
+    };
+    match found {
+        Some((owner, name, place)) => {
+            once(&owner, name, &place)?;
+            Ok(Some((owner, name)))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Where a key inside an object-valued key of the cmd profile (`font`) is.
+fn in_profile_object(key: &str) -> String {
+    format!("{CMD_PROFILE}'s {key:?}")
 }
 
 fn current(obj: &CstObject, name: &str) -> Option<Value> {
@@ -510,6 +570,7 @@ fn set_profile_keys(
     changes: &mut Vec<WtChange>,
 ) -> Result<(), WtError> {
     for (key, value) in values {
+        once(profile, key, CMD_PROFILE)?;
         let existing = current(profile, key);
         match (value.as_object(), existing.as_ref()) {
             // An object value (font) merges key by key into an existing object, so
@@ -519,6 +580,7 @@ fn set_profile_keys(
                     WtError::Shape(format!("cmd profile key {key:?} changed while editing"))
                 })?;
                 for (sub, sub_value) in subs {
+                    once(&parent, sub, &in_profile_object(key))?;
                     changes.push(WtChange {
                         key: WtKey::ProfileSub {
                             key: key.clone(),
@@ -1150,5 +1212,145 @@ mod tests {
                 "{text:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_key_cmd_studio_owns_written_twice_is_refused() {
+        // Windows Terminal would read one copy while CMD Studio read or changed the other.
+        const BASE: &str = r#"{
+    "defaultProfile": "{61c54bbd-c2c6-5271-96e7-009a87ff44bf}",
+    "profiles": {
+        "list": [
+            {
+                "guid": "{0caa0dad-35be-5f56-a8ff-afceeeaa6101}",
+                "font": { "face": "Consolas" },
+                "opacity": 50
+            }
+        ]
+    },
+    "schemes": []
+}
+"#;
+        let profile_key = |key: &str| WtKey::Profile { key: key.into() };
+        let face = WtKey::ProfileSub {
+            key: "font".into(),
+            sub: "face".into(),
+        };
+        let cases = [
+            (
+                "\"schemes\": []",
+                "\"schemes\": [],\n    \"defaultProfile\": \"{0caa0dad-35be-5f56-a8ff-afceeeaa6101}\"",
+                "the top level has \"defaultProfile\" twice",
+                WtKey::DefaultProfile,
+            ),
+            (
+                "\"schemes\": []",
+                "\"profiles\": {},\n    \"schemes\": []",
+                "the top level has \"profiles\" twice",
+                profile_key("opacity"),
+            ),
+            (
+                "\"schemes\": []",
+                "\"schemes\": [],\n    \"schemes\": []",
+                "the top level has \"schemes\" twice",
+                WtKey::Scheme,
+            ),
+            (
+                "\"list\": [",
+                "\"list\": [],\n        \"list\": [",
+                "\"profiles\" has \"list\" twice",
+                profile_key("opacity"),
+            ),
+            (
+                "\"opacity\": 50",
+                "\"opacity\": 50,\n                \"opacity\": 70",
+                "the cmd profile has \"opacity\" twice",
+                profile_key("opacity"),
+            ),
+            (
+                "{ \"face\": \"Consolas\" }",
+                "{ \"face\": \"Consolas\", \"face\": \"Fira Code\" }",
+                "the cmd profile's \"font\" has \"face\" twice",
+                face.clone(),
+            ),
+            (
+                "\"opacity\": 50",
+                "\"opacity\": 50,\n                \"font\": {}",
+                "the cmd profile has \"font\" twice",
+                face,
+            ),
+        ];
+        let (s, p) = (scheme(), profile());
+        for (from, to, want, key) in cases {
+            let text = BASE.replacen(from, to, 1);
+            assert_ne!(text, BASE);
+            let refused = |r: Result<(), WtError>| match r {
+                Err(WtError::Shape(m)) => {
+                    assert!(m.contains(want), "{m}");
+                    assert!(m.ends_with("fix settings.json by hand"), "{m}");
+                }
+                other => panic!("{want}: {other:?}"),
+            };
+            refused(apply_edit(&text, &edit(&s, &p, true)).map(|_| ()));
+            refused(read_value(&text, &key).map(|_| ()));
+            let originals = BTreeMap::from([(key.clone(), Some(json!(1)))]);
+            let written = BTreeMap::from([(key.clone(), json!(2))]);
+            refused(revert(&text, &originals, &written, &[]).map(|_| ()));
+        }
+        // Removing a list CMD Studio created checks it as well.
+        let list_twice = BASE.replacen("\"list\": [", "\"list\": [],\n        \"list\": [", 1);
+        for created in [WtCreated::CmdProfile, WtCreated::ProfileList] {
+            assert!(matches!(
+                revert(&list_twice, &BTreeMap::new(), &BTreeMap::new(), &[created]),
+                Err(WtError::Shape(m)) if m.contains("\"profiles\" has \"list\" twice")
+            ));
+        }
+        let three = BASE.replacen(
+            "\"schemes\": []",
+            "\"schemes\": [], \"schemes\": [], \"schemes\": []",
+            1,
+        );
+        assert!(matches!(
+            read_value(&three, &WtKey::Scheme),
+            Err(WtError::Shape(m)) if m.contains("the top level has \"schemes\" 3 times")
+        ));
+    }
+
+    #[test]
+    fn keys_cmd_studio_does_not_own_may_repeat() {
+        let text = r#"{
+    "copyOnSelect": true,
+    "copyOnSelect": false,
+    "profiles": {
+        "defaults": {},
+        "defaults": {},
+        "list": [
+            {
+                "guid": "{0caa0dad-35be-5f56-a8ff-afceeeaa6101}",
+                "hidden": false,
+                "hidden": true,
+                "font": {
+                    "weight": "bold",
+                    "weight": "light"
+                }
+            }
+        ]
+    }
+}
+"#;
+        let (s, p) = (scheme(), profile());
+        let face = WtKey::ProfileSub {
+            key: "font".into(),
+            sub: "face".into(),
+        };
+        assert_eq!(read_value(text, &face).unwrap(), None);
+        let e = apply_edit(text, &edit(&s, &p, true)).unwrap();
+        assert_eq!(
+            read_value(&e.text, &face).unwrap(),
+            Some(json!("Cascadia Mono"))
+        );
+        assert_eq!(e.text.matches("\"hidden\"").count(), 2);
+        let back = revert(&e.text, &originals(&e), &written(&e), &e.created).unwrap();
+        assert_eq!(back, text);
     }
 }
