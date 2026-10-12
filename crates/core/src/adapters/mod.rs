@@ -111,10 +111,16 @@ pub trait AutoRun {
 /// Per-user fonts (spec §5.4 `Fonts`, G12).
 pub trait Fonts {
     /// Family names GDI lists in this session (`EnumFontFamiliesExW`), sorted, without duplicates.
+    /// `Err` when GDI lists nothing: every Windows has fonts, so an empty list means the listing
+    /// did not work, and the call gives no other sign of failure.
     fn families(&self) -> Result<Vec<String>, AdapterError>;
     /// `%LOCALAPPDATA%\Microsoft\Windows\Fonts`, or the test's folder.
     fn user_fonts_dir(&self) -> PathBuf;
-    /// Data of a per-user font registration value (the font file's path); `None` when absent.
+    /// Data of a per-user font registration value (the font file's path). `Ok(None)` when the
+    /// value, or its key, is absent. `Err` for a value that is there but is not plain `REG_SZ`
+    /// text (`REG_EXPAND_SZ`, `REG_DWORD`, bad UTF-16): callers record what this returns and write
+    /// it back with `register`, which stores a `REG_SZ`, so a value that cannot be written back
+    /// is never reported as absent. Reading never changes the value.
     fn registration(&self, value_name: &str) -> Result<Option<String>, AdapterError>;
     fn register(&self, value_name: &str, file: &str) -> Result<(), AdapterError>;
     /// Deletes the registration value; `Ok` when it is absent.
@@ -125,7 +131,10 @@ pub trait Fonts {
     fn delete_registration_key_if_empty(&self) -> Result<(), AdapterError>;
     /// Makes the font usable now: `AddFontResourceW`, then broadcast `WM_FONTCHANGE`.
     fn load(&self, file: &Path) -> Result<(), AdapterError>;
-    /// `RemoveFontResourceW`, then broadcast; `Ok` when it was not loaded.
+    /// Removes every reference to the file: `RemoveFontResourceW` again and again until it
+    /// returns FALSE (the documented way to bring a font's resource count to zero; at most 32
+    /// calls), then broadcast `WM_FONTCHANGE`. `Ok` when it was not loaded. `Err` when the file
+    /// was still loaded after 32 removals.
     fn unload(&self, file: &Path) -> Result<(), AdapterError>;
 }
 

@@ -310,6 +310,10 @@ struct FontsState {
     file_families: BTreeMap<String, String>,
     /// The registration key is absent, as on an account that never had a per-user font.
     key_missing: bool,
+    /// `families` fails.
+    fail_families: bool,
+    /// Value names whose `registration` fails.
+    fail_registration: BTreeSet<String>,
 }
 
 /// Per-user fonts in memory.
@@ -339,6 +343,19 @@ impl FakeFonts {
     pub fn set_key_exists(&self, exists: bool) {
         self.state.borrow_mut().key_missing = !exists;
     }
+    /// Makes every later `families` fail, as the real one does when GDI lists nothing.
+    pub fn fail_families(&self) {
+        self.state.borrow_mut().fail_families = true;
+    }
+    /// Makes every later `registration(value_name)` fail, as the real one does for a value that
+    /// is not plain `REG_SZ` text (`REG_EXPAND_SZ`, `REG_DWORD`, bad UTF-16). Other value names,
+    /// `register` and `unregister` are not affected, and the stored data stays as it was.
+    pub fn fail_registration_of(&self, value_name: &str) {
+        self.state
+            .borrow_mut()
+            .fail_registration
+            .insert(value_name.to_string());
+    }
     /// `(registry values, loaded files, whether the registration key exists)`, for comparisons.
     pub fn snapshot(&self) -> (BTreeMap<String, String>, BTreeSet<PathBuf>, bool) {
         let s = self.state.borrow();
@@ -349,6 +366,12 @@ impl FakeFonts {
 impl Fonts for FakeFonts {
     fn families(&self) -> Result<Vec<String>, AdapterError> {
         let s = self.state.borrow();
+        if s.fail_families {
+            return Err(AdapterError::new(
+                "EnumFontFamiliesExW",
+                "GDI listed no font families (injected)",
+            ));
+        }
         let mut all = s.families.clone();
         for file in &s.loaded {
             let name = file.file_name().and_then(OsStr::to_str).unwrap_or_default();
@@ -362,7 +385,14 @@ impl Fonts for FakeFonts {
         self.dir.clone()
     }
     fn registration(&self, value_name: &str) -> Result<Option<String>, AdapterError> {
-        Ok(self.state.borrow().registry.get(value_name).cloned())
+        let s = self.state.borrow();
+        if s.fail_registration.contains(value_name) {
+            return Err(AdapterError::new(
+                format!("read {value_name}"),
+                "the value is not plain REG_SZ text (injected)",
+            ));
+        }
+        Ok(s.registry.get(value_name).cloned())
     }
     fn register(&self, value_name: &str, file: &str) -> Result<(), AdapterError> {
         let mut s = self.state.borrow_mut();
@@ -731,6 +761,51 @@ mod tests {
         f.unregister("N (TrueType)").unwrap();
         f.delete_registration_key_if_empty().unwrap();
         assert!(!f.registration_key_exists().unwrap());
+    }
+
+    #[test]
+    fn fake_fonts_can_fail_the_family_list() {
+        // The real adapter fails like this when GDI lists nothing.
+        let f = FakeFonts::new(r"C:\fonts", &["Arial"]);
+        f.register("A (TrueType)", r"C:\fonts\a.ttf").unwrap();
+        let before = f.snapshot();
+        assert_eq!(f.families().unwrap(), vec!["Arial".to_string()]);
+        f.fail_families();
+        let e = f.families().unwrap_err();
+        assert_eq!(e.context, "EnumFontFamiliesExW");
+        assert!(e.message.contains("injected"), "{e}");
+        assert!(f.families().is_err(), "it keeps failing");
+        // Nothing else is affected: the registry, loading and the key still work.
+        assert_eq!(
+            f.registration("A (TrueType)").unwrap().as_deref(),
+            Some(r"C:\fonts\a.ttf")
+        );
+        f.load(Path::new(r"C:\fonts\a.ttf")).unwrap();
+        f.unload(Path::new(r"C:\fonts\a.ttf")).unwrap();
+        assert_eq!(f.snapshot(), before);
+    }
+
+    #[test]
+    fn fake_fonts_can_fail_the_registration_of_one_value() {
+        // The real adapter fails like this for a value that is not plain REG_SZ text.
+        let f = FakeFonts::new(r"C:\fonts", &["Arial"]);
+        f.register("A (TrueType)", r"C:\fonts\a.ttf").unwrap();
+        f.register("B (TrueType)", r"C:\fonts\b.ttf").unwrap();
+        let before = f.snapshot();
+        f.fail_registration_of("B (TrueType)");
+        let e = f.registration("B (TrueType)").unwrap_err();
+        assert!(e.context.contains("B (TrueType)"), "{e}");
+        assert!(e.message.contains("injected"), "{e}");
+        assert!(f.registration("B (TrueType)").is_err(), "it keeps failing");
+        // Only that value name is affected: another value, an absent one, the family list and
+        // the stored data are not.
+        assert_eq!(
+            f.registration("A (TrueType)").unwrap().as_deref(),
+            Some(r"C:\fonts\a.ttf")
+        );
+        assert_eq!(f.registration("C (TrueType)").unwrap(), None);
+        assert_eq!(f.families().unwrap(), vec!["Arial".to_string()]);
+        assert_eq!(f.snapshot(), before);
     }
 
     #[test]

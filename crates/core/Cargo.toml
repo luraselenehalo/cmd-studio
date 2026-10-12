@@ -28,7 +28,8 @@ schemars = { version = "1", features = ["uuid1"] }
 winreg = "=0.56.0"
 # host.rs: Foundation, Globalization, Security(+Authorization), Storage_FileSystem,
 # Storage_Packaging_Appx, System_Com, System_SystemInformation, System_SystemServices,
-# System_Threading, UI_Shell. fonts.rs: Foundation, Graphics_Gdi, UI_WindowsAndMessaging.
+# System_Threading, UI_Shell. fonts.rs: Foundation, Graphics_Gdi, System_Threading (its leak
+# test's GetGuiResources), UI_WindowsAndMessaging.
 windows-sys = { version = "=0.61.2", features = [
     "Win32_Foundation",
     "Win32_Globalization",

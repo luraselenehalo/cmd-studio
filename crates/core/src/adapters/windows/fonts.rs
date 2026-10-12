@@ -5,10 +5,11 @@
 //!
 //! The GDI calls used here (`GetDC`, `ReleaseDC`, `EnumFontFamiliesExW`, `AddFontResourceW`,
 //! `RemoveFontResourceW`) name no error code in their documentation; `AddFontResourceW` says "No
-//! extended error information is available". What `GetLastError` holds after them is a stale code
-//! from some earlier call, or "The operation completed successfully". So an error reported for one
-//! of them is a fixed sentence that names the call, and the file where there is one (it ends with
-//! `NO_REASON`), and `GetLastError` is never read here.
+//! extended error information is available". What `GetLastError` may hold after them is a stale
+//! code from some earlier call, or "The operation completed successfully". So an error reported
+//! for one of them is a fixed sentence that names the call, and the file where there is one, and
+//! `GetLastError` is never read here. Where Windows only says that a call failed, the sentence
+//! ends with `NO_REASON`.
 use super::registry::RegLocation;
 use super::wide;
 use crate::adapters::{AdapterError, Fonts, RegValue, REG_SZ};
@@ -25,13 +26,13 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 /// The per-user key where Windows lists the fonts it loads at sign-in.
 pub const FONTS_SUBKEY: &str = r"Software\Microsoft\Windows NT\CurrentVersion\Fonts";
 
-/// How many times `unload` asks Windows to drop one file. The font table counts how often a file was
-/// added, and each `RemoveFontResourceW` takes one off; the documented way to bring the count to
-/// zero is to call it until it returns FALSE. Adding one font file 32 times is far beyond anything
-/// real, so a loop that gets this far has found something wrong.
+/// How many times `unload` asks Windows to drop one file. Windows keeps a resource count for a
+/// font, and the documented way to bring it to zero is to call `RemoveFontResourceW` in a loop
+/// until it returns FALSE. A font file added 32 times is far beyond anything real, so a loop that
+/// gets this far has found something wrong.
 const MAX_REMOVALS: u32 = 32;
 
-/// The end of every fixed failure sentence below.
+/// The end of a fixed sentence for a call that failed and says nothing more.
 const NO_REASON: &str = "Windows gives no further reason";
 
 /// The user's fonts: the family list GDI shows, the per-user fonts folder, the registration
@@ -83,15 +84,16 @@ fn add_failed(file: &Path) -> AdapterError {
     AdapterError::new(
         format!("AddFontResourceW {}", file.display()),
         format!(
-            "no font was added: the file may be missing, not a font Windows can load, or damaged; {NO_REASON}"
+            "no font was added, for example because the file is missing, is not a font Windows can load, or is damaged; {NO_REASON}"
         ),
     )
 }
 
+/// Not a failure Windows reported: every removal answered that it removed something.
 fn still_loaded(file: &Path) -> AdapterError {
     AdapterError::new(
         format!("RemoveFontResourceW {}", file.display()),
-        format!("the file was still in the font table after {MAX_REMOVALS} removals; {NO_REASON}"),
+        format!("the file was still loaded after {MAX_REMOVALS} removals"),
     )
 }
 
@@ -633,8 +635,20 @@ mod tests {
             errors[3].context,
             r"RemoveFontResourceW C:\Users\ผู้ใช้\Fonts\a.ttf"
         );
-        for e in &errors {
+        // A call that failed and says nothing more ends in the same words.
+        for e in &errors[..3] {
             assert!(e.message.contains("no further reason"), "{e}");
+            assert!(e.message.ends_with(NO_REASON), "{e}");
+        }
+        // The causes of an AddFontResourceW failure are examples, not what Windows said.
+        assert!(errors[2].message.contains("for example"), "{}", errors[2]);
+        // The removal loop gives up by its own count. Windows reported nothing wrong, so the
+        // text says what happened and does not claim a reason is missing.
+        assert_eq!(
+            errors[3].message,
+            format!("the file was still loaded after {MAX_REMOVALS} removals")
+        );
+        for e in &errors {
             assert!(!e.message.contains("os error"), "{e}");
             assert!(!e.message.contains("Access is denied"), "{e}");
         }
@@ -642,7 +656,8 @@ mod tests {
 
     /// What a font install run changed, so that it can be put back however the run ends: a
     /// failing assert or unwrap must never leave a developer's fonts changed. Each flag is set
-    /// before its step, so a step that fails half-way is undone as well.
+    /// before its step, so a step that fails half-way is undone as well. One `unload` takes every
+    /// reference to the file, so the one `loaded` flag covers any number of `load` calls.
     struct Undo<'a> {
         fonts: &'a WinFonts,
         value_name: &'a str,
@@ -902,9 +917,10 @@ mod tests {
     }
 
     /// Real-location check (G12): installs the bundled CaskaydiaCove NF for
-    /// this user, sees GDI list it, then removes it. Runs only with
-    /// CMDSTUDIO_SYSTEM_TESTS=1 (CI and test VMs); needs resources\ filled by
-    /// scripts\fetch-resources.ps1.
+    /// this user, adds it to the session a second time, sees GDI list it,
+    /// then removes it and sees GDI stop listing it, which shows that one
+    /// `unload` takes every reference. Runs only with CMDSTUDIO_SYSTEM_TESTS=1
+    /// (CI and test VMs); needs resources\ filled by scripts\fetch-resources.ps1.
     #[test]
     fn system_real_font_install_and_remove() {
         // Only the value 1 enables this: CMDSTUDIO_SYSTEM_TESTS=0 or an empty value does not.
@@ -931,21 +947,28 @@ mod tests {
             !f.families().unwrap().iter().any(|n| n == family),
             "{family} is already installed; run this on a machine without it"
         );
+        let dest = f.user_fonts_dir().join("CaskaydiaCoveNerdFont-Regular.ttf");
+        // Nothing of the user's may be at that path when the unload below runs.
+        assert!(!dest.exists(), "{} already exists", dest.display());
+        // Not loaded yet, so there is nothing to remove, and that is not an error.
+        f.unload(&dest).unwrap();
         let dir_existed = f.user_fonts_dir().is_dir();
         let key_existed = f.registration_key_exists().unwrap();
         let mut seen = false;
         run_installed(&f, &src, value_name, || {
+            // A second add: if Windows counts references, it now holds two to the file. The
+            // removal at the end of the run has to take both, or the family stays listed.
+            f.load(&dest).unwrap();
             seen = f.families().unwrap().iter().any(|n| n == family);
         });
         // `run_installed` has put everything back; check that before judging the install itself.
-        let dest = f.user_fonts_dir().join("CaskaydiaCoveNerdFont-Regular.ttf");
         assert!(!dest.exists(), "the copied font file is still there");
         assert_eq!(f.registration(value_name).unwrap(), None);
         assert_eq!(f.registration_key_exists().unwrap(), key_existed);
         assert_eq!(f.user_fonts_dir().is_dir(), dir_existed);
         assert!(
             !f.families().unwrap().iter().any(|n| n == family),
-            "{family} is still listed after the removal"
+            "{family} is still listed after the removal: unload left a reference to the file"
         );
         assert!(seen, "GDI did not list {family} after the install");
     }
