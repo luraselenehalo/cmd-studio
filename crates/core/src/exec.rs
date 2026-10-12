@@ -51,6 +51,12 @@ struct FontPrior {
     /// Where the file comes back from when it was there; `None` when it was not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source: Option<FileSource>,
+    /// The hash `resources/manifest.json` pinned for the bundled file when this was captured:
+    /// what apply installs. An uninstall knows CMD Studio's file by it, or by the pin of the
+    /// bundle it runs with, even after an update of CMD Studio that ships another build of the
+    /// font. `None` when the pin could not be read then, or in a record made before it was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    installs: Option<String>,
 }
 
 /// Where a font file that was there before comes back from.
@@ -174,6 +180,37 @@ fn sibling(dir: &Path, what: &str) -> PathBuf {
     dir.with_file_name(format!(".{name}.{what}-{tail}"))
 }
 
+/// A font that an uninstall left as it is because it is not the one CMD Studio installed any
+/// more: the user installed one of that name since (spec §5.4: uninstall only fonts CMD Studio
+/// installed).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FontLeft {
+    pub family: String,
+    /// Why it is not CMD Studio's, in English: "its registration … now names …" or "… now holds
+    /// another build …".
+    pub why_en: String,
+    /// The same, in Thai.
+    pub why_th: String,
+}
+
+impl FontLeft {
+    /// What an undo says about it, in English.
+    pub fn en(&self) -> String {
+        format!(
+            "The font {} was left installed: {}, so it is yours now.",
+            self.family, self.why_en
+        )
+    }
+
+    /// What an undo says about it, in Thai.
+    pub fn th(&self) -> String {
+        format!(
+            "ไม่ได้ถอนฟอนต์ {} เพราะ{} ฟอนต์นี้จึงเป็นของคุณแล้ว",
+            self.family, self.why_th
+        )
+    }
+}
+
 pub struct SystemExecutor<'a> {
     sys: System<'a>,
     resources: &'a Resources,
@@ -181,6 +218,8 @@ pub struct SystemExecutor<'a> {
     /// Font files this executor uninstalled but could not delete. Every method that changes
     /// the list takes `&mut self`, so it needs no interior mutability.
     held: Vec<PathBuf>,
+    /// Fonts this executor did not uninstall because they are the user's now.
+    left: Vec<FontLeft>,
 }
 
 impl<'a> SystemExecutor<'a> {
@@ -190,7 +229,14 @@ impl<'a> SystemExecutor<'a> {
             resources,
             manifest: None,
             held: Vec::new(),
+            left: Vec::new(),
         }
+    }
+
+    /// The fonts a restore did not uninstall because they are not the ones CMD Studio
+    /// installed any more (see [`SystemExecutor::font_not_ours`]), each once.
+    pub fn fonts_left(&self) -> Vec<FontLeft> {
+        self.left.clone()
     }
 
     /// Font files that were uninstalled (unloaded and unregistered) but could not be deleted,
@@ -419,11 +465,74 @@ impl<'a> SystemExecutor<'a> {
             .map_err(|e| failure("E_FONT_INSTALL", e))
     }
 
+    /// Whether the font at `dest` is still the one CMD Studio installed, judged now. It is not
+    /// when its registration `value_name` names another file, or when `dest` holds other bytes
+    /// than CMD Studio installs: neither `installed` (the pin recorded when apply captured the
+    /// font, see `FontPrior::installs`) nor the bundled font `src`'s pin in
+    /// `resources/manifest.json`. Then the user installed a font of that name since, and it is
+    /// theirs: `Some` with why. `None` when it is CMD Studio's, or nothing is there. A read that
+    /// fails, or a pin that is needed and cannot be read, is an error: nothing is uninstalled on
+    /// a guess.
+    pub(crate) fn font_not_ours(
+        &mut self,
+        family: &str,
+        (src, dest): (&Path, &Path),
+        value_name: &str,
+        installed: Option<&str>,
+    ) -> Result<Option<FontLeft>, Failure> {
+        let read = |e| failure("E_MACHINE_READ", e);
+        let left = |why_en: String, why_th: String| {
+            Some(FontLeft {
+                family: family.to_string(),
+                why_en,
+                why_th,
+            })
+        };
+        if let Some(named) = self.sys.fonts.registration(value_name).map_err(read)? {
+            if !same_path(Path::new(&named), dest) {
+                return Ok(left(
+                    format!(
+                        "its registration {value_name} now names {named}, a file CMD Studio did \
+                         not install"
+                    ),
+                    format!("ค่า {value_name} ตอนนี้ชี้ไปที่ {named} ซึ่งไม่ใช่ไฟล์ที่ CMD Studio ติดตั้ง"),
+                ));
+            }
+        }
+        let Some(bytes) = self.sys.fs.read(dest).map_err(read)? else {
+            return Ok(None);
+        };
+        let hash = sha256_hex(&bytes);
+        if installed == Some(hash.as_str()) || hash == self.pinned_font_hash(src)? {
+            return Ok(None);
+        }
+        let file = dest.display();
+        Ok(left(
+            format!(
+                "{file} now holds another build of the font than the one CMD Studio installed \
+                 (it was installed again over it)"
+            ),
+            format!("ไฟล์ {file} ตอนนี้เป็นฟอนต์คนละรุ่นกับที่ CMD Studio ติดตั้ง (มีการติดตั้งทับภายหลัง)"),
+        ))
+    }
+
     fn restore_font(&mut self, family: &str, prior: &Option<Vec<u8>>) -> Result<(), Failure> {
         let p: FontPrior = from_json(prior)?;
         let (src, dest, value_name) = self.font_target(family)?;
         match (p.file_existed, &p.source) {
-            (false, _) => self.remove_font(&p, &dest, &value_name),
+            (false, _) => {
+                // A font of that name the user installed since is theirs: it stays.
+                let installed = p.installs.as_deref();
+                if let Some(left) =
+                    self.font_not_ours(family, (&src, &dest), &value_name, installed)?
+                {
+                    if !self.left.contains(&left) {
+                        self.left.push(left);
+                    }
+                    return Ok(());
+                }
+                self.remove_font(&p, &dest, &value_name)
+            }
             (true, Some(source)) => self.put_font_back(&p, source, &src, &dest, &value_name),
             (true, None) => Err(failure(
                 "E_SNAPSHOT_READ",
@@ -432,11 +541,12 @@ impl<'a> SystemExecutor<'a> {
         }
     }
 
-    /// The font file was not there before: the font is uninstalled in the order G12 proved
-    /// (spec §5.4): out of the session's font table, then the registration, then a broadcast of
-    /// the change, then the file. Once the registration is gone the font is uninstalled. A file
-    /// that would not unload or delete (Windows Terminal may hold it) is left for a later delete
-    /// and listed by `held_files`.
+    /// The font file was not there before, and the font is still the one CMD Studio installed
+    /// (see `font_not_ours`): it is uninstalled in the order G12 proved (spec §5.4): out of the
+    /// session's font table, then the registration, then a broadcast of the change, then the
+    /// file. Once the registration is gone the font is uninstalled. A file that would not
+    /// unload or delete (Windows Terminal may hold it) is left for a later delete and listed by
+    /// `held_files`.
     fn remove_font(&mut self, p: &FontPrior, dest: &Path, value_name: &str) -> Result<(), Failure> {
         let (fs, fonts) = (self.sys.fs, self.sys.fonts);
         // An unload that fails leaves the font in this session only; the delete below then
@@ -604,12 +714,13 @@ impl Executor for SystemExecutor<'_> {
                 // The bundled file comes back from the bundle, at this hash; any other is kept
                 // here. Without a readable pin the bytes are kept too, so an undo never needs
                 // the bundle.
+                let pin = self.pinned_font_hash(&src).ok();
                 let source = match &file {
                     None => None,
                     Some(bytes) => {
                         let sha256 = sha256_hex(bytes);
-                        Some(match self.pinned_font_hash(&src) {
-                            Ok(pin) if pin == sha256 => FileSource::Bundle { path: src, sha256 },
+                        Some(match &pin {
+                            Some(pin) if *pin == sha256 => FileSource::Bundle { path: src, sha256 },
                             _ => FileSource::Bytes { hex: to_hex(bytes) },
                         })
                     }
@@ -621,6 +732,7 @@ impl Executor for SystemExecutor<'_> {
                     key_existed,
                     registration,
                     source,
+                    installs: pin,
                 })
                 .map(Some)
             }
@@ -755,6 +867,11 @@ impl<'a> UndoExecutor<'a> {
     /// The inner executor's [`SystemExecutor::held_files`].
     pub fn held_files(&self) -> Vec<PathBuf> {
         self.inner.held_files()
+    }
+
+    /// The inner executor's [`SystemExecutor::fonts_left`].
+    pub fn fonts_left(&self) -> Vec<FontLeft> {
+        self.inner.fonts_left()
     }
 }
 
@@ -1067,11 +1184,39 @@ impl<'a> UndoVerifier<'a> {
     }
 }
 
+/// Whether `op` installed a font where none was before (`want` is what it captured), and the
+/// font there now is the user's (see [`SystemExecutor::font_not_ours`]): the undo left it, as it
+/// must, and nothing of CMD Studio's is in it.
+fn font_left_to_the_user(
+    exec: &mut SystemExecutor<'_>,
+    op: &Op,
+    want: &Option<Vec<u8>>,
+) -> Result<bool, Failure> {
+    let Op::InstallFont { family } = op else {
+        return Ok(false);
+    };
+    let Ok(prior) = from_json::<FontPrior>(want) else {
+        return Ok(false);
+    };
+    if prior.file_existed {
+        return Ok(false);
+    }
+    let (src, dest, value_name) = exec.font_target(family)?;
+    Ok(exec
+        .font_not_ours(
+            family,
+            (&src, &dest),
+            &value_name,
+            prior.installs.as_deref(),
+        )?
+        .is_some())
+}
+
 impl Verifier for UndoVerifier<'_> {
     fn verify(&mut self, _ops: &[Op]) -> Result<(), Failure> {
         for (op, want) in &self.expected {
             let now = self.exec.capture(op)?;
-            if !same_state(op, &now, want) {
+            if !same_state(op, &now, want) && !font_left_to_the_user(&mut self.exec, op, want)? {
                 return Err(failure(
                     "E_VERIFY_READBACK",
                     format!("undo did not restore {}", op_label(op)),
@@ -1954,6 +2099,47 @@ mod tests {
     }
 
     #[test]
+    fn a_font_that_cannot_be_told_from_the_users_is_never_uninstalled() {
+        let op = Op::InstallFont {
+            family: NERD_FONT_FAMILY.into(),
+        };
+        // Its registration cannot be read: nothing is uninstalled on a guess.
+        let (m, res, _) = setup();
+        let mut ex = SystemExecutor::new(m.system(), &res);
+        let prior = ex.capture(&op).unwrap();
+        ex.apply(&op).unwrap();
+        let themed = (m.fs.snapshot(), m.fonts.snapshot());
+        m.fonts.fail_registration_of("CaskaydiaCove NF (TrueType)");
+        assert_eq!(ex.restore(&op, &prior).unwrap_err().code, "E_MACHINE_READ");
+        assert_eq!((m.fs.snapshot(), m.fonts.snapshot()), themed);
+
+        // Other bytes are there, the restore point recorded no pin, and the bundle's pin
+        // cannot be read now.
+        let (m, res, _) = setup();
+        let manifest = Path::new(RES).join("manifest.json");
+        let dest = m.fonts.user_fonts_dir().join(NERD_FONT_FILE);
+        m.fs.fail_reads_of(&manifest);
+        let prior = SystemExecutor::new(m.system(), &res).capture(&op).unwrap();
+        m.fs.stop_failing(&manifest);
+        SystemExecutor::new(m.system(), &res).apply(&op).unwrap();
+        m.fs.put(&dest, b"another build");
+        m.fs.fail_reads_of(&manifest);
+        let themed = (m.fs.snapshot(), m.fonts.snapshot());
+        let err = SystemExecutor::new(m.system(), &res)
+            .restore(&op, &prior)
+            .unwrap_err();
+        assert_eq!(err.code, "E_RUNTIME_MISSING", "{err:?}");
+        assert_eq!((m.fs.snapshot(), m.fonts.snapshot()), themed);
+        // Once it can be read, the font is known for the user's, and stays.
+        m.fs.stop_failing(&manifest);
+        let mut ex = SystemExecutor::new(m.system(), &res);
+        ex.restore(&op, &prior).unwrap();
+        assert_eq!((m.fs.snapshot(), m.fonts.snapshot()), themed);
+        let [left] = ex.fonts_left().try_into().unwrap();
+        assert_eq!(left.family, NERD_FONT_FAMILY);
+    }
+
+    #[test]
     fn a_held_font_file_is_listed_for_a_later_delete() {
         let (m, res, _) = setup();
         let op = Op::InstallFont {
@@ -2430,6 +2616,7 @@ mod tests {
                     key_existed: true,
                     registration: registration.map(str::to_string),
                     source: file_existed.then(|| FileSource::Bytes { hex: "00".into() }),
+                    installs: None,
                 })
                 .unwrap(),
             )

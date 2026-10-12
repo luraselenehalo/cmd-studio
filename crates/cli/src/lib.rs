@@ -791,6 +791,7 @@ impl<'s, 'a> Say<'s, 'a> {
             start,
             result,
             problems,
+            fonts_left,
         } = match undo(sys, ctx) {
             Ok(report) => report,
             Err(e) => return self.refused(sys, ctx, &e),
@@ -820,6 +821,11 @@ impl<'s, 'a> Say<'s, 'a> {
         // What the undo could not do besides its transaction; the result stands.
         for problem in &problems {
             self.err(self.coded(problem.code, &problem.message));
+        }
+        // A font the user installed since stays installed: said in the chosen language.
+        for left in &fonts_left {
+            let text = self.pick(left.en(), left.th());
+            self.err(format!("E_FONT_INSTALL: {text}"));
         }
         code
     }
@@ -1618,6 +1624,40 @@ mod tests {
             assert!(err.contains(said), "{err}");
             // What to fix is said all the same, from the journal.
             assert!(err.contains(&format!("file {}", init.display())), "{err}");
+        }
+    }
+
+    #[test]
+    fn an_undo_says_it_left_a_font_the_user_installed_over_ours() {
+        use cmdstudio_core::adapters::fake::FakeFonts;
+        use cmdstudio_core::plan::NERD_FONT_FAMILY;
+        use cmdstudio_core::resources::NERD_FONT_FILE;
+        for lang in [Lang::En, Lang::Th] {
+            let (mut m, d) = machine();
+            let fonts = r"C:\Users\tester\AppData\Local\Microsoft\Windows\Fonts";
+            // No Cascadia Mono, so the apply installs the bundled font.
+            m.fonts = FakeFonts::new(fonts, &["Arial"]);
+            m.fonts.knows_file(NERD_FONT_FILE, NERD_FONT_FAMILY);
+            if lang == Lang::Th {
+                m.host.info.ui_language = LANG_THAI;
+            }
+            assert_eq!(cli(&m, &d, &["apply", THEME]).0, EXIT_OK);
+            let file = Path::new(fonts).join(NERD_FONT_FILE);
+            assert!(m.fs.exists(&file));
+            m.fs.put(&file, b"the user's own build");
+            let (code, out, err) = cli(&m, &later(&d, 1), &["undo"]);
+            assert_eq!(code, EXIT_OK, "{out}{err}");
+            let shown = file.display().to_string();
+            let line = err
+                .lines()
+                .find(|l| l.starts_with("E_FONT_INSTALL: "))
+                .unwrap_or_else(|| panic!("{err}"));
+            assert!(line.contains(&shown), "{line}");
+            match lang {
+                Lang::En => assert!(line.contains("was left installed"), "{line}"),
+                Lang::Th => assert!(line.contains("ไม่ได้ถอนฟอนต์"), "{line}"),
+            }
+            assert_eq!(m.fs.file(&file), Some(b"the user's own build".to_vec()));
         }
     }
 

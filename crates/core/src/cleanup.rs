@@ -472,7 +472,7 @@ fn revert_steps(sys: System<'_>, ctx: &Ctx, state: State, report: &mut Report) -
         pending_deletes: state.pending_deletes.clone(),
         ..State::default()
     };
-    uninstall_fonts(sys, base, &mut next, report);
+    uninstall_fonts(sys, ctx, base, &mut next, report);
     save_state(sys, ctx, &next, report);
     let unresolved = settle_record(sys, ctx, ran.id.as_deref(), report);
     Reverted {
@@ -1260,9 +1260,15 @@ fn command_processor_key(sys: System<'_>, report: &mut Report) {
 /// Step 3: the fonts CMD Studio installed. One that stays installed stays in the baseline for
 /// the next revert, and so does whether CMD Studio made the registration key; once no font of
 /// CMD Studio's is left, a key it made is deleted when empty.
-fn uninstall_fonts(sys: System<'_>, base: &Baseline, next: &mut State, report: &mut Report) {
+fn uninstall_fonts(
+    sys: System<'_>,
+    ctx: &Ctx,
+    base: &Baseline,
+    next: &mut State,
+    report: &mut Report,
+) {
     for font in &base.fonts {
-        if !uninstall_font(sys, font, next, report) {
+        if !uninstall_font(sys, ctx, font, next, report) {
             next.baseline.note_font(font.clone());
         }
     }
@@ -1276,42 +1282,50 @@ fn uninstall_fonts(sys: System<'_>, base: &Baseline, next: &mut State, report: &
 /// One font CMD Studio installed, in the order G12 proved (spec §5.4): out of the session's
 /// font table, its registration, a broadcast of the change, its file. Whether CMD Studio is done
 /// with it: uninstalled (its file deleted, or, while Windows Terminal holds it, noted for a
-/// later run to delete, which is no failure), or registered again to a file CMD Studio did not
-/// install, which is not CMD Studio's to remove. One whose registration cannot be read or
-/// deleted stays installed, as a failed step.
+/// later run to delete, which is no failure), or not CMD Studio's to remove any more (see
+/// `SystemExecutor::font_not_ours`): registered again to a file CMD Studio did not install, or
+/// its file holds another build of the font. Such a font is the user's own, and leaving it
+/// leaves nothing of CMD Studio's, so it does not keep the records. One whose registration or
+/// file cannot be read (or whose bundled pin cannot be), or whose registration cannot be
+/// deleted, stays installed, as a failed step.
 fn uninstall_font(
     sys: System<'_>,
+    ctx: &Ctx,
     font: &FontRecord,
     next: &mut State,
     report: &mut Report,
 ) -> bool {
     let what = format!("Uninstall font {}", font.family);
-    match sys.fonts.registration(&font.value_name) {
-        Err(e) => {
+    let mut exec = SystemExecutor::new(sys, &ctx.resources);
+    let not_ours = match font_target(sys, &ctx.resources, &font.family) {
+        // state.json keeps no hash of the font: the bundle's pin tells CMD Studio's file.
+        Some((src, _, _)) => {
+            exec.font_not_ours(&font.family, (&src, &font.file), &font.value_name, None)
+        }
+        None => Err(Failure {
+            code: "E_RUNTIME_MISSING",
+            message: format!("no bundled file for {}", font.family),
+        }),
+    };
+    match not_ours {
+        Err(f) => {
             report.fail(
                 what,
-                "E_MACHINE_READ",
+                f.code,
                 format!(
-                    "its registration {} could not be read ({e}), so it was left installed for \
-                     the next revert",
-                    font.value_name
+                    "whether it is still the font CMD Studio installed could not be checked ({}), \
+                     so it was left installed for the next revert",
+                    f.message
                 ),
                 None,
             );
             return false;
         }
-        Ok(Some(named)) if !same_path(Path::new(&named), &font.file) => {
-            report.done(
-                what,
-                format!(
-                    "left as it is: its registration {} now names {named}, a file CMD Studio did \
-                     not install",
-                    font.value_name
-                ),
-            );
+        Ok(Some(left)) => {
+            report.done(what, format!("left as it is: {}", left.why_en));
             return true;
         }
-        Ok(_) => {}
+        Ok(None) => {}
     }
     // An unload that fails leaves the font in this session only; the delete below then fails
     // too, and the file is noted.
@@ -2652,6 +2666,33 @@ mod tests {
             Some(theirs)
         );
         assert!(state(&m, &ctx).baseline.fonts.is_empty());
+    }
+
+    #[test]
+    fn a_font_file_the_user_installed_over_ours_is_not_cmd_studios_to_remove() {
+        // Another build of the font, installed by hand at the same path: its registration still
+        // names that path, but the bytes are not the bundled font's.
+        let (m, ctx) = machine();
+        apply(&m, &ctx, Target::All);
+        let file = font_file(&m);
+        m.fs.put(&file, b"the user's own build");
+        let report = revert_all(m.system(), &later(&ctx, 1)).unwrap();
+        assert!(report.ok(), "{report:?}");
+        let step = report
+            .steps
+            .iter()
+            .find(|s| s.what.contains(NERD_FONT_FAMILY))
+            .unwrap_or_else(|| panic!("{report:?}"));
+        assert!(step.detail.starts_with("left as it is"), "{step:?}");
+        assert_eq!(m.fs.file(&file), Some(b"the user's own build".to_vec()));
+        assert!(registered(&m));
+        assert!(state(&m, &ctx).baseline.fonts.is_empty());
+        // Nothing of CMD Studio's is left in it, so --cleanup keeps no records for it.
+        let report = cleanup(m.system(), &later(&ctx, 2), true).unwrap();
+        assert!(report.ok(), "{report:?}");
+        assert!(!m.fs.exists(&ctx.paths.data), "{report:?}");
+        assert_eq!(m.fs.file(&file), Some(b"the user's own build".to_vec()));
+        assert!(registered(&m));
     }
 
     #[test]

@@ -4,7 +4,7 @@
 use crate::adapters::{AdapterError, Arch, Fs, FsLock, System};
 use crate::detect::{detect, DetectError, Detected};
 use crate::exec::{
-    fix_by_hand, font_target, op_label, same_path, sweep, SystemExecutor, UndoExecutor,
+    fix_by_hand, font_target, op_label, same_path, sweep, FontLeft, SystemExecutor, UndoExecutor,
     UndoVerifier, CLEANUP_FIX_EN, CLEANUP_FIX_TH,
 };
 use crate::generate::lua::Lang;
@@ -433,6 +433,9 @@ pub struct UndoReport {
     /// What the undo could not do besides its transaction, each with its code; the result
     /// stands. For example: an undo that is done but whose apply could not be marked undone.
     pub problems: Vec<Failure>,
+    /// The fonts a committed undo did not uninstall because the user installed a font of that
+    /// name since (`E_FONT_INSTALL`, said in English and in Thai): the result stands.
+    pub fonts_left: Vec<FontLeft>,
 }
 
 /// What a rollback's outcome says when its list of what to fix by hand (`incomplete.json`) could
@@ -505,6 +508,7 @@ pub fn undo(sys: System<'_>, ctx: &Ctx) -> Result<UndoReport, ActionError> {
             start,
             result: UndoResult::NothingToUndo,
             problems,
+            fonts_left: Vec::new(),
         });
     };
     let priors: Vec<(Op, Option<Vec<u8>>)> = journal
@@ -539,6 +543,12 @@ pub fn undo(sys: System<'_>, ctx: &Ctx) -> Result<UndoReport, ActionError> {
     if let Err(f) = record_incomplete(&store, &id, &outcome) {
         problems.push(f);
     }
+    // Only a committed undo leaves a font to the user: a rolled-back one put the font back.
+    let fonts_left = if outcome == Outcome::Committed {
+        exec.fonts_left()
+    } else {
+        Vec::new()
+    };
     if outcome == Outcome::Committed {
         // The machine is back; only the restore point's note of it failed. Said, not turned
         // into an error that would hide the outcome.
@@ -562,6 +572,7 @@ pub fn undo(sys: System<'_>, ctx: &Ctx) -> Result<UndoReport, ActionError> {
             outcome,
         },
         problems,
+        fonts_left,
     })
 }
 
@@ -2648,6 +2659,95 @@ mod tests {
                 .incomplete,
             Some(saved)
         );
+    }
+
+    // ---- Uninstall only fonts CMD Studio installed. ----
+
+    #[test]
+    fn an_undo_never_uninstalls_a_font_the_user_put_there() {
+        let value = format!("{NERD_FONT_FAMILY} (TrueType)");
+        // Another build of the font, installed by hand over CMD Studio's, at the same path.
+        let (m, ctx) = machine();
+        apply(&m, &ctx, Target::All);
+        let file = font_file(&m);
+        m.fs.put(&file, b"the user's own build");
+        let undone = undo(m.system(), &later(&ctx, 1)).unwrap();
+        assert!(
+            matches!(
+                undone.result,
+                UndoResult::Done {
+                    outcome: Outcome::Committed,
+                    ..
+                }
+            ),
+            "{undone:?}"
+        );
+        assert_eq!(m.fs.file(&file), Some(b"the user's own build".to_vec()));
+        assert_eq!(
+            m.fonts.registration(&value).unwrap(),
+            Some(file.display().to_string())
+        );
+        assert!(registered(&m));
+        // Said, in English and in Thai, with the file as written.
+        let [left] = undone.fonts_left.as_slice() else {
+            panic!("{undone:?}")
+        };
+        let shown = file.display().to_string();
+        assert!(
+            left.en().contains(&shown) && left.th().contains(&shown),
+            "{left:?}"
+        );
+        assert!(left.en().contains("left installed"), "{left:?}");
+        assert!(left.th().contains("ไม่ได้ถอนฟอนต์"), "{left:?}");
+
+        // The registration names another file now: it and CMD Studio's file both stay.
+        let (m, ctx) = machine();
+        apply(&m, &ctx, Target::All);
+        let file = font_file(&m);
+        let ours = m.fs.file(&file).unwrap();
+        let theirs = r"C:\Users\tester\AppData\Local\Microsoft\Windows\Fonts\Caskaydia_mine.ttf";
+        m.fonts.register(&value, theirs).unwrap();
+        let undone = undo(m.system(), &later(&ctx, 1)).unwrap();
+        assert!(
+            matches!(
+                undone.result,
+                UndoResult::Done {
+                    outcome: Outcome::Committed,
+                    ..
+                }
+            ),
+            "{undone:?}"
+        );
+        assert_eq!(
+            m.fonts.registration(&value).unwrap().as_deref(),
+            Some(theirs)
+        );
+        assert_eq!(m.fs.file(&file), Some(ours));
+        let [left] = undone.fonts_left.as_slice() else {
+            panic!("{undone:?}")
+        };
+        assert!(
+            left.en().contains(theirs) && left.th().contains(theirs),
+            "{left:?}"
+        );
+
+        // CMD Studio's own bytes, still registered to its file: removed as before.
+        let (m, ctx) = machine();
+        apply(&m, &ctx, Target::All);
+        let undone = undo(m.system(), &later(&ctx, 1)).unwrap();
+        assert!(undone.fonts_left.is_empty(), "{undone:?}");
+        assert!(
+            matches!(
+                undone.result,
+                UndoResult::Done {
+                    outcome: Outcome::Committed,
+                    ..
+                }
+            ),
+            "{undone:?}"
+        );
+        assert!(!registered(&m));
+        assert!(!m.fs.exists(&font_file(&m)));
     }
 
     // ---- An AutoRun value that is not plain text is never guessed at (spec §5.4). ----
