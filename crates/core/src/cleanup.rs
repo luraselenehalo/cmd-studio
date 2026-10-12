@@ -15,8 +15,8 @@
 //! person can finish it, how, in English and in Thai; it is never reported as done, and nothing
 //! of the user's is deleted, nor the only record of what the user's settings were.
 use crate::actions::{
-    begin, delete_pending, delete_pending_and_save, next_id, record_incomplete, ActionError, Ctx,
-    StartReport,
+    begin, delete_pending, delete_pending_and_save, latest_record, next_id, rebuilt_incomplete,
+    record_incomplete, ActionError, Ctx, StartReport,
 };
 use crate::adapters::{program_data_dir, DirEntry, DirState, RegText, RegValue, System};
 use crate::exec::{
@@ -31,7 +31,7 @@ use crate::snapshot::{
 use crate::state::{
     AutoRunRecord, Baseline, FontRecord, RegValueRecord, State, StateError, Was, WtFileBaseline,
 };
-use crate::txn::{self, Executor, Failure, Outcome, Stage};
+use crate::txn::{self, Executor, Failure, Outcome};
 use crate::verify::SystemVerifier;
 use crate::wt_edit::{read_value, revert, WtError, WtKey};
 use serde_json::{Map, Value};
@@ -943,8 +943,10 @@ fn carry_over(
     if left.is_empty() {
         return;
     }
-    let own = match store.latest_incomplete() {
-        Ok(record) => record.filter(|r| r.id == id),
+    // Its own record, rebuilt from its journal when it could not be saved, so its own steps
+    // are not lost.
+    let own = match latest_record(store) {
+        Ok(record) => record.map(|(r, _)| r).filter(|r| r.id == id),
         Err(f) => {
             report.fail(WHAT, f.code, f.message, None);
             return;
@@ -1483,7 +1485,8 @@ fn is_damaged_copy(path: &Path) -> bool {
 ///   nothing, and does not count;
 /// - a rollback record that cannot be read (`E_SNAPSHOT_READ`), or one with a step whose
 ///   target still holds CMD Studio's change (see `still_ours`), in any restore point, newest or
-///   not; or a journal whose rollback did not finish with no record of what it left
+///   not; or a journal whose rollback did not finish and whose record could not be saved, when
+///   a step of the record rebuilt from it (`actions::rebuilt_incomplete`) is still CMD Studio's
 ///   (`E_ROLLBACK_INCOMPLETE`).
 ///
 /// Its code, when there is such a thing. A listing that fails counts as one.
@@ -1523,11 +1526,16 @@ fn records_in_doubt(sys: System<'_>, ctx: &Ctx) -> Option<&'static str> {
                     return Some("E_ROLLBACK_INCOMPLETE");
                 }
             }
+            // The journal says the rollback did not finish, and its record could not be saved:
+            // the record rebuilt from the journal is judged as a saved one is.
             Ok(None) => {
-                let unrecorded = store
-                    .journal(id)
-                    .is_ok_and(|j| matches!(j.stage, Stage::RollbackIncomplete { .. }));
-                if unrecorded {
+                let left = rebuilt_incomplete(&store, id).is_some_and(|record| {
+                    record
+                        .steps
+                        .iter()
+                        .any(|step| still_ours(sys, ctx, &store, id, step).is_some())
+                });
+                if left {
                     return Some("E_ROLLBACK_INCOMPLETE");
                 }
             }
@@ -3614,6 +3622,61 @@ mod tests {
         let again = cleanup(m.system(), &later(&ctx, 2), true).unwrap();
         assert_same_records_kept(&m, &ctx, &first, &again);
         assert_eq!(m.fs.file(&copy).as_deref(), Some(SETTINGS.as_bytes()));
+    }
+
+    #[test]
+    fn a_rollback_whose_record_never_got_written_keeps_the_records_only_while_it_is_still_ours() {
+        // Its incomplete.json can never be written: only the journal says the rollback did not
+        // finish. What it left (init.lua, CMD Studio's own file) is not the user's, and Revert
+        // everything ran since: --cleanup keeps nothing for it.
+        let (m, ctx) = machine();
+        apply(&m, &ctx, Target::All);
+        let init = ctx.paths.generated().join("init.lua");
+        m.fs.fail_writes_to(&init);
+        let p = prepare_apply(
+            m.system(),
+            &later(&ctx, 1),
+            &terracotta(),
+            &request(Target::All),
+        )
+        .unwrap();
+        let record = ctx
+            .paths
+            .snapshots()
+            .join(&p.manifest.id)
+            .join("incomplete.json");
+        m.fs.fail_writes_to(&record);
+        assert!(matches!(
+            run_apply(m.system(), &later(&ctx, 1), p),
+            Outcome::RollbackIncomplete { .. }
+        ));
+        m.fs.stop_failing(&init);
+        let reverted = revert_all(m.system(), &later(&ctx, 2)).unwrap();
+        assert!(
+            reverted
+                .steps
+                .iter()
+                .any(|s| s.ok && s.what.contains("init.lua")),
+            "{reverted:?}"
+        );
+        assert!(!m.fs.exists(&record));
+        let report = cleanup(m.system(), &later(&ctx, 3), true).unwrap();
+        assert!(report.ok(), "{report:?}");
+        assert!(!m.fs.exists(&ctx.paths.data), "{report:?}");
+
+        // While the op that failed still holds CMD Studio's change (settings.json keeps the
+        // scheme, and no baseline knows the file), the records stay, run after run.
+        let (m, ctx) = machine();
+        let id = apply_whose_settings_cannot_go_back(&m, &ctx);
+        let record = ctx.paths.snapshots().join(&id).join("incomplete.json");
+        m.fs.remove_file(&record).unwrap();
+        m.fs.fail_writes_to(&record);
+        let first = cleanup(m.system(), &later(&ctx, 1), true).unwrap();
+        assert_records_kept(&m, &ctx, &first);
+        assert_eq!(kept_step(&ctx, &first).code, Some("E_ROLLBACK_INCOMPLETE"));
+        let again = cleanup(m.system(), &later(&ctx, 2), true).unwrap();
+        assert_same_records_kept(&m, &ctx, &first, &again);
+        assert!(!m.fs.exists(&record));
     }
 
     #[test]

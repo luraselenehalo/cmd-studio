@@ -4,7 +4,7 @@
 //! says what it found and goes on. A check says `ok` only after it really looked (spec §2.1
 //! COE). What it could not look at is `skipped` with the reason, or `fail` with the read error
 //! (`E_MACHINE_READ`): a read that failed is never taken for the problem a check looks for.
-use crate::actions::{Ctx, BUSY_EN, BUSY_TH};
+use crate::actions::{latest_record, Ctx, BUSY_EN, BUSY_TH};
 use crate::adapters::{DefaultTerminal, RegText, System};
 use crate::exec::{CLEANUP_FIX_EN, CLEANUP_FIX_TH, COMMAND_PROCESSOR_KEY};
 use crate::generate::wt::{commandline, CMD_PROFILE_GUID, SCHEME_NAME};
@@ -1149,9 +1149,11 @@ fn records(sys: System<'_>, ctx: &Ctx) -> Vec<Check> {
             others.join("\n"),
         ));
     }
-    match store.latest_incomplete() {
+    // A list that could not be saved is rebuilt from the journal, as the next start does, but
+    // only read here.
+    match latest_record(&store) {
         Ok(None) => {}
-        Ok(Some(record)) => {
+        Ok(Some((record, _))) => {
             let n = record.steps.len();
             let mut lines = vec![format!("{}: {}", record.code, record.reason)];
             for s in &record.steps {
@@ -1868,6 +1870,36 @@ mod tests {
             (Status::Fail, Some("E_SNAPSHOT_READ")),
             "{r3:?}"
         );
+    }
+
+    #[test]
+    fn a_rollback_whose_record_could_not_be_saved_is_reported_from_its_journal() {
+        // incomplete.json could not be written: doctor, which writes nothing, builds the list
+        // from the restore point's journal, as the next start will.
+        let (m, ctx) = machine();
+        let init = ctx.paths.generated().join("init.lua");
+        m.fs.put(&init, b"old");
+        m.fs.fail_writes_to(&init);
+        let p = prepare_apply(m.system(), &ctx, &terracotta(), &request(Target::All)).unwrap();
+        let file = point(&ctx, &p.manifest.id, "incomplete.json");
+        m.fs.fail_writes_to(&file);
+        assert!(matches!(
+            run_apply(m.system(), &ctx, p),
+            Outcome::RollbackIncomplete { .. }
+        ));
+        m.fs.stop_failing(&file);
+        let r3 = by_id(&run(&m, &ctx), "R3");
+        assert_eq!(
+            (r3.status, r3.code),
+            (Status::Fail, Some("E_ROLLBACK_INCOMPLETE")),
+            "{r3:?}"
+        );
+        assert!(
+            r3.details.contains(&format!("file {}", init.display())),
+            "{r3:?}"
+        );
+        assert!(r3.details.contains("rebuilt"), "{r3:?}");
+        assert!(!m.fs.exists(&file), "doctor writes nothing");
     }
 
     #[test]

@@ -540,10 +540,15 @@ impl<'a> SnapshotStore<'a> {
     /// journal failed) is not a transaction that has run since, so it does not hide the record
     /// of an earlier one. One whose journal was set aside did run, and does.
     pub fn latest_incomplete(&self) -> Result<Option<Incomplete>, Failure> {
-        let Some(id) = self.ids()?.into_iter().rev().find(|id| self.ran(id)) else {
+        let Some(id) = self.latest_ran()? else {
             return Ok(None);
         };
         self.incomplete(&id)
+    }
+
+    /// The newest restore point whose transaction ran (see [`SnapshotStore::latest_incomplete`]).
+    pub fn latest_ran(&self) -> Result<Option<String>, Failure> {
+        Ok(self.ids()?.into_iter().rev().find(|id| self.ran(id)))
     }
 
     /// The `incomplete.json` of restore point `id`, newest or not; `None` when it has none. One

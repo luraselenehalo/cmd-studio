@@ -11,8 +11,9 @@ pub mod args;
 
 use args::{parse, Args, Command, UsageError, USAGE, USAGE_TH};
 use cmdstudio_core::actions::{
-    pending_incomplete, prepare_apply, recover_at_start, run_apply, undo, ActionError, Ctx,
-    Handled, StartReport, UndoReport, UndoResult, UnreadablePoint, BUSY_TH,
+    pending_incomplete, prepare_apply, record_not_saved, recover_at_start, run_apply, undo,
+    ActionError, Ctx, Handled, StartReport, UndoReport, UndoResult, UnreadablePoint, BUSY_TH,
+    RECORD_NOT_SAVED_TH,
 };
 use cmdstudio_core::adapters::{DirEntry, Host, System};
 use cmdstudio_core::cleanup::{cleanup, Report};
@@ -663,7 +664,13 @@ impl<'s, 'a> Say<'s, 'a> {
                 failed,
             } => {
                 self.err(self.coded(code, reason));
-                // The record the core just wrote for this transaction: the newest one.
+                // The core's reason says it in English; in Thai it is said as well.
+                if self.lang == Lang::Th && record_not_saved(outcome) {
+                    let text = self.note(RECORD_NOT_SAVED_TH);
+                    self.err(text);
+                }
+                // The record the core just wrote for this transaction (or, when it could not be
+                // saved, rebuilt from its journal): the newest one.
                 let record = match pending_incomplete(sys, ctx) {
                     Ok(record) => record,
                     Err(e) => {
@@ -1301,6 +1308,7 @@ pub fn run(args: &[OsString], io: &mut Io<'_>) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cmdstudio_core::actions::RECORD_NOT_SAVED_EN;
     use cmdstudio_core::adapters::fake::FakeMachine;
     use cmdstudio_core::adapters::{AutoRun, Fs, RegValue, WtLocation, WtVariant, REG_SZ};
     use std::path::Path;
@@ -1459,6 +1467,113 @@ mod tests {
                 }
             }
             assert_eq!((m.fs.file(WT), m.autorun.snapshot()), before);
+        }
+    }
+
+    /// The fake disk, but no `incomplete.json` can be written.
+    struct NoRecords<'a>(&'a cmdstudio_core::adapters::fake::FakeFs);
+
+    impl Fs for NoRecords<'_> {
+        fn read(
+            &self,
+            path: &Path,
+        ) -> Result<Option<Vec<u8>>, cmdstudio_core::adapters::AdapterError> {
+            self.0.read(path)
+        }
+        fn write_atomic(
+            &self,
+            path: &Path,
+            bytes: &[u8],
+        ) -> Result<(), cmdstudio_core::adapters::AdapterError> {
+            if path.file_name() == Some(std::ffi::OsStr::new("incomplete.json")) {
+                return Err(cmdstudio_core::adapters::AdapterError::new(
+                    path.display().to_string(),
+                    "denied (test)",
+                ));
+            }
+            self.0.write_atomic(path, bytes)
+        }
+        fn remove_file(&self, path: &Path) -> Result<(), cmdstudio_core::adapters::AdapterError> {
+            self.0.remove_file(path)
+        }
+        fn exists(&self, path: &Path) -> bool {
+            self.0.exists(path)
+        }
+        fn is_dir(&self, path: &Path) -> bool {
+            self.0.is_dir(path)
+        }
+        fn create_dir_all(
+            &self,
+            path: &Path,
+        ) -> Result<(), cmdstudio_core::adapters::AdapterError> {
+            self.0.create_dir_all(path)
+        }
+        fn remove_dir(&self, path: &Path) -> Result<(), cmdstudio_core::adapters::AdapterError> {
+            self.0.remove_dir(path)
+        }
+        fn remove_dir_all(
+            &self,
+            path: &Path,
+        ) -> Result<(), cmdstudio_core::adapters::AdapterError> {
+            self.0.remove_dir_all(path)
+        }
+        fn rename(
+            &self,
+            from: &Path,
+            to: &Path,
+        ) -> Result<(), cmdstudio_core::adapters::AdapterError> {
+            self.0.rename(from, to)
+        }
+        fn list_dir(
+            &self,
+            path: &Path,
+        ) -> Result<Vec<DirEntry>, cmdstudio_core::adapters::AdapterError> {
+            self.0.list_dir(path)
+        }
+        fn try_lock(
+            &self,
+            path: &Path,
+        ) -> Result<Option<cmdstudio_core::adapters::FsLock>, cmdstudio_core::adapters::AdapterError>
+        {
+            self.0.try_lock(path)
+        }
+    }
+
+    #[test]
+    fn a_fix_list_that_could_not_be_saved_is_said_in_the_chosen_language() {
+        for lang in [Lang::En, Lang::Th] {
+            let (mut m, d) = machine();
+            if lang == Lang::Th {
+                m.host.info.ui_language = LANG_THAI;
+            }
+            let init = d.data_dir.join(r"generated\init.lua");
+            m.fs.put(&init, b"old");
+            m.fs.fail_writes_to(&init);
+            let fs = NoRecords(&m.fs);
+            let sys = System {
+                fs: &fs,
+                ..m.system()
+            };
+            let (mut out, mut err) = (Vec::new(), Vec::new());
+            let args: Vec<OsString> = ["apply", THEME].iter().map(OsString::from).collect();
+            let code = run_with(
+                &args,
+                &mut Io {
+                    out: &mut out,
+                    err: &mut err,
+                },
+                sys,
+                &d,
+            );
+            let err = String::from_utf8_lossy(&err).into_owned();
+            assert_eq!(code, EXIT_INCOMPLETE, "{err}");
+            let said = match lang {
+                Lang::En => RECORD_NOT_SAVED_EN,
+                Lang::Th => RECORD_NOT_SAVED_TH,
+            };
+            assert!(err.contains(said), "{err}");
+            // What to fix is said all the same, from the journal.
+            assert!(err.contains(&format!("file {}", init.display())), "{err}");
         }
     }
 

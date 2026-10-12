@@ -18,7 +18,7 @@ use crate::snapshot::{
     UnreadableKind, Unrestored, KEEP,
 };
 use crate::state::{Applied, AutoRunRecord, FontRecord, RegValueRecord, State, StateError};
-use crate::txn::{self, Failure, Outcome};
+use crate::txn::{self, Failure, Outcome, Stage};
 use crate::verify::SystemVerifier;
 use crate::wt_edit::{apply_edit, WtEdit, WtError};
 use std::collections::BTreeMap;
@@ -406,8 +406,11 @@ pub fn run_apply(sys: System<'_>, ctx: &Ctx, prepared: Prepared) -> Outcome {
     // Only a rollback uninstalls a font (`SystemExecutor::apply` never does), so a committed
     // apply holds no file and `after_held` has nothing to give back for one.
     let (outcome, _) = after_held(sys, ctx, &ops, &exec.held_files(), outcome);
-    // Best effort: the outcome itself already says what was not put back.
-    let _ = record_incomplete(&store, &id, &outcome);
+    // A list that could not be saved is said, and rebuilt from the journal at the next start.
+    let outcome = match record_incomplete(&store, &id, &outcome) {
+        Ok(()) => outcome,
+        Err(why) => with_record_not_saved(outcome, &why),
+    };
     if outcome == Outcome::Committed {
         // Failing to prune costs disk space only.
         let _ = store.prune(KEEP);
@@ -432,6 +435,40 @@ pub struct UndoReport {
     pub problems: Vec<Failure>,
 }
 
+/// What a rollback's outcome says when its list of what to fix by hand (`incomplete.json`) could
+/// not be saved (spec §5.5).
+pub const RECORD_NOT_SAVED_EN: &str = "the fix-by-hand list could not be saved; it will be \
+                                       rebuilt from the restore point at the next start";
+/// [`RECORD_NOT_SAVED_EN`] in Thai.
+pub const RECORD_NOT_SAVED_TH: &str = "บันทึกรายการที่ต้องแก้ด้วยมือไม่สำเร็จ \
+                                       CMD Studio จะสร้างรายการนี้ใหม่จากจุดย้อนกลับเมื่อเริ่มคำสั่งครั้งถัดไป";
+
+/// Whether `outcome` says its list of what to fix by hand could not be saved (see
+/// [`RECORD_NOT_SAVED_EN`]).
+pub fn record_not_saved(outcome: &Outcome) -> bool {
+    matches!(outcome, Outcome::RollbackIncomplete { reason, .. } if reason.contains(RECORD_NOT_SAVED_EN))
+}
+
+/// `outcome` with its reason saying that the list of what to fix by hand could not be saved, and
+/// why. Only a rollback that did not finish has such a list.
+fn with_record_not_saved(outcome: Outcome, why: &Failure) -> Outcome {
+    match outcome {
+        Outcome::RollbackIncomplete {
+            code,
+            reason,
+            failed,
+        } => Outcome::RollbackIncomplete {
+            code,
+            reason: format!(
+                "{reason}; {RECORD_NOT_SAVED_EN} ({}: {})",
+                why.code, why.message
+            ),
+            failed,
+        },
+        other => other,
+    }
+}
+
 /// Puts back what the newest apply that is not undone yet changed, byte for byte (spec §4.4
 /// "ย้อนกลับ", CLI `undo`), as a transaction of its own over that apply's ops in reverse, so a
 /// failed undo rolls back to the themed state. Takes the lock and does what every command does
@@ -446,8 +483,9 @@ pub fn undo(sys: System<'_>, ctx: &Ctx) -> Result<UndoReport, ActionError> {
     let store = SnapshotStore::new(sys.fs, &root);
     // `latest_undoable` skips an apply that did not commit, so with a rollback that did not
     // finish it would undo the apply before that one, and the undo, being newer, would hide
-    // the record of what is left to fix. A record that cannot be read stops it the same way.
-    if let Some(record) = store.latest_incomplete()? {
+    // the record of what is left to fix. A record that cannot be read stops it the same way, and
+    // one that could not be saved is rebuilt from the journal and stops it too.
+    if let Some((record, _)) = latest_record(&store)? {
         return Err(ActionError::PendingIncomplete(record));
     }
     // state.json is one of the targets an undo puts back. One from a newer CMD Studio, or one
@@ -629,7 +667,8 @@ pub(crate) fn begin_anyway(
 /// 3. a recovery that could not put everything back is recorded in its restore point, so it is
 ///    still reported after a restart;
 /// 4. half-made runtime folders are deleted;
-/// 5. the record of a rollback that did not finish, if nothing has run since, is read.
+/// 5. the record of a rollback that did not finish, if nothing has run since, is read; one that
+///    could not be saved when the rollback ended is rebuilt from the journal and written.
 ///
 /// Nothing here stops the command: what could not be done is in `problems`.
 fn start(sys: System<'_>, ctx: &Ctx) -> StartReport {
@@ -689,8 +728,26 @@ fn start(sys: System<'_>, ctx: &Ctx) -> StartReport {
         }
     }
     sweep(sys, &ctx.paths);
-    match store.latest_incomplete() {
-        Ok(record) => report.incomplete = record,
+    match latest_record(&store) {
+        Ok(Some((record, saved))) => {
+            // The list could not be saved when the rollback ended: it is written now, so this
+            // and every later start, doctor and `--cleanup` find it.
+            if !saved {
+                if let Err(f) = store.write_incomplete(&record) {
+                    report.problems.push(Failure {
+                        code: f.code,
+                        message: format!(
+                            "the list of what the rollback of restore point {} left to fix by \
+                             hand could not be saved again ({}); until it can be, it is rebuilt \
+                             from that restore point's journal at every start",
+                            record.id, f.message
+                        ),
+                    });
+                }
+            }
+            report.incomplete = Some(record);
+        }
+        Ok(None) => {}
         Err(f) => report.problems.push(f),
     }
     report.recovered = recovered;
@@ -710,32 +767,88 @@ pub fn recover_at_start(sys: System<'_>, ctx: &Ctx) -> Result<StartReport, Actio
 }
 
 /// What the newest transaction could not put back, if it ended `RollbackIncomplete` and
-/// nothing has run since. A record that cannot be read is an error (`E_SNAPSHOT_READ`), never
+/// nothing has run since; rebuilt from its journal when its record could not be saved (see
+/// [`latest_record`]). A record that cannot be read is an error (`E_SNAPSHOT_READ`), never
 /// "nothing": it is the one record that says what to fix by hand.
 pub fn pending_incomplete(sys: System<'_>, ctx: &Ctx) -> Result<Option<Incomplete>, ActionError> {
     let root = ctx.paths.snapshots();
-    Ok(SnapshotStore::new(sys.fs, &root).latest_incomplete()?)
+    Ok(latest_record(&SnapshotStore::new(sys.fs, &root))?.map(|(record, _)| record))
+}
+
+/// The record of the newest transaction that ran, when it ended `RollbackIncomplete` (see
+/// [`SnapshotStore::latest_incomplete`]), and whether it is saved. When its `incomplete.json` is
+/// missing but its journal says the rollback did not finish, the list could not be saved when
+/// it ended: the record is rebuilt from the journal ([`rebuilt_incomplete`]), and `false` says
+/// so. Only reads. A record that cannot be read is an error, never "nothing".
+pub(crate) fn latest_record(
+    store: &SnapshotStore<'_>,
+) -> Result<Option<(Incomplete, bool)>, Failure> {
+    let Some(id) = store.latest_ran()? else {
+        return Ok(None);
+    };
+    Ok(match store.incomplete(&id)? {
+        Some(record) => Some((record, true)),
+        None => rebuilt_incomplete(store, &id).map(|record| (record, false)),
+    })
+}
+
+/// The record of restore point `id` rebuilt from its journal, when the journal says its
+/// rollback did not finish (`RollbackIncomplete { failed }`) and its `incomplete.json` could not
+/// be saved: the steps `failed` names, each with how to fix it by hand, as
+/// [`record_incomplete`] writes them. What started the rollback, and each step's own error,
+/// were not kept, so the code is `E_ROLLBACK_INCOMPLETE` and the reason says the list was
+/// rebuilt. `None` when the journal says something else or cannot be read. Only reads.
+pub(crate) fn rebuilt_incomplete(store: &SnapshotStore<'_>, id: &str) -> Option<Incomplete> {
+    let journal = store.journal(id).ok()?;
+    let Stage::RollbackIncomplete { failed } = journal.stage else {
+        return None;
+    };
+    let lost = || Failure {
+        code: "E_ROLLBACK_INCOMPLETE",
+        message: "the rollback could not put this back; its own error was not kept, because \
+                  the list of what to fix by hand could not be saved"
+            .to_string(),
+    };
+    let outcome = Outcome::RollbackIncomplete {
+        code: "E_ROLLBACK_INCOMPLETE",
+        reason: format!(
+            "the rollback of restore point {id} did not finish, and the list of what to fix by \
+             hand could not be saved then, so it was rebuilt from that restore point's journal; \
+             what started the rollback was not kept"
+        ),
+        failed: failed.into_iter().map(|index| (index, lost())).collect(),
+    };
+    incomplete_of(store, id, &outcome)
 }
 
 /// Writes `incomplete.json` into restore point `id` when `outcome` is `RollbackIncomplete`:
 /// each op that was not put back, its error, and how to fix it by hand in English and in Thai,
 /// so that this survives a restart (spec §5.5). A step whose op the journal cannot tell is
 /// named `step <n>`, with the shared clean-up advice as its fix; an outcome with no failed ops
-/// (its journal could not be read at all) gets one such step for the whole change. The outcome
-/// itself already says the rollback is incomplete, so a caller that cannot report a failed
-/// write may drop it.
+/// (its journal could not be read at all) gets one such step for the whole change. A write that
+/// fails is said by the caller; the next start rebuilds the list from the journal
+/// ([`rebuilt_incomplete`]).
 pub(crate) fn record_incomplete(
     store: &SnapshotStore<'_>,
     id: &str,
     outcome: &Outcome,
 ) -> Result<(), Failure> {
+    match incomplete_of(store, id, outcome) {
+        Some(record) => store.write_incomplete(&record),
+        None => Ok(()),
+    }
+}
+
+/// The record [`record_incomplete`] writes for `outcome`; `None` when it is not
+/// `RollbackIncomplete`.
+fn incomplete_of(store: &SnapshotStore<'_>, id: &str, outcome: &Outcome) -> Option<Incomplete> {
     let Outcome::RollbackIncomplete {
         code,
         reason,
         failed,
     } = outcome
     else {
-        return Ok(());
+        return None;
     };
     let journal = store.journal(id).ok();
     let mut steps: Vec<Unrestored> = failed
@@ -776,7 +889,7 @@ pub(crate) fn record_incomplete(
             restore_point: None,
         });
     }
-    store.write_incomplete(&Incomplete {
+    Some(Incomplete {
         id: id.to_string(),
         code: code.to_string(),
         reason: reason.clone(),
@@ -1016,7 +1129,7 @@ mod tests {
     use crate::model::Target;
     use crate::plan::NERD_FONT_FAMILY;
     use crate::presets::terracotta;
-    use crate::txn::{Journal, JournalStore, Stage};
+    use crate::txn::{Journal, JournalStore};
 
     fn everything(m: &crate::adapters::fake::FakeMachine) -> impl PartialEq + std::fmt::Debug {
         (
@@ -2434,6 +2547,94 @@ mod tests {
         assert_eq!(
             pending_incomplete(m.system(), &later).unwrap(),
             Some(record)
+        );
+    }
+
+    // ---- A rollback record whose write failed is rebuilt from the journal (spec §5.5). ----
+
+    /// An apply whose rollback cannot put init.lua back, and whose incomplete.json cannot be
+    /// written either, which stays so. Its id and init.lua.
+    fn rollback_without_a_record(
+        m: &crate::adapters::fake::FakeMachine,
+        ctx: &Ctx,
+    ) -> (String, PathBuf, Outcome) {
+        let init = ctx.paths.generated().join("init.lua");
+        m.fs.put(&init, b"old");
+        m.fs.fail_writes_to(&init);
+        let p = prepare_apply(m.system(), ctx, &terracotta(), &request(Target::All)).unwrap();
+        let id = p.manifest.id.clone();
+        m.fs.fail_writes_to(point(ctx, &id, "incomplete.json"));
+        let out = run_apply(m.system(), ctx, p);
+        assert!(!m.fs.exists(&point(ctx, &id, "incomplete.json")));
+        (id, init, out)
+    }
+
+    #[test]
+    fn an_apply_whose_rollback_record_could_not_be_saved_says_so() {
+        let (m, ctx) = machine();
+        let (_, _, out) = rollback_without_a_record(&m, &ctx);
+        let Outcome::RollbackIncomplete { code, reason, .. } = &out else {
+            panic!("{out:?}")
+        };
+        assert_eq!(*code, "E_DATA_WRITE");
+        assert!(
+            reason.contains(
+                "the fix-by-hand list could not be saved; it will be rebuilt from the restore \
+                 point at the next start"
+            ),
+            "{reason}"
+        );
+        assert!(reason.contains("E_SNAPSHOT_WRITE"), "{reason}");
+    }
+
+    #[test]
+    fn a_rollback_record_that_could_not_be_saved_is_rebuilt_at_the_next_start() {
+        let (m, ctx) = machine();
+        let (id, init, _) = rollback_without_a_record(&m, &ctx);
+        let file = point(&ctx, &id, "incomplete.json");
+        let target = format!("file {}", init.display());
+        // Undo is refused as with a saved record. Its start tries to save the list again; that
+        // fails, and is said.
+        let e = undo(m.system(), &later(&ctx, 1)).unwrap_err();
+        let ActionError::PendingIncomplete(record) = &e else {
+            panic!("{e:?}")
+        };
+        assert_eq!(
+            (record.id.as_str(), record.code.as_str()),
+            (id.as_str(), "E_ROLLBACK_INCOMPLETE")
+        );
+        assert_eq!(record.steps[0].target, target);
+        let start = recover_at_start(m.system(), &later(&ctx, 2)).unwrap();
+        assert!(
+            start
+                .problems
+                .iter()
+                .any(|f| f.code == "E_SNAPSHOT_WRITE" && f.message.contains("rebuilt")),
+            "{start:?}"
+        );
+        assert_eq!(start.incomplete.as_ref(), Some(record));
+        // Once it can be written, the next start writes it, and later starts read it.
+        m.fs.stop_failing(&file);
+        let start = recover_at_start(m.system(), &later(&ctx, 3)).unwrap();
+        assert!(start.problems.is_empty(), "{start:?}");
+        let saved = SnapshotStore::new(&m.fs, &ctx.paths.snapshots())
+            .incomplete(&id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(start.incomplete.as_ref(), Some(&saved));
+        assert_eq!(saved.code, "E_ROLLBACK_INCOMPLETE");
+        assert!(saved.reason.contains("rebuilt"), "{saved:?}");
+        let step = &saved.steps[0];
+        assert_eq!(step.target, target);
+        assert!(
+            step.fix.starts_with("Copy ") && step.fix_th.starts_with("คัดลอก "),
+            "{step:?}"
+        );
+        assert_eq!(
+            recover_at_start(m.system(), &later(&ctx, 4))
+                .unwrap()
+                .incomplete,
+            Some(saved)
         );
     }
 
