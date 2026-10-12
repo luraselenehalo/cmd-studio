@@ -327,8 +327,63 @@ fn split_bom(text: &str) -> (&'static str, &str) {
     }
 }
 
+/// The deepest nesting of objects and lists CMD Studio reads. Windows Terminal's
+/// own files nest about six levels; jsonc-parser recurses once per level, and on
+/// a 1 MB stack (a Windows main thread) that overflowed from about 440 levels.
+const MAX_DEPTH: usize = 64;
+
+/// Refuses text nested deeper than `MAX_DEPTH` before jsonc-parser sees it.
 fn parse(text: &str) -> Result<CstRootNode, WtError> {
+    if nesting_depth(text) > MAX_DEPTH {
+        return Err(WtError::Parse(format!(
+            "objects and lists nest deeper than {MAX_DEPTH} levels"
+        )));
+    }
     CstRootNode::parse(text, &wt_parse_options()).map_err(|e| WtError::Parse(e.to_string()))
+}
+
+/// How deep `{` and `[` nest outside strings and comments, read as jsonc-parser
+/// reads them: a string ends at a quote no backslash escapes, a line comment at
+/// `\n` or `\r`, a block comment at the first `*/`. One pass, no recursion. Text
+/// that is not valid is left to the parser.
+fn nesting_depth(text: &str) -> usize {
+    let mut bytes = text.bytes().peekable();
+    let (mut depth, mut deepest) = (0usize, 0usize);
+    while let Some(b) = bytes.next() {
+        match b {
+            b'"' => {
+                while let Some(c) = bytes.next() {
+                    match c {
+                        b'\\' => {
+                            bytes.next();
+                        }
+                        b'"' => break,
+                        _ => {}
+                    }
+                }
+            }
+            b'/' if bytes.peek() == Some(&b'/') => {
+                while bytes.next_if(|c| *c != b'\n' && *c != b'\r').is_some() {}
+            }
+            b'/' if bytes.peek() == Some(&b'*') => {
+                bytes.next();
+                let mut star = false;
+                for c in bytes.by_ref() {
+                    if star && c == b'/' {
+                        break;
+                    }
+                    star = c == b'*';
+                }
+            }
+            b'{' | b'[' => {
+                depth += 1;
+                deepest = deepest.max(depth);
+            }
+            b'}' | b']' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    deepest
 }
 
 fn root_object(root: &CstRootNode) -> Result<CstObject, WtError> {
@@ -551,6 +606,12 @@ mod tests {
             .iter()
             .map(|c| (c.key.clone(), c.original.clone()))
             .collect()
+    }
+
+    /// A valid file whose innermost list is `levels` brackets deep, the root included.
+    fn nested(levels: usize) -> String {
+        let (open, close) = ("[".repeat(levels - 1), "]".repeat(levels - 1));
+        format!("{{\n    \"x\": {open}1{close}\n}}\n")
     }
 
     fn written(e: &WtEdited) -> BTreeMap<WtKey, Value> {
@@ -1013,5 +1074,81 @@ mod tests {
             apply_edit(DEFAULT, &edit(&not_an_object, &p, false)),
             Err(WtError::Shape(_))
         ));
+    }
+
+    #[test]
+    fn sixty_four_levels_are_still_read() {
+        let (s, p) = (scheme(), profile());
+        let text = nested(64);
+        check_parses(&text).unwrap();
+        assert_eq!(read_value(&text, &WtKey::Scheme).unwrap(), None);
+        let e = apply_edit(&text, &edit(&s, &p, true)).unwrap();
+        let back = revert(&e.text, &originals(&e), &written(&e), &e.created).unwrap();
+        assert_eq!(back, text);
+    }
+
+    #[test]
+    fn deeper_files_are_refused_before_the_parser_reads_them() {
+        // jsonc-parser recurses once per level; on a 1 MB stack (a Windows main
+        // thread) that overflowed from about 440 levels. 10,000 levels on this
+        // thread show the refusal comes first, so nothing is parsed or written.
+        let (s, p) = (scheme(), profile());
+        for levels in [65, 512, 10_000] {
+            let text = nested(levels);
+            let font = WtKey::Profile { key: "font".into() };
+            for err in [
+                check_parses(&text).err(),
+                apply_edit(&text, &edit(&s, &p, true)).err(),
+                read_value(&text, &font).err(),
+                revert(&text, &BTreeMap::new(), &BTreeMap::new(), &[]).err(),
+            ] {
+                let err = err.unwrap();
+                assert_eq!(err.code(), "E_WT_PARSE");
+                assert!(
+                    matches!(&err, WtError::Parse(m) if m.contains("deeper than 64 levels")),
+                    "{levels}: {err}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn brackets_in_strings_and_comments_do_not_count() {
+        assert_eq!(nesting_depth(r#"{"a": [1]}"#), 2);
+        assert_eq!(nesting_depth(r#"{"a": "[[[{{{"}"#), 1);
+        assert_eq!(nesting_depth(r#"{"a": "\"[[[", "b": "\\", "c": [[1]]}"#), 3);
+        assert_eq!(nesting_depth("{ // [[[[ {{{{\n \"a\": [1] }"), 2);
+        assert_eq!(nesting_depth("{ // [[[[\r \"a\": [1] }"), 2);
+        assert_eq!(nesting_depth("{ /* [[[[ * / {{ **/ \"a\": [1] }"), 2);
+        assert_eq!(nesting_depth("[] [] {} [[]] ]]]] [1]"), 2);
+        // A slash that opens no comment is the parser's to refuse; what follows counts.
+        assert_eq!(nesting_depth("/[[["), 3);
+        let (s, p) = (scheme(), profile());
+        let many = |c: &str| c.repeat(100);
+        let text = format!(
+            "{{\n    // {}\n    \"x\": \"{}\" /* {} */\n}}\n",
+            many("{"),
+            many("["),
+            many("[")
+        );
+        let e = apply_edit(&text, &edit(&s, &p, false)).unwrap();
+        assert!(e.text.contains(&many("[")));
+    }
+
+    #[test]
+    fn unterminated_strings_and_comments_are_left_to_the_parser() {
+        for text in [
+            "{\"a\": \"[[[[",
+            "{\"a\": \"\\",
+            "{ /* [[[[",
+            "{ /* *",
+            "{ // [[[[",
+        ] {
+            assert_eq!(nesting_depth(text), 1, "{text:?}");
+            assert!(
+                matches!(check_parses(text), Err(WtError::Parse(_))),
+                "{text:?}"
+            );
+        }
     }
 }
