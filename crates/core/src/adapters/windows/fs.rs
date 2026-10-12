@@ -1,7 +1,8 @@
 //! Files on the real disk, with atomic replacement (spec §5.4 `Fs`).
 use super::io_err;
-use crate::adapters::{AdapterError, DirEntry, Fs};
+use crate::adapters::{AdapterError, DirEntry, Fs, FsLock};
 use std::io::{ErrorKind, Write};
+use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -153,12 +154,30 @@ impl Fs for WinFs {
         out.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(out)
     }
+
+    /// The open handle is the lock: share mode 0 lets no other handle open the file, in this
+    /// process or another, until it is closed, which Windows also does when the process ends.
+    /// Another holder shows as `ERROR_SHARING_VIOLATION`; it is not retried, so a second run
+    /// learns at once that one is already going.
+    fn try_lock(&self, path: &Path) -> Result<Option<FsLock>, AdapterError> {
+        let opened = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .share_mode(0)
+            .open(path);
+        match opened {
+            Ok(file) => Ok(Some(FsLock::new(file))),
+            Err(e) if e.raw_os_error() == Some(ERROR_SHARING_VIOLATION) => Ok(None),
+            Err(e) => Err(io_err("lock", path, &e)),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::windows::fs::OpenOptionsExt;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Instant;
 
@@ -331,6 +350,40 @@ mod tests {
             .file_type()
             .is_symlink());
         assert_eq!(std::fs::read(&real).unwrap(), b"new");
+    }
+
+    #[test]
+    fn try_lock_is_exclusive_until_dropped_and_keeps_its_file() {
+        // A folder with Thai letters and a space, as a user's data folder may have.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("ไทย dir");
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("cmdstudio.lock");
+
+        let first = WinFs.try_lock(&path).unwrap().expect("nobody holds it yet");
+        assert!(path.is_file(), "the lock file is made");
+        assert!(
+            WinFs.try_lock(&path).unwrap().is_none(),
+            "a second lock is refused while the first is open, in this process too"
+        );
+        // Share mode 0: no other handle may read the file or delete it while it is held.
+        let read = std::fs::read(&path).unwrap_err();
+        assert_eq!(read.raw_os_error(), Some(ERROR_SHARING_VIOLATION), "{read}");
+        assert!(std::fs::remove_file(&path).is_err());
+        assert!(path.is_file(), "and it is still there");
+
+        drop(first);
+        assert!(path.is_file(), "the file stays after the lock is let go");
+        assert_eq!(std::fs::read(&path).unwrap(), b"", "and opens again");
+        let again = WinFs.try_lock(&path).unwrap();
+        assert!(again.is_some(), "free again once the first is dropped");
+        drop(again);
+
+        // A folder that is not there, or a folder in the file's place, is an error, not "held".
+        let missing = dir.join("missing").join("x.lock");
+        assert!(WinFs.try_lock(&missing).is_err());
+        assert!(!missing.parent().unwrap().exists(), "no folder is made");
+        assert!(WinFs.try_lock(&dir).is_err());
     }
 
     #[test]

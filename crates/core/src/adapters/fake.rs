@@ -1,16 +1,38 @@
 //! In-memory adapters for tests (this crate's and, through the `fake`
 //! feature, crates/cli's). They never touch the machine.
 use super::{
-    AdapterError, Arch, AutoRun, Created, DefaultTerminal, DirEntry, DirState, Fonts, Fs, Host,
-    Output, Process, RegValue, System, SystemInfo, WtLocation, WtSettings,
+    AdapterError, Arch, AutoRun, Created, DefaultTerminal, DirEntry, DirState, Fonts, Fs, FsLock,
+    Host, Output, Process, RegValue, System, SystemInfo, WtLocation, WtSettings,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 fn err(context: &Path, message: &str) -> AdapterError {
     AdapterError::new(context.display().to_string(), message)
+}
+
+/// The paths that a live `FakeFs::try_lock` guard holds, shared with the guards.
+type Locks = Arc<Mutex<BTreeSet<PathBuf>>>;
+
+/// The set itself. A guard that panicked while holding the mutex left a set that is still
+/// whole, so a poisoned mutex is used as it is.
+fn held(locks: &Locks) -> MutexGuard<'_, BTreeSet<PathBuf>> {
+    locks.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Keeps one path of a `FakeFs` locked until it is dropped.
+struct FakeLock {
+    locks: Locks,
+    path: PathBuf,
+}
+
+impl Drop for FakeLock {
+    fn drop(&mut self) {
+        held(&self.locks).remove(&self.path);
+    }
 }
 
 #[derive(Default)]
@@ -26,11 +48,23 @@ struct FsState {
 #[derive(Default)]
 pub struct FakeFs {
     state: RefCell<FsState>,
+    /// Files locked by `try_lock`. While a file is locked, reading, writing, deleting or moving
+    /// it (or a folder above it) fails, as share mode 0 makes it on the disk.
+    locks: Locks,
 }
 
 impl FakeFs {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn is_locked(&self, path: &Path) -> bool {
+        held(&self.locks).contains(path)
+    }
+
+    /// Whether `path`, or anything inside it, is locked.
+    fn holds_a_lock(&self, path: &Path) -> bool {
+        held(&self.locks).iter().any(|p| p.starts_with(path))
     }
 
     /// Puts a file in place (and its parent folders), bypassing failure injection.
@@ -97,6 +131,9 @@ fn parent_exists(dirs: &BTreeSet<PathBuf>, path: &Path) -> bool {
 
 impl Fs for FakeFs {
     fn read(&self, path: &Path) -> Result<Option<Vec<u8>>, AdapterError> {
+        if self.is_locked(path) {
+            return Err(err(path, "the file is locked"));
+        }
         let s = self.state.borrow();
         if s.fail_reads.contains(path) {
             return Err(err(path, "read failed (injected)"));
@@ -105,6 +142,9 @@ impl Fs for FakeFs {
     }
 
     fn write_atomic(&self, path: &Path, bytes: &[u8]) -> Result<(), AdapterError> {
+        if self.is_locked(path) {
+            return Err(err(path, "the file is locked"));
+        }
         let mut s = self.state.borrow_mut();
         if s.fail_writes.contains(path) {
             return Err(err(path, "write failed (injected)"));
@@ -118,6 +158,9 @@ impl Fs for FakeFs {
     }
 
     fn remove_file(&self, path: &Path) -> Result<(), AdapterError> {
+        if self.is_locked(path) {
+            return Err(err(path, "the file is locked"));
+        }
         let mut s = self.state.borrow_mut();
         if s.fail_removes.contains(path) {
             return Err(err(path, "file is in use (injected)"));
@@ -163,6 +206,9 @@ impl Fs for FakeFs {
     }
 
     fn remove_dir_all(&self, path: &Path) -> Result<(), AdapterError> {
+        if self.holds_a_lock(path) {
+            return Err(err(path, "a file inside is locked"));
+        }
         let mut s = self.state.borrow_mut();
         if s.fail_removes.iter().any(|f| f.starts_with(path)) {
             return Err(err(path, "a file inside is in use (injected)"));
@@ -173,6 +219,9 @@ impl Fs for FakeFs {
     }
 
     fn rename(&self, from: &Path, to: &Path) -> Result<(), AdapterError> {
+        if self.holds_a_lock(from) {
+            return Err(err(from, "it, or a file inside, is locked"));
+        }
         let mut s = self.state.borrow_mut();
         if s.files.contains_key(to) || s.dirs.contains(to) {
             return Err(err(to, "already exists"));
@@ -233,6 +282,35 @@ impl Fs for FakeFs {
             .collect();
         out.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(out)
+    }
+
+    /// Like the disk: the folder must exist, a folder is not a file, a file that cannot be
+    /// written cannot be opened to lock it, and the file is made (empty) when missing and stays.
+    fn try_lock(&self, path: &Path) -> Result<Option<FsLock>, AdapterError> {
+        {
+            let s = self.state.borrow();
+            if s.dirs.contains(path) {
+                return Err(err(path, "is a folder"));
+            }
+            if !parent_exists(&s.dirs, path) {
+                return Err(err(path, "parent folder not found"));
+            }
+            if s.fail_writes.contains(path) {
+                return Err(err(path, "open for writing failed (injected)"));
+            }
+        }
+        if !held(&self.locks).insert(path.to_path_buf()) {
+            return Ok(None);
+        }
+        self.state
+            .borrow_mut()
+            .files
+            .entry(path.to_path_buf())
+            .or_default();
+        Ok(Some(FsLock::new(FakeLock {
+            locks: Arc::clone(&self.locks),
+            path: path.to_path_buf(),
+        })))
     }
 }
 
@@ -770,6 +848,50 @@ mod tests {
             fs.read(Path::new(r"C:\d\dir\x.txt")).unwrap(),
             Some(b"x".to_vec())
         );
+    }
+
+    #[test]
+    fn fake_fs_lock_is_exclusive_until_dropped_and_keeps_its_file() {
+        let fs = FakeFs::new();
+        let dir = Path::new(r"C:\d");
+        let path = dir.join("app.lock");
+        assert!(
+            fs.try_lock(&path).is_err(),
+            "the folder must exist, as on the disk"
+        );
+        fs.create_dir_all(dir).unwrap();
+
+        let first = fs.try_lock(&path).unwrap().expect("nobody holds it yet");
+        assert_eq!(fs.file(&path), Some(Vec::new()), "the lock file is made");
+        assert!(
+            fs.try_lock(&path).unwrap().is_none(),
+            "a second lock is refused while the first lives"
+        );
+        // Nobody may open the file while it is held: not to read it, write it or delete it, nor
+        // to move or delete the folder around it.
+        assert!(fs.read(&path).is_err());
+        assert!(fs.write_atomic(&path, b"x").is_err());
+        assert!(fs.remove_file(&path).is_err());
+        assert!(fs.remove_dir_all(dir).is_err());
+        assert!(fs.rename(dir, Path::new(r"C:\e")).is_err());
+        assert_eq!(fs.file(&path), Some(Vec::new()), "and it is still there");
+        // Another path is another lock.
+        let other = fs.try_lock(&dir.join("other.lock")).unwrap();
+        assert!(other.is_some());
+
+        drop(first);
+        assert_eq!(fs.file(&path), Some(Vec::new()), "the file stays");
+        assert_eq!(fs.read(&path).unwrap(), Some(Vec::new()), "and opens again");
+        let again = fs.try_lock(&path).unwrap();
+        assert!(again.is_some(), "free again once the first is dropped");
+        drop((again, other));
+        fs.remove_dir_all(dir).unwrap();
+
+        // A file that cannot be opened for writing cannot be locked either; a folder is no file.
+        fs.create_dir_all(dir).unwrap();
+        fs.fail_writes_to(&path);
+        assert!(fs.try_lock(&path).is_err());
+        assert!(fs.try_lock(dir).is_err());
     }
 
     #[test]

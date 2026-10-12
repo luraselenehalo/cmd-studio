@@ -1094,7 +1094,7 @@ pub fn sweep(sys: System<'_>, paths: &Paths) {
 mod tests {
     use super::*;
     use crate::adapters::fake::{FakeFonts, FakeFs, FakeHost, FakeMachine};
-    use crate::adapters::{AdapterError, AutoRun, DirEntry, Fonts, Fs, Host, SystemInfo};
+    use crate::adapters::{AdapterError, AutoRun, DirEntry, Fonts, Fs, FsLock, Host, SystemInfo};
     use crate::plan::NERD_FONT_FAMILY;
     use crate::resources::fake_resources;
     use crate::resources::NERD_FONT_FILE;
@@ -1839,6 +1839,9 @@ mod tests {
         }
         fn list_dir(&self, path: &Path) -> Result<Vec<DirEntry>, AdapterError> {
             self.fs.list_dir(path)
+        }
+        fn try_lock(&self, path: &Path) -> Result<Option<FsLock>, AdapterError> {
+            self.fs.try_lock(path)
         }
     }
 

@@ -53,6 +53,35 @@ pub trait Fs {
     fn rename(&self, from: &Path, to: &Path) -> Result<(), AdapterError>;
     /// The entries directly inside a folder, sorted by path; empty when the folder does not exist.
     fn list_dir(&self, path: &Path) -> Result<Vec<DirEntry>, AdapterError>;
+    /// Locks the file at `path` for this caller alone, creating it when missing: while the
+    /// returned guard lives, nobody else may open the file, to read, write or delete it, nor
+    /// take the lock again (in this process either). `Ok(None)` when someone else holds it. The
+    /// folder that holds the file must exist. The file stays when the guard is dropped, and an
+    /// ending process lets go of its locks, so a crash leaves no lock behind.
+    fn try_lock(&self, path: &Path) -> Result<Option<FsLock>, AdapterError>;
+}
+
+/// An exclusive lock on a file, from [`Fs::try_lock`]: held while this value lives, let go when
+/// it is dropped.
+#[must_use = "the lock is let go as soon as this is dropped"]
+pub struct FsLock {
+    /// What holds the lock: the open file, or a fake's token. Only dropping it matters.
+    _held: Box<dyn std::any::Any + Send>,
+}
+
+impl FsLock {
+    /// A lock that `held` keeps until it is dropped.
+    pub fn new(held: impl std::any::Any + Send) -> Self {
+        FsLock {
+            _held: Box::new(held),
+        }
+    }
+}
+
+impl std::fmt::Debug for FsLock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("FsLock")
+    }
 }
 
 /// `REG_SZ`.

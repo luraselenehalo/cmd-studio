@@ -661,7 +661,7 @@ impl JournalStore for DiskJournal<'_> {
 mod tests {
     use super::*;
     use crate::adapters::fake::FakeFs;
-    use crate::adapters::{AdapterError, DirEntry};
+    use crate::adapters::{AdapterError, DirEntry, FsLock};
 
     const ROOT: &str = r"C:\d\snapshots";
 
@@ -1761,6 +1761,9 @@ mod tests {
         }
         fn list_dir(&self, path: &Path) -> Result<Vec<DirEntry>, AdapterError> {
             self.inner.list_dir(path)
+        }
+        fn try_lock(&self, path: &Path) -> Result<Option<FsLock>, AdapterError> {
+            self.inner.try_lock(path)
         }
     }
 }
