@@ -1,0 +1,27 @@
+name: spike-windows
+on:
+  workflow_dispatch:
+  push:
+    branches: [phase0-gate]
+    paths:
+      - 'spikes/windows/**'
+      - '.github/workflows/spike-windows.yml'
+permissions:
+  contents: read
+jobs:
+  probes:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fonts (G12)
+        shell: powershell
+        run: '& ./spikes/windows/fonts.ps1 *>&1 | Tee-Object -FilePath spike-logs-fonts.txt'
+      - name: AutoRun (G13)
+        if: always()
+        shell: powershell
+        run: '& ./spikes/windows/autorun.ps1 *>&1 | Tee-Object -FilePath spike-logs-autorun.txt'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: spike-logs
+          path: spike-logs-*.txt
