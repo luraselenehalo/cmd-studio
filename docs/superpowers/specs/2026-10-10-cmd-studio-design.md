@@ -423,7 +423,8 @@ cmd-studio/
 ├─ runtime\
 │  ├─ omp-<ver>\       oh-my-posh.exe
 │  └─ clink-<ver>\     clink_x64.exe, clink_dll_x64.dll, ...
-├─ snapshots\<id>\     manifest.json, journal.json, payload\
+├─ snapshots\<id>\     manifest.json, journal.json, payload\ และ incomplete.json เมื่อย้อนกลับไม่ครบ
+├─ cmdstudio.lock      ล็อกให้คำสั่งที่เปลี่ยนเครื่องทำงานทีละคำสั่ง (§5.5)
 └─ logs\               cmdstudio.log (หมุนไฟล์ 5 ไฟล์ ไฟล์ละ 1 MB)
 ```
 
@@ -442,6 +443,7 @@ cmd-studio/
   - โหมด "cmd ทุกหน้าต่าง": ตั้งเป็น `%SystemRoot%\System32\cmd.exe` เปล่าๆ เสมอ ตามบทเรียนข้อ 2
   - โหมด "เฉพาะใน Windows Terminal": ตั้งเป็น `%SystemRoot%\System32\cmd.exe /k ""<clink-launch>" inject --quiet --profile "<data>\clink-profile""` (G19 ใช้กับโหมดนี้ด้วย) เครื่องหมายคำพูดคู่นอกสุดมีไว้ให้ `cmd /k` ตัดทิ้ง เพราะ cmd ตัดคู่นอกสุดออกเมื่อคำสั่งขึ้นต้นด้วยเครื่องหมายคำพูด และไม่เขียน AutoRun แบบนี้ตั้งใจให้หน้าต่างที่เปิดจากนอก WT ไม่ได้ธีม เป็นรูปแบบเดียวกับต้นแบบรุ่นแรกที่ใช้งานได้ ✅
 - **รักษาไฟล์เดิม:** ต้องรักษาคอมเมนต์และรูปแบบไฟล์ไว้ ใช้ `jsonc-parser` 0.34.0 ที่เปิดฟีเจอร์ `cst` ✅ (G9) และเขียนตัวแปลง `serde_json::Value` เป็น `CstInputValue` เอง ถ้าไฟล์ parse ไม่ได้ ห้ามแตะไฟล์ ให้แจ้ง `E_WT_PARSE` พร้อมปุ่มกู้จากจุดย้อนกลับล่าสุด (ถ้ามี)
+  - ไฟล์ที่ WT อ่านได้ แต่เขียนคีย์ที่ CMD Studio ดูแลซ้ำ 2 ครั้ง (เช่น `defaultProfile` หรือคีย์ในโปรไฟล์ cmd) หรือซ้อน object และ list ลึกเกิน 64 ชั้น ก็ห้ามแตะเช่นกัน ให้แจ้ง `E_WT_PARSE` พร้อมบอกว่าคีย์ไหนซ้ำ แล้วให้ผู้ใช้แก้ `settings.json` ด้วยมือ เหตุผลคือไม่รู้ว่า WT ใช้ค่าไหนในคีย์ที่ซ้ำ และไฟล์ที่ซ้อนลึกมากทำให้ตัว parse ใช้สแต็กจนล้นได้ (phase 1b)
 - **จุดย้อนกลับ:** เก็บค่าเดิมของทุกคีย์ที่แตะ ถ้าคีย์ไหนไม่เคยมีมาก่อน ให้บันทึกว่า "ไม่มี" ตอนย้อนกลับจะได้ลบคีย์นั้นออก
 - **ทางที่ไม่เลือก:** ใช้ JSON fragment ของ WT ซึ่งไม่ต้องแตะไฟล์ของผู้ใช้เลย แต่ถ้าผู้ใช้เคยตั้งค่าเองในไฟล์หลัก ค่าของผู้ใช้จะชนะ ข้อนี้เป็นเหตุผลที่ไม่เลือก แต่ยังไม่ได้ยืนยันกับของจริง ⬜
 
@@ -493,7 +495,7 @@ cmd-studio/
 - Windows 11 มี Cascadia Code และ Cascadia Mono ติดตั้งในระบบแล้ว แต่ Windows 10 ไม่มี ✅ (นับจากรายชื่อฟอนต์ที่ GDI เห็น)
   - conhost ใช้ได้เฉพาะฟอนต์ในระบบ
   - WT แนบ Cascadia มาในแพ็กเกจของตัวเอง จึงอาจวาดได้แม้ระบบไม่มี ⬜ ยังไม่ได้ลอง (ใน VM ที่ลองไม่มี WT บน Windows 10)
-  - ตัวสำรองตาม §3.3 คือ CaskaydiaCove NF ที่แนบมา (founder 2026-10-11) ส่วนวิธีที่ D8 นับฟอนต์ในแพ็กเกจของ WT ยังต้องตัดสินใน phase 1b ⬜
+  - ตัวสำรองตาม §3.3 คือ CaskaydiaCove NF ที่แนบมา (founder 2026-10-11) · D8 ใน v1 นับเฉพาะฟอนต์ที่ GDI เห็น ไม่นับฟอนต์ในแพ็กเกจของ WT (ตัดสินใน phase 1b) เมื่อ GDI ไม่เห็นฟอนต์ของธีม planner จึงใช้ตัวสำรองเสมอ
 - จุดย้อนกลับต้องบันทึกว่าเราเป็นคนติดตั้ง ตอนถอนจะได้ถอนเฉพาะฟอนต์ที่เราติดตั้ง
 
 **ไฟล์ (`Fs`)**
@@ -515,8 +517,14 @@ cmd-studio/
   3. `clink_x64.exe --profile <p> set clink.logo` ต้องโหลด Lua ได้โดยไม่มี error (G5 ✅): ให้ดูว่า output มีบรรทัดที่เข้ากับ `\.lua:\d+:` หรือไม่ ถ้ามีให้แจ้ง `E_VERIFY_CLINK` ห้ามดูจาก exit code เพราะเป็น 0 เสมอ
   4. parse `settings.json` ของ WT ที่เพิ่งเขียนได้
 - **ถ้าโปรแกรมดับกลางทาง:** เปิดขึ้นมาใหม่แล้วเจอ journal ที่ยังไม่จบ ให้ย้อนกลับอัตโนมัติแล้วแจ้งผู้ใช้
-- **ถ้าย้อนกลับไม่ครบ (`rollbackIncomplete`):** ต้องแจ้งชัดว่าส่วนไหนคืนไม่ได้ พร้อมวิธีแก้ด้วยมือ ห้ามรายงานว่าสำเร็จ
-- **การเก็บจุดย้อนกลับ:** เก็บ 20 จุดล่าสุด ส่วนจุดแรกสุดซึ่งเป็นค่าเดิมก่อนติดตั้งเก็บไว้ตลอด
+  - ย้อนตอนเริ่มทุกคำสั่งที่เปลี่ยนเครื่อง (ใช้ธีม, ย้อนกลับ, ย้อนทุกอย่าง และ `--cleanup`) ส่วน doctor อ่านอย่างเดียว จึงไม่ย้อนเอง แต่แจ้งว่ามีการเปลี่ยนแปลงที่ค้างอยู่ (§5.8) (phase 1b)
+  - ถ้าตอนนั้นอ่าน journal ของมันไม่ได้ (เช่น ไฟล์ถูกล็อกหรือกำลังถูกสแกน) ทุกคำสั่งที่เปลี่ยนเครื่องจะหยุดด้วย `E_SNAPSHOT_READ` โดยไม่เปลี่ยนอะไร แล้วให้ลองใหม่ เพราะถ้าทำต่อ จุดย้อนกลับใหม่จะกลายเป็นจุดล่าสุด และการเปลี่ยนแปลงที่ค้างจะไม่ถูกย้อนอีกเลย ถ้าจุดนั้นอ่านไม่ได้ตลอด ทางออกคือคำสั่ง `cmdstudio set-aside <id>` ซึ่งกันจุดนั้นไว้ต่างหาก แต่สิ่งที่มันเปลี่ยนไว้ต้องแก้ด้วยมือ (phase 1b)
+  - จุดย้อนกลับที่ไฟล์หายหรือเสีย จะถูกกันไว้ต่างหาก (เปลี่ยนชื่อ journal เป็น `journal.unreadable.json` และเก็บไว้ให้ดู) แล้วแจ้งครั้งเดียว ส่วนจุดที่อ่านไม่ได้แค่ชั่วคราวจะแจ้งทุกครั้งจนกว่าจะอ่านได้ ทั้งสองแบบไม่ขวาง doctor (phase 1b)
+- **ถ้าย้อนกลับไม่ครบ (`rollbackIncomplete`):** ต้องแจ้งชัดว่าส่วนไหนคืนไม่ได้ พร้อมวิธีแก้ด้วยมือ ห้ามรายงานว่าสำเร็จ · รายการนี้และวิธีแก้เก็บใน `snapshots\<id>\incomplete.json` ข้าง journal (ไม่เก็บใน `state.json` เพราะ `state.json` เองก็อาจเป็นไฟล์ที่คืนไม่ได้) จึงยังแจ้งได้หลังเปิดโปรแกรมใหม่ จนกว่าจะมีทรานแซกชันใหม่ (phase 1b)
+  - ระหว่างที่บันทึกนี้ยังค้างอยู่ หรือยังอ่านบันทึกนี้ไม่ได้ ปุ่ม "ย้อนกลับ" จะไม่ทำงาน เพราะการย้อนการใช้ธีมครั้งก่อนหน้าจะทำให้บันทึกของสิ่งที่ต้องแก้หายไป ส่วน "ย้อนทุกอย่าง" ยังทำได้ และย้ายรายการที่ยังคืนไม่ได้ไปไว้ในบันทึกของจุดย้อนกลับของมันเอง จึงยังแจ้งต่อไป (phase 1b)
+- **ทำงานทีละคำสั่ง:** ทุกคำสั่งที่เปลี่ยนเครื่อง (ใช้ธีม, ย้อนกลับ, ย้อนทุกอย่าง และ `--cleanup`) ถือล็อก `<data>\cmdstudio.lock` ตลอดคำสั่ง ไม่ว่าจะมาจากแอปหรือ CLI ถ้ามีตัวอื่นถืออยู่ ให้หยุดทันทีด้วย `E_BUSY` โดยไม่รอ ส่วน doctor ไม่ใช้ล็อกนี้ (phase 1b)
+- **ลำดับของจุดย้อนกลับ:** id ของจุดย้อนกลับใหม่ต้องไม่ย้อนเวลา แม้นาฬิกาของเครื่องจะถอยหลัง (ถ้านาฬิกาตามหลังจุดล่าสุด ให้ใช้เวลาของจุดล่าสุดบวก 1 ms) เพราะการกู้หลังโปรแกรมดับและ "ย้อนกลับ" ดูจากลำดับนี้ (phase 1b)
+- **การเก็บจุดย้อนกลับ:** เก็บ 20 จุดล่าสุด ส่วนจุดแรกสุดซึ่งเป็นค่าเดิมก่อนติดตั้งเก็บไว้ตลอด · จุดที่อาจเป็นสำเนาเดียวของค่าเดิมของผู้ใช้จะไม่ถูกลบ ได้แก่จุดที่ journal ยังไม่จบ อ่านไม่ได้ หรือจบแบบย้อนกลับไม่ครบ จุดที่ถูกกันไว้ต่างหากพร้อม journal และจุดที่มี `incomplete.json` (phase 1b)
 
 ### 5.6 พรีวิว
 - ใน UI มีตัวจำลองที่วาด prompt และกล่องต้อนรับจาก theme model โดยไม่เรียก OMP ทุกครั้ง เหตุผลคือให้ลื่นตอนลากเลือกสี และให้เห็นส่วน git ได้แม้เครื่องไม่มี git
@@ -555,37 +563,57 @@ exit code: `0` สำเร็จ · `1` ล้มเหลวและย้อ
 |---|---|
 | D1 | ไฟล์ runtime อยู่ครบและ hash ตรง |
 | D2 | `oh-my-posh version` รันได้และตรงกับเวอร์ชันที่ pin ไว้ |
-| D3 | Clink โหลดสคริปต์ของเราได้ (ตรวจจาก output ของ `clink set` ตาม G5) และ inject ได้จริงจาก path ของ runtime (หลังเปิด cmd ใน `clink.log` ต้องไม่มี `Unable to get DLL version` หรือ `Failed to copy DLL` ตาม G19) |
-| D4 | AutoRun มีส่วนของเราที่มี guard และชี้ไปที่ runtime ที่มีอยู่จริง (ตรวจเมื่ออยู่ในโหมด "cmd ทุกหน้าต่าง") |
+| D3 | Clink โหลดสคริปต์ของเราได้ (ตรวจจาก output ของ `clink set` ตาม G5) และ inject ได้จริงจาก path ของ runtime (หลังเปิด cmd ใน `clink.log` ต้องไม่มี `Unable to get DLL version` หรือ `Failed to copy DLL` ตาม G19) · อ่านเฉพาะส่วนของ `clink.log` ที่เขียนหลังใช้ธีม ถ้ายังไม่มีหน้าต่าง cmd ไหน inject ให้เตือน `E_THEME_NOT_LOADED` พร้อมบอกให้เปิดหน้าต่างใหม่ และถ้ายังเป็นอยู่ให้แก้ AutoRun ด้วยมือ (phase 1a: ตัวอ่าน AutoRun ของ planner ยอมรับค่าบางแบบที่ cmd ไม่รัน มีแต่หน้าต่าง cmd จริงที่บอกได้) |
+| D4 | AutoRun มีส่วนของเราที่มี guard อยู่หน้าสุด และชี้ไปที่ runtime ที่มีอยู่จริง (ตรวจเมื่ออยู่ในโหมด "cmd ทุกหน้าต่าง") · ค่าที่ cmd รันไม่ได้ทั้งค่าให้แจ้ง `E_AUTORUN_WRITE` พร้อมวิธีแก้ด้วยมือ |
 | D5 | ไม่มี Clink ตัวอื่นใน AutoRun ทั้ง HKCU และ HKLM (ถ้ามีจะเตือน) |
-| D6 | มี WT ติดตั้งอยู่ และ `settings.json` ของทุกรุ่น parse ได้ |
-| D7 | โปรไฟล์ cmd มี `commandline` ตรงตามโหมด, ใช้ `colorScheme` ชื่อ `CMD Studio` และเป็นโปรไฟล์ค่าเริ่มต้นถ้าผู้ใช้เลือกไว้ |
-| D8 | ฟอนต์ที่ธีมต้องใช้ติดตั้งอยู่ ข้อนี้สำคัญเพราะ WT ไม่เตือนเองเมื่อหาฟอนต์ไม่เจอ (G12) · ต้องแยกฟอนต์ที่ WT มีในแพ็กเกจของตัวเองออกจากฟอนต์ของระบบ ⬜ (phase 1b ตาม §5.4) |
-| D9 | ไฟล์ใน `generated\` ตรงกับ hash ใน `state.json` ถ้าไม่ตรงแปลว่ามีคนแก้ด้วยมือ ให้เสนอให้ใช้ธีมซ้ำ |
-| D10 | แอปรันแบบไม่ได้แพ็ก (ตรวจไว้กันพลาด) |
-| D11 | แอปเทอร์มินัลเริ่มต้นของ Windows เป็น WT (แสดงเป็นข้อมูลอย่างเดียว เฉพาะ Windows 11) |
+| D6 | มี WT ติดตั้งอยู่ และ `settings.json` ของทุกรุ่น parse ได้ · WT ที่ติดตั้งแล้วแต่ยังไม่เคยเปิดจะยังไม่มี `settings.json` ให้เตือนว่าเปิด WT หนึ่งครั้งแล้วใช้ธีมซ้ำ (CMD Studio ไม่สร้างไฟล์นี้เอง) |
+| D7 | โปรไฟล์ cmd มี `commandline` ตรงตามโหมด, ใช้ `colorScheme` ชื่อ `CMD Studio` และเป็นโปรไฟล์ค่าเริ่มต้นถ้าผู้ใช้เลือกไว้ · `commandline` ต้องตรงกับที่ planner เขียนทุกตัวอักษร · ไฟล์ที่เขียนคีย์ของเราซ้ำหรือซ้อนลึกเกิน 64 ชั้นให้แจ้ง `E_WT_PARSE` พร้อมเหตุผล (§5.4) (phase 1b) |
+| D8 | ฟอนต์ที่ธีมต้องใช้ติดตั้งอยู่ ข้อนี้สำคัญเพราะ WT ไม่เตือนเองเมื่อหาฟอนต์ไม่เจอ (G12) · นับเฉพาะฟอนต์ที่ GDI เห็น ไม่นับฟอนต์ในแพ็กเกจของ WT (§5.4) |
+| D9 | ไฟล์ใน `generated\` ตรงกับ hash ใน `state.json` ถ้าไม่ตรงแปลว่ามีคนแก้ด้วยมือ ให้เสนอให้ใช้ธีมซ้ำ · ถ้าอ่าน `state.json` ไม่ได้ ให้แจ้ง `E_STATE_INVALID` ที่ข้อนี้ ส่วนข้อที่ต้องรู้ว่าใช้ธีมอะไรอยู่จะข้ามไปพร้อมบอกเหตุผล ห้ามบอกว่า "ยังไม่ได้ใช้ธีม" (phase 1b) |
+| D10 | แอปรันแบบไม่ได้แพ็ก (ตรวจไว้กันพลาด) · ถ้า Windows ตอบไม่ได้ว่าแอปไม่ได้อยู่ในแพ็กเกจ ให้ถือว่าอยู่ (phase 1b) |
+| D11 | แอปเทอร์มินัลเริ่มต้นของ Windows เป็น WT (แสดงเป็นข้อมูลอย่างเดียว เฉพาะ Windows 11) · ถ้าอ่านรุ่นของ Windows หรือค่าแอปเทอร์มินัลเริ่มต้นไม่ได้ ให้ข้ามพร้อมบอกว่าอ่านอะไรไม่ได้ ห้ามเดา (phase 1b) |
+
+กติกาของ doctor ทุกข้อ (phase 1b):
+- doctor อ่านอย่างเดียว ไม่เขียนอะไร ไม่ถือล็อก `cmdstudio.lock` และไม่ย้อนการเปลี่ยนแปลงที่ค้าง จึงไม่ถูกขวางด้วย CMD Studio อีกตัวที่กำลังทำงาน จุดย้อนกลับที่อ่านไม่ได้ หรือ `state.json` ที่อ่านไม่ได้ แต่แจ้งสิ่งเหล่านี้แล้วตรวจข้ออื่นต่อ
+- ข้อที่อ่านสิ่งที่ต้องตรวจไม่ได้ (registry, ไฟล์ หรือรายชื่อฟอนต์) ให้แจ้ง `fail` ด้วย `E_MACHINE_READ` พร้อมข้อความ error ห้ามแจ้งว่า `ok` และห้ามแจ้งเป็นปัญหาที่ข้อนั้นตรวจหา เช่น ไฟล์ที่อ่านไม่ได้ ไม่ได้แปลว่าไฟล์หายหรือถูกแก้
+- หลัง D1–D11 จะมีบรรทัดเพิ่มเฉพาะเมื่อจุดย้อนกลับมีปัญหา ถ้าไม่มีปัญหาก็ไม่มีบรรทัดเหล่านี้:
+
+| รหัส | แจ้งเมื่อ |
+|---|---|
+| R1 | มี CMD Studio อีกตัวกำลังเปลี่ยนเครื่องอยู่ (`E_BUSY`) · การเปลี่ยนแปลงล่าสุดถูกตัดกลางทางและยังไม่ได้ย้อน ซึ่งจะย้อนตอนเริ่มคำสั่งถัดไปที่เปลี่ยนเครื่อง (`E_TXN_INTERRUPTED`) · หรืออ่านจุดย้อนกลับของมันไม่ได้จึงยังตรวจไม่ได้ (`E_SNAPSHOT_READ` พร้อมทางออก `cmdstudio set-aside <id>`) |
+| R2 | อ่านจุดย้อนกลับอื่นไม่ได้ (`E_SNAPSHOT_READ`) |
+| R3 | การย้อนกลับครั้งล่าสุดทำได้ไม่ครบ พร้อมรายการที่ต้องแก้ด้วยมือทั้งภาษาไทยและอังกฤษ (`E_ROLLBACK_INCOMPLETE`) หรืออ่านบันทึกนั้นไม่ได้ (`E_SNAPSHOT_READ`) |
 
 ### 5.9 รหัสปัญหา
 ทุกปัญหาที่ผู้ใช้เห็นต้องมี 3 อย่าง คือ รหัสที่คงที่, ข้อความภาษาคนทั้งไทยและอังกฤษ และรายละเอียดทางเทคนิคที่กดเปิดดูได้
 
-| รหัส | ความหมาย |
-|---|---|
-| `E_WT_NOT_FOUND` | ไม่พบ Windows Terminal |
-| `E_WT_PARSE` | parse `settings.json` ของ WT ไม่ได้ |
-| `E_WT_WRITE` | เขียน `settings.json` ของ WT ไม่ได้ |
-| `E_AUTORUN_FOREIGN_CLINK` | เจอ Clink ตัวอื่นใน AutoRun |
-| `E_AUTORUN_WRITE` | เขียน AutoRun ไม่ได้ |
-| `E_CLINK_PATH` | ไม่มี path ที่ cmd ใช้เรียก Clink ได้อย่างปลอดภัย: ไม่มีทางไหนใน `<clink-launch>` ที่เป็น ASCII ล้วน (G19) หรือ path มี `%`, `"` หรือ `;` หรือไม่ใช่ Unicode ที่ถูกต้อง (§5.4) |
-| `E_FONT_INSTALL` | ติดตั้งฟอนต์ไม่สำเร็จ |
-| `E_RUNTIME_MISSING` | ไฟล์ runtime หาย |
-| `E_VERIFY_OMP` | ขั้นตรวจผล: OMP เรนเดอร์ config ไม่ได้ |
-| `E_VERIFY_CLINK` | ขั้นตรวจผล: Clink โหลดสคริปต์ไม่ได้ |
-| `E_VERIFY_READBACK` | ขั้นตรวจผล: ค่าที่อ่านกลับมาไม่ตรงกับที่เขียน |
-| `E_SNAPSHOT_WRITE` | ถ่ายจุดย้อนกลับไม่สำเร็จ |
-| `E_THEME_INVALID` | ไฟล์ธีมผิดรูปแบบ |
-| `E_THEME_NEWER_SCHEMA` | ไฟล์ธีมมาจากโปรแกรมรุ่นใหม่กว่า |
-| `E_ROLLBACK_INCOMPLETE` | ย้อนกลับได้ไม่ครบ |
-| `E_TXN_INTERRUPTED` | การใช้ธีมครั้งก่อนถูกตัดกลางทาง (โปรแกรมดับ) และย้อนกลับให้แล้วตอนเปิดใหม่ |
+| รหัส | ความหมาย | English |
+|---|---|---|
+| `E_WT_NOT_FOUND` | ไม่พบ Windows Terminal หรือพบแต่ยังไม่เคยเปิด จึงยังไม่มี `settings.json` (D6) | Windows Terminal was not found, or was never opened, so it has no settings.json yet (D6) |
+| `E_WT_PARSE` | parse `settings.json` ของ WT ไม่ได้ หรือไฟล์เขียนคีย์ที่ CMD Studio ดูแลซ้ำ หรือซ้อนลึกเกิน 64 ชั้น (§5.4) ต้องแก้ไฟล์ด้วยมือ | Windows Terminal's settings.json can't be parsed, writes a key CMD Studio owns twice, or nests deeper than 64 levels (§5.4); fix it by hand |
+| `E_WT_WRITE` | เขียน `settings.json` ของ WT ไม่ได้ หรือ (D7) โปรไฟล์ cmd ใน WT ไม่ตรงกับธีม | Windows Terminal's settings.json could not be written, or (D7) its cmd profile does not match the theme |
+| `E_AUTORUN_FOREIGN_CLINK` | เจอ Clink ตัวอื่นใน AutoRun | Another Clink runs from AutoRun |
+| `E_AUTORUN_WRITE` | เขียน AutoRun ไม่ได้ หรือแก้อย่างปลอดภัยไม่ได้จึงต้องแก้ด้วยมือ หรือ (D4) ส่วนของเราหายไปหรือไม่อยู่หน้าสุด | AutoRun could not be written, or can't be changed safely and needs a hand edit, or (D4) CMD Studio's part is gone or not first |
+| `E_CLINK_PATH` | ไม่มี path ที่ cmd ใช้เรียก Clink ได้อย่างปลอดภัย: ไม่มีทางไหนใน `<clink-launch>` ที่เป็น ASCII ล้วน (G19) หรือ path มี `%`, `"` หรือ `;` หรือไม่ใช่ Unicode ที่ถูกต้อง (§5.4) · หรือ (D3) Clink inject จากโฟลเดอร์ของมันไม่ได้ (G19) | No path cmd can use to start Clink safely: no `<clink-launch>` choice is all ASCII (G19), or a path holds `%`, `"` or `;` or is not valid Unicode (§5.4); or (D3) Clink can't inject from its folder (G19) |
+| `E_FONT_INSTALL` | ติดตั้งฟอนต์ไม่สำเร็จ หรือ (D8) ไม่พบฟอนต์ของธีม | The font could not be installed, or (D8) the theme's font is not installed |
+| `E_RUNTIME_MISSING` | ไฟล์ runtime หาย ถูกแก้ หรือรันไม่ได้ (D1–D3) หรือไฟล์ที่แนบมากับ CMD Studio หายหรือเสีย | Runtime files are missing, changed or do not run (D1–D3), or the files that come with CMD Studio are missing or damaged |
+| `E_VERIFY_OMP` | ขั้นตรวจผล: OMP เรนเดอร์ config ไม่ได้ | Verify: Oh My Posh can't render the config |
+| `E_VERIFY_CLINK` | ขั้นตรวจผล: Clink โหลดสคริปต์ไม่ได้ (D3 ด้วย) | Verify: Clink can't load the scripts (D3 too) |
+| `E_VERIFY_READBACK` | ขั้นตรวจผล: ค่าที่อ่านกลับมาไม่ตรงกับที่เขียน | Verify: a value read back differs from what was written |
+| `E_SNAPSHOT_WRITE` | ถ่ายจุดย้อนกลับไม่สำเร็จ | A restore point could not be written |
+| `E_THEME_INVALID` | ไฟล์ธีมผิดรูปแบบ | The theme file is not valid |
+| `E_THEME_NEWER_SCHEMA` | ไฟล์ธีมมาจากโปรแกรมรุ่นใหม่กว่า | The theme file comes from a newer version |
+| `E_ROLLBACK_INCOMPLETE` | ย้อนกลับได้ไม่ครบ | The rollback did not finish; some parts must be fixed by hand |
+| `E_TXN_INTERRUPTED` | การเปลี่ยนแปลงครั้งก่อนถูกตัดกลางทาง (โปรแกรมดับ) และย้อนกลับให้ตอนเริ่มคำสั่งถัดไปที่เปลี่ยนเครื่อง · doctor แจ้งเมื่อยังไม่ได้ย้อน (§5.5) | An earlier change was cut off (the app stopped); it is rolled back when the next command that changes the machine starts, and doctor reports one not rolled back yet (§5.5) |
+| `E_UNSUPPORTED_PLATFORM` | เครื่องนี้ไม่ใช่ Windows แบบ x64 (เช่น ARM64) ส่วนเสริมที่แนบมากับ v1 มีแต่รุ่น x64 | This machine is not x64 Windows (for example ARM64); the add-ons bundled with v1 are x64 only |
+| `E_DATA_WRITE` | เขียนลงโฟลเดอร์ข้อมูลของโปรแกรมไม่ได้ เช่น ไฟล์ใน `generated\` หรือ `state.json` | Could not write to CMD Studio's data folder, such as a file in `generated\` or state.json |
+| `E_STATE_INVALID` | ใช้ `state.json` ไม่ได้ เพราะไฟล์เสีย ถูกแก้ เปิดไม่ได้ หรือเขียนโดย CMD Studio รุ่นที่ใหม่กว่า (ไฟล์แบบนี้ไม่ถูกเขียนทับ) | state.json can't be used: it is damaged, was edited, could not be opened, or was written by a newer CMD Studio (such a file is never written over) |
+| `E_GENERATED_EDITED` | มีคนแก้ไฟล์ใน `generated\` ด้วยมือ (D9) | A file in `generated\` was edited by hand (D9) |
+| `E_APP_PACKAGED` | แอปรันอยู่ในแพ็กเกจ MSIX สิ่งที่แอปเขียนจึงไม่มีผลกับโปรแกรมอื่น (D10, §2.2 ข้อ 1) | The app runs inside an MSIX package, so what it writes is invisible to other programs (D10, §2.2 lesson 1) |
+| `E_THEME_NOT_LOADED` | ใช้ธีมแล้วแต่ยังไม่มีหน้าต่าง cmd ไหนโหลดธีม ถ้าเปิดหน้าต่างใหม่แล้วยังเป็นแบบนี้ แปลว่า cmd หยุดก่อนถึงส่วนของเราใน AutoRun ต้องแก้ค่า AutoRun ด้วยมือ (D3) | The theme is applied, but no cmd window has loaded it yet. If a new window does not either, cmd stops before CMD Studio's part of AutoRun, and AutoRun needs a hand edit (D3) |
+| `E_MACHINE_READ` | อ่านการตั้งค่าของเครื่องนี้ไม่ได้ (registry, ไฟล์ หรือรายชื่อฟอนต์) จึงยังไม่ได้เปลี่ยนอะไร หรือ doctor ตรวจข้อนั้นไม่ได้ | Could not read this computer's settings (the registry, a file, the font list), so nothing was changed, or doctor could not check that item |
+| `E_SNAPSHOT_READ` | อ่านจุดย้อนกลับไม่ได้ (ไฟล์หาย เสีย หรือเปิดไม่ได้ในตอนนี้) · ถ้าเป็นจุดของการเปลี่ยนแปลงที่ถูกตัดกลางทาง แปลว่ายังตรวจการเปลี่ยนแปลงครั้งก่อนไม่ได้ จึงยังไม่ได้เปลี่ยนอะไร ให้ลองใหม่ (§5.5) | A restore point can't be read (missing, damaged, or not readable right now). When it is the one of a change that was cut off, an earlier change could not be checked yet: nothing was changed; try again (§5.5) |
+| `E_BUSY` | มี CMD Studio อีกตัว หรือโปรแกรมอื่น เปิดไฟล์ `cmdstudio.lock` อยู่ คือกำลังเปลี่ยนการตั้งค่าของเครื่องนี้ ให้ลองใหม่เมื่อทำเสร็จ (§5.5) | Another CMD Studio, or another program, has cmdstudio.lock open: it is changing this computer right now. Try again when it is done (§5.5) |
 
 ### 5.10 Log ความเป็นส่วนตัว และความปลอดภัยของแอป
 - ไม่มี telemetry ใดๆ
@@ -619,10 +647,12 @@ exit code: `0` สำเร็จ · `1` ล้มเหลวและย้อ
 
 ### 6.3 ถอนการติดตั้ง
 - hook `NSIS_HOOK_PREUNINSTALL` เรียก `cmdstudio --cleanup` ก่อนลบไฟล์ ซึ่งทำตามลำดับนี้:
-  1. เอาเฉพาะส่วนของเราออกจาก AutoRun
+  1. เอาเฉพาะส่วนของเราออกจาก AutoRun (อ่านค่าแบบเดียวกับ planner) และเปิดคำสั่งของ Clink ตัวอื่นที่ CMD Studio ปิดไว้กลับคืน (phase 1b)
   2. คืนค่าโปรไฟล์ cmd ใน WT และลบ scheme ชื่อ `CMD Studio`
-  3. ถอนฟอนต์ที่เราติดตั้ง
+  3. ถอนฟอนต์ที่เราติดตั้ง · ไฟล์ฟอนต์ที่ WT ยังเปิดค้างอยู่จะลบไม่ได้ จึงบันทึกไว้ใน `state.json` แล้วลบตอนใช้ธีม ย้อนกลับ หรือย้อนทุกอย่างครั้งถัดไป หรือตอนรัน `--cleanup` ครั้งถัดไป (phase 1b)
   4. ลบข้อมูลของแอป ยกเว้น `themes\` ถ้าผู้ใช้ไม่ได้เลือกให้ลบ และลบ `%ProgramData%\ai.resincore.cmdstudio-<SID ของผู้ใช้>\` ถ้าเคยใช้ข้อ 3 ของ `<clink-launch>` (§5.4)
+- `--cleanup` ใช้ล็อกเดียวกับการใช้ธีม (§5.5) และถ้ามีการเปลี่ยนแปลงที่ถูกตัดกลางทางแต่ยังตรวจไม่ได้ จะหยุดโดยไม่ลบอะไรเลย (`E_SNAPSHOT_READ`) เพราะจุดย้อนกลับนั้นอาจเป็นสำเนาเดียวของค่าเดิมของผู้ใช้ (phase 1b)
+- ถ้ายังไม่แน่ใจว่าทุกอย่างกลับเป็นเหมือนก่อนมี CMD Studio เช่น `state.json` เสียหรืออ่านไม่ได้, `settings.json` ที่แก้ไม่ได้จึงไม่ได้แตะ, ฟอนต์ที่ยังถอนไม่ได้, AutoRun ที่ต้องแก้ด้วยมือ, การย้อนกลับที่ไม่ครบ หรือจุดย้อนกลับที่ถูกกันไว้ต่างหากหรืออ่านไม่ได้ ข้อ 4 จะเก็บ `state.json` และจุดย้อนกลับไว้ เพราะเป็นบันทึกเดียวของค่าเดิม แล้วแจ้งเป็นขั้นที่ไม่สำเร็จพร้อมวิธีแก้ด้วยมือ รัน `--cleanup` ซ้ำกี่ครั้งก็ตรวจใหม่และได้คำตอบเดิม จนกว่าจะแก้ครบ (phase 1b)
 - **hook นี้รันตอนอัปเดตด้วย** ✅ (G10) ต้องข้าม `--cleanup` เมื่อ `$UpdateMode = 1` ไม่อย่างนั้นการอัปเดตทุกครั้งจะย้อนธีมของผู้ใช้
 - ตัวถอนของ Tauri มีช่องติ๊ก "ลบข้อมูลแอป" ช่องนี้คือตัวเลือก "ลบธีมของฉันด้วย" ตาม §2.1:
   - ถ้าติ๊ก (`$DeleteAppDataCheckboxState = 1`) ให้ส่ง `--remove-themes` แล้ว NSIS จะลบ `%LOCALAPPDATA%\ai.resincore.cmdstudio` เอง ✅ (G10)
@@ -796,3 +826,5 @@ exit code: `0` สำเร็จ · `1` ล้มเหลวและย้อ
 | 2026-10-11 | แก้ตามรีวิวทั้ง branch:<br>• G19 ทำให้ cmd ทุกหน้าต่างขึ้น error ไม่ใช่ได้ cmd เปล่า และเกิดกับชื่อผู้ใช้ภาษาไทยบน Windows ภาษาอังกฤษด้วย ลองทางเลี่ยงทั้ง 2 ทางบนทั้ง 2 แบบแล้ว<br>• ฟอนต์สำรองใน §3.3 และ D8 เปลี่ยนเป็นรอตัดสินใน phase 1b เพราะ Windows 10 ไม่มี Cascadia Mono ในระบบ<br>• สคริปต์ทดสอบที่แก้การตั้งค่าของผู้ใช้ รันได้เฉพาะใน VM ทดสอบ |
 | 2026-10-11 | founder ตอบ "ลุยต่อเลย" ต่อคำแนะนำของ architect จึงถือว่าเลือกตามนั้น:<br>• G19 เรียก Clink ผ่าน `<clink-launch>` (path แบบ 8.3 และใช้ `%ProgramData%\CMD Studio\<SID>` เป็นทางสำรอง) ตาม §5.4<br>• ฟอนต์สำรองของ §3.3 คือ CaskaydiaCove NF ที่แนบมา<br>• เปิด Pull Request ของ `phase0-gate` เข้า `main`<br>• การแจ้งบั๊กให้ Clink (โพสต์สาธารณะ) ยังรอคำอนุมัติแยก |
 | 2026-10-11 | ปรับแผน phase 1a ตามผล phase 0 (architect เลือก founder เปลี่ยนได้):<br>• ย้ายโฟลเดอร์สำรองของ `<clink-launch>` เป็น `%ProgramData%\ai.resincore.cmdstudio-<SID>` และเพิ่มกฎเรื่องสิทธิ์ เพราะโฟลเดอร์แม่ร่วมแบบเดิมเปิดให้ผู้ใช้คนอื่นในเครื่องเปลี่ยน Clink ได้ (§5.4)<br>• เพิ่มรหัส `E_CLINK_PATH` (§5.9)<br>• การเลือก `<clink-launch>` และฟอนต์สำรองเป็นฟังก์ชัน pure ใน `plan` ส่วน `detect` อ่านข้อมูลจากเครื่อง (§5.2) |
+| 2026-10-12 | ตัดสินระหว่างวางแผน phase 1b (architect เลือก founder เปลี่ยนได้):<br>• D8 นับเฉพาะฟอนต์ที่ GDI เห็น (§5.4, §5.8)<br>• WT ที่ยังไม่เคยเปิดไม่มี `settings.json`: CMD Studio ไม่สร้างไฟล์เอง แต่เตือนให้เปิด WT หนึ่งครั้งแล้วใช้ธีมซ้ำ (D6)<br>• เครื่อง ARM64 ใช้ธีมไม่ได้ (`E_UNSUPPORTED_PLATFORM`) เพราะส่วนเสริมที่แนบมามีแต่รุ่น x64<br>• D3 อ่าน `clink.log` เฉพาะส่วนที่เขียนหลังใช้ธีม และเตือน `E_THEME_NOT_LOADED` จนกว่าจะมีหน้าต่าง cmd ที่ inject ได้ D4 ตรวจว่าส่วนของเราอยู่หน้าสุดของ AutoRun (phase 1a ruling P68) และ D11 เป็นข้อมูลอย่างเดียว<br>• ย้อนกลับไม่ครบแล้วบันทึกรายการกับวิธีแก้ไว้ใน `snapshots\<id>\incomplete.json` (§5.3, §5.5)<br>• เพิ่มรหัส `E_DATA_WRITE`, `E_STATE_INVALID`, `E_GENERATED_EDITED`, `E_APP_PACKAGED`, `E_THEME_NOT_LOADED` ใน §5.9 |
+| 2026-10-12 | ตัดสินระหว่างทำ phase 1b (architect เลือก founder เปลี่ยนได้):<br>• คำสั่งที่เปลี่ยนเครื่องทำงานทีละคำสั่งด้วยล็อก `cmdstudio.lock` ตัวที่สองหยุดทันทีด้วย `E_BUSY` (§5.3, §5.5)<br>• การอ่านที่ล้มเหลวใช้รหัสของการอ่าน ไม่ใช้รหัสของการเขียน: `E_MACHINE_READ`, `E_SNAPSHOT_READ` และ `E_STATE_INVALID` ซึ่งครอบทั้ง `state.json` ที่เปิดไม่ได้และที่มาจากรุ่นใหม่กว่า (§5.9)<br>• ถ้ายังตรวจการเปลี่ยนแปลงที่ถูกตัดกลางทางไม่ได้ ทุกคำสั่งที่เปลี่ยนเครื่อง รวมทั้ง `--cleanup` จะหยุดโดยไม่เปลี่ยนอะไร ถ้าจุดนั้นอ่านไม่ได้ตลอด ทางออกคือ `cmdstudio set-aside <id>` (§5.5, §6.3)<br>• "ย้อนกลับ" ไม่ทำงานระหว่างที่บันทึกการย้อนกลับที่ไม่ครบยังค้างอยู่ ส่วน "ย้อนทุกอย่าง" ยังทำได้ และ id ของจุดย้อนกลับไม่ย้อนเวลา (§5.5)<br>• ไฟล์ฟอนต์ที่ WT ยังเปิดค้างอยู่ บันทึกไว้แล้วลบภายหลัง (§6.3)<br>• ไม่แตะ `settings.json` ที่เขียนคีย์ของเราซ้ำหรือซ้อนลึกเกิน 64 ชั้น (§5.4)<br>• `--cleanup` เปิด Clink ตัวอื่นที่เราปิดไว้กลับคืน และเก็บ `state.json` กับจุดย้อนกลับไว้เมื่อยังไม่แน่ใจว่าทุกอย่างกลับเป็นเหมือนเดิม (§6.3)<br>• doctor อ่านอย่างเดียว ไม่ถูกขวางด้วยล็อก จุดย้อนกลับ หรือ `state.json` ที่อ่านไม่ได้ อ่านอะไรไม่ได้ให้แจ้ง `E_MACHINE_READ` ห้ามแจ้ง `ok` และแจ้งปัญหาของจุดย้อนกลับเป็น R1–R3 ต่อจาก D1–D11 (§5.8)<br>• ตารางใน §5.9 มีความหมายของทุกรหัสทั้งภาษาไทยและอังกฤษ |
