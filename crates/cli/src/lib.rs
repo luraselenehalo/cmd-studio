@@ -20,7 +20,9 @@ use cmdstudio_core::doctor::{doctor, Status};
 use cmdstudio_core::exec::{op_label, CLEANUP_FIX_EN, CLEANUP_FIX_TH, COMMAND_PROCESSOR_KEY};
 use cmdstudio_core::generate::lua::Lang;
 use cmdstudio_core::model::{parse_theme, Target};
-use cmdstudio_core::plan::{Op, Paths, PlanError, Request, Warning, NERD_FONT_FAMILY};
+use cmdstudio_core::plan::{
+    Op, Paths, PlanError, Request, Warning, AUTORUN_NOT_TEXT, AUTORUN_NOT_TEXT_TH, NERD_FONT_FAMILY,
+};
 use cmdstudio_core::resources::Resources;
 use cmdstudio_core::snapshot::{Incomplete, SetAside, SnapshotStore, Unrestored};
 use cmdstudio_core::txn::{Failure, Outcome};
@@ -428,6 +430,33 @@ impl<'s, 'a> Say<'s, 'a> {
                      ให้รันคำสั่งเดิมอีกครั้งโดยเพิ่ม --replace-other-clink (undo จะเปิดกลับให้)",
                 ));
                 EXIT_INVALID
+            }
+            // The value is not text, so there is no command to show: what is wrong is said
+            // instead, in the chosen language.
+            ActionError::Plan(PlanError::AutoRunNeedsHandEdit { part })
+                if part == AUTORUN_NOT_TEXT =>
+            {
+                let key = COMMAND_PROCESSOR_KEY;
+                self.err(self.pick(
+                    format!("{code}: CMD Studio can't safely change AutoRun: {AUTORUN_NOT_TEXT}."),
+                    format!(
+                        "{code}: CMD Studio แก้ AutoRun อย่างปลอดภัยไม่ได้ เพราะ{AUTORUN_NOT_TEXT_TH}"
+                    ),
+                ));
+                self.err(self.pick(
+                    format!(
+                        "Your settings were not changed. Fix it by hand: in Registry Editor, \
+                         open {key} and make AutoRun a String Value (REG_SZ) that holds the \
+                         commands you want, or delete it if you do not need it. Then run this \
+                         again."
+                    ),
+                    format!(
+                        "ยังไม่ได้เปลี่ยนการตั้งค่าของคุณ ให้แก้ด้วยมือ: เปิด Registry Editor (regedit) ไปที่ {key} \
+                         แล้วทำให้ AutoRun เป็นชนิด String Value (REG_SZ) ที่มีคำสั่งที่ต้องการ \
+                         หรือลบค่านี้ถ้าไม่ได้ใช้ จากนั้นรันคำสั่งนี้อีกครั้ง"
+                    ),
+                ));
+                EXIT_FAILED
             }
             ActionError::Plan(PlanError::AutoRunNeedsHandEdit { part }) => {
                 let head = self.pick(
@@ -1399,6 +1428,38 @@ mod tests {
         assert!(err.contains("\n  echo A |\n"), "{err}");
         assert!(err.contains("Registry Editor"), "{err}");
         assert_eq!((m.fs.file(WT), m.autorun.snapshot()), before);
+    }
+
+    #[test]
+    fn an_autorun_value_that_is_not_text_needs_a_hand_edit_and_nothing_changes() {
+        let dword = RegValue {
+            kind: 4,
+            bytes: vec![1, 0, 0, 0],
+        };
+        for lang in [Lang::En, Lang::Th] {
+            let (mut m, d) = machine();
+            if lang == Lang::Th {
+                m.host.info.ui_language = LANG_THAI;
+            }
+            m.autorun.write_user(&dword).unwrap();
+            let before = (m.fs.file(WT), m.autorun.snapshot());
+            let (code, out, err) = cli(&m, &d, &["apply", THEME]);
+            assert_eq!(code, EXIT_FAILED, "{out}{err}");
+            assert!(err.starts_with("E_AUTORUN_WRITE: "), "{err}");
+            assert!(err.contains(COMMAND_PROCESSOR_KEY), "{err}");
+            match lang {
+                Lang::En => {
+                    assert!(err.contains("not plain text"), "{err}");
+                    assert!(err.contains("Your settings were not changed."), "{err}");
+                }
+                Lang::Th => {
+                    assert!(err.contains("ไม่ใช่ข้อความธรรมดา"), "{err}");
+                    assert!(err.contains("ยังไม่ได้เปลี่ยนการตั้งค่าของคุณ"), "{err}");
+                    assert!(!err.contains("not plain text"), "{err}");
+                }
+            }
+            assert_eq!((m.fs.file(WT), m.autorun.snapshot()), before);
+        }
     }
 
     #[test]

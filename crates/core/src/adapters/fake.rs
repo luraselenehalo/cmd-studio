@@ -712,6 +712,34 @@ impl Host for FakeHost {
     }
 }
 
+/// Registry values that are there but are not plain text, so CMD Studio never edits one as an
+/// AutoRun value (spec §5.4): `REG_SZ` with an unpaired surrogate, with an odd number of bytes,
+/// and with text after its first NUL (`echo hi`, NUL, `x`, NUL, `y`, NUL); and a `REG_DWORD`.
+pub fn not_text_values() -> Vec<RegValue> {
+    let units =
+        |text: &str| -> Vec<u8> { text.encode_utf16().flat_map(u16::to_le_bytes).collect() };
+    let mut odd = units("echo hi");
+    odd.push(0x21);
+    vec![
+        RegValue {
+            kind: super::REG_SZ,
+            bytes: vec![0x00, 0xD8, 0, 0],
+        },
+        RegValue {
+            kind: super::REG_SZ,
+            bytes: odd,
+        },
+        RegValue {
+            kind: super::REG_SZ,
+            bytes: units("echo hi\0x\0y\0"),
+        },
+        RegValue {
+            kind: 4,
+            bytes: vec![1, 0, 0, 0],
+        },
+    ]
+}
+
 /// One of each fake, for tests that need a whole `System`.
 pub struct FakeMachine {
     pub fs: FakeFs,

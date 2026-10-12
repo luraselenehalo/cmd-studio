@@ -2,7 +2,7 @@
 //! except that it creates the data folder, because `GetShortPathNameW` works
 //! only on a path that exists (spec §5.4 step 2).
 use crate::adapters::{
-    program_data_dir, AdapterError, DirState, RegValue, System, SystemInfo, WtLocation,
+    program_data_dir, AdapterError, DirState, RegText, RegValue, System, SystemInfo, WtLocation,
 };
 use crate::plan::{Machine, Paths};
 use std::path::PathBuf;
@@ -59,9 +59,9 @@ pub fn detect(sys: System<'_>, paths: &Paths) -> Result<Detected, DetectError> {
         .filter(|l| sys.fs.exists(&l.settings))
         .map(|l| l.settings.clone())
         .collect();
-    // Raw text for the planner; a value that is not text reads as None here, and the executor
-    // captures its exact bytes for undo.
-    let text = |v: Option<RegValue>| v.and_then(|v| v.text());
+    // Raw text for the planner. A value that is there but is not plain text is told apart from
+    // an absent one: the planner never edits it (spec §5.4).
+    let text = |v: Option<RegValue>| RegText::of(v.as_ref());
     let machine = Machine {
         wt_settings,
         autorun_hkcu: text(sys.autorun.read_user().map_err(DetectError::Read)?),
@@ -142,11 +142,11 @@ mod tests {
             "only settings files that exist"
         );
         assert_eq!(
-            d.machine.autorun_hkcu.as_deref(),
-            Some(r"%USERPROFILE%\x.cmd"),
+            d.machine.autorun_hkcu,
+            RegText::Text(r"%USERPROFILE%\x.cmd".into()),
             "unexpanded text"
         );
-        assert_eq!(d.machine.autorun_hklm.as_deref(), Some("clink inject"));
+        assert_eq!(d.machine.autorun_hklm, RegText::Text("clink inject".into()));
         assert_eq!(
             d.machine.fonts,
             vec!["Arial".to_string(), "Cascadia Mono".to_string()]
@@ -178,28 +178,25 @@ mod tests {
     }
 
     #[test]
-    fn a_non_text_autorun_reads_as_none() {
-        let m = machine();
-        m.autorun
-            .write_user(&RegValue {
-                kind: 4,
-                bytes: vec![1, 0, 0, 0],
-            })
-            .unwrap();
-        let d = detect(m.system(), &paths()).unwrap();
-        assert_eq!(d.machine.autorun_hkcu, None);
+    fn an_autorun_that_is_not_text_is_never_taken_for_an_absent_one() {
+        for value in crate::adapters::fake::not_text_values() {
+            let m = machine();
+            m.autorun.write_user(&value).unwrap();
+            let d = detect(m.system(), &paths()).unwrap();
+            assert_eq!(d.machine.autorun_hkcu, RegText::NotText, "{value:?}");
+            assert_eq!(d.machine.autorun_hklm, RegText::Absent, "{value:?}");
+        }
     }
 
     #[test]
-    fn a_non_text_machine_autorun_reads_as_none_too() {
-        let m = machine();
-        m.autorun.set_machine(Some(RegValue {
-            kind: 4,
-            bytes: vec![1, 0, 0, 0],
-        }));
-        let d = detect(m.system(), &paths()).unwrap();
-        assert_eq!(d.machine.autorun_hklm, None);
-        assert_eq!(d.machine.autorun_hkcu, None, "an absent value is None too");
+    fn a_machine_autorun_that_is_not_text_is_told_apart_too() {
+        for value in crate::adapters::fake::not_text_values() {
+            let m = machine();
+            m.autorun.set_machine(Some(value.clone()));
+            let d = detect(m.system(), &paths()).unwrap();
+            assert_eq!(d.machine.autorun_hklm, RegText::NotText, "{value:?}");
+            assert_eq!(d.machine.autorun_hkcu, RegText::Absent, "an absent value");
+        }
     }
 
     #[test]

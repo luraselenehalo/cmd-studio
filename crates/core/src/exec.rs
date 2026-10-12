@@ -12,7 +12,7 @@
 use crate::adapters::{
     program_data_dir, Created, DirState, Fs, RegValue, System, REG_EXPAND_SZ, REG_SZ,
 };
-use crate::plan::{Component, Op, Paths};
+use crate::plan::{Component, Op, Paths, AUTORUN_NOT_TEXT};
 use crate::resources::{check_bundle, sha256_hex, Manifest, ResourceError, Resources};
 use crate::state::{AutoRunRecord, RegValueRecord};
 use crate::txn::{Executor, Failure, Verifier};
@@ -664,10 +664,21 @@ impl Executor for SystemExecutor<'_> {
             }
             Op::SetAutoRun { value } => {
                 let a = self.sys.autorun;
+                let current = a.read_user().map_err(|e| failure("E_AUTORUN_WRITE", e))?;
+                // The planner refuses a value that is there but is not plain text; one that
+                // turned into such a value since is never written over or deleted either.
+                if current.as_ref().is_some_and(|v| v.text().is_none()) {
+                    return Err(failure(
+                        "E_AUTORUN_WRITE",
+                        format!(
+                            "{AUTORUN_NOT_TEXT}, so CMD Studio left it as it is; it needs a hand \
+                             edit in Registry Editor, at {COMMAND_PROCESSOR_KEY}"
+                        ),
+                    ));
+                }
                 let result = match value {
                     Some(text) => {
                         // Keep REG_EXPAND_SZ when the value already has it (spec §5.4).
-                        let current = a.read_user().map_err(|e| failure("E_AUTORUN_WRITE", e))?;
                         let kind = if current.is_some_and(|v| v.kind == REG_EXPAND_SZ) {
                             REG_EXPAND_SZ
                         } else {
@@ -2186,8 +2197,9 @@ mod tests {
 
     #[test]
     fn autorun_comes_back_with_its_exact_type_and_bytes() {
-        // A REG_EXPAND_SZ with bytes after its text, an empty REG_SZ, a REG_SZ with no closing
-        // NUL, and a value that is not text at all: each comes back byte for byte.
+        // A REG_EXPAND_SZ with bytes after its text (so not plain text), an empty REG_SZ, a
+        // REG_SZ with no closing NUL, and a value that is not text at all: each comes back byte
+        // for byte.
         let mut odd = RegValue::from_text(REG_EXPAND_SZ, "%USERPROFILE%\\a & ไทย");
         odd.bytes.extend_from_slice(&[0x41, 0x00, 0xff]);
         let values = [
@@ -2214,18 +2226,27 @@ mod tests {
             ] {
                 let (m, res, _) = setup();
                 m.autorun.write_user(&value).unwrap();
-                round_trip(&m, &res, &op);
+                if value.text().is_some() {
+                    round_trip(&m, &res, &op);
+                } else {
+                    // One that is not plain text is never written over or deleted (spec §5.4),
+                    // and a restore still brings it back byte for byte.
+                    let mut ex = SystemExecutor::new(m.system(), &res);
+                    let prior = ex.capture(&op).unwrap();
+                    let e = ex.apply(&op).unwrap_err();
+                    assert_eq!(e.code, "E_AUTORUN_WRITE", "{value:?}");
+                    assert!(e.message.contains("not plain text"), "{e:?}");
+                    assert_eq!(m.autorun.read_user().unwrap(), Some(value.clone()));
+                    m.autorun
+                        .write_user(&RegValue::from_text(REG_SZ, "changed since"))
+                        .unwrap();
+                    ex.restore(&op, &prior).unwrap();
+                }
                 assert_eq!(m.autorun.read_user().unwrap(), Some(value.clone()));
             }
         }
-        // Apply writes REG_SZ over anything but a REG_EXPAND_SZ.
+        // Apply writes REG_SZ where there was no value.
         let (m, res, _) = setup();
-        m.autorun
-            .write_user(&RegValue {
-                kind: 4,
-                bytes: vec![1, 0, 0, 0],
-            })
-            .unwrap();
         SystemExecutor::new(m.system(), &res)
             .apply(&Op::SetAutoRun {
                 value: Some("ours".into()),

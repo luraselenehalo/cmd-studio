@@ -5,12 +5,12 @@
 //! COE). What it could not look at is `skipped` with the reason, or `fail` with the read error
 //! (`E_MACHINE_READ`): a read that failed is never taken for the problem a check looks for.
 use crate::actions::{Ctx, BUSY_EN, BUSY_TH};
-use crate::adapters::{DefaultTerminal, System};
+use crate::adapters::{DefaultTerminal, RegText, System};
 use crate::exec::{CLEANUP_FIX_EN, CLEANUP_FIX_TH, COMMAND_PROCESSOR_KEY};
 use crate::generate::wt::{commandline, CMD_PROFILE_GUID, SCHEME_NAME};
 use crate::model::Target;
 use crate::plan::autorun::{is_foreign, is_our_entry, runs_clink, scan};
-use crate::plan::{autorun_entry, Component, OMP_VERSION};
+use crate::plan::{autorun_entry, Component, AUTORUN_NOT_TEXT, AUTORUN_NOT_TEXT_TH, OMP_VERSION};
 use crate::resources::{check_bundle, sha256_hex, ResourceError};
 use crate::snapshot::{SnapshotStore, UnreadableKind};
 use crate::state::{Applied, State, StateError};
@@ -436,12 +436,37 @@ fn d4(sys: System<'_>, ctx: &Ctx, state: &Result<State, StateError>) -> Check {
             )
         }
     };
-    // A value that is not text (not REG_SZ or REG_EXPAND_SZ) runs nothing, as no value does.
+    let key = COMMAND_PROCESSOR_KEY;
+    // A value that is there but is not plain text is never read as no value (spec §5.4): CMD
+    // Studio can neither check it nor change it, so it is fixed by hand.
     let current = match sys.autorun.read_user() {
-        Ok(value) => value.and_then(|v| v.text()).unwrap_or_default(),
+        Ok(value) => match RegText::of(value.as_ref()) {
+            RegText::Absent => String::new(),
+            RegText::Text(text) => text,
+            RegText::NotText => {
+                let (kind, len) = value.map_or((0, 0), |v| (v.kind, v.bytes.len()));
+                return check(
+                    "D4",
+                    Status::Fail,
+                    Some("E_AUTORUN_WRITE"),
+                    format!(
+                        "หน้าต่าง cmd ใหม่อาจไม่ได้ธีม เพราะ{AUTORUN_NOT_TEXT_TH} CMD Studio \
+                         จึงตรวจหรือแก้ค่านี้ไม่ได้ ให้แก้ด้วยมือ: เปิด Registry Editor (regedit) \
+                         ไปที่ {key} ทำให้ AutoRun เป็นชนิด String Value (REG_SZ) ที่มีคำสั่งที่ต้องการ \
+                         หรือลบค่านี้ แล้วใช้ธีมซ้ำ"
+                    ),
+                    format!(
+                        "New cmd windows may not get the theme: {AUTORUN_NOT_TEXT}, so CMD Studio \
+                         can neither check it nor change it. Fix it by hand: in Registry Editor, \
+                         open {key} and make AutoRun a String Value (REG_SZ) that holds the \
+                         commands you want, or delete it; then apply the theme again"
+                    ),
+                    format!("AutoRun has registry type {kind} and {len} bytes"),
+                );
+            }
+        },
         Err(e) => return unreadable("D4", "ค่า AutoRun ของ cmd", "cmd's AutoRun value", e),
     };
-    let key = COMMAND_PROCESSOR_KEY;
     let read = scan(&current);
     if read.rejected {
         return check(
@@ -513,15 +538,30 @@ fn d4(sys: System<'_>, ctx: &Ctx, state: &Result<State, StateError>) -> Check {
 /// D5 reads AutoRun as the planner does (`plan::autorun`): in the user's value, the commands it
 /// would ask the user about turning off (`is_foreign`: they inject Clink and are not ours); in
 /// the machine-wide one, every command that injects Clink, as the planner's warning counts
-/// them. A command that only mentions Clink is another program's own.
+/// them. A command that only mentions Clink is another program's own. A value that is there but
+/// is not plain text is never read as one without Clink: unless the other value gives a warning,
+/// D5 is not checked.
 fn d5(sys: System<'_>, ctx: &Ctx) -> Check {
-    let text = |v: Option<crate::adapters::RegValue>| v.and_then(|v| v.text()).unwrap_or_default();
     let (user, machine) = match (sys.autorun.read_user(), sys.autorun.read_machine()) {
-        (Ok(user), Ok(machine)) => (text(user), text(machine)),
+        (Ok(user), Ok(machine)) => (RegText::of(user.as_ref()), RegText::of(machine.as_ref())),
         (Err(e), _) | (_, Err(e)) => {
             return unreadable("D5", "ค่า AutoRun ของ cmd", "cmd's AutoRun values", e)
         }
     };
+    // The values that are not plain text, as Registry Editor names their keys.
+    let not_text: Vec<&str> = [
+        (&user, "HKCU (HKEY_CURRENT_USER)"),
+        (&machine, "HKLM (HKEY_LOCAL_MACHINE)"),
+    ]
+    .into_iter()
+    .filter(|(v, _)| **v == RegText::NotText)
+    .map(|(_, hive)| hive)
+    .collect();
+    let text = |v: RegText| match v {
+        RegText::Text(text) => text,
+        RegText::Absent | RegText::NotText => String::new(),
+    };
+    let (user, machine) = (text(user), text(machine));
     let profile = ctx.paths.clink_profile();
     // The planner refuses a profile path that is not Unicode, so no entry of ours holds one.
     let other_clink = |command: &str| match profile.to_str() {
@@ -540,9 +580,14 @@ fn d5(sys: System<'_>, ctx: &Ctx) -> Check {
         .filter(|p| runs_clink(&p.text))
         .map(|p| format!("HKLM: {}", p.text))
         .collect();
+    let unchecked: Vec<String> = not_text
+        .iter()
+        .map(|hive| format!("{hive}: not checked, {AUTORUN_NOT_TEXT}"))
+        .collect();
     let details = in_user
         .iter()
         .chain(&in_machine)
+        .chain(&unchecked)
         .cloned()
         .collect::<Vec<_>>()
         .join("\n");
@@ -567,6 +612,25 @@ fn d5(sys: System<'_>, ctx: &Ctx) -> Check {
              แต่สีใน Windows Terminal ยังใช้ได้",
             "A cmd add-on is set up for the whole machine; the theme's prompt may not work, but \
              the colors in Windows Terminal still do",
+            details,
+        );
+    }
+    if !not_text.is_empty() {
+        let hives = not_text.join(", ");
+        return check(
+            "D5",
+            Status::Skipped,
+            None,
+            format!(
+                "ตรวจข้อนี้ไม่ได้ เพราะค่า AutoRun ใน {hives} ไม่ใช่ข้อความธรรมดา \
+                 จึงบอกไม่ได้ว่ามีส่วนเสริมของ cmd ตัวอื่นตั้งไว้หรือไม่ ถ้าค่านี้ไม่ได้ตั้งใจให้เป็นแบบนี้ \
+                 ให้แก้ด้วยมือใน Registry Editor (regedit)"
+            ),
+            format!(
+                "Not checked: the AutoRun value in {hives} is not plain text, so whether it sets \
+                 up another cmd add-on can't be told. If it should not be that way, fix it by hand \
+                 in Registry Editor"
+            ),
             details,
         );
     }
@@ -1456,6 +1520,34 @@ mod tests {
             exec.apply(op).unwrap();
             j.stage = Stage::Applying { done: i + 1 };
             journal.save(&j).unwrap();
+        }
+    }
+
+    #[test]
+    fn an_autorun_value_that_is_not_text_is_never_read_as_none() {
+        for value in crate::adapters::fake::not_text_values() {
+            let (m, ctx) = themed(Target::All);
+            m.autorun.write_user(&value).unwrap();
+            let checks = run(&m, &ctx);
+            let d4 = by_id(&checks, "D4");
+            assert_eq!(
+                (d4.status, d4.code),
+                (Status::Fail, Some("E_AUTORUN_WRITE")),
+                "{value:?}"
+            );
+            assert!(d4.message_en.contains("not plain text"), "{d4:?}");
+            assert!(d4.message_en.contains(COMMAND_PROCESSOR_KEY), "{d4:?}");
+            assert!(d4.message_th.contains(COMMAND_PROCESSOR_KEY), "{d4:?}");
+            assert!(!d4.message_en.contains("is gone"), "{d4:?}");
+            let d5 = by_id(&checks, "D5");
+            assert_eq!((d5.status, d5.code), (Status::Skipped, None), "{value:?}");
+            assert!(d5.message_en.starts_with("Not checked"), "{d5:?}");
+            // The machine-wide value too: it may hold a Clink nobody can see.
+            let (m, ctx) = machine();
+            m.autorun.set_machine(Some(value.clone()));
+            let d5 = by_id(&run(&m, &ctx), "D5");
+            assert_eq!(d5.status, Status::Skipped, "{value:?}");
+            assert!(d5.message_en.contains("HKLM"), "{d5:?}");
         }
     }
 

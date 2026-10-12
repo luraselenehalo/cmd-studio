@@ -105,18 +105,46 @@ impl RegValue {
     }
 
     /// The text of a `REG_SZ` or `REG_EXPAND_SZ` value, up to its first NUL,
-    /// unexpanded. `None` for any other type or for bytes that are not UTF-16.
+    /// unexpanded. `None` for any other type, and for bytes that are not plain text: an odd
+    /// number of them (half a UTF-16 unit), UTF-16 that is not valid, or anything but NULs after
+    /// the first NUL. Writing such a value back as text would lose what Windows keeps of it, so
+    /// it is never edited as text (spec §5.4).
     pub fn text(&self) -> Option<String> {
         if self.kind != REG_SZ && self.kind != REG_EXPAND_SZ {
             return None;
         }
-        let (pairs, _) = self.bytes.as_chunks::<2>();
-        let units: Vec<u16> = pairs
-            .iter()
-            .map(|p| u16::from_le_bytes(*p))
-            .take_while(|u| *u != 0)
-            .collect();
-        String::from_utf16(&units).ok()
+        let (pairs, rest) = self.bytes.as_chunks::<2>();
+        if !rest.is_empty() {
+            return None;
+        }
+        let mut units = pairs.iter().map(|p| u16::from_le_bytes(*p));
+        let text: Vec<u16> = units.by_ref().take_while(|u| *u != 0).collect();
+        if units.any(|u| u != 0) {
+            return None;
+        }
+        String::from_utf16(&text).ok()
+    }
+}
+
+/// A registry value as the readers of AutoRun take it (spec §5.4): absent, text, or there but
+/// not plain text. A value that is not plain text is never taken for an absent one, nor read as
+/// text: it is left for a hand edit.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum RegText {
+    #[default]
+    Absent,
+    /// The value's text ([`RegValue::text`]), unexpanded.
+    Text(String),
+    /// The value is there, but [`RegValue::text`] has none for it.
+    NotText,
+}
+
+impl RegText {
+    pub fn of(value: Option<&RegValue>) -> RegText {
+        match value {
+            None => RegText::Absent,
+            Some(v) => v.text().map_or(RegText::NotText, RegText::Text),
+        }
     }
 }
 
@@ -319,9 +347,14 @@ mod tests {
         assert_eq!(v.text().as_deref(), Some("if exist \"C:\\ผู้ใช้\\x.exe\" x"));
         assert_eq!(v.bytes.len() % 2, 0);
         assert_eq!(&v.bytes[v.bytes.len() - 2..], &[0, 0]);
-        let mut odd = RegValue::from_text(REG_EXPAND_SZ, "%USERPROFILE%\\a");
-        odd.bytes.extend_from_slice(&[0x41, 0x00, 0x00, 0x00]);
-        assert_eq!(odd.text().as_deref(), Some("%USERPROFILE%\\a"));
+        let mut padded = RegValue::from_text(REG_EXPAND_SZ, "%USERPROFILE%\\a");
+        padded.bytes.extend_from_slice(&[0x00, 0x00]);
+        assert_eq!(padded.text().as_deref(), Some("%USERPROFILE%\\a"));
+        // Text after the first NUL is not cut off as if it were not there: the value is not
+        // plain text.
+        let mut after = RegValue::from_text(REG_EXPAND_SZ, "%USERPROFILE%\\a");
+        after.bytes.extend_from_slice(&[0x41, 0x00, 0x00, 0x00]);
+        assert_eq!(after.text(), None);
         assert_eq!(
             RegValue {
                 kind: 4,
@@ -338,6 +371,22 @@ mod tests {
             .text(),
             None
         );
+    }
+
+    #[test]
+    fn reg_text_is_none_for_a_value_that_is_not_plain_text() {
+        // NULs may follow the text; anything else after it, or half a UTF-16 unit, may not.
+        let mut padded = RegValue::from_text(REG_SZ, "echo hi");
+        padded.bytes.extend_from_slice(&[0, 0, 0, 0]);
+        assert_eq!(padded.text().as_deref(), Some("echo hi"));
+        let unterminated = RegValue {
+            kind: REG_SZ,
+            bytes: vec![0x61, 0x00],
+        };
+        assert_eq!(unterminated.text().as_deref(), Some("a"));
+        for value in fake::not_text_values() {
+            assert_eq!(value.text(), None, "{value:?}");
+        }
     }
 
     #[test]

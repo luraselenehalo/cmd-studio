@@ -18,15 +18,13 @@ use crate::actions::{
     begin, delete_pending, delete_pending_and_save, next_id, record_incomplete, ActionError, Ctx,
     StartReport,
 };
-use crate::adapters::{
-    program_data_dir, DirEntry, DirState, RegValue, System, REG_EXPAND_SZ, REG_SZ,
-};
+use crate::adapters::{program_data_dir, DirEntry, DirState, RegText, RegValue, System};
 use crate::exec::{
     font_target, same_path, same_state, FixByHand, SystemExecutor, COMMAND_PROCESSOR_KEY, FONTS_KEY,
 };
 use crate::generate::wt::CMD_PROFILE_GUID;
 use crate::plan::autorun::{is_foreign, remove_ours, scan};
-use crate::plan::{Op, Paths, PlanError, NERD_FONT_FAMILY};
+use crate::plan::{Op, Paths, PlanError, AUTORUN_NOT_TEXT, AUTORUN_NOT_TEXT_TH, NERD_FONT_FAMILY};
 use crate::snapshot::{
     Incomplete, Manifest, SetAside, SnapshotKind, SnapshotStore, Unrestored, KEEP,
 };
@@ -241,6 +239,8 @@ pub fn cleanup(sys: System<'_>, ctx: &Ctx, remove_themes: bool) -> Result<Report
     let mut unusable = None;
     let mut newer_state = false;
     let unresolved;
+    // AutoRun is not plain text, so whether it still holds CMD Studio's part is not known.
+    let mut autorun_not_text = false;
     match load_state(sys, ctx, &mut report) {
         Ok((loaded, damaged)) => {
             let reverted = revert_steps(sys, ctx, loaded, &mut report);
@@ -248,6 +248,7 @@ pub fn cleanup(sys: System<'_>, ctx: &Ctx, remove_themes: bool) -> Result<Report
                 unusable = Some("E_STATE_INVALID");
             }
             unresolved = reverted.unresolved;
+            autorun_not_text = reverted.autorun_not_text;
             match reverted.state {
                 Some(next) => state = Some(next),
                 None => return Ok(report),
@@ -286,9 +287,10 @@ pub fn cleanup(sys: System<'_>, ctx: &Ctx, remove_themes: bool) -> Result<Report
         );
         return Ok(report);
     }
-    let not_back = state
-        .as_ref()
-        .is_some_and(|s| holds_what_is_not_back(&s.baseline));
+    let not_back = autorun_not_text
+        || state
+            .as_ref()
+            .is_some_and(|s| holds_what_is_not_back(&s.baseline));
     // Looked for on disk by every run, so a later --cleanup gives the same answer.
     let in_doubt = records_in_doubt(sys, ctx);
     let keep_records =
@@ -374,6 +376,9 @@ struct Reverted {
     unresolved: bool,
     /// state.json's copy of the AutoRun original was damaged (see [`original_damaged`]).
     damaged: bool,
+    /// AutoRun was left as it is because it is not plain text: whether it still holds CMD
+    /// Studio's part cannot be known, even when state.json has no AutoRun original.
+    autorun_not_text: bool,
 }
 
 /// Steps 1–3 with `state` loaded: the AutoRun and settings.json transaction, the applies marked
@@ -400,7 +405,9 @@ fn revert_steps(sys: System<'_>, ctx: &Ctx, state: State, report: &mut Report) -
             Some(autorun_original_by_hand(sys, ctx)),
         );
     }
-    let autorun_done = autorun_step(sys, &ctx.paths, base, &mut ops, report);
+    let autorun = autorun_step(sys, &ctx.paths, base, &mut ops, report);
+    let autorun_done = autorun == AutoRunStep::Done;
+    let autorun_not_text = autorun == AutoRunStep::NotText;
     if !autorun_done || damaged {
         // Only the original: it says which other Clink to turn back on, and whether the value
         // was there before, once AutoRun can be edited. A damaged one stays while it is
@@ -418,6 +425,7 @@ fn revert_steps(sys: System<'_>, ctx: &Ctx, state: State, report: &mut Report) -
             state: None,
             unresolved: settle_record(sys, ctx, ran.id.as_deref(), report),
             damaged,
+            autorun_not_text,
         };
     }
     if autorun_done && base.autorun.as_ref().is_some_and(|a| !a.key_existed) {
@@ -436,21 +444,34 @@ fn revert_steps(sys: System<'_>, ctx: &Ctx, state: State, report: &mut Report) -
         state: Some(next),
         unresolved,
         damaged,
+        autorun_not_text,
     }
 }
 
 /// What the AutoRun steps are about.
 const AUTORUN_STEP: &str = "Take CMD Studio's part out of AutoRun";
 
-/// Step 1: queues what AutoRun becomes. Whether AutoRun needs nothing more: a change is queued,
-/// or none is needed. A value that cannot be read, or is left for a hand edit, is a failed step.
+/// How step 1 went.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AutoRunStep {
+    /// A change is queued, or none is needed.
+    Done,
+    /// Left as it is, as a failed step: it could not be read, or needs a hand edit.
+    Left,
+    /// Left as it is, as a failed step, because it is there but is not plain text: what it
+    /// holds, CMD Studio's part or not, cannot be known.
+    NotText,
+}
+
+/// Step 1: queues what AutoRun becomes. A value that cannot be read, is left for a hand edit, or
+/// is not plain text (never rewritten, spec §5.4), is a failed step.
 fn autorun_step(
     sys: System<'_>,
     paths: &Paths,
     base: &Baseline,
     ops: &mut Vec<Op>,
     report: &mut Report,
-) -> bool {
+) -> AutoRunStep {
     const WHAT: &str = AUTORUN_STEP;
     let profile = paths.clink_profile().display().to_string();
     let value = match sys.autorun.read_user() {
@@ -462,33 +483,31 @@ fn autorun_step(
                 format!("AutoRun could not be read ({e}), so it was left as it is"),
                 None,
             );
-            return false;
+            return AutoRunStep::Left;
         }
     };
-    let current = match &value {
-        None => None,
-        Some(v) => match v.text() {
-            Some(text) => Some(text),
-            // Not a string value: cmd does not run it, so nothing of ours runs from it.
-            None if v.kind != REG_SZ && v.kind != REG_EXPAND_SZ => return true,
-            None => {
-                report.fail(
-                    WHAT,
-                    "E_AUTORUN_WRITE",
-                    "AutoRun is a string value but not valid text, so CMD Studio cannot tell \
-                     its part from the rest; it was left as it is",
-                    Some(autorun_by_hand(&lossy_text(v), &profile)),
-                );
-                return false;
-            }
-        },
+    let current = match RegText::of(value.as_ref()) {
+        RegText::Absent => None,
+        RegText::Text(text) => Some(text),
+        RegText::NotText => {
+            report.fail(
+                WHAT,
+                "E_AUTORUN_WRITE",
+                format!(
+                    "{AUTORUN_NOT_TEXT}, so CMD Studio cannot tell its part from the rest; it was \
+                     left as it is"
+                ),
+                Some(autorun_not_text_by_hand(&profile)),
+            );
+            return AutoRunStep::NotText;
+        }
     };
     match autorun_after_revert(current.as_deref(), base.autorun.as_ref(), paths) {
         Ok(next) => {
             if let Some(value) = next {
                 ops.push(Op::SetAutoRun { value });
             }
-            true
+            AutoRunStep::Done
         }
         Err(e) => {
             let part = match &e {
@@ -501,7 +520,7 @@ fn autorun_step(
                 format!("{e}. It was left as it is"),
                 Some(autorun_by_hand(&part, &profile)),
             );
-            false
+            AutoRunStep::Left
         }
     }
 }
@@ -1037,18 +1056,19 @@ fn cmd_studios_own(sys: System<'_>, ctx: &Ctx, path: &Path) -> bool {
 }
 
 /// Whether AutoRun still holds an entry of ours, or lacks another program's Clink that
-/// `original` held (one CMD Studio turned off). One that cannot be read counts as holding ours.
+/// `original` held (one CMD Studio turned off). One that cannot be read, or is not plain text,
+/// counts as holding ours.
 fn autorun_still_ours(sys: System<'_>, paths: &Paths, original: Option<&AutoRunRecord>) -> bool {
     let profile_path = paths.clink_profile();
     let Some(profile) = profile_path.to_str() else {
         return false;
     };
+    // A value that is not plain text may hold it: what it holds cannot be known.
     let current = match sys.autorun.read_user() {
-        Ok(None) => None,
-        Ok(Some(v)) => match v.text() {
-            Some(text) => Some(text),
-            None if v.kind != REG_SZ && v.kind != REG_EXPAND_SZ => None,
-            None => return true,
+        Ok(value) => match RegText::of(value.as_ref()) {
+            RegText::Absent => None,
+            RegText::Text(text) => Some(text),
+            RegText::NotText => return true,
         },
         Err(_) => return true,
     };
@@ -1613,6 +1633,27 @@ fn autorun_by_hand(command: &str, profile: &str) -> FixByHand {
             "เปิด Registry Editor (regedit) ไปที่ {key} แล้วดูค่า AutoRun \
              ให้เอาออกเฉพาะส่วนของ CMD Studio คือคำสั่งที่เริ่ม Clink ด้วย --profile \"{profile}\" \
              และเก็บส่วนอื่นไว้ตามเดิม ส่วนนี้อยู่ใน: {command}"
+        ),
+    }
+}
+
+/// An AutoRun value that is not plain text, left as it is: CMD Studio cannot tell its part from
+/// the rest, so the user looks at it.
+fn autorun_not_text_by_hand(profile: &str) -> FixByHand {
+    let key = COMMAND_PROCESSOR_KEY;
+    FixByHand {
+        en: format!(
+            "In Registry Editor, open {key} and look at the AutoRun value: {AUTORUN_NOT_TEXT}, so \
+             CMD Studio cannot tell its part from the rest and left it as it is. Take out CMD \
+             Studio's part, the command that starts Clink with --profile \"{profile}\", if it is \
+             there, and keep the rest as a String Value (REG_SZ); or delete the value if you do \
+             not need it."
+        ),
+        th: format!(
+            "เปิด Registry Editor (regedit) ไปที่ {key} แล้วดูค่า AutoRun: {AUTORUN_NOT_TEXT_TH} \
+             CMD Studio จึงแยกส่วนของตัวเองออกจากส่วนอื่นไม่ได้ และไม่ได้แก้ค่านี้ \
+             ให้เอาส่วนของ CMD Studio คือคำสั่งที่เริ่ม Clink ด้วย --profile \"{profile}\" ออกถ้ามี \
+             แล้วเก็บส่วนที่เหลือไว้เป็นชนิด String Value (REG_SZ) หรือลบค่านี้ถ้าไม่ได้ใช้"
         ),
     }
 }
@@ -2994,7 +3035,8 @@ mod tests {
         );
         assert_eq!(m.autorun.read_user().unwrap(), Some(broken));
 
-        // A value of another type is no command, and cmd does not run it: it stays, unsaid.
+        // A value of another type is not plain text either: it stays, and is said, since what
+        // it holds is not CMD Studio's to guess (spec §5.4).
         let (m, ctx) = machine();
         apply(&m, &ctx, Target::All);
         let dword = RegValue {
@@ -3003,8 +3045,37 @@ mod tests {
         };
         m.autorun.write_user(&dword).unwrap();
         let report = revert_all(m.system(), &later(&ctx, 1)).unwrap();
-        assert!(report.ok(), "{report:?}");
+        assert_eq!(failed(&report, "E_AUTORUN_WRITE").len(), 1, "{report:?}");
         assert_eq!(m.autorun.read_user().unwrap(), Some(dword));
+    }
+
+    #[test]
+    fn cleanup_leaves_an_autorun_value_that_is_not_text_for_a_hand_edit_and_keeps_the_records() {
+        // Whether the apply changed AutoRun (its original is in state.json) or not (Windows
+        // Terminal only): the value is never rewritten, and what it holds cannot be known.
+        for target in [Target::All, Target::Wt] {
+            for value in crate::adapters::fake::not_text_values() {
+                let (m, ctx) = machine();
+                apply(&m, &ctx, target);
+                m.autorun.write_user(&value).unwrap();
+                let report = cleanup(m.system(), &later(&ctx, 1), true).unwrap();
+                let steps = failed(&report, "E_AUTORUN_WRITE");
+                let [step] = steps[..] else {
+                    panic!("{target:?} {value:?}: {report:?}")
+                };
+                assert!(step.what.contains("AutoRun"), "{step:?}");
+                let fix = step.fix.as_ref().unwrap();
+                assert!(fix.en.contains(COMMAND_PROCESSOR_KEY), "{fix:?}");
+                assert!(fix.en.contains("not plain text"), "{fix:?}");
+                assert!(fix.th.contains(COMMAND_PROCESSOR_KEY), "{fix:?}");
+                assert_eq!(m.autorun.read_user().unwrap(), Some(value.clone()));
+                assert_records_kept(&m, &ctx, &report);
+                // The next --cleanup finds the same.
+                let again = cleanup(m.system(), &later(&ctx, 2), true).unwrap();
+                assert_same_records_kept(&m, &ctx, &report, &again);
+                assert_eq!(m.autorun.read_user().unwrap(), Some(value));
+            }
+        }
     }
 
     #[test]

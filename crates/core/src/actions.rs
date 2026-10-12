@@ -2436,4 +2436,59 @@ mod tests {
             Some(record)
         );
     }
+
+    // ---- An AutoRun value that is not plain text is never guessed at (spec §5.4). ----
+
+    #[test]
+    fn an_autorun_value_that_is_not_text_stops_the_plan_for_every_cmd_window() {
+        for value in crate::adapters::fake::not_text_values() {
+            let (m, ctx) = machine();
+            m.autorun.write_user(&value).unwrap();
+            let before = everything(&m);
+            let e =
+                prepare_apply(m.system(), &ctx, &terracotta(), &request(Target::All)).unwrap_err();
+            assert_eq!(e.code(), "E_AUTORUN_WRITE", "{value:?}");
+            let ActionError::Plan(PlanError::AutoRunNeedsHandEdit { part }) = &e else {
+                panic!("{value:?}: {e:?}")
+            };
+            assert!(part.contains("not plain text"), "{part}");
+            assert_eq!(everything(&m), before, "{value:?}");
+            assert_eq!(m.autorun.read_user().unwrap(), Some(value.clone()));
+            // Windows Terminal only: AutoRun is not touched, so the value is no trouble.
+            let p = prepare_apply(m.system(), &ctx, &terracotta(), &request(Target::Wt)).unwrap();
+            assert!(
+                !p.ops.iter().any(|o| matches!(o, Op::SetAutoRun { .. })),
+                "{value:?}: {:?}",
+                p.ops
+            );
+            assert_eq!(run_apply(m.system(), &ctx, p), Outcome::Committed);
+            assert_eq!(m.autorun.read_user().unwrap(), Some(value));
+        }
+    }
+
+    #[test]
+    fn an_autorun_value_that_turned_into_something_not_text_is_never_written_over() {
+        // Planned with text; by the time the op runs, the value is not text. The op refuses,
+        // and the rollback leaves the value byte for byte.
+        for value in crate::adapters::fake::not_text_values() {
+            let (m, ctx) = machine();
+            m.autorun
+                .write_user(&RegValue::from_text(REG_SZ, "echo hi"))
+                .unwrap();
+            let p = prepare_apply(m.system(), &ctx, &terracotta(), &request(Target::All)).unwrap();
+            m.autorun.write_user(&value).unwrap();
+            let out = run_apply(m.system(), &ctx, p);
+            assert!(
+                matches!(
+                    &out,
+                    Outcome::RolledBack {
+                        code: "E_AUTORUN_WRITE",
+                        ..
+                    }
+                ),
+                "{value:?}: {out:?}"
+            );
+            assert_eq!(m.autorun.read_user().unwrap(), Some(value));
+        }
+    }
 }
