@@ -215,9 +215,22 @@ impl Fs for FakeFs {
         Ok(())
     }
 
+    /// A locked file inside stops it as on the disk: entries go in order, depth first, until
+    /// the first locked file, which stays with every entry after it and the folders that hold
+    /// them (`Path` order, which is the listing order but for letter case).
     fn remove_dir_all(&self, path: &Path) -> Result<(), AdapterError> {
-        if self.holds_a_lock(path) {
-            return Err(err(path, "a file inside is locked"));
+        let first_locked = held(&self.locks)
+            .iter()
+            .filter(|p| p.starts_with(path))
+            .min()
+            .cloned();
+        if let Some(stop) = first_locked {
+            let mut s = self.state.borrow_mut();
+            s.files.retain(|f, _| !(f.starts_with(path) && *f < stop));
+            s.dirs.retain(|d| {
+                !(d.starts_with(path) && d.as_path() != path && *d < stop && !stop.starts_with(d))
+            });
+            return Err(err(&stop, "the file is locked"));
         }
         let mut s = self.state.borrow_mut();
         if s.fail_removes.iter().any(|f| f.starts_with(path)) {
@@ -907,6 +920,36 @@ mod tests {
         assert!(again.is_some(), "free again once the first is dropped");
         drop((again, other));
         fs.remove_dir_all(dir).unwrap();
+
+        // Deleting a folder around a held lock goes as on the disk (see WinFs's test): entries
+        // in order, depth first, until the locked file; it and everything after it stay.
+        let data = Path::new(r"C:\data");
+        for name in ["a.txt", r"b\x.txt", r"lock-dir\inner.txt", "z.txt"] {
+            fs.put(data.join(name), b"x");
+        }
+        fs.create_dir_all(&data.join("a-dir")).unwrap();
+        let held = fs.try_lock(&data.join(r"lock-dir\l.lock")).unwrap();
+        assert!(fs.remove_dir_all(data).is_err());
+        let left: Vec<String> = fs
+            .snapshot()
+            .0
+            .into_keys()
+            .chain(fs.snapshot().1)
+            .filter(|p| p.starts_with(data))
+            .map(|p| p.display().to_string())
+            .collect();
+        assert_eq!(
+            left,
+            [
+                r"C:\data\lock-dir\l.lock",
+                r"C:\data\z.txt",
+                r"C:\data",
+                r"C:\data\lock-dir",
+            ]
+        );
+        drop(held);
+        fs.remove_dir_all(data).unwrap();
+        assert!(!fs.exists(data));
 
         // A file that cannot be opened for writing cannot be locked either; a folder is no file.
         fs.create_dir_all(dir).unwrap();

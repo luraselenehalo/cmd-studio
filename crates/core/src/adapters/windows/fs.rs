@@ -384,6 +384,44 @@ mod tests {
         assert!(WinFs.try_lock(&missing).is_err());
         assert!(!missing.parent().unwrap().exists(), "no folder is made");
         assert!(WinFs.try_lock(&dir).is_err());
+
+        // Deleting a folder that holds a file that is locked deletes entries in the order the
+        // folder lists them (by name), depth first, and stops with an error at the locked file:
+        // it, and every entry after it, stays. std's remove_dir_all does that here (seen on
+        // Windows 11 with Rust 1.99); FakeFs does the same, and this pins it.
+        let data = dir.join("data");
+        for name in ["a.txt", r"sub\b.txt", "z.txt"] {
+            WinFs.write_atomic(&data.join(name), b"x").unwrap();
+        }
+        let lock = WinFs
+            .try_lock(&data.join("cmdstudio.lock"))
+            .unwrap()
+            .unwrap();
+        assert!(WinFs.remove_dir_all(&data).is_err());
+        let mut left = names_in(&data);
+        left.sort();
+        assert_eq!(left, ["cmdstudio.lock", "sub", "z.txt"]);
+        drop(lock);
+        WinFs.remove_dir_all(&data).unwrap();
+        assert!(!data.exists());
+        // The same a level down, as FakeFs's test lays it out: what comes before the locked
+        // file inside its own folder goes too, and so does an empty folder before it.
+        for name in ["a.txt", r"b\x.txt", r"lock-dir\inner.txt", "z.txt"] {
+            WinFs.write_atomic(&data.join(name), b"x").unwrap();
+        }
+        WinFs.create_dir_all(&data.join("a-dir")).unwrap();
+        let lock = WinFs
+            .try_lock(&data.join(r"lock-dir\l.lock"))
+            .unwrap()
+            .unwrap();
+        assert!(WinFs.remove_dir_all(&data).is_err());
+        let mut left = names_in(&data);
+        left.sort();
+        assert_eq!(left, ["lock-dir", "z.txt"]);
+        assert_eq!(names_in(&data.join("lock-dir")), ["l.lock"]);
+        drop(lock);
+        WinFs.remove_dir_all(&data).unwrap();
+        assert!(!data.exists());
     }
 
     #[test]
