@@ -3,6 +3,7 @@
 //! everything else goes through the adapter traits in `adapters`.
 pub mod adapters;
 pub mod color;
+pub mod detect;
 pub mod generate;
 pub mod model;
 pub mod oklch;
