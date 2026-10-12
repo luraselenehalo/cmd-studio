@@ -152,6 +152,17 @@ pub struct Unreadable {
     pub failure: Failure,
 }
 
+/// How a restore point was set aside (see [`SnapshotStore::set_aside`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SetAside {
+    /// Its journal was renamed `journal.unreadable.json`: the transaction ran, and its payload
+    /// files may be the only copy of what it changed. Prune keeps it, and so does `--cleanup`.
+    WithJournal,
+    /// It had no journal (`journal.missing.json`): it ran nothing and holds no file of the
+    /// user's.
+    WithoutJournal,
+}
+
 /// A read that failed, and which way.
 struct ReadError {
     kind: UnreadableKind,
@@ -290,12 +301,23 @@ impl<'a> SnapshotStore<'a> {
 
     /// Whether the restore point was set aside (see [`SnapshotStore::set_aside`]): it has no
     /// `journal.json`, and has either the renamed journal or the note that stands for one.
-    /// `--cleanup` keeps the restore points while one is: its files may be the only copy of
-    /// what it changed.
     pub fn is_set_aside(&self, id: &str) -> bool {
+        self.set_aside_as(id).is_some()
+    }
+
+    /// How the restore point was set aside; `None` when it was not (see
+    /// [`SnapshotStore::is_set_aside`]).
+    pub fn set_aside_as(&self, id: &str) -> Option<SetAside> {
         let dir = self.dir(id);
-        !self.fs.exists(&dir.join(JOURNAL))
-            && (self.fs.exists(&dir.join(JOURNAL_ASIDE)) || self.fs.exists(&dir.join(NO_JOURNAL)))
+        if self.fs.exists(&dir.join(JOURNAL)) {
+            None
+        } else if self.fs.exists(&dir.join(JOURNAL_ASIDE)) {
+            Some(SetAside::WithJournal)
+        } else if self.fs.exists(&dir.join(NO_JOURNAL)) {
+            Some(SetAside::WithoutJournal)
+        } else {
+            None
+        }
     }
 
     /// Whether the restore point's transaction got as far as a journal: it has `journal.json`,
@@ -421,13 +443,17 @@ impl<'a> SnapshotStore<'a> {
     }
 
     /// Deletes all but the first-ever and the `keep` newest restore points, and returns the
-    /// deleted ids. A restore point that was set aside counts like any other: among the newest
-    /// it stays, older it goes. Unless it was set aside, a restore point is never deleted when
-    /// its payload files may be the only copy of a user's file:
+    /// deleted ids. A restore point is never deleted when its payload files may be the only copy
+    /// of a user's file:
     /// - its journal is unfinished, or cannot be read (it may be an unfinished transaction);
+    /// - it was set aside with its journal (`journal.unreadable.json`): it ran, and nothing says
+    ///   what its payload files hold;
     /// - its rollback ended `RollbackIncomplete`, which counts as finished but left something
     ///   that could not be put back;
     /// - it has an `incomplete.json`, which says what to copy back from where.
+    ///
+    /// One set aside without a journal (`journal.missing.json`) ran nothing: among the newest it
+    /// stays, older it goes.
     ///
     /// A folder that cannot be deleted does not keep the others from going; the first such
     /// failure is returned at the end.
@@ -455,8 +481,10 @@ impl<'a> SnapshotStore<'a> {
 
     /// Whether [`SnapshotStore::prune`] may delete the restore point, once it is old enough.
     fn may_go(&self, id: &str) -> bool {
-        if self.is_set_aside(id) {
-            return true;
+        match self.set_aside_as(id) {
+            Some(SetAside::WithoutJournal) => return true,
+            Some(SetAside::WithJournal) => return false,
+            None => {}
         }
         if self.fs.exists(&self.dir(id).join(INCOMPLETE)) {
             return false;
@@ -1557,36 +1585,46 @@ mod tests {
     }
 
     #[test]
-    fn a_set_aside_restore_point_counts_among_the_newest_and_goes_when_old() {
-        // Prune's rule for a restore point it cannot read: it stays until it is set aside
-        // (a person has been told), and from then on it is pruned like any other.
+    fn a_restore_point_set_aside_with_its_journal_never_goes_and_one_without_goes_when_old() {
+        // A restore point it cannot read stays. Set aside with its journal, the transaction ran
+        // and its payload files may be the only copy of a user's file: it never goes. Set aside
+        // with no journal (journal.missing.json), it ran nothing: it goes when old.
         let fs = FakeFs::new();
         let store = SnapshotStore::new(&fs, Path::new(ROOT));
         for i in 1..=25u64 {
-            point(&store, &format!("{i:013}-x"), Stage::Committed);
+            if i == 3 {
+                store
+                    .write_manifest(&manifest(&format!("{i:013}-x"), SnapshotKind::Apply))
+                    .unwrap();
+            } else {
+                point(&store, &format!("{i:013}-x"), Stage::Committed);
+            }
         }
         for broken in [2u64, 4, 24] {
             fs.remove_file(Path::new(&at(&format!("{broken:013}-x"), r"payload\0.bin")))
                 .unwrap();
         }
-        store.set_aside("0000000000002-x").unwrap();
-        store.set_aside("0000000000024-x").unwrap();
+        for aside in [2u64, 3, 24] {
+            store.set_aside(&format!("{aside:013}-x")).unwrap();
+        }
+        assert!(fs.exists(Path::new(&at("0000000000003-x", "journal.missing.json"))));
         let deleted = store.prune(KEEP).unwrap();
-        // #2 is old and set aside: gone. #4 is old but not set aside: stays. #24 is set aside
-        // but one of the 20 newest: stays.
-        let expected: Vec<String> = [2u64, 3, 5].iter().map(|i| format!("{i:013}-x")).collect();
+        // #2–#5 are old enough. #2 is set aside with its journal: stays. #3 is set aside with
+        // none: gone. #4 is not set aside: stays. #24 is set aside, one of the newest: stays.
+        let expected: Vec<String> = [3u64, 5].iter().map(|i| format!("{i:013}-x")).collect();
         assert_eq!(deleted, expected);
         let left = store.ids().unwrap();
-        assert!(left.contains(&"0000000000004-x".to_string()));
-        assert!(left.contains(&"0000000000024-x".to_string()));
-        assert_eq!(left.len(), 22);
+        for kept in [2u64, 4, 24] {
+            assert!(left.contains(&format!("{kept:013}-x")), "{kept}");
+        }
+        assert_eq!(left.len(), 23);
     }
 
     #[test]
-    fn prune_keeps_what_a_rollback_could_not_put_back_until_it_is_set_aside() {
+    fn prune_keeps_what_a_rollback_could_not_put_back_even_once_it_is_set_aside() {
         // The payload files of a rollback that ended RollbackIncomplete may be the only copy of
         // what it failed to put back, and incomplete.json says where. The journal counts as
-        // finished, but prune must not take them.
+        // finished, but prune must not take them, set aside or not.
         let fs = FakeFs::new();
         let store = SnapshotStore::new(&fs, Path::new(ROOT));
         for i in 1..=25u64 {
@@ -1607,10 +1645,11 @@ mod tests {
         assert!(left.contains(&ids(&[2])[0]) && left.contains(&ids(&[3])[0]));
         assert!(fs.file(store.payload_path("0000000000002-x", 0)).is_some());
         assert!(fs.file(at("0000000000003-x", "incomplete.json")).is_some());
-        // a person has been told and set them aside: now they go like any other
+        // set aside, with their journals: they still stay
         store.set_aside("0000000000002-x").unwrap();
         store.set_aside("0000000000003-x").unwrap();
-        assert_eq!(store.prune(KEEP).unwrap(), ids(&[2, 3]));
+        assert_eq!(store.prune(KEEP).unwrap(), Vec::<String>::new());
+        assert!(fs.file(store.payload_path("0000000000002-x", 0)).is_some());
     }
 
     #[test]
