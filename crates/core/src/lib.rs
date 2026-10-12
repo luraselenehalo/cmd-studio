@@ -13,3 +13,4 @@ pub mod resources;
 pub mod schema;
 pub mod text;
 pub mod txn;
+pub mod wt_edit;

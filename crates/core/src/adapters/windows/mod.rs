@@ -10,6 +10,7 @@ pub mod fonts;
 pub mod fs;
 pub mod host;
 pub mod registry;
+pub mod wt;
 
 pub(crate) fn io_err(op: &str, path: &Path, e: &std::io::Error) -> AdapterError {
     AdapterError::new(format!("{op} {}", path.display()), e.to_string())

@@ -1,0 +1,19 @@
+{
+  "defaultProfile": "{0CAA0DAD-35BE-5F56-A8FF-AFCEEEAA6101}",
+  "profiles": {
+    "defaults": { "fontSize": 11 },
+    "list": [
+      {
+        // The user's own cmd profile, uppercase guid, two-space indent.
+        "guid": "{0CAA0DAD-35BE-5F56-A8FF-AFCEEEAA6101}",
+        "name": "My cmd",
+        "colorScheme": "Campbell",
+        "font": { "face": "Consolas", "weight": "bold" },
+        "commandline": "%SystemRoot%\\System32\\cmd.exe",
+      },
+    ],
+  },
+  "schemes": [
+    { "name": "Campbell", "background": "#0C0C0C" },
+  ],
+}
