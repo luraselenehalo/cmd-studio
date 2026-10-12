@@ -343,6 +343,7 @@ struct AutoRunState {
     user: Option<RegValue>,
     machine: Option<RegValue>,
     fail_writes: bool,
+    fail_reads: bool,
 }
 
 /// The `Command Processor` keys in memory. The user key exists by default.
@@ -374,18 +375,32 @@ impl FakeAutoRun {
     pub fn fail_writes(&self) {
         self.state.borrow_mut().fail_writes = true;
     }
+    /// Makes every later read fail, of both keys and of whether the user key exists, as when the
+    /// user may not read them. The values stay, and writes are not affected.
+    pub fn fail_reads(&self) {
+        self.state.borrow_mut().fail_reads = true;
+    }
     /// `(key exists, user value)`, for byte-for-byte comparisons.
     pub fn snapshot(&self) -> (bool, Option<RegValue>) {
         let s = self.state.borrow();
         (s.key, s.user.clone())
     }
+    /// What every read does first: fail while `fail_reads` is on.
+    fn read_check(&self) -> Result<(), AdapterError> {
+        if self.state.borrow().fail_reads {
+            return Err(AdapterError::new("AutoRun", "read denied (injected)"));
+        }
+        Ok(())
+    }
 }
 
 impl AutoRun for FakeAutoRun {
     fn user_key_exists(&self) -> Result<bool, AdapterError> {
+        self.read_check()?;
         Ok(self.state.borrow().key)
     }
     fn read_user(&self) -> Result<Option<RegValue>, AdapterError> {
+        self.read_check()?;
         Ok(self.state.borrow().user.clone())
     }
     fn write_user(&self, value: &RegValue) -> Result<(), AdapterError> {
@@ -413,6 +428,7 @@ impl AutoRun for FakeAutoRun {
         Ok(())
     }
     fn read_machine(&self) -> Result<Option<RegValue>, AdapterError> {
+        self.read_check()?;
         Ok(self.state.borrow().machine.clone())
     }
 }
@@ -972,6 +988,29 @@ mod tests {
         assert_eq!(a.snapshot(), (false, None));
         a.write_user(&RegValue::from_text(REG_SZ, "x")).unwrap();
         assert!(a.user_key_exists().unwrap());
+    }
+
+    #[test]
+    fn fake_autorun_can_fail_every_read() {
+        // As when the user may not read the keys: every read fails, nothing else changes.
+        let a = FakeAutoRun::new();
+        a.write_user(&RegValue::from_text(REG_SZ, "echo mine"))
+            .unwrap();
+        a.set_machine(Some(RegValue::from_text(REG_SZ, "echo all")));
+        let before = a.snapshot();
+        a.fail_reads();
+        for e in [
+            a.read_user().unwrap_err(),
+            a.read_machine().unwrap_err(),
+            a.user_key_exists().unwrap_err(),
+        ] {
+            assert!(e.message.contains("(injected)"), "{e}");
+        }
+        assert!(a.read_user().is_err(), "it keeps failing");
+        assert_eq!(a.snapshot(), before, "the values stay");
+        a.write_user(&RegValue::from_text(REG_SZ, "echo new"))
+            .unwrap();
+        assert!(a.read_user().is_err(), "a write does not clear it");
     }
 
     #[test]

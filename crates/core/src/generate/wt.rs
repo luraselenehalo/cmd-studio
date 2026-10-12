@@ -43,8 +43,7 @@ pub fn scheme(theme: &Theme) -> Value {
 }
 
 /// Keys CMD Studio sets on the cmd profile. With `Target::Wt`, cmd loads
-/// Clink through `/k`. The whole command is wrapped in one more pair of
-/// quotes because `cmd /k` strips the outermost pair.
+/// Clink through `/k` (see [`commandline`]).
 ///
 /// Both paths are trusted as given. `%` and `"` are written unescaped, and a
 /// path that is not Unicode becomes U+FFFD through `Path::display`. Callers
@@ -65,15 +64,7 @@ pub fn profile_values(
         CursorShape::Underscore => "underscore",
     };
     let [horizontal, vertical] = t.padding;
-    let commandline = match target {
-        Target::All => CMD_EXE.to_string(),
-        Target::Wt => format!(
-            r#"{} /k ""{}" inject --quiet --profile "{}"""#,
-            CMD_EXE,
-            clink_launch.display(),
-            clink_profile.display()
-        ),
-    };
+    let commandline = commandline(target, clink_launch, clink_profile);
     let mut m = Map::new();
     m.insert("colorScheme".into(), json!(SCHEME_NAME));
     m.insert(
@@ -87,6 +78,22 @@ pub fn profile_values(
     m.insert("icon".into(), json!("\u{273b}"));
     m.insert("commandline".into(), json!(commandline));
     m
+}
+
+/// The cmd profile's `commandline` for `target` (spec §5.4): plain `cmd.exe` for every cmd
+/// window (lesson 2), or cmd loading Clink through `/k` for Windows Terminal only, wrapped in
+/// one more pair of quotes because `cmd /k` strips the outermost pair. The paths are trusted
+/// as in [`profile_values`]. Doctor D7 compares the profile with it.
+pub fn commandline(target: Target, clink_launch: &Path, clink_profile: &Path) -> String {
+    match target {
+        Target::All => CMD_EXE.to_string(),
+        Target::Wt => format!(
+            r#"{} /k ""{}" inject --quiet --profile "{}"""#,
+            CMD_EXE,
+            clink_launch.display(),
+            clink_profile.display()
+        ),
+    }
 }
 
 #[cfg(test)]
