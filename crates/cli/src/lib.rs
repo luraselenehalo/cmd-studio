@@ -14,7 +14,7 @@ use cmdstudio_core::actions::{
     pending_incomplete, prepare_apply, recover_at_start, run_apply, undo, ActionError, Ctx,
     Handled, StartReport, UndoReport, UndoResult, UnreadablePoint, BUSY_TH,
 };
-use cmdstudio_core::adapters::{Host, System};
+use cmdstudio_core::adapters::{DirEntry, Host, System};
 use cmdstudio_core::cleanup::{cleanup, Report};
 use cmdstudio_core::doctor::{doctor, Status};
 use cmdstudio_core::exec::{op_label, CLEANUP_FIX_EN, CLEANUP_FIX_TH, COMMAND_PROCESSOR_KEY};
@@ -174,15 +174,6 @@ const CLEANUP_AGAIN_EN: &str = "Not everything could be done: see each FAILED st
 const CLEANUP_AGAIN_TH: &str = "ยังทำไม่ครบทุกอย่าง ดูแต่ละขั้นที่ไม่สำเร็จด้านบน บางขั้นจะเสร็จเมื่อรัน \
      `cmdstudio --cleanup` อีกครั้ง เช่น หลังปิดหน้าต่าง cmd และ Windows Terminal ทุกหน้าต่าง \
      ส่วนขั้นอื่นบอกวิธีแก้ด้วยมือไว้";
-
-/// What is in a data folder that only CMD Studio puts there.
-const DATA_FOLDER_SIGNS: [&str; 5] = [
-    "state.json",
-    "snapshots",
-    "runtime",
-    "generated",
-    "cmdstudio.lock",
-];
 
 /// What the user reads, in one language, and what this run said already: the starts of the CLI
 /// and of the core's command both report what they found, and each thing is said once.
@@ -797,13 +788,14 @@ impl<'s, 'a> Say<'s, 'a> {
         code
     }
 
-    /// `--cleanup` with `--data-dir`: deletes every entry of that folder but `themes\`, so a
-    /// folder that does not look like CMD Studio's (a mistyped path) is refused before anything
-    /// is touched. CMD Studio's is absent, empty, holds something only CMD Studio puts there, or
-    /// holds nothing but `themes\`, which is what a `--cleanup` that kept the themes leaves (so
-    /// running it again is fine). That last one is refused with `--remove-themes`: a folder that
-    /// holds only a `themes\` could be anybody's, and that form would delete it. `themes\` next
-    /// to anything else is not taken for a sign.
+    /// `--cleanup` with `--data-dir` deletes every entry of that folder but `themes\` (core
+    /// `remove_data`), so a mistyped path must never reach it. The folder is taken for CMD
+    /// Studio's only when it is absent or empty, or when every entry in it is one that CMD
+    /// Studio itself puts there, of the right kind (see [`put_there_by_cmd_studio`]). One that
+    /// holds only `themes\` is taken too, since a `--cleanup` that kept the themes leaves that,
+    /// but not with `--remove-themes`: such a folder could be anybody's, and that form would
+    /// delete it. Anything else is refused before anything is created or deleted, naming the
+    /// entries that are not CMD Studio's.
     fn check_data_dir(
         &mut self,
         sys: System<'_>,
@@ -824,26 +816,32 @@ impl<'s, 'a> Say<'s, 'a> {
                 return Err(EXIT_FAILED);
             }
         };
-        let named = |entry: &cmdstudio_core::adapters::DirEntry, wanted: &str| {
-            entry
-                .path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.eq_ignore_ascii_case(wanted))
-        };
-        let ours = entries
+        let foreign: Vec<String> = entries
             .iter()
-            .any(|entry| DATA_FOLDER_SIGNS.iter().any(|sign| named(entry, sign)));
-        if entries.is_empty() || ours {
-            return Ok(());
-        }
-        let only_themes = entries
-            .iter()
-            .all(|entry| entry.is_dir && named(entry, "themes"));
-        if only_themes && !remove_themes {
-            return Ok(());
-        }
-        if only_themes {
+            .filter(|entry| !put_there_by_cmd_studio(&ctx.paths, entry))
+            .map(|entry| {
+                let name = entry
+                    .path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                // A folder is shown with a backslash, so that its kind shows.
+                if entry.is_dir {
+                    format!("\"{name}\\\"")
+                } else {
+                    format!("\"{name}\"")
+                }
+            })
+            .collect();
+        if foreign.is_empty() {
+            let themes = ctx.paths.themes();
+            let only_themes = !entries.is_empty()
+                && entries
+                    .iter()
+                    .all(|entry| entry.is_dir && same_name(&entry.path, &themes));
+            if !(only_themes && remove_themes) {
+                return Ok(());
+            }
             self.err(self.pick(
                 format!(
                     "cmdstudio: {} holds only a themes folder and nothing else of CMD Studio's, \
@@ -862,19 +860,27 @@ impl<'s, 'a> Say<'s, 'a> {
             ));
             return Err(EXIT_INVALID);
         }
-        let signs = DATA_FOLDER_SIGNS.join(", ");
+        const SHOWN: usize = 3;
+        let named: Vec<&str> = foreign.iter().take(SHOWN).map(String::as_str).collect();
+        let more = foreign.len().saturating_sub(SHOWN);
+        let (named, data) = (named.join(", "), data.display());
+        let (more_en, more_th) = if more > 0 {
+            (format!(" and {more} more"), format!(" และอีก {more} รายการ"))
+        } else {
+            (String::new(), String::new())
+        };
         self.err(self.pick(
             format!(
-                "cmdstudio: {} does not look like CMD Studio's data folder: it holds none of \
-                 {signs}, and more than a themes folder. Nothing was deleted; check the path \
-                 after --data-dir.",
-                data.display()
+                "cmdstudio: {data} holds what CMD Studio does not put in its data folder: \
+                 {named}{more_en}. --cleanup deletes everything in that folder but themes\\, so \
+                 nothing was deleted. Move them out of the folder, or check the path after \
+                 --data-dir."
             ),
             format!(
-                "cmdstudio: {} ไม่ใช่โฟลเดอร์ข้อมูลของ CMD Studio เพราะไม่มี {signs} อยู่เลย \
-                 และมีอย่างอื่นนอกจากโฟลเดอร์ themes จึงยังไม่ได้ลบอะไร ให้ตรวจ path ที่ใส่หลัง \
-                 --data-dir",
-                data.display()
+                "cmdstudio: {data} มีสิ่งที่ CMD Studio ไม่ได้ใส่ไว้ในโฟลเดอร์ข้อมูล: \
+                 {named}{more_th} --cleanup จะลบทุกอย่างในโฟลเดอร์นั้นยกเว้น themes\\ \
+                 จึงยังไม่ได้ลบอะไร ให้ย้ายสิ่งเหล่านั้นออกจากโฟลเดอร์ หรือตรวจ path ที่ใส่หลัง \
+                 --data-dir"
             ),
         ));
         Err(EXIT_INVALID)
@@ -1108,6 +1114,67 @@ impl<'s, 'a> Say<'s, 'a> {
             EXIT_OK
         }
     }
+}
+
+/// Whether two paths end in the same name, without regard to ASCII letter case, as Windows
+/// compares names.
+fn same_name(a: &Path, b: &Path) -> bool {
+    match (
+        a.file_name().and_then(|n| n.to_str()),
+        b.file_name().and_then(|n| n.to_str()),
+    ) {
+        (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+        _ => false,
+    }
+}
+
+/// Whether an entry directly in the data folder is one CMD Studio itself puts there, of the
+/// kind it writes, as the core's `Paths` and its writers make them:
+/// - the folders `generated\`, `clink-profile\`, `runtime\`, `snapshots\` and `themes\`;
+/// - the files `state.json` and `cmdstudio.lock` (made by `Fs::try_lock`);
+/// - `state.json.damaged-<ms>`: a damaged state.json that Revert everything or `--cleanup` set
+///   aside (`cleanup::load_state`);
+/// - `.state.json.<32 hex digits>.cmdstudio-tmp`: the temp file `WinFs::write_atomic` writes
+///   beside state.json, left behind when a run is cut off in that write. state.json is the only
+///   file CMD Studio writes directly in the data folder: the generated files, Clink's profile,
+///   the runtimes and the restore points, with their own temp files, are in the folders above.
+///
+/// Names compare without regard to ASCII letter case, as Windows does.
+fn put_there_by_cmd_studio(paths: &Paths, entry: &DirEntry) -> bool {
+    let Some(name) = entry.path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let named = |ours: PathBuf| same_name(&ours, &entry.path);
+    if entry.is_dir {
+        return [
+            paths.generated(),
+            paths.clink_profile(),
+            paths.runtime_root(),
+            paths.snapshots(),
+            paths.themes(),
+        ]
+        .into_iter()
+        .any(named);
+    }
+    if [paths.state_file(), paths.lock_file()]
+        .into_iter()
+        .any(named)
+    {
+        return true;
+    }
+    let state_file = paths.state_file();
+    let Some(state) = state_file.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let (name, state) = (name.to_ascii_lowercase(), state.to_ascii_lowercase());
+    let damaged = name
+        .strip_prefix(&format!("{state}.damaged-"))
+        .is_some_and(|ms| !ms.is_empty() && ms.bytes().all(|b| b.is_ascii_digit()));
+    let temp = name
+        .strip_prefix(&format!(".{state}."))
+        .and_then(|rest| rest.strip_suffix(".cmdstudio-tmp"))
+        .is_some_and(|hex| hex.len() == 32 && hex.bytes().all(|b| b.is_ascii_hexdigit()));
+    damaged || temp
 }
 
 /// The record of a restore point set aside by hand while its journal could not be read: one
@@ -1600,7 +1667,7 @@ mod tests {
         let (code, out, err) = cli(&m, &d, &["--cleanup", "--data-dir", docs]);
         assert_eq!(code, EXIT_INVALID, "{out}{err}");
         assert!(
-            err.contains("does not look like CMD Studio's data folder"),
+            err.contains("holds what CMD Studio does not put in its data folder: \"notes.txt\"."),
             "{err}"
         );
         assert_eq!(m.fs.snapshot(), before);
@@ -1615,6 +1682,141 @@ mod tests {
         let (code, out, err) = cli(&m, &later(&d, 1), &["--cleanup", "--data-dir", other]);
         assert_eq!(code, EXIT_OK, "{out}{err}");
         assert!(m.fs.file(format!(r"{docs}\notes.txt")).is_some());
+    }
+
+    /// The data-folder refusal of `--cleanup --data-dir`, by its wording.
+    const NOT_OURS: &str = "holds what CMD Studio does not put in its data folder";
+
+    #[test]
+    fn cleanup_refuses_a_folder_that_holds_anything_cmd_studio_does_not_put_there() {
+        // A project that happens to hold a state.json, even one CMD Studio wrote: --cleanup
+        // would delete everything in it but themes\.
+        let (m, d) = machine();
+        assert_eq!(cli(&m, &d, &["apply", THEME]).0, EXIT_OK);
+        let state = m.fs.file(d.data_dir.join("state.json")).unwrap();
+        let project = r"D:\proj";
+        m.fs.put(format!(r"{project}\state.json"), &state);
+        m.fs.put(format!(r"{project}\notes.txt"), b"mine");
+        m.fs.put(format!(r"{project}\src\main.rs"), b"fn main() {}");
+        let before = m.fs.snapshot();
+        for args in [
+            vec!["--cleanup", "--data-dir", project],
+            vec!["--cleanup", "--remove-themes", "--data-dir", project],
+        ] {
+            let (code, out, err) = cli(&m, &later(&d, 1), &args);
+            assert_eq!(code, EXIT_INVALID, "{args:?}: {out}{err}");
+            assert!(
+                err.contains(&format!(
+                    "{project} {NOT_OURS}: \"notes.txt\", \"src\\\". --cleanup deletes"
+                )),
+                "{err}"
+            );
+            assert!(
+                err.contains("Move them out of the folder, or check the path after --data-dir."),
+                "{err}"
+            );
+            assert_eq!(m.fs.snapshot(), before, "{args:?}");
+        }
+        // In Thai, with the names as they were written.
+        m.fs.put(format!(r"{project}\บันทึก.txt"), b"mine");
+        let before = m.fs.snapshot();
+        let mut m = m;
+        m.host.info.ui_language = LANG_THAI;
+        let (code, _, err) = cli(&m, &later(&d, 1), &["--cleanup", "--data-dir", project]);
+        assert_eq!(code, EXIT_INVALID, "{err}");
+        assert!(
+            err.contains(
+                "มีสิ่งที่ CMD Studio ไม่ได้ใส่ไว้ในโฟลเดอร์ข้อมูล: \"notes.txt\", \"src\\\", \"บันทึก.txt\""
+            ),
+            "{err}"
+        );
+        assert!(err.contains("ให้ย้ายสิ่งเหล่านั้นออกจากโฟลเดอร์"), "{err}");
+        assert_eq!(m.fs.snapshot(), before);
+    }
+
+    #[test]
+    fn a_name_of_cmd_studios_with_the_wrong_kind_is_not_taken_for_it() {
+        let (m, d) = machine();
+        for (folder, put) in [
+            (r"C:\x\a", r"C:\x\a\state.json\inside.txt"),
+            (r"C:\x\b", r"C:\x\b\runtime"),
+        ] {
+            m.fs.put(put, b"x");
+            let before = m.fs.snapshot();
+            let (code, out, err) = cli(&m, &d, &["--cleanup", "--data-dir", folder]);
+            assert_eq!(code, EXIT_INVALID, "{folder}: {out}{err}");
+            assert!(err.contains(NOT_OURS), "{err}");
+            assert_eq!(m.fs.snapshot(), before, "{folder}");
+        }
+        // The first few are named, then how many more.
+        for n in 1..=5 {
+            m.fs.put(format!(r"C:\x\c\f{n}.txt"), b"x");
+        }
+        let (_, _, err) = cli(&m, &d, &["--cleanup", "--data-dir", r"C:\x\c"]);
+        assert!(
+            err.contains(": \"f1.txt\", \"f2.txt\", \"f3.txt\" and 2 more. --cleanup"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_folder_cmd_studio_made_is_still_taken_for_its_own() {
+        let other = r"C:\Users\tester\other";
+        // After an apply, and after its undo.
+        for undo in [false, true] {
+            let (m, d) = machine();
+            assert_eq!(
+                cli(&m, &d, &["apply", THEME, "--data-dir", other]).0,
+                EXIT_OK
+            );
+            if undo {
+                assert_eq!(
+                    cli(&m, &later(&d, 1), &["undo", "--data-dir", other]).0,
+                    EXIT_OK
+                );
+            }
+            let (code, out, err) = cli(&m, &later(&d, 2), &["--cleanup", "--data-dir", other]);
+            assert_eq!(code, EXIT_OK, "undo {undo}: {out}{err}");
+        }
+        // After a run a crash cut off: a journal it left, the temp file of a write it did not
+        // finish, and a damaged state.json a revert set aside, in any letter case.
+        let (m, d) = machine();
+        assert_eq!(
+            cli(&m, &d, &["apply", THEME, "--data-dir", other]).0,
+            EXIT_OK
+        );
+        let point = format!(r"{other}\snapshots\1791694709500-bbbbbbbb");
+        m.fs.put(
+            format!(r"{point}\manifest.json"),
+            manifest("1791694709500-bbbbbbbb"),
+        );
+        m.fs.put(
+            format!(r"{point}\journal.json"),
+            r#"{"id": "1791694709500-bbbbbbbb", "ops": [], "snapshots": [], "stage": {"state": "planned"}}"#,
+        );
+        m.fs.put(
+            format!(r"{other}\.state.json.0123456789abcdef0123456789ABCDEF.cmdstudio-tmp"),
+            b"{",
+        );
+        m.fs.put(format!(r"{other}\State.json.damaged-1791694709000"), b"{");
+        let (code, out, err) = cli(&m, &later(&d, 3), &["--cleanup", "--data-dir", other]);
+        assert!(!err.contains(NOT_OURS), "{err}");
+        assert_ne!(code, EXIT_INVALID, "{out}{err}");
+        // Names that only look like those are not.
+        for stray in [
+            r".state.json.0123.cmdstudio-tmp",
+            r".notes.txt.0123456789abcdef0123456789abcdef.cmdstudio-tmp",
+            r"state.json.damaged-",
+            r"state.json.damaged-12ab",
+        ] {
+            let (m, d) = machine();
+            let folder = r"C:\Users\tester\stray";
+            m.fs.put(format!(r"{folder}\state.json"), b"{}");
+            m.fs.put(format!(r"{folder}\{stray}"), b"x");
+            let (code, _, err) = cli(&m, &d, &["--cleanup", "--data-dir", folder]);
+            assert_eq!(code, EXIT_INVALID, "{stray}: {err}");
+            assert!(err.contains(&format!("\"{stray}\"")), "{err}");
+        }
     }
 
     #[test]
