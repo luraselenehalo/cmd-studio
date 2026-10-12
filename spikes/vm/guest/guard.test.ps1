@@ -10,7 +10,7 @@ function Expect($what, $ok) { if ($ok) { "pass: $what" } else { "FAIL: $what"; $
 $changers = [ordered]@{
   'wt-cmd-scheme.ps1' = @(); 'proto-setup.ps1' = @(); 'thai-clink-workaround.ps1' = @('-Mode', 'short')
   'font-persist.ps1' = @(); 'thai-prefs.ps1' = @(); 'run-ci-probe.ps1' = @('-Probe', 'fonts')
-  'add-thai-user.ps1' = @()
+  'add-thai-user.ps1' = @(); 'phase1b-check.ps1' = @('-Step', 'Snapshot')
 }
 
 function Run-Guest($script, [string[]] $argv, $computer, $localAppData) {

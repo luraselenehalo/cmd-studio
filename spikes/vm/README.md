@@ -79,6 +79,7 @@ The guest scripts live in `guest\`:
 - `thai-prefs.ps1`: on VM-C, reads or sets the Thai UI, regional format and home location. guestcontrol may not see the user's HKCU, so run it with `Invoke-GuestDesktop`.
 - `thai-clink-probes.ps1`: on VM-C, reruns `spikes/clink/run-probes.ps1` from inside the Thai profile.
 - `thai-clink-workaround.ps1`: on VM-C, points AutoRun at Clink through the 8.3 path (`short`) or a copy in `C:\ProgramData` (`ascii`). Clink 1.9.34 cannot inject from a Thai folder on Thai Windows; see `docs/spikes/G4-G5-G16-G17-clink.md`.
+- `phase1b-check.ps1`: Phase 1b's apply → doctor → undo check (plan Task 19). Steps `OpenWt`, `ForeignAutoRun`, `Snapshot`, `Apply`, `ShowAutoRun`, `ShowClinkPath`, `Doctor`, `HideOmp`, `RestoreOmp`, `CloseCmd`, `Undo`, `Compare`.
 
 - `add-thai-user.ps1`: adds `ผู้ทดสอบ ไทย` to a VM and switches auto-logon to it. Start it elevated through UAC on the VM's own screen. On VM-A this gives the case of a Thai user name on English Windows.
 - `guard.test.ps1`: checks on the host, without a VM, that every script that changes settings refuses to run outside a `CMDSTUDIO-*` machine. It also checks that `wt-cmd-scheme.ps1` keeps the first backup of `settings.json`.
