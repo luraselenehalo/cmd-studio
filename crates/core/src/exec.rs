@@ -152,7 +152,7 @@ fn path_text(path: &Path) -> Result<&str, Failure> {
 }
 
 /// Whether two paths name the same place: Windows ignores the letter case of a path.
-fn same_path(a: &Path, b: &Path) -> bool {
+pub(crate) fn same_path(a: &Path, b: &Path) -> bool {
     a == b
         || a.to_str()
             .zip(b.to_str())
@@ -786,7 +786,16 @@ pub fn op_label(op: &Op) -> String {
 }
 
 /// The registry key that holds AutoRun, as Registry Editor shows it.
-const COMMAND_PROCESSOR_KEY: &str = r"HKEY_CURRENT_USER\Software\Microsoft\Command Processor";
+pub const COMMAND_PROCESSOR_KEY: &str = r"HKEY_CURRENT_USER\Software\Microsoft\Command Processor";
+
+/// The hand fix when nothing better is known (a step of a journal that cannot be read), and the
+/// first half of a runtime folder's: close what may hold CMD Studio's files, then let
+/// `--cleanup` take out what CMD Studio changed. In English and in Thai (spec §5.9).
+pub const CLEANUP_FIX_EN: &str = "Close every cmd window and Windows Terminal, then run \
+                                  `cmdstudio --cleanup`, which takes out what CMD Studio changed.";
+/// [`CLEANUP_FIX_EN`] in Thai.
+pub const CLEANUP_FIX_TH: &str = "ปิดหน้าต่าง cmd และ Windows Terminal ทุกหน้าต่าง \
+                                  แล้วรันคำสั่ง `cmdstudio --cleanup` ซึ่งจะเอาสิ่งที่ CMD Studio เปลี่ยนออก";
 
 /// How a person puts an op's target back by hand, in English and in Thai (spec §5.9: every
 /// problem the user sees has both).
@@ -803,19 +812,15 @@ pub fn fix_by_hand(op: &Op, prior: &Option<Vec<u8>>, payload: &Path) -> FixByHan
     // Only for a runtime folder: `--cleanup` deletes the data folder and the private ProgramData
     // folder from paths it works out itself, so it holds after a rollback put state.json back.
     // AutoRun and the font need state.json's baseline, so their texts say what to edit instead.
-    let cleanup_en = "run `cmdstudio --cleanup`, which takes out what CMD Studio changed";
-    let cleanup_th = "รันคำสั่ง `cmdstudio --cleanup` ซึ่งจะเอาสิ่งที่ CMD Studio เปลี่ยนออก";
     let (payload, key) = (payload.display(), COMMAND_PROCESSOR_KEY);
     let (en, th) = match op {
         Op::InstallRuntime { dir, .. } => (
             format!(
-                "Close every cmd window and Windows Terminal, then {cleanup_en}. If {} is still \
-                 there afterwards, delete it.",
+                "{CLEANUP_FIX_EN} If {} is still there afterwards, delete it.",
                 dir.display()
             ),
             format!(
-                "ปิดหน้าต่าง cmd และ Windows Terminal ทุกหน้าต่าง แล้ว{cleanup_th} \
-                 ถ้ายังมี {} อยู่ ให้ลบโฟลเดอร์นั้นทิ้ง",
+                "{CLEANUP_FIX_TH} ถ้ายังมี {} อยู่ ให้ลบโฟลเดอร์นั้นทิ้ง",
                 dir.display()
             ),
         ),
@@ -1477,6 +1482,33 @@ mod tests {
                 && en.contains("CaskaydiaCove NF (TrueType)"),
             "{en}"
         );
+    }
+
+    #[test]
+    fn the_runtime_fix_starts_with_the_shared_cleanup_advice() {
+        // The advice is defined once (CLEANUP_FIX_EN/_TH) and reused by actions; the texts are
+        // pinned here byte for byte, as they read before it was shared.
+        let fix = fix_by_hand(
+            &Op::InstallRuntime {
+                component: Component::Omp,
+                dir: PathBuf::from(r"C:\d\runtime\omp-31.5.0"),
+            },
+            &None,
+            Path::new(r"C:\d\snapshots\0000000000001-a\payload\0.bin"),
+        );
+        assert_eq!(
+            fix.en,
+            "Close every cmd window and Windows Terminal, then run `cmdstudio --cleanup`, which \
+             takes out what CMD Studio changed. If C:\\d\\runtime\\omp-31.5.0 is still there \
+             afterwards, delete it."
+        );
+        assert_eq!(
+            fix.th,
+            "ปิดหน้าต่าง cmd และ Windows Terminal ทุกหน้าต่าง แล้วรันคำสั่ง `cmdstudio --cleanup` \
+             ซึ่งจะเอาสิ่งที่ CMD Studio เปลี่ยนออก ถ้ายังมี C:\\d\\runtime\\omp-31.5.0 อยู่ \
+             ให้ลบโฟลเดอร์นั้นทิ้ง"
+        );
+        assert!(fix.en.starts_with(CLEANUP_FIX_EN) && fix.th.starts_with(CLEANUP_FIX_TH));
     }
 
     #[test]

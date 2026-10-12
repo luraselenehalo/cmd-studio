@@ -45,8 +45,8 @@ pub fn omp_config_error(stdout: &str) -> Option<&'static str> {
         .find(|marker| stdout.contains(marker))
 }
 
-/// Where cmd's AutoRun value lives, for a message.
-const AUTORUN_KEY: &str = r"HKEY_CURRENT_USER\Software\Microsoft\Command Processor";
+/// Where cmd's AutoRun value lives, for a message (defined once, in `exec`).
+const AUTORUN_KEY: &str = crate::exec::COMMAND_PROCESSOR_KEY;
 
 fn fail(code: &'static str, message: impl std::fmt::Display) -> Failure {
     Failure {
