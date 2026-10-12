@@ -26,7 +26,7 @@ Options for every command:
 
 Exit codes:
   0  done
-  1  failed and rolled back, or refused with nothing changed
+  1  failed and rolled back, or refused before your settings were changed
   2  invalid input
   3  rollback incomplete: fix by hand what it lists
 ";
@@ -53,7 +53,7 @@ set-aside: ใช้เฉพาะเมื่อ doctor บอกให้ใ�
 
 exit code:
   0  สำเร็จ
-  1  ล้มเหลวและย้อนกลับแล้ว หรือถูกปฏิเสธโดยยังไม่ได้เปลี่ยนอะไร
+  1  ล้มเหลวและย้อนกลับแล้ว หรือถูกปฏิเสธก่อนเปลี่ยนการตั้งค่าของคุณ
   2  input ไม่ถูกต้อง
   3  ย้อนกลับไม่ครบ ต้องแก้ด้วยมือตามรายการที่แจ้ง
 ";
@@ -466,6 +466,12 @@ mod tests {
             "{}",
             lang(USAGE_TH)
         );
+        // A refusal may come after a leftover font file of CMD Studio's was deleted, so exit
+        // code 1 promises only that the user's settings were not changed.
+        assert!(USAGE.contains(
+            "\n  1  failed and rolled back, or refused before your settings were changed\n"
+        ));
+        assert!(USAGE_TH.contains("\n  1  ล้มเหลวและย้อนกลับแล้ว หรือถูกปฏิเสธก่อนเปลี่ยนการตั้งค่าของคุณ\n"));
     }
 
     #[test]

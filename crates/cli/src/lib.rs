@@ -30,8 +30,10 @@ use std::path::{Path, PathBuf};
 
 /// Done.
 pub const EXIT_OK: i32 = 0;
-/// Failed, and everything was rolled back, or nothing was changed: a refusal (another run holds
-/// the lock, a restore point that must be read first, an AutoRun that needs a hand edit).
+/// Failed, and everything was rolled back, or refused before the user's settings were changed
+/// (another run holds the lock, a restore point that must be read first, an AutoRun that needs a
+/// hand edit). Before it plans, a command may already have deleted font files CMD Studio left to
+/// delete, so the CLI never says that nothing at all was changed.
 pub const EXIT_FAILED: i32 = 1;
 /// The command line or the theme file is not valid, or another Clink is in AutoRun and
 /// `--replace-other-clink` was not given.
@@ -412,7 +414,8 @@ impl<'s, 'a> Say<'s, 'a> {
 
     /// Says why the core refused or stopped a command, and returns the exit code: 2 for another
     /// Clink without `--replace-other-clink`, which the user must agree to first; else 1, since
-    /// nothing was changed.
+    /// the user's settings were not changed. (A font file CMD Studio left to delete may already
+    /// be gone: apply and undo try those first, so "nothing was changed" is never said.)
     fn refused(&mut self, sys: System<'_>, ctx: &Ctx, e: &ActionError) -> i32 {
         let code = e.code();
         match e {
@@ -427,9 +430,10 @@ impl<'s, 'a> Say<'s, 'a> {
                     self.err(format!("  {command}"));
                 }
                 self.err(self.pick(
-                    "Nothing was changed. To turn it off and use CMD Studio's Clink instead, run \
-                     the same command again with --replace-other-clink (undo turns it back on).",
-                    "ยังไม่ได้เปลี่ยนอะไร ถ้าจะปิด Clink ตัวนั้นแล้วใช้ของ CMD Studio แทน \
+                    "Your settings were not changed. To turn it off and use CMD Studio's Clink \
+                     instead, run the same command again with --replace-other-clink (undo turns \
+                     it back on).",
+                    "ยังไม่ได้เปลี่ยนการตั้งค่าของคุณ ถ้าจะปิด Clink ตัวนั้นแล้วใช้ของ CMD Studio แทน \
                      ให้รันคำสั่งเดิมอีกครั้งโดยเพิ่ม --replace-other-clink (undo จะเปิดกลับให้)",
                 ));
                 EXIT_INVALID
@@ -444,12 +448,12 @@ impl<'s, 'a> Say<'s, 'a> {
                 let key = COMMAND_PROCESSOR_KEY;
                 self.err(self.pick(
                     format!(
-                        "Nothing was changed. Fix it by hand: in Registry Editor, open {key} and \
-                         correct or take out that command in the AutoRun value. Then run this \
-                         again."
+                        "Your settings were not changed. Fix it by hand: in Registry Editor, \
+                         open {key} and correct or take out that command in the AutoRun value. \
+                         Then run this again."
                     ),
                     format!(
-                        "ยังไม่ได้เปลี่ยนอะไร ให้แก้ด้วยมือ: เปิด Registry Editor (regedit) ไปที่ {key} \
+                        "ยังไม่ได้เปลี่ยนการตั้งค่าของคุณ ให้แก้ด้วยมือ: เปิด Registry Editor (regedit) ไปที่ {key} \
                          แล้วแก้หรือเอาคำสั่งนั้นออกจากค่า AutoRun จากนั้นรันคำสั่งนี้อีกครั้ง"
                     ),
                 ));
@@ -495,7 +499,18 @@ impl<'s, 'a> Say<'s, 'a> {
                          หรือมีตัวอักษรที่ไม่ใช่ Unicode: \"{shown}\""
                     ),
                 ));
-                self.next_step(code);
+                // Every path the planner checks is in the data folder, which by default is
+                // under the Windows user folder: the user name is what holds the character.
+                self.err(self.pick(
+                    "Your settings were not changed. This path is in CMD Studio's data folder, \
+                     which is under your Windows user folder unless --data-dir names another. \
+                     Use a Windows account whose user folder has none of them, or give \
+                     --data-dir a folder whose full path has none.",
+                    "ยังไม่ได้เปลี่ยนการตั้งค่าของคุณ path นี้อยู่ในโฟลเดอร์ข้อมูลของ CMD Studio \
+                     ซึ่งอยู่ในโฟลเดอร์ผู้ใช้ของ Windows ถ้าไม่ได้ใส่ --data-dir \
+                     ให้ใช้บัญชี Windows ที่โฟลเดอร์ผู้ใช้ไม่มีตัวอักษรเหล่านี้ \
+                     หรือใส่ --data-dir เป็นโฟลเดอร์ที่ path เต็มไม่มีตัวอักษรเหล่านี้",
+                ));
                 EXIT_FAILED
             }
             ActionError::Plan(PlanError::NoClinkPath(path)) => {
@@ -527,43 +542,44 @@ impl<'s, 'a> Say<'s, 'a> {
     }
 
     /// What to do after a refusal whose text the core words: what the code means is in that
-    /// text (or, in Thai, its meaning from spec §5.9); this says that nothing was changed, and
-    /// what to do next.
+    /// text (or, in Thai, its meaning from spec §5.9); this says that the user's settings were
+    /// not changed, and what to do next.
     fn next_step(&mut self, code: &str) {
         let (en, th) = match code {
             "E_WT_PARSE" => (
-                "Nothing was changed. Fix that settings.json by hand (Windows Terminal says where \
-                 it is wrong when it starts), then try again.",
-                "ยังไม่ได้เปลี่ยนอะไร ให้แก้ settings.json นั้นด้วยมือ (Windows Terminal \
+                "Your settings were not changed. Fix that settings.json by hand (Windows \
+                 Terminal says where it is wrong when it starts), then try again.",
+                "ยังไม่ได้เปลี่ยนการตั้งค่าของคุณ ให้แก้ settings.json นั้นด้วยมือ (Windows Terminal \
                  จะบอกจุดที่ผิดตอนเปิด) แล้วลองใหม่",
             ),
             "E_MACHINE_READ" | "E_SNAPSHOT_READ" => (
-                "Nothing was changed. Try again in a moment; `cmdstudio doctor` shows what can't \
-                 be read.",
-                "ยังไม่ได้เปลี่ยนอะไร ลองใหม่อีกครั้งในอีกสักครู่ `cmdstudio doctor` \
+                "Your settings were not changed. Try again in a moment; `cmdstudio doctor` shows \
+                 what can't be read.",
+                "ยังไม่ได้เปลี่ยนการตั้งค่าของคุณ ลองใหม่อีกครั้งในอีกสักครู่ `cmdstudio doctor` \
                  จะบอกว่าอ่านอะไรไม่ได้",
             ),
             "E_STATE_INVALID" => (
-                "Nothing was changed. Run `cmdstudio doctor`: its D9 says what to do.",
-                "ยังไม่ได้เปลี่ยนอะไร ให้รัน `cmdstudio doctor` แล้วทำตามข้อ D9",
+                "Your settings were not changed. Run `cmdstudio doctor`: its D9 says what to do.",
+                "ยังไม่ได้เปลี่ยนการตั้งค่าของคุณ ให้รัน `cmdstudio doctor` แล้วทำตามข้อ D9",
             ),
             "E_DATA_WRITE" | "E_SNAPSHOT_WRITE" => (
-                "Nothing was changed. Check that CMD Studio's data folder can be written (free \
-                 disk space, permissions), then try again.",
-                "ยังไม่ได้เปลี่ยนอะไร ให้ตรวจว่าเขียนลงโฟลเดอร์ข้อมูลของ CMD Studio ได้ \
+                "Your settings were not changed. Check that CMD Studio's data folder can be \
+                 written (free disk space, permissions), then try again.",
+                "ยังไม่ได้เปลี่ยนการตั้งค่าของคุณ ให้ตรวจว่าเขียนลงโฟลเดอร์ข้อมูลของ CMD Studio ได้ \
                  (พื้นที่ดิสก์ สิทธิ์) แล้วลองใหม่",
             ),
+            // `NoClinkPath`; `UnsupportedPath` has its own (`refused`).
             "E_CLINK_PATH" => (
-                "Nothing was changed. CMD Studio found no path on this computer that cmd can \
-                 start Clink from safely, so it can't set up the prompt here.",
-                "ยังไม่ได้เปลี่ยนอะไร เครื่องนี้ไม่มี path ที่ cmd ใช้เรียก Clink ได้อย่างปลอดภัย \
-                 CMD Studio จึงตั้ง prompt ที่นี่ไม่ได้",
+                "Your settings were not changed. CMD Studio found no path on this computer that \
+                 cmd can start Clink from safely, so it can't set up the prompt here.",
+                "ยังไม่ได้เปลี่ยนการตั้งค่าของคุณ เครื่องนี้ไม่มี path ที่ cmd \
+                 ใช้เรียก Clink ได้อย่างปลอดภัย CMD Studio จึงตั้ง prompt ที่นี่ไม่ได้",
             ),
             "E_THEME_INVALID" => (
-                "Nothing was changed. Fix the theme file, then try again.",
-                "ยังไม่ได้เปลี่ยนอะไร ให้แก้ไฟล์ธีมแล้วลองใหม่",
+                "Your settings were not changed. Fix the theme file, then try again.",
+                "ยังไม่ได้เปลี่ยนการตั้งค่าของคุณ ให้แก้ไฟล์ธีมแล้วลองใหม่",
             ),
-            _ => ("Nothing was changed.", "ยังไม่ได้เปลี่ยนอะไร"),
+            _ => ("Your settings were not changed.", "ยังไม่ได้เปลี่ยนการตั้งค่าของคุณ"),
         };
         self.err(self.pick(en, th));
     }
@@ -616,8 +632,8 @@ impl<'s, 'a> Say<'s, 'a> {
             Outcome::RolledBack { code, reason } => {
                 self.err(self.coded(code, reason));
                 self.err(self.pick(
-                    "Everything was rolled back; nothing changed.",
-                    "ย้อนกลับทุกอย่างแล้ว ไม่มีอะไรเปลี่ยน",
+                    "Everything was rolled back; your settings are as they were.",
+                    "ย้อนกลับทุกอย่างแล้ว การตั้งค่าของคุณกลับเป็นเหมือนเดิม",
                 ));
                 EXIT_FAILED
             }
@@ -785,8 +801,15 @@ impl<'s, 'a> Say<'s, 'a> {
     /// folder that does not look like CMD Studio's (a mistyped path) is refused before anything
     /// is touched. CMD Studio's is absent, empty, holds something only CMD Studio puts there, or
     /// holds nothing but `themes\`, which is what a `--cleanup` that kept the themes leaves (so
-    /// running it again is fine). `themes\` next to anything else is not taken for a sign.
-    fn check_data_dir(&mut self, sys: System<'_>, ctx: &Ctx) -> Result<(), i32> {
+    /// running it again is fine). That last one is refused with `--remove-themes`: a folder that
+    /// holds only a `themes\` could be anybody's, and that form would delete it. `themes\` next
+    /// to anything else is not taken for a sign.
+    fn check_data_dir(
+        &mut self,
+        sys: System<'_>,
+        ctx: &Ctx,
+        remove_themes: bool,
+    ) -> Result<(), i32> {
         let data = &ctx.paths.data;
         let entries = match sys.fs.list_dir(data) {
             Ok(entries) => entries,
@@ -811,11 +834,33 @@ impl<'s, 'a> Say<'s, 'a> {
         let ours = entries
             .iter()
             .any(|entry| DATA_FOLDER_SIGNS.iter().any(|sign| named(entry, sign)));
+        if entries.is_empty() || ours {
+            return Ok(());
+        }
         let only_themes = entries
             .iter()
             .all(|entry| entry.is_dir && named(entry, "themes"));
-        if entries.is_empty() || ours || only_themes {
+        if only_themes && !remove_themes {
             return Ok(());
+        }
+        if only_themes {
+            self.err(self.pick(
+                format!(
+                    "cmdstudio: {} holds only a themes folder and nothing else of CMD Studio's, \
+                     so it may not be CMD Studio's data folder, and --remove-themes would delete \
+                     that folder. Nothing was deleted. Check the path after --data-dir; without \
+                     --remove-themes, --cleanup keeps the themes folder.",
+                    data.display()
+                ),
+                format!(
+                    "cmdstudio: {} มีแต่โฟลเดอร์ themes และไม่มีอย่างอื่นของ CMD Studio \
+                     จึงอาจไม่ใช่โฟลเดอร์ข้อมูลของ CMD Studio และ --remove-themes จะลบโฟลเดอร์นั้น \
+                     จึงยังไม่ได้ลบอะไร ให้ตรวจ path ที่ใส่หลัง --data-dir ถ้าไม่ใส่ --remove-themes \
+                     --cleanup จะเก็บโฟลเดอร์ themes ไว้",
+                    data.display()
+                ),
+            ));
+            return Err(EXIT_INVALID);
         }
         let signs = DATA_FOLDER_SIGNS.join(", ");
         self.err(self.pick(
@@ -843,7 +888,7 @@ impl<'s, 'a> Say<'s, 'a> {
         data_dir_given: bool,
     ) -> i32 {
         if data_dir_given {
-            if let Err(code) = self.check_data_dir(sys, ctx) {
+            if let Err(code) = self.check_data_dir(sys, ctx, remove_themes) {
                 return code;
             }
         }
@@ -981,8 +1026,8 @@ impl<'s, 'a> Say<'s, 'a> {
         }
         if store.is_set_aside(id) {
             self.out(self.pick(
-                format!("Restore point {id} is already set aside; nothing was changed."),
-                format!("จุดย้อนกลับ {id} ถูกกันไว้ต่างหากอยู่แล้ว จึงไม่ได้เปลี่ยนอะไร"),
+                format!("Restore point {id} is already set aside."),
+                format!("จุดย้อนกลับ {id} ถูกกันไว้ต่างหากอยู่แล้ว"),
             ));
             return EXIT_OK;
         }
@@ -991,11 +1036,11 @@ impl<'s, 'a> Say<'s, 'a> {
                 self.err(self.pick(
                     format!(
                         "Restore point {id} can be read, so it is not set aside: CMD Studio can \
-                         still roll back or undo what it changed. Nothing was changed."
+                         still roll back or undo what it changed. It was left as it is."
                     ),
                     format!(
                         "จุดย้อนกลับ {id} ยังอ่านได้ จึงไม่กันไว้ต่างหาก เพราะ CMD Studio \
-                         ยังย้อนสิ่งที่มันเปลี่ยนได้ ยังไม่ได้เปลี่ยนอะไร"
+                         ยังย้อนสิ่งที่มันเปลี่ยนได้ จุดนี้จึงยังอยู่ตามเดิม"
                     ),
                 ));
                 return EXIT_FAILED;
@@ -1263,6 +1308,10 @@ mod tests {
         assert!(err.starts_with("E_AUTORUN_FOREIGN_CLINK: "), "{err}");
         assert!(err.contains(&format!("\n  {other}\n")), "{err}");
         assert!(err.contains("--replace-other-clink"), "{err}");
+        assert!(
+            err.contains("\nYour settings were not changed. To turn it off"),
+            "{err}"
+        );
         assert_eq!(m.autorun.snapshot(), before);
         assert_eq!(
             cli(&m, &d, &["apply", THEME, "--replace-other-clink"]).0,
@@ -1749,7 +1798,51 @@ mod tests {
         assert!(err.starts_with("E_CLINK_PATH: "), "{err}");
         assert!(err.contains(data), "{err}");
         assert!(!err.contains("\\u{") && !err.contains(r"\\"), "{err}");
-        assert!(err.contains("\nNothing was changed."), "{err}");
+        // A leftover font file of CMD Studio's may be gone already, so it is the user's
+        // settings that were not changed; and this path error says what the user can do.
+        assert!(
+            err.contains(
+                "\nYour settings were not changed. This path is in CMD Studio's data folder"
+            ),
+            "{err}"
+        );
+        assert!(
+            err.contains("Use a Windows account whose user folder has none of them"),
+            "{err}"
+        );
+        let (code, _, err) = cli(
+            &m,
+            &d,
+            &["apply", THEME, "--data-dir", data, "--lang", "th"],
+        );
+        assert_eq!(code, EXIT_FAILED, "{err}");
+        assert!(
+            err.contains("\nยังไม่ได้เปลี่ยนการตั้งค่าของคุณ path นี้อยู่ในโฟลเดอร์ข้อมูลของ CMD Studio"),
+            "{err}"
+        );
+        assert!(!err.contains("Nothing was changed"), "{err}");
+    }
+
+    #[test]
+    fn a_color_written_in_thai_is_shown_as_it_was_written() {
+        let (m, d) = machine();
+        let theme = String::from_utf8(m.fs.file(THEME).unwrap()).unwrap();
+        let first = theme
+            .split("\"#")
+            .nth(1)
+            .unwrap()
+            .get(..6)
+            .unwrap()
+            .to_string();
+        m.fs.put(
+            THEME,
+            theme.replacen(&format!("\"#{first}\""), "\"#สีส้ม\"", 1),
+        );
+        let (code, _, err) = cli(&m, &d, &["apply", THEME]);
+        assert_eq!(code, EXIT_INVALID, "{err}");
+        assert!(err.starts_with("E_THEME_INVALID: "), "{err}");
+        assert!(err.contains("not a #rrggbb color: \"#สีส้ม\""), "{err}");
+        assert!(!err.contains("\\u{"), "{err}");
     }
 
     #[test]
@@ -1758,12 +1851,12 @@ mod tests {
             (
                 "en",
                 "E_WT_PARSE: ",
-                "\nNothing was changed. Fix that settings.json by hand",
+                "\nYour settings were not changed. Fix that settings.json by hand",
             ),
             (
                 "th",
                 "E_WT_PARSE: อ่าน settings.json ของ Windows Terminal ไม่ได้",
-                "\nยังไม่ได้เปลี่ยนอะไร ให้แก้ settings.json นั้นด้วยมือ",
+                "\nยังไม่ได้เปลี่ยนการตั้งค่าของคุณ ให้แก้ settings.json นั้นด้วยมือ",
             ),
         ] {
             let (m, d) = machine();
@@ -1837,11 +1930,20 @@ mod tests {
             assert!(m.fs.file(&mine).is_some(), "{n}");
             assert_eq!(m.fs.list_dir(Path::new(other)).unwrap().len(), 1, "{n}");
         }
-        let (code, out, err) = cli(
-            &m,
-            &later(&d, 3),
-            &["--cleanup", "--remove-themes", "--data-dir", other],
+        // With --remove-themes, though, a folder that holds only themes\ could be anybody's
+        // (a mistyped --data-dir): it is refused and nothing is deleted.
+        let remove = ["--cleanup", "--remove-themes", "--data-dir", other];
+        let before = m.fs.snapshot();
+        let (code, out, err) = cli(&m, &later(&d, 3), &remove);
+        assert_eq!(code, EXIT_INVALID, "{out}{err}");
+        assert!(err.contains("holds only a themes folder"), "{err}");
+        assert_eq!(m.fs.snapshot(), before);
+        // A folder with CMD Studio's files goes, themes and all.
+        assert_eq!(
+            cli(&m, &later(&d, 4), &["apply", THEME, "--data-dir", other]).0,
+            EXIT_OK
         );
+        let (code, out, err) = cli(&m, &later(&d, 5), &remove);
         assert_eq!(code, EXIT_OK, "{out}{err}");
         assert!(out.ends_with(", and its data is deleted.\n"), "{out}");
         assert!(!m.fs.exists(Path::new(other)));
