@@ -148,11 +148,7 @@ pub fn apply_edit(text: &str, edit: &WtEdit<'_>) -> Result<WtEdited, WtError> {
     let schemes = obj
         .array_value_or_create("schemes")
         .ok_or_else(|| WtError::Shape("\"schemes\" is not a list".into()))?;
-    let ours: Vec<CstObject> = schemes
-        .elements()
-        .into_iter()
-        .filter_map(|e| our_scheme(&e))
-        .collect();
+    let ours = our_schemes(&schemes)?;
     let original = ours.first().and_then(CstObject::to_serde_value);
     if ours.is_empty() {
         schemes.append(to_cst(edit.scheme));
@@ -168,7 +164,7 @@ pub fn apply_edit(text: &str, edit: &WtEdit<'_>) -> Result<WtEdited, WtError> {
 
     // 2. The cmd profile: create it, or set each key on the existing one.
     let list = profiles_list(&obj, &mut created)?;
-    match find_cmd_profile(&list) {
+    match find_cmd_profile(&list)? {
         Some(profile) => set_profile_keys(&profile, edit.profile, &mut changes)?,
         None => {
             let mut map = Map::new();
@@ -226,10 +222,12 @@ pub fn read_value(text: &str, key: &WtKey) -> Result<Option<Value>, WtError> {
     let obj = root_object(&root)?;
     check_top_level(&obj)?;
     Ok(match key {
-        WtKey::Scheme => obj
-            .array_value("schemes")
-            .and_then(|s| s.elements().into_iter().find_map(|e| our_scheme(&e)))
-            .and_then(|o| o.to_serde_value()),
+        WtKey::Scheme => match obj.array_value("schemes") {
+            Some(schemes) => our_schemes(&schemes)?
+                .first()
+                .and_then(CstObject::to_serde_value),
+            None => None,
+        },
         _ => holder(&obj, key)?.and_then(|(owner, name)| current(&owner, name)),
     })
 }
@@ -253,11 +251,7 @@ pub fn revert(
     check_top_level(&obj)?;
 
     if let Some(schemes) = obj.array_value("schemes") {
-        for scheme in schemes
-            .elements()
-            .into_iter()
-            .filter_map(|e| our_scheme(&e))
-        {
+        for scheme in our_schemes(&schemes)? {
             scheme.remove();
         }
     }
@@ -376,15 +370,26 @@ fn root_object(root: &CstRootNode) -> Result<CstObject, WtError> {
         .ok_or_else(|| WtError::Shape("the top level is not an object".into()))
 }
 
-fn our_scheme(node: &CstNode) -> Option<CstObject> {
-    let obj = node.as_object()?;
-    let name = obj
-        .get("name")?
+/// The string a key of `obj` holds; `None` when it is absent or not a string.
+fn string_of(obj: &CstObject, name: &str) -> Option<String> {
+    obj.get(name)?
         .value()?
         .as_string_lit()?
         .decoded_value()
-        .ok()?;
-    (name == SCHEME_NAME).then_some(obj)
+        .ok()
+}
+
+/// Every scheme named "CMD Studio". Refuses a list in which any scheme writes
+/// "name" twice: Windows Terminal may know that scheme by the other name.
+fn our_schemes(schemes: &CstArray) -> Result<Vec<CstObject>, WtError> {
+    let mut ours = Vec::new();
+    for scheme in schemes.elements().iter().filter_map(CstNode::as_object) {
+        once(&scheme, "name", A_SCHEME)?;
+        if string_of(&scheme, "name").as_deref() == Some(SCHEME_NAME) {
+            ours.push(scheme);
+        }
+    }
+    Ok(ours)
 }
 
 /// `profiles.list`, or the legacy form where `profiles` is the list itself.
@@ -428,17 +433,20 @@ fn remove_if_empty(obj: &CstObject, name: &str) {
     }
 }
 
-fn find_cmd_profile(list: &CstArray) -> Option<CstObject> {
-    list.elements()
-        .into_iter()
-        .filter_map(|e| e.as_object())
-        .find(|o| {
-            o.get("guid")
-                .and_then(|p| p.value())
-                .and_then(|v| v.as_string_lit())
-                .and_then(|s| s.decoded_value().ok())
-                .is_some_and(|g| g.eq_ignore_ascii_case(CMD_PROFILE_GUID))
-        })
+/// The first profile whose guid is the cmd profile's, in any letter case.
+/// Refuses a list in which any profile writes "guid" twice: Windows Terminal
+/// may know that profile by the other guid.
+fn find_cmd_profile(list: &CstArray) -> Result<Option<CstObject>, WtError> {
+    let mut found = None;
+    for profile in list.elements().iter().filter_map(CstNode::as_object) {
+        once(&profile, "guid", A_PROFILE)?;
+        let is_cmd = string_of(&profile, "guid")
+            .is_some_and(|guid| guid.eq_ignore_ascii_case(CMD_PROFILE_GUID));
+        if is_cmd && found.is_none() {
+            found = Some(profile);
+        }
+    }
+    Ok(found)
 }
 
 /// The cmd profile, when the file has one. Call `check_top_level` first.
@@ -454,13 +462,18 @@ fn existing_profile(obj: &CstObject) -> Result<Option<CstObject>, WtError> {
         }
         (None, None) => None,
     };
-    Ok(list.and_then(|list| find_cmd_profile(&list)))
+    match list {
+        Some(list) => find_cmd_profile(&list),
+        None => Ok(None),
+    }
 }
 
 /// Where messages say a repeated key is.
 const TOP_LEVEL: &str = "the top level";
 const PROFILES: &str = "\"profiles\"";
 const CMD_PROFILE: &str = "the cmd profile";
+const A_SCHEME: &str = "a scheme";
+const A_PROFILE: &str = "a profile";
 
 /// Refuses a key CMD Studio owns that `obj` writes more than once: Windows
 /// Terminal would read one copy while CMD Studio read or changed another.
@@ -1350,6 +1363,99 @@ mod tests {
             Some(json!("Cascadia Mono"))
         );
         assert_eq!(e.text.matches("\"hidden\"").count(), 2);
+        let back = revert(&e.text, &originals(&e), &written(&e), &e.created).unwrap();
+        assert_eq!(back, text);
+    }
+
+    #[test]
+    fn a_scheme_or_profile_that_names_itself_twice_is_refused() {
+        // Windows Terminal may know `{ "name": "CMD Studio", "name": "Mine" }` as the
+        // user's scheme "Mine"; taking it over (and deleting it on revert) would lose
+        // it. Every scheme and every profile is checked, not only the one that matches.
+        let opacity = WtKey::Profile {
+            key: "opacity".into(),
+        };
+        let cases = [
+            (
+                r##"{ "schemes": [ { "name": "CMD Studio", "background": "#000000", "name": "Mine" } ] }"##,
+                "a scheme has \"name\" twice",
+                WtKey::Scheme,
+            ),
+            (
+                r#"{ "schemes": [ { "name": "Mine", "name": "Mine" }, { "name": "CMD Studio" } ] }"#,
+                "a scheme has \"name\" twice",
+                WtKey::Scheme,
+            ),
+            (
+                r#"{ "schemes": [ { "name": "CMD Studio" }, { "name": "Mine", "name": "Mine" } ] }"#,
+                "a scheme has \"name\" twice",
+                WtKey::Scheme,
+            ),
+            (
+                r#"{ "profiles": [ { "guid": "{0caa0dad-35be-5f56-a8ff-afceeeaa6101}" }, { "guid": "{61c54bbd-c2c6-5271-96e7-009a87ff44bf}", "guid": "{61c54bbd-c2c6-5271-96e7-009a87ff44bf}" } ] }"#,
+                "a profile has \"guid\" twice",
+                opacity.clone(),
+            ),
+            (
+                r#"{ "profiles": { "list": [ { "guid": "{0caa0dad-35be-5f56-a8ff-afceeeaa6101}", "guid": "{61c54bbd-c2c6-5271-96e7-009a87ff44bf}" } ] } }"#,
+                "a profile has \"guid\" twice",
+                opacity.clone(),
+            ),
+            (
+                r#"{ "profiles": [ { "guid": "{61c54bbd-c2c6-5271-96e7-009a87ff44bf}", "guid": "{61c54bbd-c2c6-5271-96e7-009a87ff44bf}" }, { "guid": "{0caa0dad-35be-5f56-a8ff-afceeeaa6101}" } ] }"#,
+                "a profile has \"guid\" twice",
+                opacity,
+            ),
+        ];
+        let (s, p) = (scheme(), profile());
+        for (text, want, key) in cases {
+            let refused = |r: Result<(), WtError>| match r {
+                Err(WtError::Shape(m)) => {
+                    assert!(m.contains(want), "{m}");
+                    assert!(m.ends_with("fix settings.json by hand"), "{m}");
+                }
+                other => panic!("{text}: {other:?}"),
+            };
+            refused(apply_edit(text, &edit(&s, &p, false)).map(|_| ()));
+            refused(read_value(text, &key).map(|_| ()));
+            let originals = BTreeMap::from([(key.clone(), Some(json!(1)))]);
+            let written = BTreeMap::from([(key.clone(), json!(2))]);
+            refused(revert(text, &originals, &written, &[]).map(|_| ()));
+        }
+    }
+
+    #[test]
+    fn other_schemes_and_profiles_are_left_as_they_are() {
+        let text = r##"{
+    "profiles": {
+        "list": [
+            {
+                "guid": "{61c54bbd-c2c6-5271-96e7-009a87ff44bf}",
+                "name": "Windows PowerShell",
+                "hidden": false,
+                "hidden": true
+            },
+            {
+                "guid": "{0caa0dad-35be-5f56-a8ff-afceeeaa6101}",
+                "name": "Command Prompt"
+            }
+        ]
+    },
+    "schemes": [
+        { "name": "Campbell", "background": "#0C0C0C" },
+        { "name": "Mine", "background": "#000000", "background": "#111111" }
+    ]
+}
+"##;
+        let (s, p) = (scheme(), profile());
+        let e = apply_edit(text, &edit(&s, &p, true)).unwrap();
+        for kept in [
+            "        { \"name\": \"Campbell\", \"background\": \"#0C0C0C\" },\n",
+            "        { \"name\": \"Mine\", \"background\": \"#000000\", \"background\": \"#111111\" },\n",
+            "                \"name\": \"Windows PowerShell\",\n                \"hidden\": false,\n                \"hidden\": true\n",
+        ] {
+            assert!(e.text.contains(kept), "{kept}");
+        }
         let back = revert(&e.text, &originals(&e), &written(&e), &e.created).unwrap();
         assert_eq!(back, text);
     }
