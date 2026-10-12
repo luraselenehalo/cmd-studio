@@ -7,7 +7,8 @@
 //! `E_SNAPSHOT_WRITE`. A restore point that cannot be read must never stop a later command,
 //! `--cleanup` or doctor: [`SnapshotStore::unreadable`] lists the ones that cannot, so that a
 //! person is told once, and [`SnapshotStore::set_aside`] renames the journal of each to
-//! `journal.unreadable.json`, which ends the trouble and keeps the file for a look.
+//! `journal.unreadable.json`, which ends the trouble and keeps the file for a look. Until then
+//! an undo does not go past one: see [`SnapshotStore::latest_undoable`].
 use crate::adapters::Fs;
 use crate::model::Target;
 use crate::plan::Op;
@@ -24,9 +25,13 @@ const SNAPSHOT_WRITE: &str = "E_SNAPSHOT_WRITE";
 /// A restore point could not be read: a file is missing, locked or damaged.
 const SNAPSHOT_READ: &str = "E_SNAPSHOT_READ";
 const JOURNAL: &str = "journal.json";
+const INCOMPLETE: &str = "incomplete.json";
 /// What `journal.json` is renamed to when its restore point is set aside.
 const JOURNAL_ASIDE: &str = "journal.unreadable.json";
-/// Stands in for `journal.unreadable.json` when there was no `journal.json` to rename.
+/// Written when a restore point is set aside that had no `journal.json` to rename. It is not
+/// `journal.unreadable.json`: that name means a journal existed, so the transaction ran; this
+/// one means it never got as far as a journal.
+const NO_JOURNAL: &str = "journal.missing.json";
 const NO_JOURNAL_NOTE: &[u8] =
     b"{\n  \"note\": \"journal.json was missing when this restore point was set aside\"\n}\n";
 
@@ -110,6 +115,44 @@ fn read_fail(e: impl std::fmt::Display) -> Failure {
     }
 }
 
+/// What is wrong with a restore point that cannot be used.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnreadableKind {
+    /// A file the restore point needs is not there: its manifest, its journal, or a payload the
+    /// journal names. It will not come back.
+    Missing,
+    /// The files are there but not valid: JSON of the wrong shape, or a journal that names a
+    /// payload file it may not. It will not mend itself.
+    Damaged,
+    /// The read itself failed: the file is there, and a lock, a scan or a permission kept it
+    /// from being read now. This may pass.
+    CouldNotRead,
+}
+
+/// A restore point that cannot be used, and why (see [`SnapshotStore::unreadable`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unreadable {
+    pub id: String,
+    pub kind: UnreadableKind,
+    /// The first file that could not be used, with the reason: always `E_SNAPSHOT_READ`.
+    pub failure: Failure,
+}
+
+/// A read that failed, and which way.
+struct ReadError {
+    kind: UnreadableKind,
+    failure: Failure,
+}
+
+impl ReadError {
+    fn new(kind: UnreadableKind, e: impl std::fmt::Display) -> Self {
+        ReadError {
+            kind,
+            failure: read_fail(e),
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct SnapshotStore<'a> {
     fs: &'a dyn Fs,
@@ -145,16 +188,24 @@ impl<'a> SnapshotStore<'a> {
     }
 
     /// A file of a restore point. A missing file is an error: it is never read as "empty".
-    fn read_file(&self, path: &Path) -> Result<Vec<u8>, Failure> {
-        self.fs
-            .read(path)
-            .map_err(read_fail)?
-            .ok_or_else(|| read_fail(format!("{} is missing", path.display())))
+    fn read_file(&self, path: &Path) -> Result<Vec<u8>, ReadError> {
+        match self.fs.read(path) {
+            Err(e) => Err(ReadError::new(UnreadableKind::CouldNotRead, e)),
+            Ok(None) => Err(ReadError::new(
+                UnreadableKind::Missing,
+                format!("{} is missing", path.display()),
+            )),
+            Ok(Some(bytes)) => Ok(bytes),
+        }
     }
 
-    fn read_json<T: DeserializeOwned>(&self, path: &Path) -> Result<T, Failure> {
-        serde_json::from_slice(&self.read_file(path)?)
-            .map_err(|e| read_fail(format!("{} is damaged: {e}", path.display())))
+    fn read_json<T: DeserializeOwned>(&self, path: &Path) -> Result<T, ReadError> {
+        serde_json::from_slice(&self.read_file(path)?).map_err(|e| {
+            ReadError::new(
+                UnreadableKind::Damaged,
+                format!("{} is damaged: {e}", path.display()),
+            )
+        })
     }
 
     fn write_json<T: Serialize>(&self, path: &Path, value: &T) -> Result<(), Failure> {
@@ -164,6 +215,10 @@ impl<'a> SnapshotStore<'a> {
     }
 
     pub fn manifest(&self, id: &str) -> Result<Manifest, Failure> {
+        self.read_manifest(id).map_err(|e| e.failure)
+    }
+
+    fn read_manifest(&self, id: &str) -> Result<Manifest, ReadError> {
         self.read_json(&self.dir(id).join("manifest.json"))
     }
 
@@ -175,17 +230,24 @@ impl<'a> SnapshotStore<'a> {
     /// is missing is an error, never "the target did not exist": restoring that would delete a
     /// file of the user's.
     pub fn journal(&self, id: &str) -> Result<Journal, Failure> {
+        self.read_journal(id).map_err(|e| e.failure)
+    }
+
+    fn read_journal(&self, id: &str) -> Result<Journal, ReadError> {
         let file: JournalFile = self.read_json(&self.dir(id).join(JOURNAL))?;
         let mut snapshots = Vec::with_capacity(file.snapshots.len());
         for s in file.snapshots {
             let prior = match s.payload {
                 None => None,
                 Some(name) if name != payload_name(s.op_index) => {
-                    return Err(read_fail(format!(
-                        "{JOURNAL} of {id} names the file {name} for op {}, not {}",
-                        s.op_index,
-                        payload_name(s.op_index)
-                    )));
+                    return Err(ReadError::new(
+                        UnreadableKind::Damaged,
+                        format!(
+                            "{JOURNAL} of {id} names the file {name} for op {}, not {}",
+                            s.op_index,
+                            payload_name(s.op_index)
+                        ),
+                    ));
                 }
                 Some(_) => Some(self.read_file(&self.payload_path(id, s.op_index))?),
             };
@@ -202,32 +264,54 @@ impl<'a> SnapshotStore<'a> {
         })
     }
 
-    /// Whether the restore point's journal was renamed to `journal.unreadable.json`
-    /// (see [`SnapshotStore::set_aside`]).
+    /// Whether the restore point was set aside (see [`SnapshotStore::set_aside`]): it has no
+    /// `journal.json`, and has either the renamed journal or the note that stands for one.
     fn is_set_aside(&self, id: &str) -> bool {
         let dir = self.dir(id);
-        !self.fs.exists(&dir.join(JOURNAL)) && self.fs.exists(&dir.join(JOURNAL_ASIDE))
+        !self.fs.exists(&dir.join(JOURNAL))
+            && (self.fs.exists(&dir.join(JOURNAL_ASIDE)) || self.fs.exists(&dir.join(NO_JOURNAL)))
+    }
+
+    /// Whether the restore point's transaction got as far as a journal: it has `journal.json`,
+    /// the journal renamed by [`SnapshotStore::set_aside`], or an `incomplete.json`. A manifest
+    /// alone, or with the note `set_aside` leaves for a journal that was never written, is a
+    /// transaction that ran nothing.
+    fn ran(&self, id: &str) -> bool {
+        let dir = self.dir(id);
+        [JOURNAL, JOURNAL_ASIDE, INCOMPLETE]
+            .iter()
+            .any(|name| self.fs.exists(&dir.join(name)))
     }
 
     /// The restore points that cannot be used, oldest first, each with why: the manifest or the
     /// journal is missing, locked or damaged, or a payload the journal names is missing or
     /// cannot be read. Restore points that were set aside are not listed again.
     ///
-    /// Everything else here goes on without these (an undo, a recovery and a clean-up must not
-    /// be stopped by an old file), so this is where they are reported: once, followed by
-    /// [`SnapshotStore::set_aside`].
+    /// Each entry says what kind of trouble it is, so that a caller can tell one that stays from
+    /// one that may pass. A person sets aside what is [`UnreadableKind::Missing`] or
+    /// [`UnreadableKind::Damaged`] (Task 13 does); what is [`UnreadableKind::CouldNotRead`] is
+    /// reported and left for a later try, because the lock or the scan that kept a file from
+    /// being read may be gone by then. Setting it aside would end an undo of the apply it holds.
+    ///
+    /// A recovery and a clean-up go on without these, so this is where they are reported: once,
+    /// followed by [`SnapshotStore::set_aside`]. An undo does not go on past one: see
+    /// [`SnapshotStore::latest_undoable`].
     ///
     /// A restore point listed for its manifest alone still has a journal that reads. If it is the
     /// newest and unfinished, recovery can roll it back, which setting it aside first would
     /// prevent: recover, then set aside.
-    pub fn unreadable(&self) -> Result<Vec<(String, Failure)>, Failure> {
+    pub fn unreadable(&self) -> Result<Vec<Unreadable>, Failure> {
         let mut found = Vec::new();
         for id in self.ids()? {
             if self.is_set_aside(&id) {
                 continue;
             }
-            if let Err(failure) = self.manifest(&id).and_then(|_| self.journal(&id)) {
-                found.push((id, failure));
+            if let Err(e) = self.read_manifest(&id).and_then(|_| self.read_journal(&id)) {
+                found.push(Unreadable {
+                    id,
+                    kind: e.kind,
+                    failure: e.failure,
+                });
             }
         }
         Ok(found)
@@ -236,8 +320,9 @@ impl<'a> SnapshotStore<'a> {
     /// Ends the trouble with a restore point that [`SnapshotStore::unreadable`] listed: its
     /// journal is renamed to `journal.unreadable.json`, which stays for a look and is never
     /// deleted here. From then on `unreadable` does not list it, `latest_undoable` skips it and
-    /// recovery ignores it. When there is no journal to rename, a note takes its place. Setting
-    /// aside twice is fine. The manifest and the payload files stay.
+    /// recovery ignores it. When there is no journal to rename, a note named
+    /// `journal.missing.json` takes its place. Setting aside twice is fine. The manifest and the
+    /// payload files stay.
     pub fn set_aside(&self, id: &str) -> Result<(), Failure> {
         let dir = self.dir(id);
         if !self.fs.is_dir(&dir) {
@@ -246,31 +331,45 @@ impl<'a> SnapshotStore<'a> {
         if self.is_set_aside(id) {
             return Ok(());
         }
-        let (journal, aside) = (dir.join(JOURNAL), dir.join(JOURNAL_ASIDE));
+        let journal = dir.join(JOURNAL);
         if self.fs.exists(&journal) {
-            self.fs.rename(&journal, &aside).map_err(write_fail)
+            self.fs
+                .rename(&journal, &dir.join(JOURNAL_ASIDE))
+                .map_err(write_fail)
         } else {
             self.fs
-                .write_atomic(&aside, NO_JOURNAL_NOTE)
+                .write_atomic(&dir.join(NO_JOURNAL), NO_JOURNAL_NOTE)
                 .map_err(write_fail)
         }
     }
 
-    /// The newest apply that finished and was not reversed yet. A restore point whose manifest
-    /// or journal cannot be read, or that was set aside, is skipped; [`SnapshotStore::unreadable`]
-    /// is where those are reported.
+    /// The newest apply that finished and was not reversed yet.
+    ///
+    /// It never goes past a restore point it cannot read: an apply that is newer than the answer
+    /// and whose manifest or journal cannot be read could be the one to undo, and undoing the
+    /// older apply instead would leave the newer one on the machine, and a lock that is gone a
+    /// second later would have decided it. That is `Err(E_SNAPSHOT_READ)` naming the restore
+    /// point. Only a restore point that was set aside is skipped (see
+    /// [`SnapshotStore::unreadable`] and [`SnapshotStore::set_aside`]). One that is plainly not
+    /// an answer is skipped as before: an undo or a revert-all, an apply that was reversed, and
+    /// a transaction that did not commit.
     pub fn latest_undoable(&self) -> Result<Option<(Manifest, Journal)>, Failure> {
+        let in_the_way = |id: &str, f: Failure| Failure {
+            code: f.code,
+            message: format!(
+                "restore point {id} cannot be read, so the apply before it is not undone: {}",
+                f.message
+            ),
+        };
         for id in self.ids()?.into_iter().rev() {
-            let Ok(m) = self.manifest(&id) else {
+            if self.is_set_aside(&id) {
                 continue;
-            };
+            }
+            let m = self.manifest(&id).map_err(|f| in_the_way(&id, f))?;
             if m.kind != SnapshotKind::Apply || m.undone_by.is_some() {
                 continue;
             }
-            // A set-aside restore point has no journal.json, so it is skipped here too.
-            let Ok(j) = self.journal(&id) else {
-                continue;
-            };
+            let j = self.journal(&id).map_err(|f| in_the_way(&id, f))?;
             if j.stage == Stage::Committed {
                 return Ok(Some((m, j)));
             }
@@ -361,16 +460,20 @@ impl<'a> SnapshotStore<'a> {
                 record.id
             )));
         }
-        self.write_json(&dir.join("incomplete.json"), record)
+        self.write_json(&dir.join(INCOMPLETE), record)
     }
 
-    /// The record of the newest restore point, when its transaction ended `RollbackIncomplete`:
+    /// The record of the newest transaction that ran, when it ended `RollbackIncomplete`:
     /// nothing has run since, so what it lists may still need a hand. `None` otherwise.
+    ///
+    /// A restore point that ran nothing (a manifest and no journal: the first write of the
+    /// journal failed) is not a transaction that has run since, so it does not hide the record
+    /// of an earlier one. One whose journal was set aside did run, and does.
     pub fn latest_incomplete(&self) -> Result<Option<Incomplete>, Failure> {
-        let Some(id) = self.ids()?.pop() else {
+        let Some(id) = self.ids()?.into_iter().rev().find(|id| self.ran(id)) else {
             return Ok(None);
         };
-        let path = self.dir(&id).join("incomplete.json");
+        let path = self.dir(&id).join(INCOMPLETE);
         match self.fs.read(&path).map_err(read_fail)? {
             None => Ok(None),
             Some(bytes) => serde_json::from_slice(&bytes)
@@ -864,30 +967,121 @@ mod tests {
     }
 
     #[test]
-    fn latest_undoable_skips_a_restore_point_it_cannot_read() {
-        // None of these may stop an undo of the apply before them.
+    fn latest_undoable_never_undoes_an_older_apply_past_a_restore_point_it_cannot_read() {
+        // Each of these is the newest apply, with an older apply before it. Skipping the newest
+        // would undo the older one while the newest stays on the machine, and a lock that is
+        // gone a second later would have made the difference. Only a restore point that was set
+        // aside is skipped.
+        type Break = fn(&FakeFs, &str);
+        let breaks: [(&str, Break); 6] = [
+            ("a journal that cannot be read", |fs, id| {
+                fs.fail_reads_of(at(id, "journal.json"))
+            }),
+            ("no journal (its first write failed)", |fs, id| {
+                fs.remove_file(Path::new(&at(id, "journal.json"))).unwrap()
+            }),
+            ("a payload that is gone", |fs, id| {
+                fs.remove_file(Path::new(&at(id, r"payload\0.bin")))
+                    .unwrap()
+            }),
+            ("a damaged journal", |fs, id| {
+                fs.put(at(id, "journal.json"), b"{")
+            }),
+            ("a damaged manifest", |fs, id| {
+                fs.put(at(id, "manifest.json"), b"{")
+            }),
+            ("a manifest that cannot be read", |fs, id| {
+                fs.fail_reads_of(at(id, "manifest.json"))
+            }),
+        ];
+        let (older, newest) = ("0000000000001-a", "0000000000002-b");
+        for (what, break_it) in breaks {
+            let fs = FakeFs::new();
+            let store = SnapshotStore::new(&fs, Path::new(ROOT));
+            point(&store, older, Stage::Committed);
+            point(&store, newest, Stage::Committed);
+            break_it(&fs, newest);
+            let err = store.latest_undoable().unwrap_err();
+            assert_eq!(err.code, "E_SNAPSHOT_READ", "{what}");
+            assert!(err.message.contains(newest), "{what}: {}", err.message);
+            store.set_aside(newest).unwrap();
+            assert_eq!(
+                store.latest_undoable().unwrap().unwrap().0.id,
+                older,
+                "{what}, once it is set aside"
+            );
+        }
+    }
+
+    #[test]
+    fn a_restore_point_that_cannot_be_the_answer_does_not_stop_latest_undoable() {
         let fs = FakeFs::new();
         let store = SnapshotStore::new(&fs, Path::new(ROOT));
+        // older than the answer: never looked at
         point(&store, "0000000000001-a", Stage::Committed);
-        // the journal's first write failed: a manifest and nothing else
+        fs.fail_reads_of(at("0000000000001-a", "journal.json"));
+        // the answer
+        point(&store, "0000000000002-b", Stage::Committed);
+        // newer, but an undo, which is never the answer
         store
-            .write_manifest(&manifest("0000000000002-b", SnapshotKind::Apply))
+            .begin(manifest("0000000000003-c", SnapshotKind::Undo))
+            .save(&journal("0000000000003-c", Stage::Committed))
             .unwrap();
-        // a journal that cannot be read
-        point(&store, "0000000000003-c", Stage::Committed);
         fs.fail_reads_of(at("0000000000003-c", "journal.json"));
-        // a payload that is gone
-        point(&store, "0000000000004-d", Stage::Committed);
-        fs.remove_file(Path::new(&at("0000000000004-d", r"payload\0.bin")))
+        // newer, but an apply that was undone already
+        let mut undone = manifest("0000000000004-d", SnapshotKind::Apply);
+        undone.undone_by = Some("0000000000003-c".into());
+        store
+            .begin(undone)
+            .save(&journal("0000000000004-d", Stage::Committed))
             .unwrap();
-        // a manifest that is damaged
-        point(&store, "0000000000005-e", Stage::Committed);
-        fs.put(at("0000000000005-e", "manifest.json"), b"{");
-        let (m, j) = store.latest_undoable().unwrap().unwrap();
+        fs.fail_reads_of(at("0000000000004-d", "journal.json"));
+        // newer, and a transaction that ended without applying anything
+        point(&store, "0000000000005-e", Stage::RolledBack);
         assert_eq!(
-            (m.id.as_str(), j.stage),
-            ("0000000000001-a", Stage::Committed)
+            store.latest_undoable().unwrap().unwrap().0.id,
+            "0000000000002-b"
         );
+    }
+
+    #[test]
+    fn a_restore_point_that_ran_nothing_does_not_hide_an_incomplete_record() {
+        let fs = FakeFs::new();
+        let store = SnapshotStore::new(&fs, Path::new(ROOT));
+        let (a, b, c) = ("0000000000001-a", "0000000000002-b", "0000000000003-c");
+        point(&store, a, Stage::RollbackIncomplete { failed: vec![0] });
+        store.write_incomplete(&record(a)).unwrap();
+        // a transaction whose first journal write failed: a manifest and nothing else
+        store
+            .write_manifest(&manifest(b, SnapshotKind::Apply))
+            .unwrap();
+        assert_eq!(store.latest_incomplete().unwrap(), Some(record(a)));
+        // told about once and set aside, it still ran nothing
+        store.set_aside(b).unwrap();
+        assert_eq!(store.latest_incomplete().unwrap(), Some(record(a)));
+        // something that did run
+        point(&store, c, Stage::Committed);
+        assert_eq!(store.latest_incomplete().unwrap(), None);
+    }
+
+    #[test]
+    fn a_set_aside_journal_or_a_record_marks_a_restore_point_that_ran() {
+        let fs = FakeFs::new();
+        let store = SnapshotStore::new(&fs, Path::new(ROOT));
+        let (a, b, c) = ("0000000000001-a", "0000000000002-b", "0000000000003-c");
+        point(&store, a, Stage::RollbackIncomplete { failed: vec![0] });
+        store.write_incomplete(&record(a)).unwrap();
+        // b had a journal that cannot be used: it ran something, and nobody knows what
+        point(&store, b, Stage::Committed);
+        fs.remove_file(Path::new(&at(b, r"payload\0.bin"))).unwrap();
+        store.set_aside(b).unwrap();
+        assert_eq!(store.latest_incomplete().unwrap(), None);
+        // c has a record but no journal: the record says it ran
+        store
+            .write_manifest(&manifest(c, SnapshotKind::Apply))
+            .unwrap();
+        store.write_incomplete(&record(c)).unwrap();
+        assert_eq!(store.latest_incomplete().unwrap(), Some(record(c)));
     }
 
     #[test]
@@ -1084,7 +1278,7 @@ mod tests {
         let store = SnapshotStore::new(&fs, Path::new(ROOT));
         broken_restore_points(&fs, &store);
         let found = store.unreadable().unwrap();
-        let ids: Vec<&str> = found.iter().map(|(id, _)| id.as_str()).collect();
+        let ids: Vec<&str> = found.iter().map(|u| u.id.as_str()).collect();
         assert_eq!(
             ids,
             [
@@ -1094,10 +1288,107 @@ mod tests {
                 "0000000000005-e"
             ]
         );
+        let kinds: Vec<UnreadableKind> = found.iter().map(|u| u.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                UnreadableKind::Missing,
+                UnreadableKind::CouldNotRead,
+                UnreadableKind::Missing,
+                UnreadableKind::Damaged
+            ]
+        );
         let files = ["journal.json", "journal.json", "0.bin", "manifest.json"];
-        for ((id, failure), file) in found.iter().zip(files) {
-            assert_eq!(failure.code, "E_SNAPSHOT_READ", "{id}");
-            assert!(failure.message.contains(file), "{id}: {}", failure.message);
+        for (u, file) in found.iter().zip(files) {
+            assert_eq!(u.failure.code, "E_SNAPSHOT_READ", "{}", u.id);
+            assert!(
+                u.failure.message.contains(file),
+                "{}: {}",
+                u.id,
+                u.failure.message
+            );
+        }
+    }
+
+    #[test]
+    fn unreadable_says_whether_a_file_is_missing_damaged_or_could_not_be_read() {
+        // Missing and damaged do not pass; a read that failed may (a lock, a scan): a person
+        // sets aside the first two and leaves the third for a later try.
+        use UnreadableKind::{CouldNotRead, Damaged, Missing};
+        type Break = fn(&FakeFs, &str);
+        let cases: [(&str, Break, UnreadableKind); 10] = [
+            (
+                "manifest missing",
+                |fs, id| fs.remove_file(Path::new(&at(id, "manifest.json"))).unwrap(),
+                Missing,
+            ),
+            (
+                "manifest damaged",
+                |fs, id| fs.put(at(id, "manifest.json"), b"{"),
+                Damaged,
+            ),
+            (
+                "manifest locked",
+                |fs, id| fs.fail_reads_of(at(id, "manifest.json")),
+                CouldNotRead,
+            ),
+            (
+                "journal missing",
+                |fs, id| fs.remove_file(Path::new(&at(id, "journal.json"))).unwrap(),
+                Missing,
+            ),
+            (
+                "journal damaged",
+                |fs, id| fs.put(at(id, "journal.json"), b"{"),
+                Damaged,
+            ),
+            (
+                "journal of the wrong shape",
+                |fs, id| fs.put(at(id, "journal.json"), b"{}"),
+                Damaged,
+            ),
+            (
+                "journal locked",
+                |fs, id| fs.fail_reads_of(at(id, "journal.json")),
+                CouldNotRead,
+            ),
+            (
+                "payload gone",
+                |fs, id| {
+                    fs.remove_file(Path::new(&at(id, r"payload\0.bin")))
+                        .unwrap()
+                },
+                Missing,
+            ),
+            (
+                "payload locked",
+                |fs, id| fs.fail_reads_of(at(id, r"payload\0.bin")),
+                CouldNotRead,
+            ),
+            (
+                "journal names a file it may not",
+                |fs, id| {
+                    let path = at(id, "journal.json");
+                    let text = String::from_utf8(fs.file(&path).unwrap()).unwrap();
+                    fs.put(&path, text.replace("payload/0.bin", "payload/9.bin"));
+                },
+                Damaged,
+            ),
+        ];
+        for (what, break_it, kind) in cases {
+            let fs = FakeFs::new();
+            let store = SnapshotStore::new(&fs, Path::new(ROOT));
+            point(&store, "0000000000001-a", Stage::Committed);
+            break_it(&fs, "0000000000001-a");
+            let found = store.unreadable().unwrap();
+            assert_eq!(found.len(), 1, "{what}");
+            let u = found.first().unwrap();
+            assert_eq!(
+                (u.id.as_str(), u.kind, u.failure.code),
+                ("0000000000001-a", kind, "E_SNAPSHOT_READ"),
+                "{what}: {}",
+                u.failure.message
+            );
         }
     }
 
@@ -1159,7 +1450,7 @@ mod tests {
             .unreadable()
             .unwrap()
             .into_iter()
-            .map(|u| u.0)
+            .map(|u| u.id)
             .collect();
         assert_eq!(listed, ["0000000000001-a"]);
         let j = store.recovery().load_unfinished().unwrap().unwrap();
@@ -1176,10 +1467,13 @@ mod tests {
             .unwrap();
         assert_eq!(store.unreadable().unwrap().len(), 1);
         store.set_aside("0000000000001-a").unwrap();
+        // The note has a name of its own: a renamed journal means the transaction ran, and this
+        // one ran nothing.
         let note = fs
-            .file(at("0000000000001-a", "journal.unreadable.json"))
+            .file(at("0000000000001-a", "journal.missing.json"))
             .unwrap();
         assert!(String::from_utf8(note).unwrap().contains("was missing"));
+        assert!(!fs.exists(Path::new(&at("0000000000001-a", "journal.unreadable.json"))));
         assert!(!fs.exists(Path::new(&at("0000000000001-a", "journal.json"))));
         assert_eq!(store.unreadable().unwrap(), vec![]);
         assert_eq!(store.recovery().load_unfinished().unwrap(), None);
