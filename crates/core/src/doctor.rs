@@ -257,7 +257,7 @@ fn d2(sys: System<'_>, ctx: &Ctx, state: &Result<State, StateError>) -> Check {
             format!("ตัวสร้าง prompt ไม่ใช่รุ่นที่แนบมา {SEE_D1_TH}"),
             format!("The prompt add-on is not the bundled version. {SEE_D1_EN}"),
             format!(
-                "oh-my-posh version printed {:?} (exit {})",
+                "oh-my-posh version printed \"{}\" (exit {})",
                 clip(&out.stdout),
                 out.status
             ),
@@ -794,7 +794,8 @@ fn d7_file(path: &Path, text: &str, a: &Applied, line: &str) -> Result<(), Check
     let written = read(profile_key("commandline"))?;
     if written.as_ref().and_then(Value::as_str) != Some(line) {
         return Err(bad(format!(
-            "{p}: commandline is {written:?}, not {line:?}"
+            "{p}: commandline is {}, not \"{line}\"",
+            as_written(written.as_ref())
         )));
     }
     if a.set_default {
@@ -804,10 +805,23 @@ fn d7_file(path: &Path, text: &str, a: &Applied, line: &str) -> Result<(), Check
             .and_then(Value::as_str)
             .is_some_and(|g| g.eq_ignore_ascii_case(CMD_PROFILE_GUID))
         {
-            return Err(bad(format!("{p}: defaultProfile is {default:?}")));
+            return Err(bad(format!(
+                "{p}: defaultProfile is {}",
+                as_written(default.as_ref())
+            )));
         }
     }
     Ok(())
+}
+
+/// A settings.json value for details: text in plain quotes, as it is in the file (no escapes),
+/// any other value as JSON, and an absent one in words.
+fn as_written(value: Option<&Value>) -> String {
+    match value {
+        None => "not set".to_string(),
+        Some(Value::String(text)) => format!("\"{text}\""),
+        Some(other) => other.to_string(),
+    }
 }
 
 fn d8(sys: System<'_>, state: &Result<State, StateError>) -> Check {
@@ -1040,13 +1054,21 @@ fn d11(sys: System<'_>) -> Check {
             ),
         )
     };
+    // What the setting itself says, in words.
+    let setting = match info.default_terminal {
+        DefaultTerminal::LetWindowsDecide => "not set (Windows decides)",
+        DefaultTerminal::WindowsTerminal => "Windows Terminal",
+        DefaultTerminal::WindowsTerminalPreview => "Windows Terminal Preview",
+        DefaultTerminal::Conhost => "Windows Console Host (conhost)",
+        DefaultTerminal::Other => "another app",
+    };
     check(
         "D11",
         Status::Ok,
         None,
         th,
         en,
-        format!("{:?}", info.default_terminal),
+        format!("default terminal setting: {setting}"),
     )
 }
 
@@ -1369,6 +1391,10 @@ mod tests {
         let checks = doctor(m.system(), &ctx);
         let code = |id| (by_id(&checks, id).status, by_id(&checks, id).code);
         assert_eq!(code("D2"), (Status::Fail, Some("E_RUNTIME_MISSING")));
+        assert_eq!(
+            by_id(&checks, "D2").details,
+            "oh-my-posh version printed \"31.4.0\" (exit 0)"
+        );
         assert_eq!(code("D3"), (Status::Fail, Some("E_CLINK_PATH")));
         assert_eq!(code("D4"), (Status::Fail, Some("E_AUTORUN_WRITE")));
         assert_eq!(code("D5"), (Status::Warn, Some("E_AUTORUN_FOREIGN_CLINK")));
@@ -1426,6 +1452,10 @@ mod tests {
         let d11 = by_id(&doctor(m.system(), &ctx), "D11");
         assert_eq!((d11.status, d11.code), (Status::Ok, None));
         assert!(d11.message_en.contains("classic console"), "{d11:?}");
+        assert_eq!(
+            d11.details,
+            "default terminal setting: Windows Console Host (conhost)"
+        );
         m.host.info.build = Some(19045);
         assert_eq!(
             by_id(&doctor(m.system(), &ctx), "D11").status,
@@ -2228,6 +2258,52 @@ mod tests {
         let edited = text.replacen(from, to, 1);
         assert_ne!(edited, text, "{from} is not in settings.json");
         m.fs.put(WT, edited);
+    }
+
+    #[test]
+    fn d7_says_what_settings_json_holds_as_written() {
+        // A Thai path and a Thai name come out as they are in the file: no `\u{…}` escapes and
+        // no doubled backslashes.
+        let (m, ctx) = themed(Target::All);
+        edit_wt(
+            &m,
+            r#""commandline": "%SystemRoot%\\System32\\cmd.exe""#,
+            r#""commandline": "C:\\Users\\ผู้ทดสอบ\\cmd.exe""#,
+        );
+        let d7 = by_id(&run(&m, &ctx), "D7");
+        assert!(
+            d7.details.ends_with(
+                r#": commandline is "C:\Users\ผู้ทดสอบ\cmd.exe", not "%SystemRoot%\System32\cmd.exe""#
+            ),
+            "{}",
+            d7.details
+        );
+        assert!(!d7.details.contains("\\u{"), "{}", d7.details);
+        let (m, ctx) = themed(Target::All);
+        edit_wt(
+            &m,
+            r#""defaultProfile": "{0caa0dad-35be-5f56-a8ff-afceeeaa6101}""#,
+            r#""defaultProfile": "โปรไฟล์ของฉัน""#,
+        );
+        let d7 = by_id(&run(&m, &ctx), "D7");
+        assert!(
+            d7.details.ends_with(r#": defaultProfile is "โปรไฟล์ของฉัน""#),
+            "{}",
+            d7.details
+        );
+        // A key that is not there is said in words.
+        let (m, ctx) = themed(Target::All);
+        edit_wt(
+            &m,
+            r#""defaultProfile": "{0caa0dad-35be-5f56-a8ff-afceeeaa6101}","#,
+            "",
+        );
+        let d7 = by_id(&run(&m, &ctx), "D7");
+        assert!(
+            d7.details.ends_with(": defaultProfile is not set"),
+            "{}",
+            d7.details
+        );
     }
 
     #[test]

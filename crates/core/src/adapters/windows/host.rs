@@ -395,9 +395,9 @@ pub(crate) struct RegistryFacts {
     pub(crate) unreadable: Vec<String>,
 }
 
-/// Where a key lives, for the messages: `LocalMachine\SOFTWARE\...`.
+/// Where a key lives, for the messages: `HKEY_LOCAL_MACHINE\SOFTWARE\...`.
 fn place(loc: &RegLocation) -> String {
-    format!("{:?}\\{}", loc.hive, loc.subkey)
+    loc.to_string()
 }
 
 /// The text of one value. `Ok(None)` when it is absent; `Err` with the reason when the read
@@ -420,7 +420,7 @@ fn build_number(read: RegRead<'_>) -> Result<Option<u32>, String> {
     };
     text.trim().parse().map(Some).map_err(|_| {
         format!(
-            "CurrentBuildNumber in {} is not a number: {text:?}",
+            "CurrentBuildNumber in {} is not a number: \"{text}\"",
             place(&loc)
         )
     })
@@ -1292,6 +1292,26 @@ mod tests {
             webview2.contains("LocalMachine") && webview2.contains("CurrentUser"),
             "{webview2}"
         );
+    }
+
+    #[test]
+    fn a_value_that_is_not_an_answer_is_quoted_as_written() {
+        // A build number in Thai digits: said as it is, with its key as Registry Editor shows
+        // it, never with `{:?}` escapes.
+        let thai = |loc: &RegLocation, name: &str| -> Reply {
+            match (loc.hive, name) {
+                (Hive::LocalMachine, "CurrentBuildNumber") => text("๒๖๑๐๐"),
+                _ => Ok(None),
+            }
+        };
+        let facts = registry_facts(&thai);
+        assert_eq!(facts.build, None);
+        let [entry] = facts.unreadable.as_slice() else {
+            panic!("{:?}", facts.unreadable)
+        };
+        assert!(entry.ends_with(": \"๒๖๑๐๐\""), "{entry}");
+        assert!(entry.contains(r"in HKEY_LOCAL_MACHINE\"), "{entry}");
+        assert!(!entry.contains("\\u{"), "{entry}");
     }
 
     #[test]

@@ -147,13 +147,18 @@ fn stop(child: &mut impl Running, wait: Duration) -> Result<(), String> {
             Ok(None) if since.elapsed() >= wait => {
                 return Err(match killed {
                     Err(e) => format!("could not be stopped: {e}"),
-                    Ok(()) => format!("did not stop within {wait:?} after it was killed"),
+                    Ok(()) => format!("did not stop within {} after it was killed", seconds(wait)),
                 })
             }
             Ok(None) => std::thread::sleep(POLL),
             Err(e) => return Err(format!("could not be stopped: {e}")),
         }
     }
+}
+
+/// A time for a message, in seconds: `60 seconds`, `0.5 seconds`.
+fn seconds(d: Duration) -> String {
+    format!("{} seconds", d.as_secs_f64())
 }
 
 /// What a failed `stop` adds to the message of the failure that made the caller stop the
@@ -207,7 +212,10 @@ impl Process for WinProcess {
                 Ok(Some(status)) => break status,
                 Ok(None) if started.elapsed() >= self.timeout => {
                     let note = unstopped(stop(&mut child, OUTPUT_GRACE));
-                    return Err(fail(format!("no answer after {:?}{note}", self.timeout)));
+                    return Err(fail(format!(
+                        "no answer after {}{note}",
+                        seconds(self.timeout)
+                    )));
                 }
                 Ok(None) => std::thread::sleep(POLL),
                 Err(e) => {
@@ -603,6 +611,10 @@ mod tests {
         };
         let why = stop(&mut unreadable, wait).unwrap_err();
         assert!(why.contains("wait broke"), "{why}");
+
+        // Times are said in seconds, not as `Duration`'s `{:?}` writes them.
+        assert_eq!(seconds(Duration::from_secs(60)), "60 seconds");
+        assert_eq!(seconds(OUTPUT_GRACE), "0.5 seconds");
 
         // What the caller adds to its message.
         assert_eq!(unstopped(Ok(())), "");

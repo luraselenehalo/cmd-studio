@@ -191,13 +191,23 @@ pub struct Plan {
 pub enum PlanError {
     /// Another Clink runs from AutoRun. `existing` is every command that turning it off takes
     /// out, so the user sees all of them before agreeing.
-    #[error("another Clink runs from cmd's AutoRun, in these commands: {existing:?}")]
+    #[error(
+        "another Clink runs from cmd's AutoRun, in these commands: {}",
+        quoted(existing)
+    )]
     ForeignClink { existing: Vec<String> },
     /// A path that would go into a cmd command or into Clink's settings holds `%`, `"` or
     /// `;`, or is not Unicode (spec §5.4).
-    #[error("cmd or Clink can't take this path: it holds %, a double quote, ; or text that is not Unicode: {0:?}")]
+    #[error(
+        "cmd or Clink can't take this path: it holds %, a double quote, ; or text that is not \
+         Unicode: \"{}\"",
+        .0.display()
+    )]
     UnsupportedPath(PathBuf),
-    #[error("Clink can't start from {0:?}, and no 8.3 or ProgramData path is available instead")]
+    #[error(
+        "Clink can't start from \"{}\", and no 8.3 or ProgramData path is available instead",
+        .0.display()
+    )]
     NoClinkPath(PathBuf),
     #[error("could not build the Oh My Posh config: {0}")]
     Generate(String),
@@ -221,6 +231,15 @@ impl PlanError {
             PlanError::Generate(_) => "E_THEME_INVALID",
         }
     }
+}
+
+/// Each text in plain quotes, as it is written, one after the other.
+fn quoted(texts: &[String]) -> String {
+    texts
+        .iter()
+        .map(|t| format!("\"{t}\""))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn is_ascii(p: &Path) -> bool {
@@ -627,11 +646,15 @@ mod tests {
         // G19: never write a command that makes every cmd window show an error.
         let mut m = machine();
         m.data_short = None;
+        let err = plan(&terracotta(), &req(Target::All), &m, &paths()).unwrap_err();
+        assert_eq!(err.code(), "E_CLINK_PATH");
         assert_eq!(
-            plan(&terracotta(), &req(Target::All), &m, &paths())
-                .unwrap_err()
-                .code(),
-            "E_CLINK_PATH"
+            err.to_string(),
+            format!(
+                "Clink can't start from \"{}\", and no 8.3 or ProgramData path is available \
+                 instead",
+                paths().clink_exe().display()
+            )
         );
         // Each candidate must itself be all ASCII (spec §5.4).
         m.data_short = Some(PathBuf::from(r"C:\Users\ÉTÉ~1\AppData\Local\AIRESI~1.CMD"));
@@ -689,9 +712,10 @@ mod tests {
                 existing: vec![foreign.to_string()]
             }
         );
+        // Each command as it is written, in plain quotes (no `{:?}` escapes).
         assert_eq!(
             err.to_string(),
-            r#"another Clink runs from cmd's AutoRun, in these commands: ["\"C:\\Program Files (x86)\\clink\\clink.bat\" inject --autorun"]"#
+            r#"another Clink runs from cmd's AutoRun, in these commands: ""C:\Program Files (x86)\clink\clink.bat" inject --autorun""#
         );
         let mut r = req(Target::All);
         r.replace_foreign_clink = true;
@@ -861,6 +885,12 @@ mod tests {
         };
         let err = plan(&terracotta(), &req(Target::All), &m, &p).unwrap_err();
         assert_eq!(err, PlanError::UnsupportedPath(p.clink_profile()));
+        // The path is said as it is written, Thai letters and all (no `{:?}` escapes).
+        assert!(
+            err.to_string()
+                .ends_with(r#": "D:\ข้อมูล;เก่า\ai.resincore.cmdstudio\clink-profile""#),
+            "{err}"
+        );
     }
 
     #[cfg(windows)]

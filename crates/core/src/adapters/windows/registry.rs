@@ -20,11 +20,28 @@ pub enum Hive {
     LocalMachine,
 }
 
+impl Hive {
+    /// The hive as Registry Editor names it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Hive::CurrentUser => "HKEY_CURRENT_USER",
+            Hive::LocalMachine => "HKEY_LOCAL_MACHINE",
+        }
+    }
+}
+
 /// A registry key: hive plus subkey path.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RegLocation {
     pub hive: Hive,
     pub subkey: String,
+}
+
+/// The key as Registry Editor shows it, for messages: `HKEY_CURRENT_USER\Software\...`.
+impl std::fmt::Display for RegLocation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}\\{}", self.hive.name(), self.subkey)
+    }
 }
 
 impl RegLocation {
@@ -49,10 +66,7 @@ impl RegLocation {
     }
 
     fn err(&self, what: &str, e: &std::io::Error) -> AdapterError {
-        AdapterError::new(
-            format!("{what} {:?}\\{}", self.hive, self.subkey),
-            e.to_string(),
-        )
+        AdapterError::new(format!("{what} {self}"), e.to_string())
     }
 
     /// The existing key, or `None` when it does not exist.
@@ -292,6 +306,18 @@ mod tests {
 
     fn adapter(t: &TestKey) -> WinAutoRun {
         WinAutoRun::at(t.location("Command Processor"), t.location("Machine"))
+    }
+
+    #[test]
+    fn a_key_is_named_as_registry_editor_shows_it() {
+        assert_eq!(
+            RegLocation::user(COMMAND_PROCESSOR).to_string(),
+            r"HKEY_CURRENT_USER\Software\Microsoft\Command Processor"
+        );
+        assert_eq!(
+            RegLocation::machine(r"SOFTWARE\ผู้ทดสอบ").to_string(),
+            r"HKEY_LOCAL_MACHINE\SOFTWARE\ผู้ทดสอบ"
+        );
     }
 
     #[test]

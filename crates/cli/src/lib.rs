@@ -506,8 +506,8 @@ impl<'s, 'a> Say<'s, 'a> {
                 }
                 EXIT_FAILED
             }
-            // The core's texts of these two quote the path with `{:?}`, which escapes Thai
-            // letters, and a Thai user name is where they happen: the path is shown as it is.
+            // A Thai user name is where these two happen, so they are worded here in both
+            // languages, with the path shown as it is.
             ActionError::Plan(PlanError::UnsupportedPath(path)) => {
                 let shown = path.display();
                 self.err(self.pick(

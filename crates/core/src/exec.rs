@@ -322,9 +322,16 @@ impl<'a> SystemExecutor<'a> {
             .map_err(|e| failure("E_CLINK_PATH", e))?
         {
             DirState::Private => Ok(()),
-            other => Err(failure(
+            DirState::Absent => Err(failure(
                 "E_CLINK_PATH",
-                format!("{} is not private to this user: {other:?}", dir.display()),
+                format!(
+                    "{} is not private to this user: it is gone since it was made",
+                    dir.display()
+                ),
+            )),
+            DirState::Unsafe(why) => Err(failure(
+                "E_CLINK_PATH",
+                format!("{} is not private to this user: {why}", dir.display()),
             )),
         }
     }
@@ -1436,6 +1443,28 @@ mod tests {
         let mut ex = SystemExecutor::new(m.system(), &res);
         assert_eq!(ex.apply(&op).unwrap_err().code, "E_CLINK_PATH");
         assert!(!m.fs.exists(&pd.join("clink-1.9.34")));
+    }
+
+    #[test]
+    fn a_program_data_folder_that_is_not_private_is_said_as_written() {
+        // Its owner and who may change it are said as Windows gave them, never as `{:?}` would
+        // write them (escaped, in a Rust enum's shape).
+        let (m, res, _) = setup();
+        let pd = PathBuf::from(r"C:\ProgramData\ai.resincore.cmdstudio-S-1-5-21-1-2-3-1001");
+        let why = "owned by ผู้ใช้อื่น (S-1-5-21-9), who may change it";
+        m.host.set_dir_state(&pd, DirState::Unsafe(why.into()));
+        let op = Op::InstallRuntime {
+            component: Component::Clink,
+            dir: pd.join("clink-1.9.34"),
+        };
+        let err = SystemExecutor::new(m.system(), &res)
+            .apply(&op)
+            .unwrap_err();
+        assert_eq!(err.code, "E_CLINK_PATH");
+        assert_eq!(
+            err.message,
+            format!("{} is not private to this user: {why}", pd.display())
+        );
     }
 
     #[test]

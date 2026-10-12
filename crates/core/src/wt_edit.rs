@@ -492,7 +492,7 @@ fn once(obj: &CstObject, name: &str, place: &str) -> Result<(), WtError> {
         n => format!("{n} times"),
     };
     Err(WtError::Shape(format!(
-        "{place} has {name:?} {times}; fix settings.json by hand"
+        "{place} has \"{name}\" {times}; fix settings.json by hand"
     )))
 }
 
@@ -535,7 +535,7 @@ fn holder<'k>(obj: &CstObject, key: &'k WtKey) -> Result<Option<(CstObject, &'k 
 
 /// Where a key inside an object-valued key of the cmd profile (`font`) is.
 fn in_profile_object(key: &str) -> String {
-    format!("{CMD_PROFILE}'s {key:?}")
+    format!("{CMD_PROFILE}'s \"{key}\"")
 }
 
 fn current(obj: &CstObject, name: &str) -> Option<Value> {
@@ -591,7 +591,7 @@ fn set_profile_keys(
             // the user's other font keys (weight, features) survive.
             (Some(subs), Some(Value::Object(_))) => {
                 let parent = profile.object_value(key).ok_or_else(|| {
-                    WtError::Shape(format!("cmd profile key {key:?} changed while editing"))
+                    WtError::Shape(format!("cmd profile key \"{key}\" changed while editing"))
                 })?;
                 for (sub, sub_value) in subs {
                     once(&parent, sub, &in_profile_object(key))?;

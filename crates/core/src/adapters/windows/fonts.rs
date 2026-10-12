@@ -253,10 +253,7 @@ impl Fonts for WinFonts {
         let wrong = |why: String| {
             AdapterError::new(
                 format!("read {value_name}"),
-                format!(
-                    "the value in {:?}\\{} {why}",
-                    self.reg.hive, self.reg.subkey
-                ),
+                format!("the value in {} {why}", self.reg),
             )
         };
         if value.kind != REG_SZ {
