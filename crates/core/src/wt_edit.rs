@@ -1114,6 +1114,32 @@ mod tests {
     }
 
     #[test]
+    fn revert_keeps_a_default_profile_the_user_changed_after_us() {
+        let (s, p) = (scheme(), profile());
+        let powershell = "{61c54bbd-c2c6-5271-96e7-009a87ff44bf}";
+        let azure = "{b453ae62-4e3d-5e58-b989-0a998ec441b8}";
+        let e = apply_edit(DEFAULT, &edit(&s, &p, true)).unwrap();
+        let ours = format!("\"defaultProfile\": \"{CMD_PROFILE_GUID}\"");
+        assert!(e.text.contains(&ours));
+        // Unchanged since CMD Studio wrote it: the original comes back.
+        let back = revert(&e.text, &originals(&e), &written(&e), &e.created).unwrap();
+        assert_eq!(
+            read_value(&back, &WtKey::DefaultProfile).unwrap(),
+            Some(json!(powershell))
+        );
+        // Changed by the user afterwards: the user's choice stays.
+        let user_edit = e
+            .text
+            .replace(&ours, &format!("\"defaultProfile\": \"{azure}\""));
+        assert_ne!(user_edit, e.text);
+        let back = revert(&user_edit, &originals(&e), &written(&e), &e.created).unwrap();
+        assert_eq!(
+            read_value(&back, &WtKey::DefaultProfile).unwrap(),
+            Some(json!(azure))
+        );
+    }
+
+    #[test]
     fn revert_everything_after_two_themes_gives_back_the_original() {
         // "Revert everything" passes the first original and the last write of each
         // key over several applies. The first apply writes `font` whole; the next,
