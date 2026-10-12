@@ -1,0 +1,13 @@
+{
+  "colorScheme": "CMD Studio",
+  "commandline": "%SystemRoot%\\System32\\cmd.exe",
+  "cursorShape": "filledBox",
+  "font": {
+    "face": "Cascadia Mono",
+    "size": 12
+  },
+  "icon": "✻",
+  "opacity": 96,
+  "padding": "14, 10",
+  "useAcrylic": true
+}

@@ -1,0 +1,20 @@
+[package]
+name = "cmdstudio-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_path_to_error = "0.1"
+thiserror = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+schemars = { version = "1", features = ["uuid1"] }
+
+[dev-dependencies]
+proptest = "1"
+mlua = { version = "0.10", features = ["lua52", "vendored"] }

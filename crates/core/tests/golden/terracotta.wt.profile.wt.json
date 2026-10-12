@@ -1,0 +1,13 @@
+{
+  "colorScheme": "CMD Studio",
+  "commandline": "%SystemRoot%\\System32\\cmd.exe /k \"\"C:\\Users\\3607~1\\AppData\\Local\\AIRESI~1.CMD\\runtime\\clink-1.9.34\\clink_x64.exe\" inject --quiet --profile \"C:\\Users\\ผู้ทดสอบ ไทย\\AppData\\Local\\ai.resincore.cmdstudio\\clink-profile\"\"",
+  "cursorShape": "filledBox",
+  "font": {
+    "face": "Cascadia Mono",
+    "size": 12
+  },
+  "icon": "✻",
+  "opacity": 96,
+  "padding": "14, 10",
+  "useAcrylic": true
+}

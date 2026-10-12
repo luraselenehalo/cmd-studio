@@ -1,0 +1,284 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Theme",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "description": "Where editors find the JSON Schema of this file. Optional; CMD Studio reads it,\nignores it and does not write it back.",
+      "type": "string",
+      "writeOnly": true
+    },
+    "author": {
+      "type": "string",
+      "default": "",
+      "maxLength": 64
+    },
+    "banner": {
+      "$ref": "#/$defs/BannerSettings"
+    },
+    "colors": {
+      "$ref": "#/$defs/Colors"
+    },
+    "id": {
+      "description": "A random (version 4) UUID, written as 8-4-4-4-12 hexadecimal digits with hyphens.\nAn import that clashes with an existing theme gets a new one.",
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+    },
+    "name": {
+      "type": "string",
+      "maxLength": 64,
+      "minLength": 1
+    },
+    "prompt": {
+      "$ref": "#/$defs/PromptSettings"
+    },
+    "schemaVersion": {
+      "description": "The version of the file format.",
+      "type": "integer",
+      "maximum": 1,
+      "minimum": 1
+    },
+    "simple": {
+      "description": "The inputs of simple mode; null once any color has been edited by hand.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SimpleRecipe"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "terminal": {
+      "$ref": "#/$defs/TerminalSettings"
+    },
+    "tone": {
+      "$ref": "#/$defs/Tone"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "id",
+    "name",
+    "tone",
+    "colors",
+    "terminal",
+    "prompt",
+    "banner"
+  ],
+  "$defs": {
+    "BannerSettings": {
+      "description": "The welcome box printed when cmd starts. `title` and `lines` may use the variables\n`{user}`, `{host}`, `{cwd}`, `{date}` and `{time}`; any other `{word}` stays as written.",
+      "type": "object",
+      "properties": {
+        "clearLogo": {
+          "type": "boolean"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "lines": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 80
+          },
+          "maxItems": 4
+        },
+        "tips": {
+          "type": "boolean"
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 80
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "title",
+        "lines",
+        "tips",
+        "clearLogo"
+      ]
+    },
+    "Color": {
+      "type": "string",
+      "pattern": "^#[0-9a-fA-F]{6}$"
+    },
+    "Colors": {
+      "description": "The 23 colors of a theme. `ansi` uses the standard order: black, red,\ngreen, yellow, blue, magenta, cyan, white, then the 8 bright variants.",
+      "type": "object",
+      "properties": {
+        "accent": {
+          "$ref": "#/$defs/Color"
+        },
+        "ansi": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Color"
+          },
+          "maxItems": 16,
+          "minItems": 16
+        },
+        "background": {
+          "$ref": "#/$defs/Color"
+        },
+        "cursor": {
+          "$ref": "#/$defs/Color"
+        },
+        "foreground": {
+          "$ref": "#/$defs/Color"
+        },
+        "frame": {
+          "$ref": "#/$defs/Color"
+        },
+        "muted": {
+          "$ref": "#/$defs/Color"
+        },
+        "selection": {
+          "$ref": "#/$defs/Color"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "background",
+        "foreground",
+        "cursor",
+        "selection",
+        "accent",
+        "muted",
+        "frame",
+        "ansi"
+      ]
+    },
+    "CursorShape": {
+      "type": "string",
+      "enum": [
+        "filledBox",
+        "bar",
+        "underscore"
+      ]
+    },
+    "Layout": {
+      "type": "string",
+      "enum": [
+        "box",
+        "line",
+        "powerline"
+      ]
+    },
+    "PromptSettings": {
+      "type": "object",
+      "properties": {
+        "layout": {
+          "$ref": "#/$defs/Layout"
+        },
+        "segments": {
+          "description": "Shown in list order; each segment may appear once.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Segment"
+          },
+          "uniqueItems": true
+        },
+        "transient": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "layout",
+        "segments",
+        "transient"
+      ]
+    },
+    "Segment": {
+      "type": "string",
+      "enum": [
+        "path",
+        "git",
+        "time",
+        "user",
+        "host",
+        "status",
+        "duration"
+      ]
+    },
+    "SimpleRecipe": {
+      "description": "Inputs of simple mode, kept so the theme can be edited there again.",
+      "type": "object",
+      "properties": {
+        "accent": {
+          "$ref": "#/$defs/Color"
+        },
+        "tint": {
+          "type": "number",
+          "maximum": 0.3,
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "accent",
+        "tint"
+      ]
+    },
+    "TerminalSettings": {
+      "type": "object",
+      "properties": {
+        "acrylic": {
+          "type": "boolean"
+        },
+        "cursorShape": {
+          "$ref": "#/$defs/CursorShape"
+        },
+        "font": {
+          "description": "Font family name. When it is not installed, Windows Terminal gets the bundled fallback font.",
+          "type": "string",
+          "maxLength": 64,
+          "minLength": 1
+        },
+        "fontSize": {
+          "type": "integer",
+          "maximum": 32,
+          "minimum": 8
+        },
+        "opacity": {
+          "type": "integer",
+          "maximum": 100,
+          "minimum": 30
+        },
+        "padding": {
+          "description": "`[horizontal, vertical]`.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "maximum": 40,
+            "minimum": 0
+          },
+          "maxItems": 2,
+          "minItems": 2
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "font",
+        "fontSize",
+        "cursorShape",
+        "opacity",
+        "acrylic",
+        "padding"
+      ]
+    },
+    "Tone": {
+      "type": "string",
+      "enum": [
+        "dark",
+        "light"
+      ]
+    }
+  }
+}

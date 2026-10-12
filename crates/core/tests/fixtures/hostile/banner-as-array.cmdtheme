@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "id": "2f0c8f0e-6a8e-4b7e-9a4f-3f1f0b9c1d2e",
+  "name": "Terracotta ของฉัน",
+  "author": "",
+  "tone": "dark",
+  "simple": { "accent": "#d97757", "tint": 0.10 },
+  "colors": {
+    "background": "#1f1e1d",
+    "foreground": "#faf9f5",
+    "cursor": "#d97757",
+    "selection": "#4a4845",
+    "accent": "#d97757",
+    "muted": "#8a8780",
+    "frame": "#5f5d58",
+    "ansi": [
+      "#3a3936", "#e5736a", "#8fbf7f", "#e3b66b", "#7fa7d9", "#b79bdb", "#7fc1b8", "#d8d6cf",
+      "#8a8780", "#f0907f", "#a8d196", "#eecb8a", "#9bbde8", "#cbb4e8", "#9dd3cb", "#faf9f5"
+    ]
+  },
+  "terminal": {
+    "font": "Cascadia Mono",
+    "fontSize": 12,
+    "cursorShape": "filledBox",
+    "opacity": 96,
+    "acrylic": true,
+    "padding": [14, 10]
+  },
+  "prompt": {
+    "layout": "box",
+    "segments": ["path", "git", "time"],
+    "transient": true
+  },
+  "banner": [true, "Welcome back, {user}!", ["cwd: {cwd}"], true, true]
+}
