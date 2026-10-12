@@ -1,0 +1,92 @@
+# CI on a throwaway Windows runner: format, three clippy runs, the pinned runtimes,
+# the normal tests, then the system tests that change this runner's real AutoRun and fonts.
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the toolchain pinned in rust-toolchain.toml
+        run: |
+          rustup --version
+          rustup toolchain install
+          cargo --version
+      - name: Format
+        run: cargo fmt --all -- --check
+      # The fake adapters sit behind the core's `fake` feature, which only the CLI's
+      # dev-dependency turns on. So the first run below lints the core WITH the fakes (a
+      # workspace build unifies the feature), the second WITHOUT them, as a release build
+      # sees the core, and the third names the feature itself, so it does not depend on
+      # the CLI's dev-dependency.
+      - name: Clippy of the workspace (the core with the fake adapters, through the CLI's dev-dependency)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Clippy of the core alone, as a release build sees it (no fake adapters)
+        run: cargo clippy -p cmdstudio-core --all-targets -- -D warnings
+      - name: Clippy of the core alone, with --features fake
+        run: cargo clippy -p cmdstudio-core --all-targets --features fake -- -D warnings
+      # The pins (URLs and SHA-256) live in scripts/fetch-resources.ps1, which also writes
+      # resources/manifest.json. A new pin changes the script, so the key changes and the
+      # next run downloads again.
+      - name: Cache the pinned runtimes and font
+        uses: actions/cache@v4
+        with:
+          path: resources
+          key: resources-${{ runner.os }}-${{ hashFiles('scripts/fetch-resources.ps1') }}
+      # Runs after a cache hit too, on purpose: the script compares every file in
+      # resources/ with its pinned SHA-256 and prints "resources are complete: ..." when
+      # all match, and it downloads again (also hash-checked) when one is missing or
+      # different. A partial or tampered cache is therefore refused, never trusted.
+      - name: Fetch the pinned runtimes and font
+        shell: powershell
+        run: ./scripts/fetch-resources.ps1
+      # `cargo test --workspace` builds the core with the `fake` feature (see above). The
+      # second step builds it without, so code that needs the fakes without being marked
+      # cfg(feature = "fake") fails here. Two steps, not two lines of one: PowerShell
+      # reports only the last command's exit code, so a failure in the first would be lost.
+      - name: Tests
+        run: cargo test --workspace
+      - name: Tests of the core alone (no fake adapters)
+        run: cargo test -p cmdstudio-core
+      - name: System tests (this runner's real AutoRun, fonts and bundled runtimes)
+        shell: bash
+        env:
+          # Exactly '1': any other value skips the test and prints SKIPPED. The system
+          # tests (crates/cli/tests/system.rs, system_real_autorun_round_trips,
+          # system_real_font_install_and_remove) and the symlink test read the first; the
+          # Oh My Posh render test (crates/core/tests/omp_render.rs) has a gate of its own.
+          CMDSTUDIO_SYSTEM_TESTS: '1'
+          CMDSTUDIO_OMP_TESTS: '1'
+          # The log is an artifact for people to read, so no colour codes in it.
+          CARGO_TERM_COLOR: never
+        run: |
+          # GitHub starts `shell: bash` as `bash --noprofile --norc -eo pipefail {0}`: with
+          # pipefail a failing `cargo test` fails this step even though `tee` succeeds.
+          # --test-threads=1 keeps the tests that touch this runner's AutoRun and fonts from
+          # overlapping; --nocapture shows the SKIPPED lines tests print; 2>&1 puts stderr in
+          # the log too.
+          cargo test --workspace -- --test-threads=1 --nocapture 2>&1 | tee system-tests.txt
+          # CI is where the gated tests prove themselves: a SKIPPED line anywhere means one
+          # did not run. grep -n prints each line it finds.
+          if grep -n SKIPPED system-tests.txt; then
+            echo "::error::a test printed SKIPPED in the system-test run (lines above); every test must run here"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: system-tests-log
+          path: system-tests.txt
+          if-no-files-found: ignore
