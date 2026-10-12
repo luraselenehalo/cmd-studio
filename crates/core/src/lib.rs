@@ -11,6 +11,7 @@ pub mod plan;
 pub mod presets;
 pub mod resources;
 pub mod schema;
+pub mod snapshot;
 pub mod state;
 pub mod text;
 pub mod txn;
