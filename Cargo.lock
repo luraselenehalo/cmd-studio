@@ -122,6 +122,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cmdstudio-cli"
+version = "0.1.0"
+dependencies = [
+ "cmdstudio-core",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "cmdstudio-core"
 version = "0.1.0"
 dependencies = [
