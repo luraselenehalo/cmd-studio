@@ -15,8 +15,8 @@
 //! person can finish it, how, in English and in Thai; it is never reported as done, and nothing
 //! of the user's is deleted, nor the only record of what the user's settings were.
 use crate::actions::{
-    begin, delete_pending, delete_pending_and_save, latest_record, next_id, rebuilt_incomplete,
-    record_incomplete, ActionError, Ctx, StartReport,
+    begin, delete_pending, delete_pending_and_save, latest_record, latest_record_or_why, next_id,
+    rebuilt_incomplete, record_incomplete, ActionError, Ctx, StartReport,
 };
 use crate::adapters::{program_data_dir, DirEntry, DirState, RegText, RegValue, System};
 use crate::exec::{
@@ -26,7 +26,7 @@ use crate::generate::wt::CMD_PROFILE_GUID;
 use crate::plan::autorun::{is_foreign, remove_ours, scan};
 use crate::plan::{Op, Paths, PlanError, AUTORUN_NOT_TEXT, AUTORUN_NOT_TEXT_TH, NERD_FONT_FAMILY};
 use crate::snapshot::{
-    Incomplete, Manifest, SetAside, SnapshotKind, SnapshotStore, Unrestored, KEEP,
+    Incomplete, Manifest, SetAside, SnapshotKind, SnapshotStore, UnreadableKind, Unrestored, KEEP,
 };
 use crate::state::{
     AutoRunRecord, Baseline, FontRecord, RegValueRecord, State, StateError, Was, WtFileBaseline,
@@ -189,14 +189,16 @@ pub fn autorun_after_revert(
 /// Undoes everything CMD Studio changed, key by key (the "ย้อนทุกอย่าง" button, spec §4.3),
 /// under the lock that apply and undo take; the font files earlier runs left to delete are
 /// tried again first. Refused, with nothing changed, while another run holds the lock
-/// (`E_BUSY`), while a transaction a crash cut off cannot be checked yet (`E_SNAPSHOT_READ`),
+/// (`E_BUSY`), while a transaction a crash cut off cannot be checked yet, or the record of a
+/// rollback that did not finish cannot be read now (`E_SNAPSHOT_READ`, see `pending_record`),
 /// and while state.json cannot be read now, is from a newer CMD Studio, or is damaged and
 /// cannot be set aside (`E_STATE_INVALID`): such a state.json is never renamed or written over.
 /// The record of a rollback that did not finish is settled after the revert (see [`Report`]):
 /// what is still CMD Studio's goes into the record of the revert's own restore point, so later
 /// starts keep reporting it.
 pub fn revert_all(sys: System<'_>, ctx: &Ctx) -> Result<Report, ActionError> {
-    let (_lock, start) = begin(sys, ctx)?;
+    let (_lock, mut start) = begin(sys, ctx)?;
+    pending_record(sys, ctx, &mut start, "nothing was reverted")?;
     let mut report = Report::new(start);
     let (state, _) = load_state(sys, ctx, &mut report)?;
     revert_steps(sys, ctx, state, &mut report);
@@ -209,7 +211,9 @@ pub fn revert_all(sys: System<'_>, ctx: &Ctx) -> Result<Report, ActionError> {
 ///
 /// - It stops before deleting anything while another run holds the lock (`E_BUSY`) or a
 ///   transaction a crash cut off cannot be checked yet (`E_SNAPSHOT_READ`): its restore point
-///   may be the only copy of the user's values. Restore points set aside never stop it.
+///   may be the only copy of the user's values. So it does while the record of a rollback that
+///   did not finish cannot be read now (`E_SNAPSHOT_READ`, see `pending_record`). Restore points
+///   set aside never stop it.
 /// - A revert whose transaction rolls back stops it too: nothing is deleted.
 /// - A state.json that cannot be used stops only the revert (a failed step); the folders still
 ///   go, but the data folder stays whole while it holds a state.json from a newer CMD Studio.
@@ -228,7 +232,8 @@ pub fn revert_all(sys: System<'_>, ctx: &Ctx) -> Result<Report, ActionError> {
 /// - The lock file goes last, once the lock is let go: Windows refuses to delete a file opened
 ///   the way the lock opens it.
 pub fn cleanup(sys: System<'_>, ctx: &Ctx, remove_themes: bool) -> Result<Report, ActionError> {
-    let (lock, start) = begin(sys, ctx)?;
+    let (lock, mut start) = begin(sys, ctx)?;
+    pending_record(sys, ctx, &mut start, "nothing was reverted or deleted")?;
     // What the start could not do or read may leave the records the only copy of the user's
     // values: its code, when there is such a thing. The restore points it found it cannot read
     // are found again on disk by `records_in_doubt`, by this run and every later one.
@@ -314,6 +319,36 @@ pub fn cleanup(sys: System<'_>, ctx: &Ctx, remove_themes: bool) -> Result<Report
     drop(lock);
     remove_lock_and_folder(sys, ctx, &mut report);
     Ok(report)
+}
+
+/// The record of a rollback that did not finish, read again before Revert everything or
+/// `--cleanup` changes anything, as undo does (spec §5.5, §6.3). One that cannot be read now (a
+/// scanner or another program holds it, or the restore points cannot be listed) refuses the
+/// command with `E_SNAPSHOT_READ`: its transaction would make a newer restore point, and the
+/// record would never be said again. A damaged one, which will not mend, does not: the start
+/// said it, and `--cleanup` keeps the records while it is on disk (`records_in_doubt`).
+fn pending_record(
+    sys: System<'_>,
+    ctx: &Ctx,
+    start: &mut StartReport,
+    nothing_done: &str,
+) -> Result<(), ActionError> {
+    let root = ctx.paths.snapshots();
+    match latest_record_or_why(&SnapshotStore::new(sys.fs, &root)) {
+        Ok(record) => start.incomplete = record.map(|(record, _)| record),
+        Err((UnreadableKind::CouldNotRead, f)) => {
+            return Err(ActionError::Snapshot(Failure {
+                code: f.code,
+                message: format!(
+                    "the record of what the last rollback left to fix by hand cannot be read \
+                     right now, so {nothing_done}: a revert now would hide it ({})",
+                    f.message
+                ),
+            }))
+        }
+        Err((UnreadableKind::Missing | UnreadableKind::Damaged, _)) => {}
+    }
+    Ok(())
 }
 
 /// state.json for a revert, and whether it was damaged. One that cannot be read now, or is from
@@ -3111,20 +3146,71 @@ mod tests {
 
     #[test]
     fn what_the_start_found_is_a_failed_step_with_its_code() {
-        // The record of a rollback that did not finish cannot be read: said, not dropped.
+        // The record of a rollback that did not finish is damaged, which will not mend: said,
+        // not dropped. (One that cannot be read now stops the revert instead.)
         let (m, ctx) = machine();
         apply(&m, &ctx, Target::All);
         let id = apply_that_cannot_roll_back(&m, &later(&ctx, 1));
-        m.fs.fail_reads_of(ctx.paths.snapshots().join(&id).join("incomplete.json"));
+        m.fs.put(
+            ctx.paths.snapshots().join(&id).join("incomplete.json"),
+            b"{ damaged",
+        );
         let report = revert_all(m.system(), &later(&ctx, 2)).unwrap();
         assert!(
             failed(&report, "E_SNAPSHOT_READ")
                 .iter()
-                .any(|s| s.detail.contains("incomplete.json")),
+                .any(|s| s.detail.contains("incomplete.json is damaged")),
             "{report:?}"
         );
         assert!(report.start.problems.is_empty(), "moved into the steps");
         assert!(!report.ok());
+    }
+
+    #[test]
+    fn a_pending_record_that_cannot_be_read_now_stops_revert_all_and_cleanup() {
+        // A scanner holds incomplete.json: a revert now would make a newer restore point, and
+        // the record would never be said again. Nothing changes, and no restore point is made.
+        let (m, ctx) = machine();
+        apply(&m, &ctx, Target::All);
+        let id = apply_that_cannot_roll_back(&m, &later(&ctx, 1));
+        let file = ctx.paths.snapshots().join(&id).join("incomplete.json");
+        m.fs.fail_reads_of(&file);
+        let store = |m: &FakeMachine| {
+            SnapshotStore::new(&m.fs, &ctx.paths.snapshots())
+                .ids()
+                .unwrap()
+        };
+        let before = (everything(&m, &ctx), store(&m));
+        let e = revert_all(m.system(), &later(&ctx, 2)).unwrap_err();
+        assert_eq!(e.code(), "E_SNAPSHOT_READ", "{e:?}");
+        let text = e.to_string();
+        assert!(text.contains("incomplete.json"), "{text}");
+        assert!(text.contains("nothing was reverted"), "{text}");
+        assert_eq!((everything(&m, &ctx), store(&m)), before);
+        for remove_themes in [false, true] {
+            let e = cleanup(m.system(), &later(&ctx, 3), remove_themes).unwrap_err();
+            assert_eq!(e.code(), "E_SNAPSHOT_READ", "{e:?}");
+            assert!(
+                e.to_string().contains("nothing was reverted or deleted"),
+                "{e}"
+            );
+            assert_eq!((everything(&m, &ctx), store(&m)), before);
+        }
+        // Once it can be read, Revert everything runs, and the record's steps are settled.
+        m.fs.stop_failing(&file);
+        let report = revert_all(m.system(), &later(&ctx, 4)).unwrap();
+        assert_eq!(
+            report.start.incomplete.as_ref().map(|r| r.id.as_str()),
+            Some(id.as_str())
+        );
+        assert!(
+            report
+                .steps
+                .iter()
+                .any(|s| s.ok && s.what.contains("init.lua") && s.what.contains(&id)),
+            "{report:?}"
+        );
+        assert_eq!(autorun_text(&m), None);
     }
 
     // ---- Only our part of AutoRun goes (spec §6.3 step 1). ----

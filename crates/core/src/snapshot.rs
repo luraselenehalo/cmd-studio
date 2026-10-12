@@ -554,12 +554,26 @@ impl<'a> SnapshotStore<'a> {
     /// The `incomplete.json` of restore point `id`, newest or not; `None` when it has none. One
     /// that cannot be read, or is damaged, is an error (`E_SNAPSHOT_READ`).
     pub fn incomplete(&self, id: &str) -> Result<Option<Incomplete>, Failure> {
+        self.read_incomplete(id).map_err(|(_, failure)| failure)
+    }
+
+    /// [`SnapshotStore::incomplete`], with what kind of trouble keeps a record from being read:
+    /// [`UnreadableKind::CouldNotRead`] when the read itself failed (a lock, a scan, a
+    /// permission: it may pass), [`UnreadableKind::Damaged`] when it is not valid.
+    pub fn read_incomplete(
+        &self,
+        id: &str,
+    ) -> Result<Option<Incomplete>, (UnreadableKind, Failure)> {
         let path = self.dir(id).join(INCOMPLETE);
-        match self.fs.read(&path).map_err(read_fail)? {
-            None => Ok(None),
-            Some(bytes) => serde_json::from_slice(&bytes)
-                .map(Some)
-                .map_err(|e| read_fail(format!("{} is damaged: {e}", path.display()))),
+        match self.fs.read(&path) {
+            Err(e) => Err((UnreadableKind::CouldNotRead, read_fail(e))),
+            Ok(None) => Ok(None),
+            Ok(Some(bytes)) => serde_json::from_slice(&bytes).map(Some).map_err(|e| {
+                (
+                    UnreadableKind::Damaged,
+                    read_fail(format!("{} is damaged: {e}", path.display())),
+                )
+            }),
         }
     }
 }

@@ -2045,6 +2045,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn cleanup_waits_while_the_record_of_an_unfinished_rollback_cannot_be_read() {
+        for lang in [Lang::En, Lang::Th] {
+            let (mut m, d) = machine();
+            if lang == Lang::Th {
+                m.host.info.ui_language = LANG_THAI;
+            }
+            let init = d.data_dir.join(r"generated\init.lua");
+            m.fs.put(&init, b"old");
+            m.fs.fail_writes_to(&init);
+            assert_eq!(cli(&m, &d, &["apply", THEME]).0, EXIT_INCOMPLETE);
+            m.fs.stop_failing(&init);
+            let point = m.fs.list_dir(&d.data_dir.join("snapshots")).unwrap()[0]
+                .path
+                .clone();
+            m.fs.fail_reads_of(point.join("incomplete.json"));
+            let before = (m.fs.snapshot().0.len(), m.autorun.snapshot(), m.fs.file(WT));
+            let (code, out, err) = cli(&m, &later(&d, 1), &["--cleanup"]);
+            assert_eq!(code, EXIT_FAILED, "{out}{err}");
+            assert!(err.contains("E_SNAPSHOT_READ: "), "{err}");
+            let next = match lang {
+                Lang::En => "Your settings were not changed. Try again in a moment",
+                Lang::Th => "ยังไม่ได้เปลี่ยนการตั้งค่าของคุณ ลองใหม่อีกครั้งในอีกสักครู่",
+            };
+            assert!(err.contains(next), "{err}");
+            assert_eq!(
+                (m.fs.snapshot().0.len(), m.autorun.snapshot(), m.fs.file(WT)),
+                before
+            );
+            assert!(m.fs.exists(&point.join("journal.json")), "nothing deleted");
+        }
+    }
+
     /// A transaction a crash cut off whose journal can't be read now, newer than any restore
     /// point the tests' commands make before it. Returns its id.
     fn crashed_and_unreadable(m: &FakeMachine, d: &Defaults) -> String {

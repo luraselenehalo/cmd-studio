@@ -783,10 +783,22 @@ pub fn pending_incomplete(sys: System<'_>, ctx: &Ctx) -> Result<Option<Incomplet
 pub(crate) fn latest_record(
     store: &SnapshotStore<'_>,
 ) -> Result<Option<(Incomplete, bool)>, Failure> {
-    let Some(id) = store.latest_ran()? else {
+    latest_record_or_why(store).map_err(|(_, failure)| failure)
+}
+
+/// [`latest_record`], with what kind of trouble keeps the record from being read: the restore
+/// points could not be listed, or `incomplete.json` could not be read now, is
+/// [`UnreadableKind::CouldNotRead`]; a record that is not valid is [`UnreadableKind::Damaged`].
+pub(crate) fn latest_record_or_why(
+    store: &SnapshotStore<'_>,
+) -> Result<Option<(Incomplete, bool)>, (UnreadableKind, Failure)> {
+    let Some(id) = store
+        .latest_ran()
+        .map_err(|f| (UnreadableKind::CouldNotRead, f))?
+    else {
         return Ok(None);
     };
-    Ok(match store.incomplete(&id)? {
+    Ok(match store.read_incomplete(&id)? {
         Some(record) => Some((record, true)),
         None => rebuilt_incomplete(store, &id).map(|record| (record, false)),
     })
