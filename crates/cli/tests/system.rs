@@ -114,6 +114,8 @@ struct Places {
     /// `%ProgramData%\ai.resincore.cmdstudio-<SID>`, where Clink goes when the data folder's
     /// path is not all ASCII and has no 8.3 name (G19).
     program_data: PathBuf,
+    /// Clink's runtime folder inside it, `clink-<version>`.
+    program_data_clink: PathBuf,
 }
 
 /// Everything the test changes or looks at, as it is now.
@@ -132,8 +134,9 @@ struct Snapshot {
     font_key: bool,
     font_dir: bool,
     font_file: bool,
-    /// Whether the user's own ProgramData folder exists.
+    /// Whether the user's own ProgramData folder exists, and Clink's runtime folder in it.
     program_data: bool,
+    program_data_clink: bool,
 }
 
 /// Reads the machine. An `Err` is a read that failed, said in words.
@@ -161,6 +164,7 @@ fn snapshot(sys: System<'_>, at: &Places) -> Result<Snapshot, String> {
         font_dir: sys.fs.is_dir(&at.font_dir),
         font_file: sys.fs.exists(&at.font_file),
         program_data: sys.fs.is_dir(&at.program_data),
+        program_data_clink: sys.fs.is_dir(&at.program_data_clink),
     })
 }
 
@@ -178,8 +182,23 @@ fn show_font(v: &Option<String>) -> &str {
     v.as_deref().unwrap_or("no registration")
 }
 
+/// Font family names for a person to read: each as written, not `{:?}`, which escapes the
+/// combining marks of Thai names.
+fn show_names(names: &[&String]) -> String {
+    if names.is_empty() {
+        return "(none)".to_string();
+    }
+    names
+        .iter()
+        .map(|n| n.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 impl Snapshot {
-    /// Panics, naming what differs, unless the machine is exactly as `before` found it.
+    /// Panics, naming what differs, unless what `undo` itself puts back is as `before` found
+    /// it. The font file and the fonts folder are left out: Windows may still hold the file
+    /// when `undo` ends, and `assert_font_file_same_as` checks them after the retries.
     fn assert_same_as(&self, before: &Snapshot) {
         assert!(
             self.autorun_key == before.autorun_key && self.autorun == before.autorun,
@@ -205,7 +224,9 @@ impl Snapshot {
             .collect();
         assert!(
             added.is_empty() && removed.is_empty(),
-            "the font list changed: added {added:?}, removed {removed:?}"
+            "the font list changed: added: {}; removed: {}",
+            show_names(&added),
+            show_names(&removed)
         );
         assert!(
             self.font_registration == before.font_registration,
@@ -215,12 +236,15 @@ impl Snapshot {
         );
         for (what, now, was) in [
             ("the per-user font key", self.font_key, before.font_key),
-            ("the per-user fonts folder", self.font_dir, before.font_dir),
-            ("the font file", self.font_file, before.font_file),
             (
                 "the user's ProgramData folder",
                 self.program_data,
                 before.program_data,
+            ),
+            (
+                "Clink's runtime folder in the user's ProgramData folder",
+                self.program_data_clink,
+                before.program_data_clink,
             ),
         ] {
             assert!(
@@ -230,6 +254,38 @@ impl Snapshot {
                 if now { "exists" } else { "does not exist" }
             );
         }
+    }
+
+    /// Panics unless the font file is as `before` found it. `retries` is how many times `undo`
+    /// was run again to delete a file Windows held.
+    fn assert_font_file_same_as(&self, before: &Snapshot, retries: u32) {
+        assert!(
+            !(self.font_file && !before.font_file),
+            "the font file is still there after undo, and still held after {retries} retries of \
+             the pending delete (undo run again each time)"
+        );
+        assert!(
+            self.font_file == before.font_file,
+            "the font file was there before the test and is gone after undo"
+        );
+    }
+
+    /// Panics unless the per-user fonts folder exists, or not, as it did before.
+    fn assert_font_dir_same_as(&self, before: &Snapshot) {
+        assert!(
+            self.font_dir == before.font_dir,
+            "the per-user fonts folder is not back: before it {}, now it {}",
+            if before.font_dir {
+                "existed"
+            } else {
+                "did not exist"
+            },
+            if self.font_dir {
+                "exists"
+            } else {
+                "does not exist"
+            }
+        );
     }
 }
 
@@ -311,7 +367,14 @@ impl Restore<'_> {
                 sys.fonts.delete_registration_key_if_empty(),
             );
         }
-        // The user's own folder under ProgramData, with Clink in it, only if the test made it.
+        // Clink's runtime folder in the user's own folder under ProgramData, and that folder
+        // itself, each only if the test made it.
+        if !before.program_data_clink && sys.fs.exists(&at.program_data_clink) {
+            step(
+                "delete Clink's runtime folder in ProgramData",
+                sys.fs.remove_dir_all(&at.program_data_clink),
+            );
+        }
         if !before.program_data && sys.fs.exists(&at.program_data) {
             step(
                 "delete the ProgramData folder",
@@ -355,8 +418,8 @@ fn system_apply_doctor_undo_is_byte_identical() {
     // A font no machine has, so the bundled CaskaydiaCove NF really gets installed.
     let preset = std::fs::read_to_string(repo(r"presets\terracotta.cmdtheme")).unwrap();
     let swapped = preset.replace("\"Cascadia Mono\"", "\"CMD Studio Missing Font\"");
-    assert_ne!(
-        swapped, preset,
+    assert!(
+        swapped != preset,
         "the preset no longer names Cascadia Mono, so no font would be installed"
     );
     let theme = tmp.path().join("ธีม ทดสอบ.cmdtheme");
@@ -410,6 +473,7 @@ fn system_apply_doctor_undo_is_byte_identical() {
         font_dir: fonts.user_fonts_dir(),
         font_file,
         font_value,
+        program_data_clink: program_data.join(format!("clink-{CLINK_VERSION}")),
         program_data,
     };
 
@@ -418,13 +482,26 @@ fn system_apply_doctor_undo_is_byte_identical() {
         resources,
         now_ms: now_ms(),
     };
-    apply_doctor_undo(sys, &at, &d, &theme);
+    apply_doctor_undo(sys, &at, &d, &theme, &mut || {
+        std::thread::sleep(RETRY_EVERY)
+    });
 }
+
+/// How many times `undo` is run again for a font file Windows still holds, and how long
+/// `apply_doctor_undo` waits before each.
+const FONT_RETRIES: u32 = 10;
+const RETRY_EVERY: Duration = Duration::from_secs(1);
 
 /// `apply`, `doctor --json` and `undo` of `theme` on `sys`, and the proof that the machine is
 /// exactly as it was before. A guard made before the first change repairs a run that fails
-/// half way.
-fn apply_doctor_undo(sys: System<'_>, at: &Places, d: &Defaults, theme: &Path) {
+/// half way. `pause` is called before each retry of the pending font delete (see below).
+fn apply_doctor_undo(
+    sys: System<'_>,
+    at: &Places,
+    d: &Defaults,
+    theme: &Path,
+    pause: &mut dyn FnMut(),
+) {
     let before = snapshot(sys, at).unwrap();
     // Created before the first change: from here on, whatever happens, the machine comes back.
     let _restore = Restore {
@@ -473,17 +550,51 @@ fn apply_doctor_undo(sys: System<'_>, at: &Places, d: &Defaults, theme: &Path) {
     };
     let undo = cli(sys, &d3, &[OsStr::new("undo")]);
     assert_eq!(undo.code, EXIT_OK, "{}", undo.log());
-    // Back to before, checked here as well as by the guard (which only repairs a failed run).
+    // What undo itself puts back, checked at once: AutoRun, settings.json, the font list, the
+    // font registration and key, the ProgramData folders.
     snapshot(sys, at).unwrap().assert_same_as(&before);
-    // The runtimes are gone wherever apply put them: under the data folder, or (VM-C) under ProgramData.
+    // The font file is another matter. `undo` deletes it once (exec `remove_font`); when Windows,
+    // a virus scanner or the font cache still holds the fresh file, that fails, the file is
+    // noted in state.json, and the delete is tried again at the start of the next command that
+    // changes the machine (actions `delete_pending`), while `undo` still ends with EXIT_OK. So
+    // the product's own retry is run: `undo` again, which finds nothing to undo ("Nothing to
+    // undo.", `UndoResult::NothingToUndo`, EXIT_OK) after it has tried the pending delete.
+    // The file is checked only after that, so a file left for ever is still a failure.
+    let mut retries = 0;
+    while !before.font_file && sys.fs.exists(&at.font_file) && retries < FONT_RETRIES {
+        pause();
+        retries += 1;
+        let again = Defaults {
+            now_ms: d.now_ms + 2 + u64::from(retries),
+            ..d.clone()
+        };
+        let run = cli(sys, &again, &[OsStr::new("undo")]);
+        assert_eq!(run.code, EXIT_OK, "{}", run.log());
+    }
+    let now = snapshot(sys, at).unwrap();
+    now.assert_font_file_same_as(&before, retries);
+    if retries > 0 && now.font_dir && !before.font_dir {
+        // The file was held, so undo could not remove the fonts folder apply made (exec
+        // `remove_font` tries once, and the retry above deletes only the file). The empty folder
+        // is not a leaked font, so it may stay; anything in it may not.
+        let left = sys.fs.list_dir(&at.font_dir).unwrap();
+        assert!(
+            left.is_empty(),
+            "the per-user fonts folder, which did not exist before, still holds {} entries after undo",
+            left.len()
+        );
+        println!(
+            "note: undo could not delete the font file at first; it was deleted after {retries} retries, and the empty per-user fonts folder stays"
+        );
+    } else {
+        now.assert_font_dir_same_as(&before);
+    }
+    // The runtimes under the data folder are gone (Clink's folder in ProgramData, on VM-C, is
+    // part of the snapshot above: gone unless it was there before the test).
     let paths = Paths {
         data: d.data_dir.clone(),
     };
-    for dir in [
-        paths.omp_dir(),
-        paths.clink_dir(),
-        at.program_data.join(format!("clink-{CLINK_VERSION}")),
-    ] {
+    for dir in [paths.omp_dir(), paths.clink_dir()] {
         assert!(
             !sys.fs.exists(&dir),
             "{} is still there after undo",
