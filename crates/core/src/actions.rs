@@ -74,13 +74,23 @@ pub enum ActionError {
         .0.id
     )]
     PendingIncomplete(Incomplete),
+    /// A transaction a crash may have cut off could not be checked: its restore point cannot be
+    /// read right now. Nothing is changed until it can be, and recovered.
+    #[error(
+        "An earlier change could not be checked yet: its restore point cannot be read right now \
+         ({reason}). Nothing was changed; try again in a moment"
+    )]
+    RecoveryPending { reason: String },
 }
 
-/// `E_BUSY` in English (spec §5.9).
-pub const BUSY_EN: &str =
-    "Another CMD Studio is changing this computer right now. Try again when it finishes.";
+/// `E_BUSY` in English (spec §5.9). A virus scanner or an indexer that has the lock file open
+/// for a moment looks the same as another CMD Studio, so both are named.
+pub const BUSY_EN: &str = "Another CMD Studio is changing this computer right now, or another \
+                           program has its file cmdstudio.lock open. Try again in a moment.";
 /// `E_BUSY` in Thai.
-pub const BUSY_TH: &str = "มี CMD Studio อีกตัวกำลังเปลี่ยนการตั้งค่าของเครื่องนี้อยู่ ลองใหม่อีกครั้งเมื่อทำเสร็จแล้ว";
+pub const BUSY_TH: &str = "มี CMD Studio อีกตัวกำลังเปลี่ยนการตั้งค่าของเครื่องนี้อยู่ \
+                           หรือมีโปรแกรมอื่นเปิดไฟล์ cmdstudio.lock ของ CMD Studio ค้างไว้ \
+                           ลองใหม่อีกครั้งในอีกสักครู่";
 
 impl ActionError {
     /// Stable code shown to users (spec §5.9).
@@ -96,6 +106,7 @@ impl ActionError {
             ActionError::Busy => "E_BUSY",
             ActionError::Lock(_) => "E_DATA_WRITE",
             ActionError::PendingIncomplete(_) => "E_ROLLBACK_INCOMPLETE",
+            ActionError::RecoveryPending { .. } => "E_SNAPSHOT_READ",
         }
     }
 
@@ -113,6 +124,10 @@ impl ActionError {
                 "การย้อนกลับของจุดย้อนกลับ {} ทำได้ไม่ครบ จึงยังย้อนกลับไม่ได้ \
                  ให้แก้รายการที่ค้างด้วยมือก่อน แล้วใช้ธีมใหม่ หรือรันคำสั่ง `cmdstudio --cleanup`",
                 record.id
+            )),
+            ActionError::RecoveryPending { reason } => Some(format!(
+                "ยังตรวจการเปลี่ยนแปลงครั้งก่อนไม่ได้ เพราะตอนนี้อ่านจุดย้อนกลับของมันไม่ได้ \
+                 ({reason}) จึงยังไม่ได้เปลี่ยนอะไร ลองใหม่อีกครั้งในอีกสักครู่"
             )),
             ActionError::Resources(_)
             | ActionError::Detect(_)
@@ -157,6 +172,9 @@ pub struct Prepared {
     pub manifest: Manifest,
     /// What the start of this apply found and did, before it planned (see [`StartReport`]).
     pub start: StartReport,
+    /// The data folder and the bundled files it was planned with, whose lock it holds.
+    paths: Paths,
+    resources: Resources,
     lock: FsLock,
 }
 
@@ -189,7 +207,8 @@ pub fn prepare_apply(
     let mut state = State::load(sys.fs, &ctx.paths.state_file())?;
     delete_pending_and_save(sys, ctx, &mut state, &mut start);
     let plan = plan(theme, req, &detected.machine, &ctx.paths)?;
-    let id = new_id(ctx.now_ms);
+    let root = ctx.paths.snapshots();
+    let id = next_id(&SnapshotStore::new(sys.fs, &root), ctx.now_ms);
     let mut generated = BTreeMap::new();
     let mut wt_font = None;
 
@@ -328,6 +347,8 @@ pub fn prepare_apply(
         state_after: state,
         manifest,
         start,
+        paths: ctx.paths.clone(),
+        resources: ctx.resources.clone(),
         lock,
     })
 }
@@ -337,15 +358,33 @@ pub fn prepare_apply(
 /// delete; a rollback that could neither delete nor note one ends `RollbackIncomplete` with that
 /// font among what to fix by hand. A rollback that did not finish is recorded in the restore
 /// point (`incomplete.json`). Prunes old restore points after a commit. The lock that
-/// `prepare_apply` took is let go when this returns.
+/// `prepare_apply` took is let go when this returns. Given a data folder or bundled files other
+/// than those it was prepared with, it changes nothing and ends `RolledBack` (`E_DATA_WRITE`).
 pub fn run_apply(sys: System<'_>, ctx: &Ctx, prepared: Prepared) -> Outcome {
     let Prepared {
         plan,
         ops,
         manifest,
+        paths,
+        resources,
         lock: _lock,
         ..
     } = prepared;
+    // The ops, the lock and the state.json it writes belong to the data folder it was planned
+    // in; another one would get a restore point and a state.json that no lock protects.
+    if ctx.paths != paths || ctx.resources != resources {
+        return Outcome::RolledBack {
+            code: "E_DATA_WRITE",
+            reason: format!(
+                "nothing was changed: this apply was prepared for the data folder {} and the \
+                 bundled files in {}, but was run with {} and {}",
+                paths.data.display(),
+                resources.root.display(),
+                ctx.paths.data.display(),
+                ctx.resources.root.display()
+            ),
+        };
+    }
     let root = ctx.paths.snapshots();
     let store = SnapshotStore::new(sys.fs, &root);
     let id = manifest.id.clone();
@@ -430,7 +469,7 @@ pub fn undo(sys: System<'_>, ctx: &Ctx) -> Result<UndoReport, ActionError> {
         })
         .collect();
     let ops: Vec<Op> = journal.ops.iter().rev().cloned().collect();
-    let id = new_id(ctx.now_ms);
+    let id = next_id(&store, ctx.now_ms);
     let manifest = Manifest {
         id: id.clone(),
         kind: SnapshotKind::Undo,
@@ -492,6 +531,13 @@ pub struct StartReport {
     /// points could not be listed, `incomplete.json` could not be read, a record could not be
     /// written. The command still runs.
     pub problems: Vec<Failure>,
+    /// A transaction may still need rolling back: recovery could not read the newest restore
+    /// point's journal now, and left it for a later start (`recovered` is then
+    /// `RollbackIncomplete` with no failed ops). While it is, a command that changes the machine
+    /// is refused with `E_SNAPSHOT_READ`, because its own restore point would become the newest
+    /// and recovery would never look at the crashed one again. `recover_at_start` (doctor,
+    /// `--cleanup`) reports it and goes on.
+    pub recovery_pending: bool,
 }
 
 /// A restore point that cannot be read, found when a command started.
@@ -517,9 +563,49 @@ pub enum Handled {
 }
 
 /// Takes the lock and does what every command that changes the machine does first (see
-/// [`recover_at_start`]). The lock is held until the returned guard is dropped. Task 14's
-/// revert-all and `--cleanup` start here too.
+/// [`recover_at_start`]). The lock is held until the returned guard is dropped. Refused with
+/// `E_SNAPSHOT_READ` while a transaction waits to be rolled back
+/// ([`StartReport::recovery_pending`]): a new transaction would become the newest restore point,
+/// and recovery would never look at the waiting one again. apply, undo and Task 14's revert-all
+/// start here.
 pub(crate) fn begin(sys: System<'_>, ctx: &Ctx) -> Result<(FsLock, StartReport), ActionError> {
+    let (lock, report) = begin_anyway(sys, ctx)?;
+    if report.recovery_pending {
+        let reason = match &report.recovered {
+            Some(Outcome::RollbackIncomplete { reason, .. }) => reason.clone(),
+            _ => String::new(),
+        };
+        return Err(ActionError::RecoveryPending { reason });
+    }
+    Ok((lock, report))
+}
+
+/// The id of a new restore point, made under the lock: never older than the newest there is, so
+/// restore points keep the order they were made in when the clock goes back. Undo and recovery
+/// go by that order. Only ids of the form `new_id` makes count.
+pub(crate) fn next_id(store: &SnapshotStore<'_>, now_ms: u64) -> String {
+    let newest = store
+        .ids()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|id| {
+            let (ms, _) = id.split_once('-')?;
+            if ms.len() != 13 || !ms.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            ms.parse::<u64>().ok()
+        })
+        .max();
+    new_id(newest.map_or(now_ms, |n| now_ms.max(n.saturating_add(1))))
+}
+
+/// [`begin`] without the refusal: for [`recover_at_start`], which doctor and `--cleanup` run and
+/// which only reports a transaction that waits to be rolled back. A caller that goes on to run
+/// a transaction of its own buries the waiting one (see [`begin`]).
+pub(crate) fn begin_anyway(
+    sys: System<'_>,
+    ctx: &Ctx,
+) -> Result<(FsLock, StartReport), ActionError> {
     let lock = lock(sys, ctx)?;
     Ok((lock, start(sys, ctx)))
 }
@@ -571,17 +657,20 @@ fn start(sys: System<'_>, ctx: &Ctx) -> StartReport {
         Err(f) => report.problems.push(f),
     }
 
-    if let (Some(outcome @ Outcome::RollbackIncomplete { failed, .. }), Some(id)) =
-        (&recovered, &newest)
-    {
+    let newest_set_aside = newest.as_ref().is_some_and(|id| {
+        report
+            .unreadable
+            .iter()
+            .any(|u| u.point.id == *id && u.handled == Handled::SetAside)
+    });
+    if let Some(outcome @ Outcome::RollbackIncomplete { failed, .. }) = &recovered {
         // With no failed ops, the journal itself could not be read and nothing was restored.
         // That is recorded only once the restore point is set aside: one left for a later try
         // is recovered again at the next start, and a record would outlive that recovery.
-        let set_aside = report
-            .unreadable
-            .iter()
-            .any(|u| u.point.id == *id && u.handled == Handled::SetAside);
-        if !failed.is_empty() || set_aside {
+        // Until then the transaction is still waiting to be rolled back.
+        if failed.is_empty() && !newest_set_aside {
+            report.recovery_pending = true;
+        } else if let Some(id) = &newest {
             if let Err(f) = record_incomplete(&store, id, outcome) {
                 report.problems.push(f);
             }
@@ -602,7 +691,7 @@ fn start(sys: System<'_>, ctx: &Ctx) -> StartReport {
 /// what a rollback left for a hand to fix. `E_BUSY` while another run holds the lock: a
 /// recovery then could roll back that run's transaction under it.
 pub fn recover_at_start(sys: System<'_>, ctx: &Ctx) -> Result<StartReport, ActionError> {
-    let (_lock, report) = begin(sys, ctx)?;
+    let (_lock, report) = begin_anyway(sys, ctx)?;
     Ok(report)
 }
 
@@ -617,8 +706,10 @@ pub fn pending_incomplete(sys: System<'_>, ctx: &Ctx) -> Result<Option<Incomplet
 /// Writes `incomplete.json` into restore point `id` when `outcome` is `RollbackIncomplete`:
 /// each op that was not put back, its error, and how to fix it by hand in English and in Thai,
 /// so that this survives a restart (spec §5.5). A step whose op the journal cannot tell is
-/// named `step <n>`, with the shared clean-up advice as its fix. The outcome itself already
-/// says the rollback is incomplete, so a caller that cannot report a failed write may drop it.
+/// named `step <n>`, with the shared clean-up advice as its fix; an outcome with no failed ops
+/// (its journal could not be read at all) gets one such step for the whole change. The outcome
+/// itself already says the rollback is incomplete, so a caller that cannot report a failed
+/// write may drop it.
 pub(crate) fn record_incomplete(
     store: &SnapshotStore<'_>,
     id: &str,
@@ -633,7 +724,7 @@ pub(crate) fn record_incomplete(
         return Ok(());
     };
     let journal = store.journal(id).ok();
-    let steps = failed
+    let mut steps: Vec<Unrestored> = failed
         .iter()
         .map(|(index, failure)| {
             let op = journal.as_ref().and_then(|j| j.ops.get(*index));
@@ -657,6 +748,18 @@ pub(crate) fn record_incomplete(
             }
         })
         .collect();
+    if failed.is_empty() {
+        // The journal itself could not be read, so nothing says which ops ran: the whole change
+        // is the one step (from op 0), with the shared clean-up advice.
+        steps.push(Unrestored {
+            op_index: 0,
+            target: format!("every change of restore point {id}"),
+            code: code.to_string(),
+            message: reason.clone(),
+            fix: CLEANUP_FIX_EN.to_string(),
+            fix_th: CLEANUP_FIX_TH.to_string(),
+        });
+    }
     store.write_incomplete(&Incomplete {
         id: id.to_string(),
         code: code.to_string(),
@@ -685,9 +788,14 @@ fn save_state(fs: &dyn Fs, paths: &Paths, state: &State) -> Result<(), Failure> 
 /// Tries again to delete the font files `state.pending_deletes` lists: a file that is gone
 /// leaves the list, and one still in use stays for a later run. A file that the bundled font's
 /// registration names again is installed, not CMD Studio's to delete: it leaves the list and
-/// stays; one whose registration cannot be read now is not touched. Returns whether the list
-/// changed. Writes nothing itself.
-pub(crate) fn delete_pending(sys: System<'_>, ctx: &Ctx, state: &mut State) -> bool {
+/// stays; one whose registration cannot be read now is not touched, and the failed read goes
+/// into `problems`. Returns whether the list changed. Writes nothing itself.
+pub(crate) fn delete_pending(
+    sys: System<'_>,
+    ctx: &Ctx,
+    state: &mut State,
+    problems: &mut Vec<Failure>,
+) -> bool {
     if state.pending_deletes.is_empty() {
         return false;
     }
@@ -699,7 +807,17 @@ pub(crate) fn delete_pending(sys: System<'_>, ctx: &Ctx, state: &mut State) -> b
                 match sys.fonts.registration(value_name) {
                     Ok(Some(named)) if same_path(Path::new(&named), file) => return false,
                     Ok(_) => {}
-                    Err(_) => return true,
+                    Err(e) => {
+                        problems.push(Failure {
+                            code: "E_MACHINE_READ",
+                            message: format!(
+                                "{} stays on the list of font files to delete later: whether a \
+                                 font registration names it could not be read ({e})",
+                                file.display()
+                            ),
+                        });
+                        return true;
+                    }
                 }
             }
         }
@@ -718,7 +836,7 @@ pub(crate) fn delete_pending_and_save(
     state: &mut State,
     start: &mut StartReport,
 ) {
-    if delete_pending(sys, ctx, state) {
+    if delete_pending(sys, ctx, state, &mut start.problems) {
         if let Err(f) = save_state(sys.fs, &ctx.paths, state) {
             start.problems.push(f);
         }
@@ -878,7 +996,7 @@ pub(crate) mod testing {
 mod tests {
     use super::testing::{machine, request, WT};
     use super::*;
-    use crate::adapters::{AutoRun, Fonts, Fs, RegValue, REG_EXPAND_SZ};
+    use crate::adapters::{AutoRun, Fonts, Fs, RegValue, REG_EXPAND_SZ, REG_SZ};
     use crate::model::Target;
     use crate::plan::NERD_FONT_FAMILY;
     use crate::presets::terracotta;
@@ -1136,6 +1254,12 @@ mod tests {
             assert_eq!(e.to_string(), BUSY_EN);
             assert_eq!(e.message_th().as_deref(), Some(BUSY_TH));
         };
+        // A scanner or an indexer that has the file open looks the same, so the text names the
+        // file and says it may be another program.
+        for text in [BUSY_EN, BUSY_TH] {
+            assert!(text.contains("cmdstudio.lock"), "{text}");
+        }
+        assert!(BUSY_EN.contains("another program"), "{BUSY_EN}");
         busy(
             prepare_apply(
                 m.system(),
@@ -1420,12 +1544,247 @@ mod tests {
             (record.id.as_str(), record.code.as_str()),
             (id.as_str(), "E_SNAPSHOT_READ")
         );
+        // Nothing says which ops ran, so the record's one step is the whole change, with the
+        // shared clean-up advice.
+        assert_eq!(record.steps.len(), 1, "{record:?}");
+        let step = &record.steps[0];
+        assert!(step.target.contains(&id), "{step:?}");
+        assert_eq!(step.code, "E_SNAPSHOT_READ");
+        assert_eq!(
+            (step.fix.as_str(), step.fix_th.as_str()),
+            (CLEANUP_FIX_EN, CLEANUP_FIX_TH)
+        );
+        assert!(
+            !start.recovery_pending,
+            "set aside: it does not stop later commands"
+        );
         let later_start = recover_at_start(m.system(), &later(&ctx, 2)).unwrap();
         assert_eq!(
             later_start.recovered, None,
             "set aside: not recovered again"
         );
         assert_eq!(later_start.incomplete, Some(record));
+    }
+
+    #[test]
+    fn a_crash_that_cannot_be_checked_yet_stops_every_change_until_it_can() {
+        // Going on would make the new transaction the newest restore point, and recovery only
+        // ever looks at the newest: the crashed one would never be rolled back.
+        let (m, ctx) = machine();
+        let mine = RegValue::from_text(REG_SZ, "echo mine");
+        m.autorun.write_user(&mine).unwrap();
+        let p = prepare_apply(m.system(), &ctx, &terracotta(), &request(Target::All)).unwrap();
+        let set_autorun = p
+            .ops
+            .iter()
+            .position(|o| matches!(o, Op::SetAutoRun { .. }))
+            .unwrap();
+        crash_after(&m, &ctx, &p, set_autorun + 1);
+        let id = p.manifest.id.clone();
+        drop(p);
+        assert_ne!(m.autorun.read_user().unwrap(), Some(mine.clone()));
+        let journal = point(&ctx, &id, "journal.json");
+        m.fs.fail_reads_of(&journal);
+        let crashed = (everything(&m), files_but_the_lock(&m, &ctx));
+
+        // The start that doctor and --cleanup run says so and goes on.
+        let start = recover_at_start(m.system(), &later(&ctx, 1)).unwrap();
+        assert!(start.recovery_pending, "{start:?}");
+        // A change is refused, and nothing changes.
+        let refused = |e: ActionError| {
+            assert_eq!(e.code(), "E_SNAPSHOT_READ", "{e:?}");
+            assert!(e.to_string().contains("try again"), "{e}");
+            assert!(e.message_th().is_some());
+        };
+        refused(
+            prepare_apply(
+                m.system(),
+                &later(&ctx, 2),
+                &terracotta(),
+                &request(Target::All),
+            )
+            .unwrap_err(),
+        );
+        refused(undo(m.system(), &later(&ctx, 3)).unwrap_err());
+        assert_eq!((everything(&m), files_but_the_lock(&m, &ctx)), crashed);
+
+        // Once the journal can be read, the next start rolls the crash back.
+        m.fs.stop_failing(&journal);
+        let start = recover_at_start(m.system(), &later(&ctx, 4)).unwrap();
+        assert!(
+            matches!(start.recovered, Some(Outcome::RolledBack { .. })),
+            "{start:?}"
+        );
+        assert!(!start.recovery_pending);
+        assert_eq!(m.autorun.read_user().unwrap(), Some(mine));
+        apply(&m, &later(&ctx, 5), Target::All);
+    }
+
+    #[test]
+    fn restore_points_keep_their_order_when_the_clock_goes_back() {
+        let (m, ctx) = machine();
+        let before = everything(&m);
+        let first = apply(&m, &ctx, Target::All);
+        let after_first = everything(&m);
+        let back = |ms: u64| Ctx {
+            now_ms: ctx.now_ms - 5_000 + ms,
+            ..ctx.clone()
+        };
+        let second = apply(&m, &back(0), Target::Wt);
+        assert!(second > first, "{second} is not after {first}");
+        let undone = |ctx: &Ctx| match undo(m.system(), ctx).unwrap().result {
+            UndoResult::Done { undid, outcome } => {
+                assert_eq!(outcome, Outcome::Committed);
+                undid
+            }
+            UndoResult::NothingToUndo => panic!("nothing undone"),
+        };
+        assert_eq!(undone(&back(1)), second);
+        assert_eq!(everything(&m), after_first);
+        assert_eq!(undone(&back(2)), first);
+        assert_eq!(everything(&m), before);
+    }
+
+    #[test]
+    fn run_apply_refuses_a_data_folder_other_than_the_one_it_was_prepared_in() {
+        let (m, ctx) = machine();
+        let before = (everything(&m), files_but_the_lock(&m, &ctx));
+        let p = prepare_apply(m.system(), &ctx, &terracotta(), &request(Target::All)).unwrap();
+        let elsewhere = Ctx {
+            paths: Paths {
+                data: PathBuf::from(r"C:\elsewhere"),
+            },
+            ..ctx.clone()
+        };
+        let out = run_apply(m.system(), &elsewhere, p);
+        assert!(
+            matches!(&out, Outcome::RolledBack { code: "E_DATA_WRITE", reason } if reason.contains(r"C:\elsewhere")),
+            "{out:?}"
+        );
+        assert_eq!((everything(&m), files_but_the_lock(&m, &ctx)), before);
+        assert!(!m.fs.exists(Path::new(r"C:\elsewhere")));
+        assert!(
+            m.fs.try_lock(&ctx.paths.lock_file()).unwrap().is_some(),
+            "the lock is let go"
+        );
+    }
+
+    #[test]
+    fn a_file_no_op_names_is_told_in_the_reason() {
+        let (m, ctx) = machine();
+        let stray = PathBuf::from(r"C:\Users\tester\AppData\Local\Microsoft\Windows\Fonts\x.ttf");
+        let why = Failure {
+            code: "E_DATA_WRITE",
+            message: "denied".into(),
+        };
+        let out = rollback_with_unnoted(
+            m.system(),
+            &ctx,
+            &[Op::SetAutoRun { value: None }],
+            std::slice::from_ref(&stray),
+            &why,
+            ("E_VERIFY_OMP", "cause".into(), Vec::new()),
+        );
+        let Outcome::RollbackIncomplete {
+            code,
+            reason,
+            failed,
+        } = out
+        else {
+            panic!("{out:?}")
+        };
+        assert_eq!(code, "E_VERIFY_OMP");
+        assert!(failed.is_empty());
+        assert!(reason.starts_with("cause; "), "{reason}");
+        assert!(reason.contains(&stray.display().to_string()), "{reason}");
+        assert!(reason.contains("E_DATA_WRITE: denied"), "{reason}");
+    }
+
+    /// The fake disk, but `incomplete.json` can never be written.
+    struct NoRecords<'a>(&'a crate::adapters::fake::FakeFs);
+
+    impl Fs for NoRecords<'_> {
+        fn read(&self, path: &Path) -> Result<Option<Vec<u8>>, crate::adapters::AdapterError> {
+            self.0.read(path)
+        }
+        fn write_atomic(
+            &self,
+            path: &Path,
+            bytes: &[u8],
+        ) -> Result<(), crate::adapters::AdapterError> {
+            if path.file_name() == Some(std::ffi::OsStr::new("incomplete.json")) {
+                return Err(crate::adapters::AdapterError::new(
+                    path.display().to_string(),
+                    "denied (test)",
+                ));
+            }
+            self.0.write_atomic(path, bytes)
+        }
+        fn remove_file(&self, path: &Path) -> Result<(), crate::adapters::AdapterError> {
+            self.0.remove_file(path)
+        }
+        fn exists(&self, path: &Path) -> bool {
+            self.0.exists(path)
+        }
+        fn is_dir(&self, path: &Path) -> bool {
+            self.0.is_dir(path)
+        }
+        fn create_dir_all(&self, path: &Path) -> Result<(), crate::adapters::AdapterError> {
+            self.0.create_dir_all(path)
+        }
+        fn remove_dir(&self, path: &Path) -> Result<(), crate::adapters::AdapterError> {
+            self.0.remove_dir(path)
+        }
+        fn remove_dir_all(&self, path: &Path) -> Result<(), crate::adapters::AdapterError> {
+            self.0.remove_dir_all(path)
+        }
+        fn rename(&self, from: &Path, to: &Path) -> Result<(), crate::adapters::AdapterError> {
+            self.0.rename(from, to)
+        }
+        fn list_dir(
+            &self,
+            path: &Path,
+        ) -> Result<Vec<crate::adapters::DirEntry>, crate::adapters::AdapterError> {
+            self.0.list_dir(path)
+        }
+        fn try_lock(
+            &self,
+            path: &Path,
+        ) -> Result<Option<crate::adapters::FsLock>, crate::adapters::AdapterError> {
+            self.0.try_lock(path)
+        }
+    }
+
+    #[test]
+    fn an_undo_whose_record_cannot_be_written_says_so() {
+        let (m, ctx) = machine();
+        apply(&m, &ctx, Target::All);
+        // The undo cannot delete init.lua, and its rollback cannot write it back.
+        let init = ctx.paths.generated().join("init.lua");
+        m.fs.fail_removes_of(&init);
+        m.fs.fail_writes_to(&init);
+        let fs = NoRecords(&m.fs);
+        let sys = System {
+            fs: &fs,
+            ..m.system()
+        };
+        let undone = undo(sys, &later(&ctx, 1)).unwrap();
+        assert!(
+            matches!(
+                undone.result,
+                UndoResult::Done {
+                    outcome: Outcome::RollbackIncomplete { .. },
+                    ..
+                }
+            ),
+            "{undone:?}"
+        );
+        assert_eq!(
+            undone.problems.iter().map(|f| f.code).collect::<Vec<_>>(),
+            ["E_SNAPSHOT_WRITE"],
+            "{undone:?}"
+        );
+        assert!(undone.problems[0].message.contains("incomplete.json"));
     }
 
     /// An apply whose rollback cannot put init.lua back: `RollbackIncomplete`, with a record.
@@ -1697,9 +2056,18 @@ mod tests {
         };
         m.fs.put(ctx.paths.state_file(), state.to_bytes().unwrap());
         m.fonts.fail_registration_of(&value);
-        undo(m.system(), &ctx).unwrap();
+        let undone = undo(m.system(), &ctx).unwrap();
         assert!(m.fs.exists(&file));
         assert_eq!(pending(&m, &ctx), vec![file.clone()], "kept for later");
+        // The read that failed is said.
+        let [problem] = undone.start.problems.as_slice() else {
+            panic!("{undone:?}")
+        };
+        assert_eq!(problem.code, "E_MACHINE_READ");
+        assert!(
+            problem.message.contains(&file.display().to_string()),
+            "{problem:?}"
+        );
 
         let (m, ctx) = machine();
         m.fs.put(&file, b"font-bytes");
