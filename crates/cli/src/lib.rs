@@ -481,11 +481,91 @@ impl<'s, 'a> Say<'s, 'a> {
                 }
                 EXIT_FAILED
             }
-            _ => {
+            // The core's texts of these two quote the path with `{:?}`, which escapes Thai
+            // letters, and a Thai user name is where they happen: the path is shown as it is.
+            ActionError::Plan(PlanError::UnsupportedPath(path)) => {
+                let shown = path.display();
+                self.err(self.pick(
+                    format!(
+                        "{code}: cmd or Clink can't take this path: it holds %, a double quote or \
+                         ;, or text that is not Unicode: \"{shown}\""
+                    ),
+                    format!(
+                        "{code}: cmd หรือ Clink ใช้ path นี้ไม่ได้ เพราะมี % เครื่องหมายคำพูด หรือ ; \
+                         หรือมีตัวอักษรที่ไม่ใช่ Unicode: \"{shown}\""
+                    ),
+                ));
+                self.next_step(code);
+                EXIT_FAILED
+            }
+            ActionError::Plan(PlanError::NoClinkPath(path)) => {
+                let shown = path.display();
+                self.err(self.pick(
+                    format!(
+                        "{code}: Clink can't start from \"{shown}\", and no 8.3 or ProgramData \
+                         path is available instead"
+                    ),
+                    format!(
+                        "{code}: เรียก Clink จาก \"{shown}\" ไม่ได้ และไม่มี path แบบ 8.3 \
+                         หรือใน ProgramData ให้ใช้แทน"
+                    ),
+                ));
+                self.next_step(code);
+                EXIT_FAILED
+            }
+            // Its text says what to do already.
+            ActionError::Busy => {
                 self.err(self.error_text(e));
                 EXIT_FAILED
             }
+            _ => {
+                self.err(self.error_text(e));
+                self.next_step(code);
+                EXIT_FAILED
+            }
         }
+    }
+
+    /// What to do after a refusal whose text the core words: what the code means is in that
+    /// text (or, in Thai, its meaning from spec §5.9); this says that nothing was changed, and
+    /// what to do next.
+    fn next_step(&mut self, code: &str) {
+        let (en, th) = match code {
+            "E_WT_PARSE" => (
+                "Nothing was changed. Fix that settings.json by hand (Windows Terminal says where \
+                 it is wrong when it starts), then try again.",
+                "ยังไม่ได้เปลี่ยนอะไร ให้แก้ settings.json นั้นด้วยมือ (Windows Terminal \
+                 จะบอกจุดที่ผิดตอนเปิด) แล้วลองใหม่",
+            ),
+            "E_MACHINE_READ" | "E_SNAPSHOT_READ" => (
+                "Nothing was changed. Try again in a moment; `cmdstudio doctor` shows what can't \
+                 be read.",
+                "ยังไม่ได้เปลี่ยนอะไร ลองใหม่อีกครั้งในอีกสักครู่ `cmdstudio doctor` \
+                 จะบอกว่าอ่านอะไรไม่ได้",
+            ),
+            "E_STATE_INVALID" => (
+                "Nothing was changed. Run `cmdstudio doctor`: its D9 says what to do.",
+                "ยังไม่ได้เปลี่ยนอะไร ให้รัน `cmdstudio doctor` แล้วทำตามข้อ D9",
+            ),
+            "E_DATA_WRITE" | "E_SNAPSHOT_WRITE" => (
+                "Nothing was changed. Check that CMD Studio's data folder can be written (free \
+                 disk space, permissions), then try again.",
+                "ยังไม่ได้เปลี่ยนอะไร ให้ตรวจว่าเขียนลงโฟลเดอร์ข้อมูลของ CMD Studio ได้ \
+                 (พื้นที่ดิสก์ สิทธิ์) แล้วลองใหม่",
+            ),
+            "E_CLINK_PATH" => (
+                "Nothing was changed. CMD Studio found no path on this computer that cmd can \
+                 start Clink from safely, so it can't set up the prompt here.",
+                "ยังไม่ได้เปลี่ยนอะไร เครื่องนี้ไม่มี path ที่ cmd ใช้เรียก Clink ได้อย่างปลอดภัย \
+                 CMD Studio จึงตั้ง prompt ที่นี่ไม่ได้",
+            ),
+            "E_THEME_INVALID" => (
+                "Nothing was changed. Fix the theme file, then try again.",
+                "ยังไม่ได้เปลี่ยนอะไร ให้แก้ไฟล์ธีมแล้วลองใหม่",
+            ),
+            _ => ("Nothing was changed.", "ยังไม่ได้เปลี่ยนอะไร"),
+        };
+        self.err(self.pick(en, th));
     }
 
     /// While the journal of a transaction a crash may have cut off can't be read, every change
@@ -576,10 +656,10 @@ impl<'s, 'a> Say<'s, 'a> {
             ),
             Warning::FontFallback { wanted } => self.pick(
                 format!(
-                    "The font {wanted:?} is not installed; Windows Terminal gets \
+                    "The font \"{wanted}\" is not installed; Windows Terminal gets \
                      {NERD_FONT_FAMILY} instead."
                 ),
-                format!("ไม่ได้ติดตั้งฟอนต์ {wanted:?} Windows Terminal จึงใช้ {NERD_FONT_FAMILY} แทน"),
+                format!("ไม่ได้ติดตั้งฟอนต์ \"{wanted}\" Windows Terminal จึงใช้ {NERD_FONT_FAMILY} แทน"),
             ),
         };
         format!("{}{text}", self.pick("Warning: ", "คำเตือน: "))
@@ -623,8 +703,12 @@ impl<'s, 'a> Say<'s, 'a> {
         if self.start(&prepared.start) {
             return EXIT_INCOMPLETE;
         }
+        // Names are shown as they are, in quotes: `{:?}` would escape Thai vowels and tone marks.
         let name = &theme.name;
-        self.out(self.pick(format!("Plan for {name:?}:"), format!("แผนของธีม {name:?}:")));
+        self.out(self.pick(
+            format!("Plan for \"{name}\":"),
+            format!("แผนของธีม \"{name}\":"),
+        ));
         let summary = self.pick(&prepared.plan.summary_en, &prepared.plan.summary_th);
         for line in summary {
             self.out(format!("  - {line}"));
@@ -637,17 +721,18 @@ impl<'s, 'a> Say<'s, 'a> {
         let done = match req.target {
             Target::All => self.pick(
                 format!(
-                    "Applied {name:?}. Open a new cmd window to see the prompt and the welcome box."
+                    "Applied \"{name}\". Open a new cmd window to see the prompt and the welcome \
+                     box."
                 ),
-                format!("ใช้ธีม {name:?} แล้ว เปิดหน้าต่าง cmd ใหม่เพื่อดู prompt และกล่องต้อนรับ"),
+                format!("ใช้ธีม \"{name}\" แล้ว เปิดหน้าต่าง cmd ใหม่เพื่อดู prompt และกล่องต้อนรับ"),
             ),
             Target::Wt => self.pick(
                 format!(
-                    "Applied {name:?}. Open a new cmd tab in Windows Terminal to see the prompt \
+                    "Applied \"{name}\". Open a new cmd tab in Windows Terminal to see the prompt \
                      and the welcome box."
                 ),
                 format!(
-                    "ใช้ธีม {name:?} แล้ว เปิดแท็บ cmd ใหม่ใน Windows Terminal เพื่อดู prompt \
+                    "ใช้ธีม \"{name}\" แล้ว เปิดแท็บ cmd ใหม่ใน Windows Terminal เพื่อดู prompt \
                      และกล่องต้อนรับ"
                 ),
             ),
@@ -698,7 +783,9 @@ impl<'s, 'a> Say<'s, 'a> {
 
     /// `--cleanup` with `--data-dir`: deletes every entry of that folder but `themes\`, so a
     /// folder that does not look like CMD Studio's (a mistyped path) is refused before anything
-    /// is touched. CMD Studio's is absent, empty, or holds something only CMD Studio puts there.
+    /// is touched. CMD Studio's is absent, empty, holds something only CMD Studio puts there, or
+    /// holds nothing but `themes\`, which is what a `--cleanup` that kept the themes leaves (so
+    /// running it again is fine). `themes\` next to anything else is not taken for a sign.
     fn check_data_dir(&mut self, sys: System<'_>, ctx: &Ctx) -> Result<(), i32> {
         let data = &ctx.paths.data;
         let entries = match sys.fs.list_dir(data) {
@@ -714,30 +801,34 @@ impl<'s, 'a> Say<'s, 'a> {
                 return Err(EXIT_FAILED);
             }
         };
-        let ours = entries.iter().any(|entry| {
+        let named = |entry: &cmdstudio_core::adapters::DirEntry, wanted: &str| {
             entry
                 .path
                 .file_name()
                 .and_then(|name| name.to_str())
-                .is_some_and(|name| {
-                    DATA_FOLDER_SIGNS
-                        .iter()
-                        .any(|sign| sign.eq_ignore_ascii_case(name))
-                })
-        });
-        if entries.is_empty() || ours {
+                .is_some_and(|name| name.eq_ignore_ascii_case(wanted))
+        };
+        let ours = entries
+            .iter()
+            .any(|entry| DATA_FOLDER_SIGNS.iter().any(|sign| named(entry, sign)));
+        let only_themes = entries
+            .iter()
+            .all(|entry| entry.is_dir && named(entry, "themes"));
+        if entries.is_empty() || ours || only_themes {
             return Ok(());
         }
         let signs = DATA_FOLDER_SIGNS.join(", ");
         self.err(self.pick(
             format!(
                 "cmdstudio: {} does not look like CMD Studio's data folder: it holds none of \
-                 {signs}. Nothing was deleted; check the path after --data-dir.",
+                 {signs}, and more than a themes folder. Nothing was deleted; check the path \
+                 after --data-dir.",
                 data.display()
             ),
             format!(
                 "cmdstudio: {} ไม่ใช่โฟลเดอร์ข้อมูลของ CMD Studio เพราะไม่มี {signs} อยู่เลย \
-                 จึงยังไม่ได้ลบอะไร ให้ตรวจ path ที่ใส่หลัง --data-dir",
+                 และมีอย่างอื่นนอกจากโฟลเดอร์ themes จึงยังไม่ได้ลบอะไร ให้ตรวจ path ที่ใส่หลัง \
+                 --data-dir",
                 data.display()
             ),
         ));
@@ -818,7 +909,7 @@ impl<'s, 'a> Say<'s, 'a> {
 
     /// One line per step of a clean-up: what went well on stdout, what failed on stderr with
     /// its code (the step's detail starts with it) and how to finish it by hand. Step texts are
-    /// the core's English; the code's Thai meaning is in spec §5.9.
+    /// the core's English; in Thai a failed step's code gets its meaning from spec §5.9 first.
     fn steps(&mut self, report: &Report) {
         let (done, failed, fix) =
             self.pick(("done  ", "FAILED", "fix"), ("เสร็จ", "ไม่สำเร็จ", "วิธีแก้"));
@@ -827,7 +918,19 @@ impl<'s, 'a> Say<'s, 'a> {
                 self.out(format!("{done} {}: {}", step.what, step.detail));
                 continue;
             }
-            self.err(format!("{failed} {}: {}", step.what, step.detail));
+            // The detail starts with the code; in Thai the code's meaning comes first (`coded`).
+            let detail = match step.code {
+                Some(code) => {
+                    let message = step
+                        .detail
+                        .strip_prefix(code)
+                        .and_then(|rest| rest.strip_prefix(": "))
+                        .unwrap_or(&step.detail);
+                    self.coded(code, message)
+                }
+                None => step.detail.clone(),
+            };
+            self.err(format!("{failed} {}: {detail}", step.what));
             if let Some(how) = &step.fix {
                 let how = if self.lang == Lang::Th && !how.th.is_empty() {
                     &how.th
@@ -1603,6 +1706,179 @@ mod tests {
             "{err}"
         );
         assert!(err.contains("cmdstudio --cleanup"), "{err}");
+    }
+
+    #[test]
+    fn thai_names_are_shown_as_they_are_in_both_languages() {
+        // Thai vowels and tone marks are characters Rust's `{:?}` would escape.
+        for (lang, plan, done, font) in [
+            (
+                "en",
+                "Plan for \"Terracotta ของฉัน\":\n",
+                "\nApplied \"Terracotta ของฉัน\". ",
+                "\nWarning: The font \"ฟอนต์ไทย\" is not installed",
+            ),
+            (
+                "th",
+                "แผนของธีม \"Terracotta ของฉัน\":\n",
+                "\nใช้ธีม \"Terracotta ของฉัน\" แล้ว ",
+                "\nคำเตือน: ไม่ได้ติดตั้งฟอนต์ \"ฟอนต์ไทย\" ",
+            ),
+        ] {
+            let (m, d) = machine();
+            let theme = String::from_utf8(m.fs.file(THEME).unwrap())
+                .unwrap()
+                .replace("\"name\": \"Terracotta\"", "\"name\": \"Terracotta ของฉัน\"")
+                .replace("\"font\": \"Cascadia Mono\"", "\"font\": \"ฟอนต์ไทย\"");
+            m.fs.put(THEME, theme);
+            let (code, out, err) = cli(&m, &d, &["apply", THEME, "--lang", lang]);
+            assert_eq!(code, EXIT_OK, "{out}{err}");
+            assert!(out.starts_with(plan), "{out}");
+            assert!(out.contains(done), "{out}");
+            assert!(out.contains(font), "{out}");
+            assert!(!out.contains("\\u{"), "{out}");
+        }
+    }
+
+    #[test]
+    fn a_path_cmd_cannot_take_is_shown_as_it_is() {
+        let (m, d) = machine();
+        let data = r"C:\Users\ผู้ใช้%\cmdstudio";
+        let (code, _, err) = cli(&m, &d, &["apply", THEME, "--data-dir", data]);
+        assert_eq!(code, EXIT_FAILED, "{err}");
+        assert!(err.starts_with("E_CLINK_PATH: "), "{err}");
+        assert!(err.contains(data), "{err}");
+        assert!(!err.contains("\\u{") && !err.contains(r"\\"), "{err}");
+        assert!(err.contains("\nNothing was changed."), "{err}");
+    }
+
+    #[test]
+    fn a_refusal_worded_by_the_core_says_what_to_do_next() {
+        for (lang, head, next) in [
+            (
+                "en",
+                "E_WT_PARSE: ",
+                "\nNothing was changed. Fix that settings.json by hand",
+            ),
+            (
+                "th",
+                "E_WT_PARSE: อ่าน settings.json ของ Windows Terminal ไม่ได้",
+                "\nยังไม่ได้เปลี่ยนอะไร ให้แก้ settings.json นั้นด้วยมือ",
+            ),
+        ] {
+            let (m, d) = machine();
+            m.fs.put(WT, "{ not json");
+            let before = (m.fs.file(WT), m.autorun.snapshot());
+            let (code, _, err) = cli(&m, &d, &["apply", THEME, "--lang", lang]);
+            assert_eq!(code, EXIT_FAILED, "{err}");
+            assert!(err.starts_with(head), "{err}");
+            assert!(err.contains(next), "{err}");
+            assert_eq!((m.fs.file(WT), m.autorun.snapshot()), before);
+        }
+    }
+
+    #[test]
+    fn a_failed_cleanup_step_gets_its_codes_thai_meaning() {
+        let (mut m, d) = machine();
+        m.host.info.ui_language = LANG_THAI;
+        assert_eq!(cli(&m, &d, &["apply", THEME]).0, EXIT_OK);
+        let generated = d.data_dir.join("generated");
+        m.fs.fail_removes_of(&generated);
+        let (code, out, err) = cli(&m, &later(&d, 1), &["--cleanup"]);
+        assert_eq!(code, EXIT_INCOMPLETE, "{out}{err}");
+        let step = format!(
+            "ไม่สำเร็จ Delete {}: E_DATA_WRITE: เขียนลงโฟลเดอร์ข้อมูลของ CMD Studio ไม่ได้\n  \
+             รายละเอียด: ",
+            generated.display()
+        );
+        assert!(err.contains(&step), "{err}");
+        assert!(err.contains("\n    วิธีแก้: ปิดหน้าต่าง cmd"), "{err}");
+    }
+
+    #[test]
+    fn an_older_record_without_thai_fixes_shows_the_english_one() {
+        let (mut m, d) = machine();
+        let init = d.data_dir.join(r"generated\init.lua");
+        m.fs.put(&init, b"old");
+        m.fs.fail_writes_to(&init);
+        assert_eq!(cli(&m, &d, &["apply", THEME]).0, EXIT_INCOMPLETE);
+        let point = m.fs.list_dir(&d.data_dir.join("snapshots")).unwrap()[0]
+            .path
+            .clone();
+        let file = point.join("incomplete.json");
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&m.fs.file(&file).unwrap()).unwrap();
+        for step in record["steps"].as_array_mut().unwrap() {
+            step.as_object_mut().unwrap().remove("fixTh");
+        }
+        m.fs.put(&file, serde_json::to_vec(&record).unwrap());
+        m.host.info.ui_language = LANG_THAI;
+        let (code, _, err) = cli(&m, &later(&d, 1), &["undo"]);
+        assert_eq!(code, EXIT_FAILED, "{err}");
+        assert!(err.contains("\n    วิธีแก้: Copy "), "{err}");
+    }
+
+    #[test]
+    fn cleanup_with_a_data_dir_runs_again_and_keeps_or_removes_the_themes() {
+        let (m, d) = machine();
+        let other = r"C:\Users\tester\other";
+        let mine = format!(r"{other}\themes\mine.cmdtheme");
+        m.fs.put(&mine, b"{}");
+        assert_eq!(
+            cli(&m, &d, &["apply", THEME, "--data-dir", other]).0,
+            EXIT_OK
+        );
+        // A folder that holds only themes\ is what --cleanup left: running it again is fine.
+        let kept = format!("; your themes are kept in {other}\\themes.\n");
+        for n in 1..=2 {
+            let (code, out, err) = cli(&m, &later(&d, n), &["--cleanup", "--data-dir", other]);
+            assert_eq!(code, EXIT_OK, "{n}: {out}{err}");
+            assert!(out.ends_with(&kept), "{n}: {out}");
+            assert!(m.fs.file(&mine).is_some(), "{n}");
+            assert_eq!(m.fs.list_dir(Path::new(other)).unwrap().len(), 1, "{n}");
+        }
+        let (code, out, err) = cli(
+            &m,
+            &later(&d, 3),
+            &["--cleanup", "--remove-themes", "--data-dir", other],
+        );
+        assert_eq!(code, EXIT_OK, "{out}{err}");
+        assert!(out.ends_with(", and its data is deleted.\n"), "{out}");
+        assert!(!m.fs.exists(Path::new(other)));
+        // themes\ next to anything else is not taken for CMD Studio's.
+        let docs = r"C:\Users\tester\Documents";
+        m.fs.put(format!(r"{docs}\themes\a.txt"), b"x");
+        m.fs.put(format!(r"{docs}\notes.txt"), b"mine");
+        let before = m.fs.snapshot();
+        assert_eq!(
+            cli(&m, &d, &["--cleanup", "--data-dir", docs]).0,
+            EXIT_INVALID
+        );
+        assert_eq!(m.fs.snapshot(), before);
+    }
+
+    #[test]
+    fn cleanup_with_a_damaged_state_file_does_what_doctor_says() {
+        let (m, d) = machine();
+        assert_eq!(cli(&m, &d, &["apply", THEME]).0, EXIT_OK);
+        m.fs.put(d.data_dir.join("state.json"), b"{ damaged");
+        let (_, out, _) = cli(&m, &later(&d, 1), &["doctor"]);
+        assert!(out.contains("`cmdstudio --cleanup`"), "{out}");
+        // It reverts, keeps the records, and ends with a failed step that says what to do.
+        for n in 2..=3 {
+            let (code, out, err) = cli(&m, &later(&d, n), &["--cleanup"]);
+            assert_eq!(code, EXIT_INCOMPLETE, "{n}: {out}{err}");
+            assert!(err.contains(": E_STATE_INVALID: "), "{n}: {err}");
+            assert!(err.contains("\n    fix: "), "{n}: {err}");
+            assert_eq!(m.autorun.read_user().unwrap(), None, "{n}");
+            assert!(m.fs.exists(&d.data_dir.join("snapshots")), "{n}");
+            let damaged =
+                m.fs.list_dir(&d.data_dir)
+                    .unwrap()
+                    .iter()
+                    .any(|e| e.path.to_string_lossy().contains("state.json.damaged-"));
+            assert!(damaged, "{n}");
+        }
     }
 
     #[test]

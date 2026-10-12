@@ -16,7 +16,7 @@ Usage:
 apply:
   --target all|wt          every cmd window (the default), or Windows Terminal only
   --replace-other-clink    turn off another Clink that starts from AutoRun (undo turns it back on)
-  --lang th|en             the welcome box's language, and these messages'; by default Windows'
+  --lang th|en             language of the welcome box and of these messages (default: Windows' language)
 set-aside: only when doctor says so, for a restore point that cannot be read any more.
 
 Options for every command:
@@ -24,8 +24,11 @@ Options for every command:
   --resources <dir>   use these bundled files instead of <exe folder>\\resources
   Both take a full path, such as C:\\folder.
 
-Exit codes: 0 done, 1 failed and rolled back (or nothing was changed), 2 invalid input,
-3 rollback incomplete.
+Exit codes:
+  0  done
+  1  failed and rolled back, or refused with nothing changed
+  2  invalid input
+  3  rollback incomplete: fix by hand what it lists
 ";
 
 /// [`USAGE`] in Thai.
@@ -40,7 +43,7 @@ pub const USAGE_TH: &str = "\
 apply:
   --target all|wt          ใช้กับหน้าต่าง cmd ทุกหน้าต่าง (ค่าเริ่มต้น) หรือเฉพาะใน Windows Terminal
   --replace-other-clink    ปิด Clink ตัวอื่นที่เริ่มจาก AutoRun (undo จะเปิดกลับให้)
-  --lang th|en             ภาษาของกล่องต้อนรับ และของข้อความเหล่านี้ ค่าเริ่มต้นตามภาษาของ Windows
+  --lang th|en             ภาษาของกล่องต้อนรับและของข้อความเหล่านี้ (ค่าเริ่มต้น: ภาษาของ Windows)
 set-aside: ใช้เฉพาะเมื่อ doctor บอกให้ใช้ กับจุดย้อนกลับที่อ่านไม่ได้อีกแล้ว
 
 ตัวเลือกที่ใช้ได้กับทุกคำสั่ง:
@@ -48,8 +51,11 @@ set-aside: ใช้เฉพาะเมื่อ doctor บอกให้ใ�
   --resources <dir>   ใช้ไฟล์ที่แนบมาจากโฟลเดอร์นี้แทน <โฟลเดอร์ของ exe>\\resources
   ทั้งสองตัวต้องเป็น path เต็ม เช่น C:\\folder
 
-exit code: 0 สำเร็จ, 1 ล้มเหลวและย้อนกลับแล้ว (หรือยังไม่ได้เปลี่ยนอะไร), 2 input ไม่ถูกต้อง,
-3 ย้อนกลับไม่ครบ
+exit code:
+  0  สำเร็จ
+  1  ล้มเหลวและย้อนกลับแล้ว หรือถูกปฏิเสธโดยยังไม่ได้เปลี่ยนอะไร
+  2  input ไม่ถูกต้อง
+  3  ย้อนกลับไม่ครบ ต้องแก้ด้วยมือตามรายการที่แจ้ง
 ";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -195,8 +201,8 @@ pub fn parse(args: &[OsString]) -> Result<Args, UsageError> {
                         ("--lang", Some("en")) => lang = Some(Lang::En),
                         (name, _) => {
                             return Err(bad(
-                                format!("{name} does not take {value:?}"),
-                                format!("{name} ไม่รับค่า {value:?}"),
+                                format!("{name} does not take \"{}\"", value.to_string_lossy()),
+                                format!("{name} ไม่รับค่า \"{}\"", value.to_string_lossy()),
                             ))
                         }
                     }
@@ -211,8 +217,8 @@ pub fn parse(args: &[OsString]) -> Result<Args, UsageError> {
             Some(command @ ("doctor" | "undo")) => {
                 if let Some(extra) = rest.first() {
                     return Err(bad(
-                        format!("{command} does not take {extra:?}"),
-                        format!("{command} ไม่รับ {extra:?}"),
+                        format!("{command} does not take \"{}\"", extra.to_string_lossy()),
+                        format!("{command} ไม่รับ \"{}\"", extra.to_string_lossy()),
                     ));
                 }
                 if command == "doctor" {
@@ -232,16 +238,16 @@ pub fn parse(args: &[OsString]) -> Result<Args, UsageError> {
                 };
                 let Some(id) = id.to_str() else {
                     return Err(bad(
-                        format!("{id:?} is not a restore point id"),
-                        format!("{id:?} ไม่ใช่รหัสจุดย้อนกลับ"),
+                        format!("\"{}\" is not a restore point id", id.to_string_lossy()),
+                        format!("\"{}\" ไม่ใช่รหัสจุดย้อนกลับ", id.to_string_lossy()),
                     ));
                 };
                 Command::SetAside { id: id.to_string() }
             }
             _ => {
                 return Err(bad(
-                    format!("unknown command {first:?}"),
-                    format!("ไม่รู้จักคำสั่ง {first:?}"),
+                    format!("unknown command \"{}\"", first.to_string_lossy()),
+                    format!("ไม่รู้จักคำสั่ง \"{}\"", first.to_string_lossy()),
                 ))
             }
         }
@@ -410,6 +416,56 @@ mod tests {
                 "{e:?}"
             );
         }
+    }
+
+    #[test]
+    fn what_was_typed_is_shown_as_it_was_typed() {
+        // Thai vowels and tone marks are characters Rust's `{:?}` would escape.
+        for (args, en, th) in [
+            (
+                vec!["ลบธีม"],
+                "unknown command \"ลบธีม\"",
+                "ไม่รู้จักคำสั่ง \"ลบธีม\"",
+            ),
+            (
+                vec!["apply", "x", "--target", "ทุกที่"],
+                "--target does not take \"ทุกที่\"",
+                "--target ไม่รับค่า \"ทุกที่\"",
+            ),
+            (
+                vec!["undo", "เดี๋ยวนี้"],
+                "undo does not take \"เดี๋ยวนี้\"",
+                "undo ไม่รับ \"เดี๋ยวนี้\"",
+            ),
+        ] {
+            let e = p(&args).unwrap_err();
+            assert_eq!((e.en.as_str(), e.th.as_str()), (en, th), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn no_usage_line_stops_mid_sentence() {
+        for usage in [USAGE, USAGE_TH] {
+            for line in usage.lines() {
+                assert!(!line.trim_end().ends_with([',', ';', '\'']), "{line}");
+            }
+        }
+        let lang = |usage: &'static str| {
+            usage
+                .lines()
+                .find(|l| l.trim_start().starts_with("--lang"))
+                .unwrap()
+        };
+        assert!(
+            lang(USAGE).ends_with("(default: Windows' language)"),
+            "{}",
+            lang(USAGE)
+        );
+        assert!(
+            lang(USAGE_TH).ends_with("(ค่าเริ่มต้น: ภาษาของ Windows)"),
+            "{}",
+            lang(USAGE_TH)
+        );
     }
 
     #[test]
