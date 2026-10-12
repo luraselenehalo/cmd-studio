@@ -9,6 +9,7 @@ use std::path::Path;
 pub mod fonts;
 pub mod fs;
 pub mod host;
+pub mod process;
 pub mod registry;
 pub mod wt;
 

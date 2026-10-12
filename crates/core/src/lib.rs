@@ -17,4 +17,5 @@ pub mod snapshot;
 pub mod state;
 pub mod text;
 pub mod txn;
+pub mod verify;
 pub mod wt_edit;
