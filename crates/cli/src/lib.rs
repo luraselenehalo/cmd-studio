@@ -827,11 +827,13 @@ impl<'s, 'a> Say<'s, 'a> {
     /// `--cleanup` with `--data-dir` deletes every entry of that folder but `themes\` (core
     /// `remove_data`), so a mistyped path must never reach it. The folder is taken for CMD
     /// Studio's only when it is absent or empty, or when every entry in it is one that CMD
-    /// Studio itself puts there, of the right kind (see [`put_there_by_cmd_studio`]). One that
-    /// holds only `themes\` is taken too, since a `--cleanup` that kept the themes leaves that,
-    /// but not with `--remove-themes`: such a folder could be anybody's, and that form would
-    /// delete it. Anything else is refused before anything is created or deleted, naming the
-    /// entries that are not CMD Studio's.
+    /// Studio itself puts there, of the right kind (see [`put_there_by_cmd_studio`]), and one of
+    /// them is a file of CMD Studio's own (see [`cmd_studios_own_file`]): folders that are only
+    /// named like CMD Studio's could be anybody's. One that holds only `themes\` is taken too,
+    /// since a `--cleanup` that kept the themes leaves that, but not with `--remove-themes`: such
+    /// a folder could be anybody's, and that form would delete it. Anything else is refused
+    /// before anything is created or deleted, naming the entries that are not CMD Studio's, or
+    /// the files of its own that are missing.
     fn check_data_dir(
         &mut self,
         sys: System<'_>,
@@ -875,8 +877,32 @@ impl<'s, 'a> Say<'s, 'a> {
                 && entries
                     .iter()
                     .all(|entry| entry.is_dir && same_name(&entry.path, &themes));
-            if !(only_themes && remove_themes) {
+            // Anything more than themes\ must hold one of the files CMD Studio itself writes
+            // there: folders that are only named like its own could be anybody's.
+            let own_file = entries
+                .iter()
+                .any(|entry| !entry.is_dir && cmd_studios_own_file(&ctx.paths, entry));
+            if entries.is_empty() || (only_themes && !remove_themes) || (!only_themes && own_file) {
                 return Ok(());
+            }
+            if !only_themes {
+                self.err(self.pick(
+                    format!(
+                        "cmdstudio: {} holds none of CMD Studio's own files (cmdstudio.lock, \
+                         state.json or state.json.damaged-<number>), so it may not be CMD \
+                         Studio's data folder, and --cleanup would delete what is in it. Nothing \
+                         was deleted; check the path after --data-dir.",
+                        data.display()
+                    ),
+                    format!(
+                        "cmdstudio: {} ไม่มีไฟล์ของ CMD Studio เอง (cmdstudio.lock, state.json \
+                         หรือ state.json.damaged-<ตัวเลข>) จึงอาจไม่ใช่โฟลเดอร์ข้อมูลของ CMD Studio \
+                         และ --cleanup จะลบสิ่งที่อยู่ในนั้น จึงยังไม่ได้ลบอะไร \
+                         ให้ตรวจ path ที่ใส่หลัง --data-dir",
+                        data.display()
+                    ),
+                ));
+                return Err(EXIT_INVALID);
             }
             self.err(self.pick(
                 format!(
@@ -1192,10 +1218,7 @@ fn put_there_by_cmd_studio(paths: &Paths, entry: &DirEntry) -> bool {
         .into_iter()
         .any(named);
     }
-    if [paths.state_file(), paths.lock_file()]
-        .into_iter()
-        .any(named)
-    {
+    if cmd_studios_own_file(paths, entry) {
         return true;
     }
     let state_file = paths.state_file();
@@ -1203,14 +1226,35 @@ fn put_there_by_cmd_studio(paths: &Paths, entry: &DirEntry) -> bool {
         return false;
     };
     let (name, state) = (name.to_ascii_lowercase(), state.to_ascii_lowercase());
-    let damaged = name
-        .strip_prefix(&format!("{state}.damaged-"))
-        .is_some_and(|ms| !ms.is_empty() && ms.bytes().all(|b| b.is_ascii_digit()));
-    let temp = name
-        .strip_prefix(&format!(".{state}."))
+    name.strip_prefix(&format!(".{state}."))
         .and_then(|rest| rest.strip_suffix(".cmdstudio-tmp"))
-        .is_some_and(|hex| hex.len() == 32 && hex.bytes().all(|b| b.is_ascii_hexdigit()));
-    damaged || temp
+        .is_some_and(|hex| hex.len() == 32 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// Whether an entry directly in the data folder is one of the files that only CMD Studio
+/// itself writes there, and that every data folder it used holds until a `--cleanup` empties
+/// it: `cmdstudio.lock` (made by the first command that takes the lock, before any other write,
+/// and left when the lock is let go), `state.json`, or `state.json.damaged-<ms>` (a damaged
+/// state.json that Revert everything or `--cleanup` set aside). Names compare without regard
+/// to ASCII letter case. The kind is the caller's to check.
+fn cmd_studios_own_file(paths: &Paths, entry: &DirEntry) -> bool {
+    if [paths.state_file(), paths.lock_file()]
+        .into_iter()
+        .any(|ours| same_name(&ours, &entry.path))
+    {
+        return true;
+    }
+    let state_file = paths.state_file();
+    match (
+        entry.path.file_name().and_then(|n| n.to_str()),
+        state_file.file_name().and_then(|n| n.to_str()),
+    ) {
+        (Some(name), Some(state)) => name
+            .to_ascii_lowercase()
+            .strip_prefix(&format!("{}.damaged-", state.to_ascii_lowercase()))
+            .is_some_and(|ms| !ms.is_empty() && ms.bytes().all(|b| b.is_ascii_digit())),
+        _ => false,
+    }
 }
 
 /// The record of a restore point set aside by hand while its journal could not be read: one
@@ -1933,6 +1977,43 @@ mod tests {
             err.contains(": \"f1.txt\", \"f2.txt\", \"f3.txt\" and 2 more. --cleanup"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn a_folder_with_only_cmd_studio_named_folders_but_none_of_its_files_is_refused() {
+        // Folders named like CMD Studio's are not enough: one of its own files must be there
+        // (cmdstudio.lock, state.json or a damaged state.json it set aside).
+        for lang in [Lang::En, Lang::Th] {
+            let (mut m, d) = machine();
+            if lang == Lang::Th {
+                m.host.info.ui_language = LANG_THAI;
+            }
+            let folder = r"D:\work";
+            m.fs.put(format!(r"{folder}\runtime\tool.exe"), b"mine");
+            m.fs.put(format!(r"{folder}\snapshots\2026\notes.txt"), b"mine");
+            let before = (m.fs.snapshot(), m.autorun.snapshot());
+            for args in [
+                vec!["--cleanup", "--data-dir", folder],
+                vec!["--cleanup", "--remove-themes", "--data-dir", folder],
+            ] {
+                let (code, out, err) = cli(&m, &d, &args);
+                assert_eq!(code, EXIT_INVALID, "{args:?}: {out}{err}");
+                for name in ["cmdstudio.lock", "state.json", "state.json.damaged-"] {
+                    assert!(err.contains(name), "{name}: {err}");
+                }
+                match lang {
+                    Lang::En => {
+                        assert!(err.contains("none of CMD Studio's own files"), "{err}");
+                        assert!(err.contains("check the path after --data-dir"), "{err}");
+                    }
+                    Lang::Th => {
+                        assert!(err.contains("ไม่มีไฟล์ของ CMD Studio เอง"), "{err}");
+                        assert!(err.contains("ให้ตรวจ path ที่ใส่หลัง --data-dir"), "{err}");
+                    }
+                }
+                assert_eq!((m.fs.snapshot(), m.autorun.snapshot()), before, "{args:?}");
+            }
+        }
     }
 
     #[test]
