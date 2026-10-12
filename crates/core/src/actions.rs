@@ -754,6 +754,7 @@ pub(crate) fn record_incomplete(
                 message: failure.message.clone(),
                 fix,
                 fix_th,
+                restore_point: None,
             }
         })
         .collect();
@@ -767,6 +768,7 @@ pub(crate) fn record_incomplete(
             message: reason.clone(),
             fix: CLEANUP_FIX_EN.to_string(),
             fix_th: CLEANUP_FIX_TH.to_string(),
+            restore_point: None,
         });
     }
     store.write_incomplete(&Incomplete {
@@ -1762,6 +1764,56 @@ mod tests {
         ) -> Result<Option<crate::adapters::FsLock>, crate::adapters::AdapterError> {
             self.0.try_lock(path)
         }
+    }
+
+    /// The fake fonts, but whether the registration key exists cannot be read.
+    struct KeyUnreadable<'a>(&'a crate::adapters::fake::FakeFonts);
+
+    impl Fonts for KeyUnreadable<'_> {
+        fn families(&self) -> Result<Vec<String>, AdapterError> {
+            self.0.families()
+        }
+        fn user_fonts_dir(&self) -> PathBuf {
+            self.0.user_fonts_dir()
+        }
+        fn registration(&self, value_name: &str) -> Result<Option<String>, AdapterError> {
+            self.0.registration(value_name)
+        }
+        fn register(&self, value_name: &str, file: &str) -> Result<(), AdapterError> {
+            self.0.register(value_name, file)
+        }
+        fn unregister(&self, value_name: &str) -> Result<(), AdapterError> {
+            self.0.unregister(value_name)
+        }
+        fn registration_key_exists(&self) -> Result<bool, AdapterError> {
+            Err(AdapterError::new("Fonts key", "denied (test)"))
+        }
+        fn delete_registration_key_if_empty(&self) -> Result<(), AdapterError> {
+            self.0.delete_registration_key_if_empty()
+        }
+        fn load(&self, file: &Path) -> Result<(), AdapterError> {
+            self.0.load(file)
+        }
+        fn unload(&self, file: &Path) -> Result<(), AdapterError> {
+            self.0.unload(file)
+        }
+    }
+
+    #[test]
+    fn a_fonts_key_that_cannot_be_read_stops_the_apply_with_a_read_code() {
+        // Whether CMD Studio makes the key is recorded before its first font, so revert all
+        // deletes only a key it made; not knowing it, the apply does not go on.
+        let (m, ctx) = machine();
+        let before = everything(&m);
+        let fonts = KeyUnreadable(&m.fonts);
+        let sys = System {
+            fonts: &fonts,
+            ..m.system()
+        };
+        let e = prepare_apply(sys, &ctx, &terracotta(), &request(Target::All)).unwrap_err();
+        assert_eq!(e.code(), "E_MACHINE_READ", "{e:?}");
+        assert!(e.to_string().contains("Fonts key"), "{e}");
+        assert_eq!(everything(&m), before);
     }
 
     #[test]

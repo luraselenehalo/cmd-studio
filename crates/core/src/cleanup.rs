@@ -9,9 +9,11 @@
 //! Both start as apply and undo do (`actions::begin`), under the same lock: a transaction a
 //! crash cut off is rolled back first, and while one cannot be checked yet nothing changes and
 //! nothing is deleted (`E_SNAPSHOT_READ`). Steps 1 and 2 are one transaction with a `revertAll`
-//! restore point. What could not be done is a failed [`Step`] with its code (spec §5.9) and,
-//! where a person can finish it, how, in English and in Thai; it is never reported as done, and
-//! nothing of the user's is deleted.
+//! restore point. The record of a rollback that did not finish is checked against the machine
+//! after the revert: what is still CMD Studio's stays recorded, and what is not is said to be
+//! put back. What could not be done is a failed [`Step`] with its code (spec §5.9) and, where a
+//! person can finish it, how, in English and in Thai; it is never reported as done, and nothing
+//! of the user's is deleted, nor the only record of what the user's settings were.
 use crate::actions::{
     begin, delete_pending, delete_pending_and_save, next_id, record_incomplete, ActionError, Ctx,
     StartReport,
@@ -19,16 +21,20 @@ use crate::actions::{
 use crate::adapters::{
     program_data_dir, DirEntry, DirState, RegValue, System, REG_EXPAND_SZ, REG_SZ,
 };
-use crate::exec::{same_path, FixByHand, SystemExecutor, COMMAND_PROCESSOR_KEY, FONTS_KEY};
-use crate::plan::autorun::remove_ours;
-use crate::plan::{Op, Paths, PlanError};
-use crate::snapshot::{Incomplete, Manifest, SnapshotKind, SnapshotStore, KEEP};
-use crate::state::{
-    AutoRunRecord, AutoRunWritten, Baseline, FontRecord, State, StateError, WtFileBaseline,
+use crate::exec::{
+    font_target, same_path, same_state, FixByHand, SystemExecutor, COMMAND_PROCESSOR_KEY, FONTS_KEY,
 };
-use crate::txn::{self, Failure, Outcome};
+use crate::generate::wt::CMD_PROFILE_GUID;
+use crate::plan::autorun::{is_foreign, remove_ours, scan};
+use crate::plan::{Op, Paths, PlanError, NERD_FONT_FAMILY};
+use crate::snapshot::{Incomplete, Manifest, SnapshotKind, SnapshotStore, Unrestored, KEEP};
+use crate::state::{
+    AutoRunRecord, Baseline, FontRecord, RegValueRecord, State, StateError, Was, WtFileBaseline,
+};
+use crate::txn::{self, Executor, Failure, Outcome};
 use crate::verify::SystemVerifier;
-use crate::wt_edit::{revert, WtError};
+use crate::wt_edit::{read_value, revert, WtError, WtKey};
+use serde_json::{Map, Value};
 use std::fmt::Display;
 use std::path::Path;
 
@@ -52,10 +58,12 @@ pub struct Step {
 pub struct Report {
     /// What the start found and did (see [`StartReport`]): a crash rolled back, restore points
     /// that cannot be read, the record of a rollback that did not finish. Its `problems` are
-    /// not kept here: each is a failed step, and so is a record that is pending.
+    /// not kept here: each is a failed step. Each step of the record is a step of this report
+    /// too, done when the revert left nothing of CMD Studio's in its target, failed (with the
+    /// record's fix) when it did not.
     pub start: StartReport,
-    /// The AutoRun and settings.json transaction; `None` when it did not run (nothing to change
-    /// and no apply to mark, or the revert stopped before it).
+    /// The AutoRun and settings.json transaction; `None` when it did not run (nothing to change,
+    /// no apply to mark and no record to settle, or the revert stopped before it).
     pub outcome: Option<Outcome>,
     pub steps: Vec<Step>,
 }
@@ -73,24 +81,11 @@ impl Report {
         )
     }
 
-    /// A report that begins with what the start could not do and with a rollback that did not
-    /// finish, each a failed step: an earlier change may still need a hand.
+    /// A report that begins with what the start could not do, each a failed step.
     fn new(mut start: StartReport) -> Report {
         let mut report = Report::default();
         for f in std::mem::take(&mut start.problems) {
             report.fail("Look at what earlier runs left", f.code, f.message, None);
-        }
-        if let Some(record) = &start.incomplete {
-            report.fail(
-                format!("The rollback of restore point {}", record.id),
-                "E_ROLLBACK_INCOMPLETE",
-                format!(
-                    "the rollback of restore point {} did not put everything back ({}: {}); fix \
-                     what its record lists by hand",
-                    record.id, record.code, record.reason
-                ),
-                None,
-            );
         }
         report.start = start;
         report
@@ -123,26 +118,42 @@ impl Report {
     }
 }
 
-/// `value` without CMD Studio's entries, taken out by the planner's own editor
-/// (`plan::autorun::remove_ours`), so the planner and the cleanup never disagree about what is
-/// ours; `None` when nothing but blanks is left. Fails with `E_AUTORUN_WRITE` when the value
-/// can't be edited safely and needs a hand edit.
-fn without_ours(value: &str, profile: &str) -> Result<Option<String>, PlanError> {
-    let edit = remove_ours(value, profile)?;
-    Ok((!edit.value.trim().is_empty()).then_some(edit.value))
+/// The commands of an AutoRun value, as cmd reads them.
+fn commands(value: &str) -> Vec<String> {
+    scan(value).parts.into_iter().map(|p| p.text).collect()
 }
 
-/// What AutoRun becomes (spec §6.3 step 1). `Ok(None)`: leave it as it is.
-/// `Ok(Some(None))`: delete the value. When nobody changed AutoRun since CMD
-/// Studio last wrote it, the original comes back (minus any entry of ours);
-/// otherwise only our entries leave the current value. A value that can't be
-/// edited safely is `E_AUTORUN_WRITE`, and is left for a hand edit; so is one whose original,
-/// due back, cannot be read back as text (a record that is not hex, or a value that was not a
-/// string): it is never deleted in its place.
+/// The other program's Clink commands that CMD Studio turned off and that are not back: the
+/// commands of `original` that `plan::autorun` calls another Clink (`--replace-other-clink`
+/// takes out exactly those), in their order, but for those in `now`. `original` is AutoRun as
+/// it was before CMD Studio, or as a rollback was to put it back.
+fn turned_off(original: Option<&AutoRunRecord>, profile: &str, now: &[String]) -> Vec<String> {
+    original
+        .and_then(|o| o.value.as_ref())
+        .and_then(RegValueRecord::to_reg)
+        .and_then(|v| v.text())
+        .map(|text| {
+            commands(&text)
+                .into_iter()
+                .filter(|c| is_foreign(c, profile) && !now.contains(c))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// What AutoRun becomes (spec §6.3 step 1: only our part goes). `Ok(None)`: leave it as it is.
+/// `Ok(Some(None))`: delete the value. Our entries are taken out of the current value by the
+/// planner's own editor (`plan::autorun::remove_ours`), so the planner and the cleanup never
+/// disagree about what is ours, and every other byte stays. Then the other program's Clink
+/// commands that CMD Studio turned off (see `turned_off`) come back in front, in their order.
+/// When nothing but blanks is left, the value is deleted if it was not there before CMD Studio
+/// (or nothing says it was), and kept, with what is left, if it was. A value with nothing to
+/// take out and nothing to put back is left as it is. The value keeps its registry type when it
+/// is written. A value that can't be edited safely is `E_AUTORUN_WRITE`, and is left for a hand
+/// edit.
 pub fn autorun_after_revert(
     current: Option<&str>,
     original: Option<&AutoRunRecord>,
-    written: Option<&AutoRunWritten>,
     paths: &Paths,
 ) -> Result<Option<Option<String>>, PlanError> {
     // The planner refuses a profile path that is not Unicode, so no entry of ours holds one.
@@ -150,30 +161,29 @@ pub fn autorun_after_revert(
     let Some(profile) = profile_path.to_str() else {
         return Ok(None);
     };
-    let untouched = written.is_some_and(|w| w.value.as_deref() == current);
-    let target = match (original, untouched) {
-        (Some(orig), true) => match &orig.value {
-            None => None,
-            Some(record) => match record.to_reg().and_then(|v| v.text()) {
-                Some(text) => without_ours(&text, profile)?,
-                // What was there before cannot be written back. An empty AutoRun has nothing of
-                // ours to take out; anything else is a hand edit, never a delete in its place.
-                None => match current {
-                    None => return Ok(None),
-                    Some(c) => {
-                        return Err(PlanError::AutoRunNeedsHandEdit {
-                            part: c.to_string(),
-                        })
-                    }
-                },
-            },
-        },
-        _ => match current {
-            Some(c) => without_ours(c, profile)?,
-            None => None,
-        },
+    let (rest, took_ours) = match current {
+        Some(value) => {
+            let edit = remove_ours(value, profile)?;
+            (edit.value, edit.removed_ours)
+        }
+        None => (String::new(), false),
     };
-    Ok((target.as_deref() != current).then_some(target))
+    let now = current.map(commands).unwrap_or_default();
+    let back = turned_off(original, profile, &now);
+    if !took_ours && back.is_empty() {
+        return Ok(None);
+    }
+    let front = back.join(" & ");
+    let value = match (front.is_empty(), rest.trim().is_empty()) {
+        (true, true) => {
+            let existed = original.is_some_and(|o| o.value.is_some());
+            return Ok(Some(existed.then_some(rest)));
+        }
+        (true, false) => rest,
+        (false, true) => front,
+        (false, false) => format!("{front} & {rest}"),
+    };
+    Ok(Some(Some(value)))
 }
 
 /// Undoes everything CMD Studio changed, key by key (the "ย้อนทุกอย่าง" button, spec §4.3),
@@ -182,10 +192,13 @@ pub fn autorun_after_revert(
 /// (`E_BUSY`), while a transaction a crash cut off cannot be checked yet (`E_SNAPSHOT_READ`),
 /// and while state.json cannot be read now, is from a newer CMD Studio, or is damaged and
 /// cannot be set aside (`E_STATE_INVALID`): such a state.json is never renamed or written over.
+/// The record of a rollback that did not finish is settled after the revert (see [`Report`]):
+/// what is still CMD Studio's goes into the record of the revert's own restore point, so later
+/// starts keep reporting it.
 pub fn revert_all(sys: System<'_>, ctx: &Ctx) -> Result<Report, ActionError> {
     let (_lock, start) = begin(sys, ctx)?;
     let mut report = Report::new(start);
-    let state = load_state(sys, ctx, &mut report)?;
+    let (state, _) = load_state(sys, ctx, &mut report)?;
     revert_steps(sys, ctx, state, &mut report);
     Ok(report)
 }
@@ -198,32 +211,48 @@ pub fn revert_all(sys: System<'_>, ctx: &Ctx) -> Result<Report, ActionError> {
 ///   transaction a crash cut off cannot be checked yet (`E_SNAPSHOT_READ`): its restore point
 ///   may be the only copy of the user's values. Restore points set aside never stop it.
 /// - A revert whose transaction rolls back stops it too: nothing is deleted.
-/// - A state.json that cannot be read stops only the revert (a failed step); the folders still
+/// - A state.json that cannot be used stops only the revert (a failed step); the folders still
 ///   go, but the data folder stays whole while it holds a state.json from a newer CMD Studio.
+/// - It never deletes the only record of what the user's settings were: while something is not
+///   put back (state.json could not be used, a settings.json or a font or AutoRun is left as it
+///   is, a rollback record names a target that is still CMD Studio's), state.json, its damaged
+///   copies and the restore points stay, and a failed step says so and how to finish by hand.
 /// - The folders are worked out from `Paths` and the user's SID, not from state.json; a
-///   ProgramData folder state.json names besides goes only when it is private and named like
-///   CMD Studio's. A folder that someone else may change is left alone, and the report says why.
-/// - A restore point whose pending record says to copy files from it by hand is kept.
+///   ProgramData folder state.json names besides goes only when it is directly in the
+///   ProgramData folder, private, and named like CMD Studio's. A folder that someone else may
+///   change is left alone, and the report says why.
 /// - The lock file goes last, once the lock is let go: Windows refuses to delete a file opened
 ///   the way the lock opens it.
 pub fn cleanup(sys: System<'_>, ctx: &Ctx, remove_themes: bool) -> Result<Report, ActionError> {
     let (lock, start) = begin(sys, ctx)?;
     let mut report = Report::new(start);
     let mut state = None;
+    // The code of what kept state.json from use, when something did.
+    let mut unusable = None;
     let mut newer_state = false;
+    let unresolved;
     match load_state(sys, ctx, &mut report) {
-        Ok(loaded) => match revert_steps(sys, ctx, loaded, &mut report) {
-            Some(next) => state = Some(next),
-            None => return Ok(report),
-        },
+        Ok((loaded, damaged)) => {
+            if damaged {
+                unusable = Some("E_STATE_INVALID");
+            }
+            let reverted = revert_steps(sys, ctx, loaded, &mut report);
+            unresolved = reverted.unresolved;
+            match reverted.state {
+                Some(next) => state = Some(next),
+                None => return Ok(report),
+            }
+        }
         Err(e) => {
             newer_state = matches!(e, ActionError::State(StateError::Newer { .. }));
+            unusable = Some(e.code());
             report.fail(
                 "Revert CMD Studio's changes",
                 e.code(),
                 format!("{e}; nothing was reverted"),
                 None,
             );
+            unresolved = settle_record(sys, ctx, None, &mut report);
         }
     }
     if let Some(state) = &mut state {
@@ -233,8 +262,8 @@ pub fn cleanup(sys: System<'_>, ctx: &Ctx, remove_themes: bool) -> Result<Report
         .as_ref()
         .and_then(|s| s.baseline.program_data_dir.as_deref());
     remove_program_data(sys, recorded, &mut report);
+    let data = &ctx.paths.data;
     if newer_state {
-        let data = &ctx.paths.data;
         report.fail(
             format!("Delete {}", data.display()),
             "E_STATE_INVALID",
@@ -247,25 +276,39 @@ pub fn cleanup(sys: System<'_>, ctx: &Ctx, remove_themes: bool) -> Result<Report
         );
         return Ok(report);
     }
-    let keep = report
-        .start
-        .incomplete
+    let not_back = state
         .as_ref()
-        .filter(|record| fixes_copy_from_it(record, &ctx.paths))
-        .map(|record| record.id.clone());
-    remove_data(sys, ctx, remove_themes, keep.as_deref(), &mut report);
+        .is_some_and(|s| holds_what_is_not_back(&s.baseline));
+    let keep_records = unusable.is_some() || not_back || unresolved;
+    remove_data(sys, ctx, remove_themes, keep_records, &mut report);
+    if keep_records {
+        report.fail(
+            format!("Delete {}", data.display()),
+            unusable.unwrap_or("E_ROLLBACK_INCOMPLETE"),
+            format!(
+                "state.json and the restore points were kept in {}: not everything is back as \
+                 it was before CMD Studio, and they record what it was",
+                data.display()
+            ),
+            Some(records_by_hand(data)),
+        );
+    }
     drop(lock);
     remove_lock_and_folder(sys, ctx, &mut report);
     Ok(report)
 }
 
-/// state.json for a revert. One that cannot be read now, or is from a newer CMD Studio, stops
-/// it and is left as it is: it may hold a baseline only it knows. A damaged one is renamed
-/// `state.json.damaged-<ms>` and kept for a look, the report says so in a failed step, and the
-/// revert goes on with no baseline; when that rename fails it stops, so the damaged file is
-/// never written over. The font files earlier runs left to delete are tried again, as at the
-/// start of apply and undo.
-fn load_state(sys: System<'_>, ctx: &Ctx, report: &mut Report) -> Result<State, ActionError> {
+/// state.json for a revert, and whether it was damaged. One that cannot be read now, or is from
+/// a newer CMD Studio, stops the revert and is left as it is: it may hold a baseline only it
+/// knows. A damaged one is renamed `state.json.damaged-<ms>` and kept for a look, the report
+/// says so in a failed step, and the revert goes on with no baseline; when that rename fails
+/// it stops, so the damaged file is never written over. The font files earlier runs left to
+/// delete are tried again, as at the start of apply and undo.
+fn load_state(
+    sys: System<'_>,
+    ctx: &Ctx,
+    report: &mut Report,
+) -> Result<(State, bool), ActionError> {
     let file = ctx.paths.state_file();
     match State::load(sys.fs, &file) {
         Ok(mut state) => {
@@ -279,7 +322,7 @@ fn load_state(sys: System<'_>, ctx: &Ctx, report: &mut Report) -> Result<State, 
                     None,
                 );
             }
-            Ok(state)
+            Ok((state, false))
         }
         Err(e @ StateError::Invalid(_)) => {
             let aside = file.with_extension(format!("json.damaged-{}", ctx.now_ms));
@@ -300,19 +343,28 @@ fn load_state(sys: System<'_>, ctx: &Ctx, report: &mut Report) -> Result<State, 
                 ),
                 None,
             );
-            Ok(State::default())
+            Ok((State::default(), true))
         }
         Err(e) => Err(e.into()),
     }
 }
 
+/// What [`revert_steps`] left.
+struct Reverted {
+    /// The state.json written; `None` when the transaction did not commit, and nothing else was
+    /// touched.
+    state: Option<State>,
+    /// A step of the pending rollback record names a target that is still CMD Studio's.
+    unresolved: bool,
+}
+
 /// Steps 1–3 with `state` loaded: the AutoRun and settings.json transaction, the applies marked
-/// as reverted, the registry keys CMD Studio created, the fonts, then the new state.json. It has
-/// no applied theme, and keeps what could not be put back yet (an AutoRun left for a hand edit,
-/// a settings.json that cannot be read, a font that stays installed), the ProgramData folder
-/// CMD Studio made, and the font files to delete later. `None` when the transaction did not
-/// commit: then nothing else was touched.
-fn revert_steps(sys: System<'_>, ctx: &Ctx, state: State, report: &mut Report) -> Option<State> {
+/// as reverted, the registry keys CMD Studio created, the fonts, the new state.json, and the
+/// pending rollback record settled. The new state.json has no applied theme, and keeps what
+/// could not be put back yet (the AutoRun original while AutoRun is left as it is, a
+/// settings.json left as it is, a font that stays installed), the ProgramData folder CMD Studio
+/// made, and the font files to delete later.
+fn revert_steps(sys: System<'_>, ctx: &Ctx, state: State, report: &mut Report) -> Reverted {
     let base = &state.baseline;
     let mut ops = Vec::new();
     let mut left = Baseline {
@@ -321,16 +373,21 @@ fn revert_steps(sys: System<'_>, ctx: &Ctx, state: State, report: &mut Report) -
     };
     let autorun_done = autorun_step(sys, &ctx.paths, base, &mut ops, report);
     if !autorun_done {
+        // Only the original: it says which other Clink to turn back on, and whether the value
+        // was there before, once AutoRun can be edited.
         left.autorun = base.autorun.clone();
-        left.autorun_written = base.autorun_written.clone();
     }
     for file in &base.wt {
         if !settings_step(sys, file, &mut ops, report) {
             left.wt.push(file.clone());
         }
     }
-    if !transaction(sys, ctx, ops, report) {
-        return None;
+    let ran = transaction(sys, ctx, ops, report);
+    if !ran.committed {
+        return Reverted {
+            state: None,
+            unresolved: settle_record(sys, ctx, ran.id.as_deref(), report),
+        };
     }
     if autorun_done && base.autorun.as_ref().is_some_and(|a| !a.key_existed) {
         command_processor_key(sys, report);
@@ -343,7 +400,11 @@ fn revert_steps(sys: System<'_>, ctx: &Ctx, state: State, report: &mut Report) -
     };
     uninstall_fonts(sys, base, &mut next, report);
     save_state(sys, ctx, &next, report);
-    Some(next)
+    let unresolved = settle_record(sys, ctx, ran.id.as_deref(), report);
+    Reverted {
+        state: Some(next),
+        unresolved,
+    }
 }
 
 /// Step 1: queues what AutoRun becomes. Whether AutoRun needs nothing more: a change is queued,
@@ -387,17 +448,28 @@ fn autorun_step(
             }
         },
     };
-    match autorun_after_revert(
-        current.as_deref(),
-        base.autorun.as_ref(),
-        base.autorun_written.as_ref(),
-        paths,
-    ) {
-        Ok(Some(value)) => {
-            ops.push(Op::SetAutoRun { value });
+    match autorun_after_revert(current.as_deref(), base.autorun.as_ref(), paths) {
+        Ok(next) => {
+            if let Some(value) = next {
+                ops.push(Op::SetAutoRun { value });
+            }
+            let damaged = base
+                .autorun
+                .as_ref()
+                .and_then(|a| a.value.as_ref())
+                .is_some_and(|record| record.to_reg().is_none());
+            if damaged {
+                report.fail(
+                    WHAT,
+                    "E_STATE_INVALID",
+                    "what AutoRun held before CMD Studio cannot be read back from state.json \
+                     (it is not hex), so a Clink of another program that CMD Studio turned off, \
+                     if there was one, is not turned back on; CMD Studio's own part was taken out",
+                    None,
+                );
+            }
             true
         }
-        Ok(None) => true,
         Err(e) => {
             let part = match &e {
                 PlanError::AutoRunNeedsHandEdit { part } => part.clone(),
@@ -430,7 +502,7 @@ fn lossy_text(value: &RegValue) -> String {
 /// (`wt_edit::revert`). Whether the file needs nothing more: queued, nothing to change, or
 /// gone. CMD Studio never creates a settings.json, so one that is gone is not made again, and
 /// `revert` never gives an empty text. One that cannot be read, or that Windows Terminal could
-/// not read, is left as it is and said.
+/// not read, is left as it is and said, with what CMD Studio set in it to take out by hand.
 fn settings_step(
     sys: System<'_>,
     file: &WtFileBaseline,
@@ -450,7 +522,11 @@ fn settings_step(
                 what,
                 "E_MACHINE_READ",
                 format!("it could not be read ({e}), so it was left as it is"),
-                None,
+                Some(settings_by_hand(
+                    file,
+                    "CMD Studio could not read it, so it left it as it is.",
+                    "CMD Studio อ่านไฟล์นี้ไม่ได้ จึงยังไม่ได้แก้",
+                )),
             );
             return false;
         }
@@ -481,19 +557,34 @@ fn settings_step(
                 what,
                 e.code(),
                 format!("{e}; it was left as it is"),
-                Some(settings_by_hand(path)),
+                Some(settings_by_hand(
+                    file,
+                    "Windows Terminal cannot read it as it is, so CMD Studio left it as it is; \
+                     fix that first.",
+                    "Windows Terminal อ่านไฟล์นี้ในสภาพนี้ไม่ได้ CMD Studio จึงยังไม่ได้แก้ \
+                     ให้แก้ไฟล์ให้อ่านได้ก่อน",
+                )),
             );
             false
         }
     }
 }
 
+/// How [`transaction`] went.
+struct Ran {
+    /// The `revertAll` restore point, when it ran.
+    id: Option<String>,
+    /// It committed, or had nothing to do.
+    committed: bool,
+}
+
 /// The AutoRun and settings.json changes as one transaction with a `revertAll` restore point
 /// (verified by read-back; a rollback that cannot finish is recorded), then every apply marked
 /// as reverted by it: an undo after this would bring back a theme the user removed. It runs
-/// when there is something to change or an apply to mark, so a machine the user already put
-/// back by hand gets its applies marked too. Whether it committed, or had nothing to do.
-fn transaction(sys: System<'_>, ctx: &Ctx, ops: Vec<Op>, report: &mut Report) -> bool {
+/// when there is something to change, an apply to mark, or a pending rollback record, so a
+/// machine the user already put back by hand gets its applies marked too, and the record is
+/// settled into a restore point newer than its own.
+fn transaction(sys: System<'_>, ctx: &Ctx, ops: Vec<Op>, report: &mut Report) -> Ran {
     const MARK: &str = "Mark the themes applied before as reverted";
     let root = ctx.paths.snapshots();
     let store = SnapshotStore::new(sys.fs, &root);
@@ -501,8 +592,11 @@ fn transaction(sys: System<'_>, ctx: &Ctx, ops: Vec<Op>, report: &mut Report) ->
     for f in unread {
         report.fail(MARK, f.code, f.message, None);
     }
-    if ops.is_empty() && applies.is_empty() {
-        return true;
+    if ops.is_empty() && applies.is_empty() && report.start.incomplete.is_none() {
+        return Ran {
+            id: None,
+            committed: true,
+        };
     }
     let id = next_id(&store, ctx.now_ms);
     let manifest = Manifest {
@@ -529,24 +623,26 @@ fn transaction(sys: System<'_>, ctx: &Ctx, ops: Vec<Op>, report: &mut Report) ->
     }
     let committed = outcome == Outcome::Committed;
     report.outcome = Some(outcome);
-    if !committed {
-        return false;
+    if committed {
+        if let Err(f) = store.mark_undone(&applies, &id) {
+            report.fail(
+                MARK,
+                f.code,
+                format!(
+                    "{}; until they are, an undo may put back what restore points {} changed",
+                    f.message,
+                    applies.join(", ")
+                ),
+                None,
+            );
+        }
+        // Failing to prune costs disk space only.
+        let _ = store.prune(KEEP);
     }
-    if let Err(f) = store.mark_undone(&applies, &id) {
-        report.fail(
-            MARK,
-            f.code,
-            format!(
-                "{}; until they are, an undo may put back what restore points {} changed",
-                f.message,
-                applies.join(", ")
-            ),
-            None,
-        );
+    Ran {
+        id: Some(id),
+        committed,
     }
-    // Failing to prune costs disk space only.
-    let _ = store.prune(KEEP);
-    true
 }
 
 /// The applies that no undo or revert reversed yet, and a failure for each restore point whose
@@ -589,6 +685,327 @@ fn applies_to_mark(store: &SnapshotStore<'_>) -> (Vec<String>, Vec<Failure>) {
         Err(f) => vec![f],
     };
     (applies, failures)
+}
+
+/// The record of a rollback that did not finish, found when this run started: each of its steps
+/// is checked against the machine now. A step whose target holds nothing of CMD Studio's any
+/// more is put back; one whose target still does is a failed step with the record's own fix,
+/// and is carried over into the record of `revert`, the restore point this run made, which is
+/// now the newest, so that later starts keep reporting it. Whether any step is still not put
+/// back.
+fn settle_record(sys: System<'_>, ctx: &Ctx, revert: Option<&str>, report: &mut Report) -> bool {
+    let Some(record) = report.start.incomplete.clone() else {
+        return false;
+    };
+    let root = ctx.paths.snapshots();
+    let store = SnapshotStore::new(sys.fs, &root);
+    let mut left = Vec::new();
+    for step in &record.steps {
+        let from = step
+            .restore_point
+            .clone()
+            .unwrap_or_else(|| record.id.clone());
+        let what = format!("{} (restore point {from})", step.target);
+        match still_ours(sys, ctx, &store, &from, step) {
+            None => report.done(
+                what,
+                format!(
+                    "put back: what the rollback of restore point {from} left of CMD Studio's \
+                     is gone"
+                ),
+            ),
+            Some(fix) => {
+                report.fail(
+                    what,
+                    "E_ROLLBACK_INCOMPLETE",
+                    format!(
+                        "the rollback of restore point {from} could not put it back ({}: {}), and \
+                         it still holds CMD Studio's change",
+                        step.code, step.message
+                    ),
+                    Some(fix),
+                );
+                left.push(Unrestored {
+                    restore_point: Some(from),
+                    ..step.clone()
+                });
+            }
+        }
+    }
+    if let Some(id) = revert {
+        carry_over(&store, id, &record, &left, report);
+    }
+    !left.is_empty()
+}
+
+/// Writes the steps still not put back into the record of restore point `id`, after its own
+/// steps if its rollback did not finish either.
+fn carry_over(
+    store: &SnapshotStore<'_>,
+    id: &str,
+    pending: &Incomplete,
+    left: &[Unrestored],
+    report: &mut Report,
+) {
+    const WHAT: &str = "Keep the record of what is still not put back";
+    if left.is_empty() {
+        return;
+    }
+    let own = match store.latest_incomplete() {
+        Ok(record) => record.filter(|r| r.id == id),
+        Err(f) => {
+            report.fail(WHAT, f.code, f.message, None);
+            return;
+        }
+    };
+    let (code, reason, mut steps) = match own {
+        Some(record) => (record.code, record.reason, record.steps),
+        None => (pending.code.clone(), pending.reason.clone(), Vec::new()),
+    };
+    steps.extend(left.iter().cloned());
+    let record = Incomplete {
+        id: id.to_string(),
+        code,
+        reason,
+        steps,
+    };
+    if let Err(f) = store.write_incomplete(&record) {
+        report.fail(WHAT, f.code, f.message, None);
+    }
+}
+
+/// Whether the target of a step of a rollback record still holds a change of CMD Studio's,
+/// judged now: `Some` with how to take it out by hand when it does (or when that cannot be
+/// read), `None` when it does not. The step's op comes from the journal of restore point
+/// `from`; when that cannot be read, CMD Studio's traces on the whole machine are looked for.
+fn still_ours(
+    sys: System<'_>,
+    ctx: &Ctx,
+    store: &SnapshotStore<'_>,
+    from: &str,
+    step: &Unrestored,
+) -> Option<FixByHand> {
+    let journal = store.journal(from).ok();
+    let found = journal.as_ref().and_then(|j| {
+        let op = j.ops.get(step.op_index)?;
+        let prior = j
+            .snapshots
+            .iter()
+            .find(|s| s.op_index == step.op_index)
+            .map(|s| s.prior.clone());
+        Some((op, prior))
+    });
+    let Some((op, prior)) = found else {
+        return traces_left(sys, ctx);
+    };
+    op_still_ours(sys, ctx, op, prior.as_ref()).then(|| FixByHand {
+        en: step.fix.clone(),
+        th: if step.fix_th.is_empty() {
+            step.fix.clone()
+        } else {
+            step.fix_th.clone()
+        },
+    })
+}
+
+/// Whether `op`'s target still holds CMD Studio's change, against `prior`, what the rollback was
+/// to put back. CMD Studio's own files and runtime folders are not the user's, and nothing runs
+/// them once the theme is reverted.
+fn op_still_ours(sys: System<'_>, ctx: &Ctx, op: &Op, prior: Option<&Option<Vec<u8>>>) -> bool {
+    let wt_file = |path: &Path| {
+        sys.wt
+            .locations()
+            .iter()
+            .any(|l| same_path(&l.settings, path))
+    };
+    match op {
+        Op::InstallRuntime { dir, .. } => !cmd_studios_own(sys, ctx, dir),
+        Op::WriteFile { path, .. } if cmd_studios_own(sys, ctx, path) => false,
+        // A settings.json a revert of everything wrote: CMD Studio's part is its scheme.
+        Op::WriteFile { path, .. } if wt_file(path) => settings_still_ours(sys, path, None, None),
+        Op::WriteFile { .. } => true,
+        Op::SetAutoRun { .. } => {
+            let original = prior
+                .and_then(|p| p.as_deref())
+                .and_then(|bytes| serde_json::from_slice::<AutoRunRecord>(bytes).ok());
+            autorun_still_ours(sys, &ctx.paths, original.as_ref())
+        }
+        Op::WtApply {
+            settings,
+            profile,
+            set_default,
+            ..
+        } => settings_still_ours(
+            sys,
+            settings,
+            Some((profile, *set_default)),
+            prior.and_then(|p| p.as_deref()),
+        ),
+        Op::InstallFont { .. } => {
+            let Some(prior) = prior else {
+                return true;
+            };
+            let mut exec = SystemExecutor::new(sys, &ctx.resources);
+            exec.capture(op)
+                .map_or(true, |now| !same_state(op, &now, prior))
+        }
+    }
+}
+
+/// Whether `path` is in CMD Studio's data folder or the user's ProgramData folder.
+fn cmd_studios_own(sys: System<'_>, ctx: &Ctx, path: &Path) -> bool {
+    if path.starts_with(&ctx.paths.data) {
+        return true;
+    }
+    match (sys.host.program_data(), sys.host.user_sid()) {
+        (Ok(pd), Ok(sid)) => path.starts_with(program_data_dir(&pd, &sid)),
+        _ => false,
+    }
+}
+
+/// Whether AutoRun still holds an entry of ours, or lacks another program's Clink that
+/// `original` held (one CMD Studio turned off). One that cannot be read counts as holding ours.
+fn autorun_still_ours(sys: System<'_>, paths: &Paths, original: Option<&AutoRunRecord>) -> bool {
+    let profile_path = paths.clink_profile();
+    let Some(profile) = profile_path.to_str() else {
+        return false;
+    };
+    let current = match sys.autorun.read_user() {
+        Ok(None) => None,
+        Ok(Some(v)) => match v.text() {
+            Some(text) => Some(text),
+            None if v.kind != REG_SZ && v.kind != REG_EXPAND_SZ => None,
+            None => return true,
+        },
+        Err(_) => return true,
+    };
+    if let Some(value) = &current {
+        match remove_ours(value, profile) {
+            Ok(edit) if !edit.removed_ours => {}
+            _ => return true,
+        }
+    }
+    let now = current.as_deref().map(commands).unwrap_or_default();
+    !turned_off(original, profile, &now).is_empty()
+}
+
+/// Whether `settings` still holds CMD Studio's change: a scheme named `CMD Studio`, or, given
+/// the op's profile values (and whether it set the default profile), a key that holds what CMD
+/// Studio wrote and held something else in `prior`. A file that is gone holds nothing; one that
+/// cannot be read counts as holding the change.
+fn settings_still_ours(
+    sys: System<'_>,
+    settings: &Path,
+    op: Option<(&Map<String, Value>, bool)>,
+    prior: Option<&[u8]>,
+) -> bool {
+    let now = match sys.fs.read(settings) {
+        Ok(None) => return false,
+        Ok(Some(bytes)) => match String::from_utf8(bytes) {
+            Ok(text) => text,
+            Err(_) => return true,
+        },
+        Err(_) => return true,
+    };
+    if !matches!(read_value(&now, &WtKey::Scheme), Ok(None)) {
+        return true;
+    }
+    let Some((profile, set_default)) = op else {
+        return false;
+    };
+    let was = prior.and_then(|bytes| std::str::from_utf8(bytes).ok());
+    let left = |key: WtKey, wrote: &Value| {
+        let Ok(holds) = read_value(&now, &key) else {
+            return true;
+        };
+        let held = was.and_then(|w| read_value(w, &key).ok().flatten());
+        holds.as_ref() == Some(wrote) && held.as_ref() != Some(wrote)
+    };
+    for (key, wrote) in profile {
+        let ours = match wrote {
+            Value::Object(subs) => subs.iter().any(|(sub, v)| {
+                left(
+                    WtKey::ProfileSub {
+                        key: key.clone(),
+                        sub: sub.clone(),
+                    },
+                    v,
+                )
+            }),
+            v => left(WtKey::Profile { key: key.clone() }, v),
+        };
+        if ours {
+            return true;
+        }
+    }
+    set_default
+        && left(
+            WtKey::DefaultProfile,
+            &Value::String(CMD_PROFILE_GUID.into()),
+        )
+}
+
+/// CMD Studio's traces on the whole machine, for a record step whose op cannot be known (its
+/// journal cannot be read): an entry of ours in AutoRun, a `CMD Studio` scheme in a settings
+/// file, the bundled font registered to CMD Studio's file. `None` when there is none; otherwise
+/// what is left and how to take it out by hand.
+fn traces_left(sys: System<'_>, ctx: &Ctx) -> Option<FixByHand> {
+    let mut en = Vec::new();
+    let mut th = Vec::new();
+    if autorun_still_ours(sys, &ctx.paths, None) {
+        let current = match sys.autorun.read_user() {
+            Ok(Some(v)) => v.text().unwrap_or_else(|| lossy_text(&v)),
+            _ => String::from("(it could not be read)"),
+        };
+        let fix = autorun_by_hand(&current, &ctx.paths.clink_profile().display().to_string());
+        en.push(fix.en);
+        th.push(fix.th);
+    }
+    for location in sys.wt.locations() {
+        let file = &location.settings;
+        if sys.fs.exists(file) && settings_still_ours(sys, file, None, None) {
+            let path = file.display();
+            en.push(format!(
+                "In {path}, delete the color scheme named \"CMD Studio\" and set the Command \
+                 Prompt profile (guid {CMD_PROFILE_GUID}) back as you want it."
+            ));
+            th.push(format!(
+                "ในไฟล์ {path} ให้ลบชุดสี (scheme) ชื่อ \"CMD Studio\" \
+                 แล้วตั้งโปรไฟล์ Command Prompt (guid {CMD_PROFILE_GUID}) กลับเป็นแบบที่ต้องการเอง"
+            ));
+        }
+    }
+    if let Some((_, file, value_name)) = font_target(sys, &ctx.resources, NERD_FONT_FAMILY) {
+        let ours = match sys.fonts.registration(&value_name) {
+            Ok(Some(named)) => same_path(Path::new(&named), &file),
+            Ok(None) => false,
+            Err(_) => true,
+        };
+        if ours {
+            let fix = font_by_hand(&FontRecord {
+                family: NERD_FONT_FAMILY.to_string(),
+                file,
+                value_name,
+            });
+            en.push(fix.en);
+            th.push(fix.th);
+        }
+    }
+    if en.is_empty() {
+        return None;
+    }
+    Some(FixByHand {
+        en: format!(
+            "CMD Studio cannot tell which of its changes this left: its journal cannot be read. \
+             This is still CMD Studio's: {}",
+            en.join(" ")
+        ),
+        th: format!(
+            "CMD Studio บอกไม่ได้ว่าการเปลี่ยนแปลงนี้เหลืออะไรไว้ เพราะอ่านบันทึกขั้นตอนของมันไม่ได้ \
+             สิ่งที่ยังเป็นของ CMD Studio คือ: {}",
+            th.join(" ")
+        ),
+    })
 }
 
 /// The `Command Processor` key, which CMD Studio created: deleted once it holds nothing.
@@ -743,6 +1160,12 @@ fn save_state(sys: System<'_>, ctx: &Ctx, next: &State, report: &mut Report) {
     }
 }
 
+/// Whether a baseline a revert left still holds something it could not put back: an AutoRun
+/// left as it is, a settings.json, a font.
+fn holds_what_is_not_back(baseline: &Baseline) -> bool {
+    baseline.autorun.is_some() || !baseline.wt.is_empty() || !baseline.fonts.is_empty()
+}
+
 /// `--cleanup`: the font files left for a later delete are tried once more. Nothing deletes one
 /// once CMD Studio is gone, so one still there is a failed step with how to delete it by hand.
 fn pending_font_files(sys: System<'_>, ctx: &Ctx, state: &mut State, report: &mut Report) {
@@ -768,11 +1191,13 @@ fn pending_font_files(sys: System<'_>, ctx: &Ctx, state: &mut State, report: &mu
 }
 
 /// Step 4 for the ProgramData folders: the user's own, worked out from the known folder and the
-/// SID, and one state.json names besides, if it is named like CMD Studio's.
+/// SID, and one state.json names besides, when it is directly in the ProgramData folder and
+/// named like CMD Studio's.
 fn remove_program_data(sys: System<'_>, recorded: Option<&Path>, report: &mut Report) {
     let host = sys.host;
-    let own = match (host.program_data(), host.user_sid()) {
-        (Ok(pd), Ok(sid)) => Some(program_data_dir(&pd, &sid)),
+    let program_data = host.program_data();
+    let own = match (program_data.as_ref(), host.user_sid().as_ref()) {
+        (Ok(pd), Ok(sid)) => Some(program_data_dir(pd, sid)),
         (Err(e), _) | (_, Err(e)) => {
             report.fail(
                 "Remove CMD Studio's ProgramData folder",
@@ -792,13 +1217,17 @@ fn remove_program_data(sys: System<'_>, recorded: Option<&Path>, report: &mut Re
     if own.as_deref().is_some_and(|own| same_path(own, dir)) {
         return;
     }
-    if named_like_ours(dir) {
+    let in_program_data = match (&program_data, dir.parent()) {
+        (Ok(pd), Some(parent)) => same_path(pd, parent),
+        _ => false,
+    };
+    if in_program_data && named_like_ours(dir) {
         remove_private(sys, dir, report);
     } else {
         report.done(
             format!("Remove {}", dir.display()),
             "left alone: state.json names it as CMD Studio's ProgramData folder, but it is not \
-             named like one",
+             a folder of that name directly in the ProgramData folder",
         );
     }
 }
@@ -837,24 +1266,24 @@ fn remove_private(sys: System<'_>, dir: &Path, report: &mut Report) {
     }
 }
 
-/// Whether the hand fixes of `record` copy files from its restore point (`Copy <payload> over
-/// …`): deleting the restore point would leave them nothing to copy.
-fn fixes_copy_from_it(record: &Incomplete, paths: &Paths) -> bool {
-    let dir = paths.snapshots().join(&record.id).display().to_string();
-    record
-        .steps
-        .iter()
-        .any(|s| s.fix.contains(&dir) || s.fix_th.contains(&dir))
+/// Whether `path`, in the data folder, is one of the records `--cleanup` keeps while something
+/// is not put back: state.json, a damaged state.json set aside, the restore points.
+fn is_record(ctx: &Ctx, path: &Path) -> bool {
+    let set_aside = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.to_ascii_lowercase().starts_with("state.json.damaged-"));
+    set_aside || same_path(path, &ctx.paths.state_file()) || same_path(path, &ctx.paths.snapshots())
 }
 
 /// Step 4 for the data folder: every entry but the lock file this run holds, `themes\` unless
-/// asked, and the restore point `keep` (whose record's fixes copy from it). Entries are deleted
-/// one by one, so the held lock file stops nothing; what cannot be deleted is a failed step.
+/// asked, and, with `keep_records`, the records (see [`is_record`]). Entries are deleted one by
+/// one, so the held lock file stops nothing; what cannot be deleted is a failed step.
 fn remove_data(
     sys: System<'_>,
     ctx: &Ctx,
     remove_themes: bool,
-    keep: Option<&str>,
+    keep_records: bool,
     report: &mut Report,
 ) {
     let data = &ctx.paths.data;
@@ -870,20 +1299,13 @@ fn remove_data(
             return;
         }
     };
-    let (lock, themes, snapshots) = (
-        ctx.paths.lock_file(),
-        ctx.paths.themes(),
-        ctx.paths.snapshots(),
-    );
+    let (lock, themes) = (ctx.paths.lock_file(), ctx.paths.themes());
     for entry in &entries {
-        if same_path(&entry.path, &lock) || (!remove_themes && same_path(&entry.path, &themes)) {
-            continue;
-        }
-        match keep {
-            Some(id) if same_path(&entry.path, &snapshots) => {
-                remove_restore_points_but(sys, &snapshots, id, report);
-            }
-            _ => remove_entry(sys, entry, report),
+        let kept = same_path(&entry.path, &lock)
+            || (!remove_themes && same_path(&entry.path, &themes))
+            || (keep_records && is_record(ctx, &entry.path));
+        if !kept {
+            remove_entry(sys, entry, report);
         }
     }
 }
@@ -904,35 +1326,8 @@ fn remove_entry(sys: System<'_>, entry: &DirEntry, report: &mut Report) {
     }
 }
 
-/// Every restore point but `id`, which is kept and said.
-fn remove_restore_points_but(sys: System<'_>, snapshots: &Path, id: &str, report: &mut Report) {
-    let kept = snapshots.join(id);
-    match sys.fs.list_dir(snapshots) {
-        Ok(entries) => {
-            for entry in entries.iter().filter(|e| !same_path(&e.path, &kept)) {
-                remove_entry(sys, entry, report);
-            }
-        }
-        Err(e) => report.fail(
-            format!("Delete {}", snapshots.display()),
-            "E_MACHINE_READ",
-            format!("what it holds could not be listed ({e}), so nothing in it was deleted"),
-            Some(folder_by_hand(snapshots)),
-        ),
-    }
-    report.fail(
-        format!("Delete {}", kept.display()),
-        "E_ROLLBACK_INCOMPLETE",
-        format!(
-            "{} was kept: the record of restore point {id} says to copy files from it by hand",
-            kept.display()
-        ),
-        Some(record_folder_by_hand(id, &kept)),
-    );
-}
-
 /// After the lock is let go: the lock file, then the data folder when nothing is left in it
-/// (`themes\`, or what could not be deleted, keeps it).
+/// (`themes\`, the records, or what could not be deleted, keeps it).
 fn remove_lock_and_folder(sys: System<'_>, ctx: &Ctx, report: &mut Report) {
     let lock = ctx.paths.lock_file();
     if let Err(e) = sys.fs.remove_file(&lock) {
@@ -944,15 +1339,24 @@ fn remove_lock_and_folder(sys: System<'_>, ctx: &Ctx, report: &mut Report) {
         );
     }
     let data = &ctx.paths.data;
-    if sys.fs.list_dir(data).is_ok_and(|left| left.is_empty()) {
-        if let Err(e) = sys.fs.remove_dir(data) {
-            report.fail(
-                format!("Delete {}", data.display()),
-                "E_DATA_WRITE",
-                e,
-                Some(folder_by_hand(data)),
-            );
+    match sys.fs.list_dir(data) {
+        Ok(left) if left.is_empty() => {
+            if let Err(e) = sys.fs.remove_dir(data) {
+                report.fail(
+                    format!("Delete {}", data.display()),
+                    "E_DATA_WRITE",
+                    e,
+                    Some(folder_by_hand(data)),
+                );
+            }
         }
+        Ok(_) => {}
+        Err(e) => report.fail(
+            format!("Delete {}", data.display()),
+            "E_MACHINE_READ",
+            format!("whether anything is left in it could not be listed ({e}), so it stays"),
+            Some(folder_by_hand(data)),
+        ),
     }
 }
 
@@ -973,21 +1377,60 @@ fn autorun_by_hand(command: &str, profile: &str) -> FixByHand {
     }
 }
 
-/// A settings.json Windows Terminal cannot read, left as it is.
-fn settings_by_hand(file: &Path) -> FixByHand {
-    let file = file.display();
-    FixByHand {
-        en: format!(
-            "Fix {file} so that Windows Terminal can read it, then revert again; or delete the \
-             color scheme named \"CMD Studio\" from it and set the Command Prompt profile back \
-             as you want it."
-        ),
-        th: format!(
-            "แก้ไฟล์ {file} ให้ Windows Terminal อ่านได้ แล้วสั่งย้อนทุกอย่างอีกครั้ง \
-             หรือลบชุดสี (scheme) ชื่อ \"CMD Studio\" ออกจากไฟล์นี้ \
-             แล้วตั้งโปรไฟล์ Command Prompt กลับเป็นแบบที่ต้องการเอง"
-        ),
+/// A settings.json left as it is: what CMD Studio set in it, to take out by hand, after `why`.
+/// Each key goes back to what it held before CMD Studio, unless the user has changed it since.
+fn settings_by_hand(file: &WtFileBaseline, why_en: &str, why_th: &str) -> FixByHand {
+    let mut profile_en = Vec::new();
+    let mut profile_th = Vec::new();
+    let mut top_en = Vec::new();
+    let mut top_th = Vec::new();
+    for original in &file.originals {
+        let (name, top) = match &original.key {
+            WtKey::Scheme => continue,
+            WtKey::DefaultProfile => ("\"defaultProfile\"".to_string(), true),
+            WtKey::Profile { key } => (format!("\"{key}\""), false),
+            WtKey::ProfileSub { key, sub } => (format!("\"{key}\".\"{sub}\""), false),
+        };
+        let (en, th) = match &original.original {
+            Was::Absent => (format!("delete {name}"), format!("ลบ {name}")),
+            Was::Present { value } => (
+                format!("set {name} to {value}"),
+                format!("ตั้ง {name} เป็น {value}"),
+            ),
+        };
+        if top {
+            top_en.push(en);
+            top_th.push(th);
+        } else {
+            profile_en.push(en);
+            profile_th.push(th);
+        }
     }
+    let path = file.settings.display();
+    let guid = CMD_PROFILE_GUID;
+    let mut en = format!(
+        "{why_en} By hand, in {path}: delete the color scheme named \"CMD Studio\", and put back \
+         each key below that still holds what CMD Studio set."
+    );
+    let mut th = format!(
+        "{why_th} ให้แก้ด้วยมือในไฟล์ {path}: ลบชุดสี (scheme) ชื่อ \"CMD Studio\" \
+         และคืนค่าแต่ละคีย์ข้างล่างที่ยังเป็นค่าที่ CMD Studio ตั้งไว้"
+    );
+    if !profile_en.is_empty() {
+        en.push_str(&format!(
+            " In the Command Prompt profile (guid {guid}): {}.",
+            profile_en.join("; ")
+        ));
+        th.push_str(&format!(
+            " ในโปรไฟล์ Command Prompt (guid {guid}): {}",
+            profile_th.join("; ")
+        ));
+    }
+    if !top_en.is_empty() {
+        en.push_str(&format!(" At the top level: {}.", top_en.join("; ")));
+        th.push_str(&format!(" ที่ระดับบนสุด: {}", top_th.join("; ")));
+    }
+    FixByHand { en, th }
 }
 
 /// A font file nothing will delete.
@@ -1030,17 +1473,19 @@ fn folder_by_hand(path: &Path) -> FixByHand {
     }
 }
 
-/// The restore point a pending record's fixes copy from, kept.
-fn record_folder_by_hand(id: &str, dir: &Path) -> FixByHand {
-    let dir = dir.display();
+/// state.json and the restore points, kept because not everything is back.
+fn records_by_hand(data: &Path) -> FixByHand {
+    let data = data.display();
     FixByHand {
         en: format!(
-            "First fix by hand what the record of restore point {id} lists: its fixes copy \
-             files from {dir}. Then delete {dir}."
+            "CMD Studio kept state.json and its restore points in {data}: they record what your \
+             settings were before CMD Studio. Do by hand what the failed steps above say, or \
+             install CMD Studio again and use Revert everything; then delete {data}."
         ),
         th: format!(
-            "ให้แก้ด้วยมือตามรายการในบันทึกของจุดย้อนกลับ {id} ก่อน \
-             (วิธีแก้ในบันทึกนั้นคัดลอกไฟล์จาก {dir}) แล้วจึงลบ {dir}"
+            "CMD Studio เก็บไฟล์ state.json และจุดย้อนกลับไว้ใน {data} \
+             เพราะเป็นที่บันทึกค่าเดิมก่อนใช้ CMD Studio ให้ทำตามขั้นที่ล้มเหลวข้างบนด้วยมือ \
+             หรือติดตั้ง CMD Studio ใหม่แล้วใช้ \"ย้อนทุกอย่าง\" จากนั้นจึงลบ {data}"
         ),
     }
 }
@@ -1141,46 +1586,65 @@ mod tests {
             key_existed: true,
             value: None,
         };
-        let wrote = |t: &str| AutoRunWritten {
-            value: Some(t.to_string()),
-        };
         let foreign = r#""C:\clink\clink.bat" inject --autorun"#;
-        // Untouched since our write: the original comes back, a foreign Clink that the apply
-        // took out included.
+        // A foreign Clink that the apply took out comes back, in front.
+        assert_eq!(
+            autorun_after_revert(Some(&ours), Some(&rec(foreign)), &paths),
+            Ok(Some(Some(foreign.to_string())))
+        );
         assert_eq!(
             autorun_after_revert(
-                Some(&ours),
+                Some(&format!("{ours} & echo mine")),
+                Some(&rec(&format!("{foreign} & echo old"))),
+                &paths
+            ),
+            Ok(Some(Some(format!("{foreign} & echo mine"))))
+        );
+        // ...but only one that is not there already.
+        assert_eq!(
+            autorun_after_revert(
+                Some(&format!("{ours} & {foreign}")),
                 Some(&rec(foreign)),
-                Some(&wrote(&ours)),
                 &paths
             ),
             Ok(Some(Some(foreign.to_string())))
         );
+        // Not there before CMD Studio, nothing left: the value goes. There before: it stays,
+        // with what is left.
         assert_eq!(
-            autorun_after_revert(Some(&ours), Some(&absent), Some(&wrote(&ours)), &paths),
+            autorun_after_revert(Some(&ours), Some(&absent), &paths),
             Ok(Some(None))
         );
-        // Changed by someone after us: only our parts leave, the older form too, and every
-        // other byte stays.
+        assert_eq!(
+            autorun_after_revert(Some(&ours), Some(&rec("echo old")), &paths),
+            Ok(Some(Some(String::new())))
+        );
+        // Only our parts leave, the older form too, and every other byte stays, whatever the
+        // value was before.
         let changed = format!("{ours} & echo a ^& b & {older} & echo z");
         assert_eq!(
-            autorun_after_revert(Some(&changed), Some(&absent), Some(&wrote(&ours)), &paths),
+            autorun_after_revert(Some(&changed), Some(&absent), &paths),
             Ok(Some(Some("echo a ^& b & echo z".into())))
         );
-        // No state at all: still only our part leaves; nothing of ours means no change.
         assert_eq!(
-            autorun_after_revert(Some(&ours), None, None, &paths),
+            autorun_after_revert(Some(&format!("{ours} & echo mine")), Some(&absent), &paths),
+            Ok(Some(Some("echo mine".into())))
+        );
+        // No state at all: still only our part leaves; nothing of ours means no change, even
+        // for a value that is empty.
+        assert_eq!(
+            autorun_after_revert(Some(&ours), None, &paths),
             Ok(Some(None))
         );
         assert_eq!(
-            autorun_after_revert(Some("echo hi"), None, None, &paths),
+            autorun_after_revert(Some("echo hi"), None, &paths),
             Ok(None)
         );
-        assert_eq!(autorun_after_revert(None, None, None, &paths), Ok(None));
+        assert_eq!(autorun_after_revert(Some(" "), None, &paths), Ok(None));
+        assert_eq!(autorun_after_revert(None, None, &paths), Ok(None));
         // A command that holds our profile path without being one of our entries is left for
         // a hand edit: cutting it out would take other text with it.
-        let err =
-            autorun_after_revert(Some(&format!("echo ^& {ours}")), None, None, &paths).unwrap_err();
+        let err = autorun_after_revert(Some(&format!("echo ^& {ours}")), None, &paths).unwrap_err();
         assert_eq!(err.code(), "E_AUTORUN_WRITE");
     }
 
@@ -1360,17 +1824,64 @@ mod tests {
         id
     }
 
-    /// The fake disk, but `dir` cannot be listed.
-    struct Unlistable<'a> {
-        fs: &'a FakeFs,
-        dir: PathBuf,
+    /// An apply whose rollback could not put settings.json back, on a machine CMD Studio had
+    /// not changed before: it fails at AutoRun after settings.json was written, and neither can
+    /// be written again. Its state.json was never written, so no baseline knows the file. Its id.
+    fn apply_whose_settings_cannot_go_back(m: &FakeMachine, ctx: &Ctx) -> String {
+        m.autorun.fail_writes();
+        let fs = HookedFs {
+            fs: &m.fs,
+            list_fails: None,
+            writes_once: Some(PathBuf::from(WT)),
+            wrote: std::cell::Cell::new(false),
+        };
+        let sys = System {
+            fs: &fs,
+            ..m.system()
+        };
+        let p = prepare_apply(sys, ctx, &terracotta(), &request(Target::All)).unwrap();
+        let id = p.manifest.id.clone();
+        let out = run_apply(sys, ctx, p);
+        assert!(
+            matches!(&out, Outcome::RollbackIncomplete { failed, .. } if failed.len() == 2),
+            "{out:?}"
+        );
+        assert!(String::from_utf8(m.fs.file(WT).unwrap())
+            .unwrap()
+            .contains("CMD Studio"));
+        id
     }
 
-    impl Fs for Unlistable<'_> {
+    /// The fake disk, but `list_fails` cannot be listed, and `writes_once` can be written once.
+    struct HookedFs<'a> {
+        fs: &'a FakeFs,
+        list_fails: Option<PathBuf>,
+        writes_once: Option<PathBuf>,
+        wrote: std::cell::Cell<bool>,
+    }
+
+    impl<'a> HookedFs<'a> {
+        fn unlistable(fs: &'a FakeFs, dir: &Path) -> Self {
+            HookedFs {
+                fs,
+                list_fails: Some(dir.to_path_buf()),
+                writes_once: None,
+                wrote: std::cell::Cell::new(false),
+            }
+        }
+    }
+
+    impl Fs for HookedFs<'_> {
         fn read(&self, path: &Path) -> Result<Option<Vec<u8>>, AdapterError> {
             self.fs.read(path)
         }
         fn write_atomic(&self, path: &Path, bytes: &[u8]) -> Result<(), AdapterError> {
+            if self.writes_once.as_deref() == Some(path) && self.wrote.replace(true) {
+                return Err(AdapterError::new(
+                    path.display().to_string(),
+                    "denied (test)",
+                ));
+            }
             self.fs.write_atomic(path, bytes)
         }
         fn remove_file(&self, path: &Path) -> Result<(), AdapterError> {
@@ -1395,7 +1906,7 @@ mod tests {
             self.fs.rename(from, to)
         }
         fn list_dir(&self, path: &Path) -> Result<Vec<DirEntry>, AdapterError> {
-            if path == self.dir {
+            if self.list_fails.as_deref() == Some(path) {
                 return Err(AdapterError::new(
                     path.display().to_string(),
                     "denied (test)",
@@ -1534,13 +2045,20 @@ mod tests {
             report.start.unreadable.iter().any(|u| u.point.id == id),
             "{report:?}"
         );
-        // Nothing says which of its changes ran, so the user is told; ours are taken out.
+        // Nothing says which of its changes ran. Our AutoRun entry is taken out, but its
+        // settings.json and font are still CMD Studio's, and no baseline knows them: the user
+        // is told what is left and how to take it out, and the records stay.
+        assert_eq!(m.autorun.read_user().unwrap(), None);
+        let fails = failed(&report, "E_ROLLBACK_INCOMPLETE");
         assert!(
-            !failed(&report, "E_ROLLBACK_INCOMPLETE").is_empty(),
+            fails.iter().any(|s| s.fix.as_ref().is_some_and(|f| {
+                f.en.contains(WT) && f.en.contains("CMD Studio") && f.th.contains(WT)
+            })),
             "{report:?}"
         );
-        assert_eq!(m.autorun.read_user().unwrap(), None);
-        assert!(!m.fs.exists(&ctx.paths.data), "{report:?}");
+        assert!(m.fs.exists(&ctx.paths.snapshots().join(&id)), "{report:?}");
+        assert!(m.fs.exists(&ctx.paths.state_file()));
+        assert!(!m.fs.exists(&ctx.paths.runtime_root()));
     }
 
     #[test]
@@ -1565,8 +2083,9 @@ mod tests {
             );
 
             // --cleanup's revert stops the same way. It still removes the ProgramData folder,
-            // which it works out without state.json, and keeps the data folder only while it
-            // holds a state.json from a newer CMD Studio.
+            // which it works out without state.json; it keeps the whole data folder while it
+            // holds a state.json from a newer CMD Studio, and state.json with the restore points
+            // when it cannot be read.
             let pd = own_program_data(&m);
             m.fs.put(pd.join("clink_x64.exe"), b"x");
             m.host.set_dir_state(&pd, DirState::Private);
@@ -1583,7 +2102,17 @@ mod tests {
                     "the data folder is kept"
                 );
             } else {
-                assert!(!m.fs.exists(&ctx.paths.data), "{report:?}");
+                // It may hold the only record of the user's settings: it stays, with the
+                // restore points, and the rest of the data folder goes.
+                assert!(m.fs.exists(&file), "{report:?}");
+                assert!(m.fs.exists(&ctx.paths.snapshots()), "{report:?}");
+                assert!(!m.fs.exists(&ctx.paths.runtime_root()), "{report:?}");
+                assert!(
+                    report.steps.iter().any(|s| !s.ok
+                        && s.code == Some("E_STATE_INVALID")
+                        && s.fix.as_ref().is_some_and(|f| f.en.contains("state.json"))),
+                    "{report:?}"
+                );
             }
         }
     }
@@ -2020,29 +2549,40 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_keeps_the_restore_point_whose_record_says_what_to_copy_back() {
+    fn cleanup_keeps_the_records_while_a_rollback_record_is_not_put_back() {
+        // The record's fix copies settings.json back from its restore point, and nothing else
+        // knows what the file held: --cleanup keeps state.json and the restore points.
         let (m, ctx) = machine();
-        apply(&m, &ctx, Target::All);
-        let id = apply_that_cannot_roll_back(&m, &later(&ctx, 1));
-        let report = cleanup(m.system(), &later(&ctx, 2), true).unwrap();
+        let id = apply_whose_settings_cannot_go_back(&m, &ctx);
+        let report = cleanup(m.system(), &later(&ctx, 1), true).unwrap();
         assert!(!report.ok());
-        let record = report.start.incomplete.as_ref().unwrap();
-        assert_eq!(record.id, id);
-        let payload = SnapshotStore::new(&m.fs, &ctx.paths.snapshots())
-            .payload_path(&id, record.steps[0].op_index);
+        let settings_step = report
+            .start
+            .incomplete
+            .as_ref()
+            .unwrap()
+            .steps
+            .iter()
+            .find(|s| s.target.contains("Windows Terminal"))
+            .unwrap()
+            .op_index;
+        let payload =
+            SnapshotStore::new(&m.fs, &ctx.paths.snapshots()).payload_path(&id, settings_step);
+        let fails = failed(&report, "E_ROLLBACK_INCOMPLETE");
+        assert!(
+            fails
+                .iter()
+                .any(|s| s.fix.as_ref().is_some_and(|f| f.en.contains("copy"))),
+            "the record's own fix: {report:?}"
+        );
+        assert!(m.fs.exists(&ctx.paths.state_file()));
+        assert!(m.fs.exists(&ctx.paths.snapshots()));
         assert!(
             m.fs.exists(&payload),
             "the copy its fix names is still there"
         );
-        let kept = ctx.paths.snapshots().join(&id).display().to_string();
-        assert!(
-            failed(&report, "E_ROLLBACK_INCOMPLETE")
-                .iter()
-                .any(|s| s.detail.contains(&kept) && s.fix.is_some()),
-            "{report:?}"
-        );
         assert!(!m.fs.exists(&ctx.paths.runtime_root()));
-        assert!(!m.fs.exists(&ctx.paths.state_file()));
+        assert!(!m.fs.exists(&ctx.paths.lock_file()));
     }
 
     #[test]
@@ -2087,29 +2627,24 @@ mod tests {
     fn cleanup_that_cannot_list_the_data_folder_says_so() {
         let (m, ctx) = machine();
         apply(&m, &ctx, Target::All);
-        let fs = Unlistable {
-            fs: &m.fs,
-            dir: ctx.paths.data.clone(),
-        };
+        let fs = HookedFs::unlistable(&m.fs, &ctx.paths.data);
         let sys = System {
             fs: &fs,
             ..m.system()
         };
         let report = cleanup(sys, &later(&ctx, 1), true).unwrap();
         assert!(!report.ok());
-        assert!(!failed(&report, "E_MACHINE_READ").is_empty(), "{report:?}");
+        // Both listings say so: the one before deleting, and the one after, for the folder.
+        assert_eq!(failed(&report, "E_MACHINE_READ").len(), 2, "{report:?}");
         assert!(m.fs.exists(&ctx.paths.runtime_root()));
     }
 
     #[test]
-    fn an_original_autorun_that_cannot_be_read_back_needs_a_hand_edit_and_is_never_deleted() {
+    fn an_original_autorun_that_cannot_be_read_back_is_said_and_autorun_is_never_deleted() {
         let paths = Paths {
             data: PathBuf::from(r"C:\d"),
         };
         let ours = autorun_entry(&ClinkLaunch::Direct(paths.clink_exe()), &paths).unwrap();
-        let wrote = AutoRunWritten {
-            value: Some(ours.clone()),
-        };
         let undecodable = [
             RegValueRecord {
                 kind: REG_SZ,
@@ -2125,13 +2660,14 @@ mod tests {
                 key_existed: true,
                 value: Some(value),
             };
-            let e = autorun_after_revert(Some(&ours), Some(&original), Some(&wrote), &paths)
-                .unwrap_err();
-            assert_eq!(e.code(), "E_AUTORUN_WRITE");
-            // With nothing of ours in AutoRun there is nothing to take out.
-            let deleted = AutoRunWritten { value: None };
+            // The value was there before CMD Studio: our part goes, and it stays, empty.
             assert_eq!(
-                autorun_after_revert(None, Some(&original), Some(&deleted), &paths),
+                autorun_after_revert(Some(&ours), Some(&original), &paths),
+                Ok(Some(Some(String::new())))
+            );
+            // With nothing of ours in AutoRun there is nothing to take out.
+            assert_eq!(
+                autorun_after_revert(None, Some(&original), &paths),
                 Ok(None)
             );
         }
@@ -2147,26 +2683,19 @@ mod tests {
             }),
         });
         m.fs.put(ctx.paths.state_file(), s.to_bytes().unwrap());
-        let ours = m.autorun.read_user().unwrap();
-        let entry = ours.as_ref().unwrap().text().unwrap();
         let report = revert_all(m.system(), &later(&ctx, 1)).unwrap();
-        let [step] = failed(&report, "E_AUTORUN_WRITE")[..] else {
+        // Our part goes. AutoRun existed before CMD Studio, so it stays, empty: never deleted.
+        assert_eq!(
+            m.autorun.read_user().unwrap().unwrap().text().as_deref(),
+            Some("")
+        );
+        // What it held cannot be read back, so whether another program's Clink should come
+        // back is not known: said.
+        let [step] = failed(&report, "E_STATE_INVALID")[..] else {
             panic!("{report:?}")
         };
-        let fix = step.fix.as_ref().unwrap();
-        for text in [&fix.en, &fix.th] {
-            assert!(
-                text.contains(COMMAND_PROCESSOR_KEY) && text.contains(&entry),
-                "{text}"
-            );
-        }
-        assert_eq!(m.autorun.read_user().unwrap(), ours, "left, never deleted");
+        assert!(step.what.contains("AutoRun"), "{step:?}");
         assert_eq!(m.fs.file(WT).unwrap(), SETTINGS.as_bytes());
-        assert_eq!(
-            state(&m, &ctx).baseline.autorun,
-            s.baseline.autorun,
-            "kept for the next revert"
-        );
     }
 
     #[test]
@@ -2231,23 +2760,7 @@ mod tests {
 
     #[test]
     fn what_the_start_found_is_a_failed_step_with_its_code() {
-        // A rollback that did not finish, with nothing run since: the user is told, and its
-        // record is in the report.
-        let (m, ctx) = machine();
-        apply(&m, &ctx, Target::All);
-        let id = apply_that_cannot_roll_back(&m, &later(&ctx, 1));
-        let report = revert_all(m.system(), &later(&ctx, 2)).unwrap();
-        assert_eq!(
-            report.start.incomplete.as_ref().map(|r| r.id.as_str()),
-            Some(id.as_str())
-        );
-        let [step] = failed(&report, "E_ROLLBACK_INCOMPLETE")[..] else {
-            panic!("{report:?}")
-        };
-        assert!(step.detail.contains(&id), "{step:?}");
-        assert!(!report.ok());
-
-        // Its record cannot be read: said, not dropped.
+        // The record of a rollback that did not finish cannot be read: said, not dropped.
         let (m, ctx) = machine();
         apply(&m, &ctx, Target::All);
         let id = apply_that_cannot_roll_back(&m, &later(&ctx, 1));
@@ -2261,5 +2774,264 @@ mod tests {
         );
         assert!(report.start.problems.is_empty(), "moved into the steps");
         assert!(!report.ok());
+    }
+
+    // ---- Only our part of AutoRun goes (spec §6.3 step 1). ----
+
+    fn autorun_text(m: &FakeMachine) -> Option<String> {
+        m.autorun.read_user().unwrap().and_then(|v| v.text())
+    }
+
+    #[test]
+    fn a_second_apply_after_the_user_changed_autorun_loses_nothing_of_theirs() {
+        let (m, ctx) = machine();
+        apply(&m, &ctx, Target::All);
+        let ours = autorun_text(&m).unwrap();
+        m.autorun
+            .write_user(&RegValue::from_text(REG_SZ, &format!("echo mine & {ours}")))
+            .unwrap();
+        apply(&m, &later(&ctx, 1), Target::All);
+        assert_eq!(autorun_text(&m), Some(format!("{ours} & echo mine")));
+        let report = revert_all(m.system(), &later(&ctx, 2)).unwrap();
+        assert!(report.ok(), "{report:?}");
+        assert_eq!(autorun_text(&m).as_deref(), Some("echo mine"));
+    }
+
+    #[test]
+    fn a_hand_edit_after_a_refused_revert_is_kept_through_the_next_apply() {
+        let (m, ctx) = machine();
+        apply(&m, &ctx, Target::All);
+        let ours = autorun_text(&m).unwrap();
+        m.autorun
+            .write_user(&RegValue::from_text(REG_SZ, &format!("echo ^& {ours}")))
+            .unwrap();
+        let report = revert_all(m.system(), &later(&ctx, 1)).unwrap();
+        assert!(!failed(&report, "E_AUTORUN_WRITE").is_empty(), "{report:?}");
+        // The user takes our part out by hand, keeping a command of their own, and applies
+        // again.
+        m.autorun
+            .write_user(&RegValue::from_text(REG_SZ, "echo mine"))
+            .unwrap();
+        apply(&m, &later(&ctx, 2), Target::All);
+        let report = revert_all(m.system(), &later(&ctx, 3)).unwrap();
+        assert!(report.ok(), "{report:?}");
+        assert_eq!(autorun_text(&m).as_deref(), Some("echo mine"));
+    }
+
+    #[test]
+    fn a_clink_cmd_studio_turned_off_comes_back_and_what_the_user_added_stays() {
+        let foreign = r#""C:\clink\clink.bat" inject --autorun"#;
+        let original = format!(r#"{foreign} & "%USERPROFILE%\conda_hook.bat""#);
+        let replace = crate::plan::Request {
+            replace_foreign_clink: true,
+            ..request(Target::All)
+        };
+        for user_adds in [false, true] {
+            let (m, ctx) = machine();
+            let before = RegValue::from_text(REG_EXPAND_SZ, &original);
+            m.autorun.write_user(&before).unwrap();
+            let p = prepare_apply(m.system(), &ctx, &terracotta(), &replace).unwrap();
+            assert_eq!(run_apply(m.system(), &ctx, p), Outcome::Committed);
+            let now = autorun_text(&m).unwrap();
+            assert!(!now.contains("clink.bat"), "turned off: {now}");
+            if user_adds {
+                m.autorun
+                    .write_user(&RegValue::from_text(
+                        REG_EXPAND_SZ,
+                        &format!("{now} & echo mine"),
+                    ))
+                    .unwrap();
+            }
+            let report = revert_all(m.system(), &later(&ctx, 1)).unwrap();
+            assert!(report.ok(), "{report:?}");
+            let after = m.autorun.read_user().unwrap().unwrap();
+            assert_eq!(after.kind, REG_EXPAND_SZ, "the value stays expandable");
+            let want = if user_adds {
+                format!("{original} & echo mine")
+            } else {
+                original.clone()
+            };
+            assert_eq!(after.text(), Some(want), "user_adds: {user_adds}");
+            if !user_adds {
+                assert_eq!(after, before, "byte for byte");
+            }
+        }
+    }
+
+    // ---- --cleanup never deletes the only copy of the user's values. ----
+
+    #[test]
+    fn cleanup_keeps_the_records_when_a_settings_file_is_left_as_it_is() {
+        let (m, ctx) = machine();
+        apply(&m, &ctx, Target::All);
+        // Windows Terminal, or a scanner, has it open for a moment.
+        m.fs.fail_reads_of(WT);
+        let report = cleanup(m.system(), &later(&ctx, 1), true).unwrap();
+        assert!(!report.ok());
+        let [step] = failed(&report, "E_MACHINE_READ")[..] else {
+            panic!("{report:?}")
+        };
+        // Its fix says what CMD Studio set there, so it can be taken out by hand.
+        let fix = step.fix.as_ref().unwrap();
+        for text in [&fix.en, &fix.th] {
+            assert!(
+                text.contains("\"CMD Studio\"")
+                    && text.contains("\"opacity\"")
+                    && text.contains(crate::generate::wt::CMD_PROFILE_GUID),
+                "{text}"
+            );
+        }
+        // What knows the file's values stays, and says so.
+        assert!(m.fs.exists(&ctx.paths.state_file()));
+        assert!(m.fs.exists(&ctx.paths.snapshots()));
+        assert_eq!(state(&m, &ctx).baseline.wt.len(), 1);
+        assert!(
+            failed(&report, "E_ROLLBACK_INCOMPLETE")
+                .iter()
+                .any(|s| s.fix.as_ref().is_some_and(|f| f.en.contains("state.json"))),
+            "{report:?}"
+        );
+        assert!(!m.fs.exists(&ctx.paths.runtime_root()));
+        assert!(!m.fs.exists(&ctx.paths.lock_file()));
+    }
+
+    #[test]
+    fn cleanup_keeps_a_damaged_state_file_it_set_aside() {
+        let (m, ctx) = machine();
+        apply(&m, &ctx, Target::All);
+        m.fs.put(ctx.paths.state_file(), b"garbage");
+        let ctx1 = later(&ctx, 1);
+        let report = cleanup(m.system(), &ctx1, true).unwrap();
+        assert!(!report.ok());
+        let aside = ctx
+            .paths
+            .data
+            .join(format!("state.json.damaged-{}", ctx1.now_ms));
+        assert_eq!(
+            m.fs.file(&aside).as_deref(),
+            Some(&b"garbage"[..]),
+            "{report:?}"
+        );
+        assert!(m.fs.exists(&ctx.paths.snapshots()));
+        assert!(!m.fs.exists(&ctx.paths.runtime_root()));
+        let kept = failed(&report, "E_STATE_INVALID");
+        assert!(
+            kept.iter()
+                .any(|s| s.what.starts_with("Delete") && s.fix.is_some()),
+            "{report:?}"
+        );
+    }
+
+    // ---- A rollback record is never dropped by a revert. ----
+
+    #[test]
+    fn a_rollback_record_the_revert_cannot_clear_is_listed_and_kept_until_it_is() {
+        let (m, ctx) = machine();
+        let id = apply_whose_settings_cannot_go_back(&m, &ctx);
+        assert_eq!(
+            pending_incomplete(m.system(), &ctx).unwrap().map(|r| r.id),
+            Some(id)
+        );
+        for n in 1..=2 {
+            let report = revert_all(m.system(), &later(&ctx, n)).unwrap();
+            assert!(!report.ok(), "{report:?}");
+            // Its settings.json step is listed with the record's own fix. AutoRun holds nothing
+            // of ours, so that step is put back.
+            let [step] = failed(&report, "E_ROLLBACK_INCOMPLETE")[..] else {
+                panic!("{report:?}")
+            };
+            assert!(step.what.contains(WT), "{step:?}");
+            assert!(
+                step.fix
+                    .as_ref()
+                    .is_some_and(|f| f.en.contains("copy") && !f.th.is_empty()),
+                "{step:?}"
+            );
+            if n == 1 {
+                assert!(
+                    report
+                        .steps
+                        .iter()
+                        .any(|s| s.ok && s.what.contains("AutoRun")),
+                    "{report:?}"
+                );
+            }
+            // Later starts still find it.
+            let record = pending_incomplete(m.system(), &ctx).unwrap().unwrap();
+            assert!(
+                record.steps.iter().any(|s| s.target.contains(WT)),
+                "{record:?}"
+            );
+        }
+        // Put back by hand: the next revert finds it so, says so, and the record ends.
+        m.fs.put(WT, SETTINGS);
+        let report = revert_all(m.system(), &later(&ctx, 3)).unwrap();
+        assert!(report.ok(), "{report:?}");
+        assert!(
+            report.steps.iter().any(|s| s.ok && s.what.contains(WT)),
+            "{report:?}"
+        );
+        assert_eq!(pending_incomplete(m.system(), &ctx).unwrap(), None);
+    }
+
+    #[test]
+    fn a_rollback_record_the_revert_clears_is_said_so_and_ends() {
+        let (m, ctx) = machine();
+        apply(&m, &ctx, Target::All);
+        let id = apply_that_cannot_roll_back(&m, &later(&ctx, 1));
+        let report = revert_all(m.system(), &later(&ctx, 2)).unwrap();
+        assert!(report.ok(), "{report:?}");
+        let init = ctx.paths.generated().join("init.lua").display().to_string();
+        assert!(
+            report
+                .steps
+                .iter()
+                .any(|s| s.ok && s.what.contains(&init) && s.what.contains(&id)),
+            "{report:?}"
+        );
+        assert_eq!(pending_incomplete(m.system(), &ctx).unwrap(), None);
+        let again = revert_all(m.system(), &later(&ctx, 3)).unwrap();
+        assert!(again.ok(), "{again:?}");
+        assert_eq!(again.start.incomplete, None);
+    }
+
+    #[test]
+    fn a_recorded_program_data_folder_must_sit_in_program_data_and_be_named_like_ours() {
+        let cases = [
+            (
+                r"C:\ProgramData\AI.RESINCORE.CMDSTUDIO-S-1-5-21-9-9-9-1001",
+                true,
+            ),
+            (
+                r"C:\Elsewhere\ai.resincore.cmdstudio-S-1-5-21-9-9-9-1001",
+                false,
+            ),
+            (r"C:\ProgramData\ai.resincore.cmdstudio-", false),
+        ];
+        for (dir, goes) in cases {
+            let dir = PathBuf::from(dir);
+            let (m, ctx) = machine();
+            m.fs.put(dir.join("clink_x64.exe"), b"x");
+            m.host.set_dir_state(&dir, DirState::Private);
+            let s = State {
+                baseline: Baseline {
+                    program_data_dir: Some(dir.clone()),
+                    ..Baseline::default()
+                },
+                ..State::default()
+            };
+            m.fs.put(ctx.paths.state_file(), s.to_bytes().unwrap());
+            let report = cleanup(m.system(), &ctx, true).unwrap();
+            assert_eq!(!m.fs.exists(&dir), goes, "{dir:?}: {report:?}");
+            if !goes {
+                assert!(
+                    report
+                        .steps
+                        .iter()
+                        .any(|s| s.ok && s.detail.starts_with("left alone")),
+                    "{report:?}"
+                );
+            }
+        }
     }
 }

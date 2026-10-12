@@ -539,6 +539,11 @@ pub struct Unrestored {
     /// written before this field existed has none.
     #[serde(default)]
     pub fix_th: String,
+    /// The restore point whose ops `op_index` counts, when it is not the record's own: a step
+    /// that a revert of everything could not put back either, carried over into the record of
+    /// its own restore point. Not written while `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restore_point: Option<String>,
 }
 
 /// `incomplete.json`: what a transaction that ended `RollbackIncomplete` could not put back,
@@ -889,6 +894,7 @@ mod tests {
                 message: "denied".into(),
                 fix: "Copy x over y.".into(),
                 fix_th: "คัดลอก x ทับ y".into(),
+                restore_point: None,
             }],
         };
         store.write_incomplete(&record).unwrap();
@@ -1688,6 +1694,7 @@ mod tests {
             message: "denied".into(),
             fix: "Copy a over b.".into(),
             fix_th: "คัดลอก a ทับ b".into(),
+            restore_point: None,
         };
         let json = serde_json::to_value(&step).unwrap();
         assert_eq!(json["fix"], "Copy a over b.");

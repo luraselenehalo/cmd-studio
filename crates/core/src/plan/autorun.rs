@@ -412,7 +412,8 @@ fn command_words(command: &str) -> Vec<String> {
 }
 
 /// Whether `text` runs another Clink: it injects Clink (see [`runs_clink`]) and is not ours.
-fn is_foreign(text: &str, profile: &str) -> bool {
+/// The cleanup turns back on exactly the commands this called another Clink.
+pub(crate) fn is_foreign(text: &str, profile: &str) -> bool {
     !holds_ours(text, profile) && runs_clink(text)
 }
 
