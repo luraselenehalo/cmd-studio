@@ -1941,4 +1941,93 @@ mod tests {
         assert_eq!(d5.details, format!("HKLM: {machine_wide}"));
         assert!(d5.message_en.contains("whole machine"), "{d5:?}");
     }
+
+    #[test]
+    fn every_problem_is_said_in_thai_and_english() {
+        // Spec §5.9: `run` checks both texts, the code of every warning and failure, and that
+        // nothing changed. These are the results the other tests reach through `doctor` alone.
+        let statuses = |checks: &[Check]| -> Vec<(&'static str, Status)> {
+            checks.iter().map(|c| (c.id, c.status)).collect()
+        };
+        let not_ok = |checks: &[Check], ids: &[&str]| {
+            for id in ids {
+                let c = by_id(checks, id);
+                assert!(matches!(c.status, Status::Warn | Status::Fail), "{c:?}");
+            }
+        };
+
+        // The problems of `problems_are_reported_with_their_codes`, and a font that is gone.
+        let (mut m, ctx) = themed(Target::All);
+        m.process.answer("oh-my-posh.exe", "version", 0, "31.4.0\n");
+        put_log(
+            &m,
+            &ctx,
+            "check_dll_version 154 Unable to get DLL version for 'C:\\??'\n",
+        );
+        m.autorun
+            .write_user(&RegValue::from_text(
+                REG_SZ,
+                r#""C:\clink\clink.bat" inject"#,
+            ))
+            .unwrap();
+        m.fs.put(ctx.paths.generated().join("init.lua"), b"-- edited by hand");
+        m.fs.put(WT, b"{ broken");
+        m.fonts = crate::adapters::fake::FakeFonts::new(r"C:\f", &["Arial"]);
+        let checks = run(&m, &ctx);
+        not_ok(&checks, &["D2", "D3", "D4", "D5", "D6", "D7", "D8", "D9"]);
+
+        // A Lua error, a clink that does not start, AutoRun that cmd refuses or with ours
+        // behind another command, and the runtime gone.
+        let (m, ctx) = themed(Target::All);
+        m.process.answer(
+            "clink_x64.exe",
+            "--profile",
+            0,
+            "C:\\d\\generated\\init.lua:9: attempt to call a nil value\n",
+        );
+        let ours = m.autorun.read_user().unwrap().unwrap().text().unwrap();
+        m.autorun
+            .write_user(&RegValue::from_text(REG_SZ, &format!("{ours} & & x")))
+            .unwrap();
+        not_ok(&run(&m, &ctx), &["D3", "D4"]);
+        m.autorun
+            .write_user(&RegValue::from_text(REG_SZ, &format!("echo x & {ours}")))
+            .unwrap();
+        m.fs.remove_dir_all(&ctx.paths.clink_dir()).unwrap();
+        m.fs.remove_dir_all(&ctx.paths.omp_dir()).unwrap();
+        not_ok(&run(&m, &ctx), &["D1", "D4"]);
+        m.autorun
+            .write_user(&RegValue::from_text(REG_SZ, &ours))
+            .unwrap();
+        let d4 = by_id(&run(&m, &ctx), "D4");
+        assert_eq!(d4.code, Some("E_RUNTIME_MISSING"), "{d4:?}");
+
+        // No Windows Terminal at all, and each default terminal D11 can name.
+        let (mut m, ctx) = machine();
+        m.fs.remove_file(std::path::Path::new(WT)).unwrap();
+        m.wt.locations.iter_mut().for_each(|l| l.installed = false);
+        assert_eq!(by_id(&run(&m, &ctx), "D6").code, Some("E_WT_NOT_FOUND"));
+        for terminal in [
+            DefaultTerminal::WindowsTerminal,
+            DefaultTerminal::WindowsTerminalPreview,
+            DefaultTerminal::LetWindowsDecide,
+            DefaultTerminal::Conhost,
+            DefaultTerminal::Other,
+        ] {
+            m.host.info.default_terminal = terminal;
+            let d11 = by_id(&run(&m, &ctx), "D11");
+            assert_eq!(d11.status, Status::Ok, "{d11:?}");
+        }
+
+        // An apply with no Windows Terminal: what needs it is skipped, saying why.
+        m.process.answer("oh-my-posh.exe", "version", 0, "31.5.0\n");
+        let p = prepare_apply(m.system(), &ctx, &terracotta(), &request(Target::All)).unwrap();
+        assert_eq!(run_apply(m.system(), &ctx, p), Outcome::Committed);
+        let checks = run(&m, &ctx);
+        assert!(
+            statuses(&checks).contains(&("D7", Status::Skipped))
+                && statuses(&checks).contains(&("D8", Status::Skipped)),
+            "{checks:#?}"
+        );
+    }
 }
