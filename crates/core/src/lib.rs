@@ -4,6 +4,7 @@
 pub mod adapters;
 pub mod color;
 pub mod detect;
+pub mod exec;
 pub mod generate;
 pub mod model;
 pub mod oklch;
