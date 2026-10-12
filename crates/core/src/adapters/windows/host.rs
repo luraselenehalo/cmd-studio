@@ -12,7 +12,7 @@ use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use windows_sys::core::{GUID, PWSTR};
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, LocalFree, APPMODEL_ERROR_NO_PACKAGE, ERROR_ALREADY_EXISTS, HANDLE,
+    GetLastError, APPMODEL_ERROR_NO_PACKAGE, ERROR_ALREADY_EXISTS, HANDLE,
 };
 use windows_sys::Win32::Globalization::GetUserDefaultUILanguage;
 use windows_sys::Win32::Security::Authorization::{
@@ -64,28 +64,63 @@ const WEBVIEW2_CLIENT: &str = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}";
 #[derive(Clone, Copy, Debug, Default)]
 pub struct WinHost;
 
-/// A block that `LocalAlloc` handed out (a security descriptor, a SID string).
-/// `LocalFree` runs when the guard goes out of scope, on every path out of a function.
-struct LocalBlock(*mut c_void);
+/// Owning guards for Win32 resources. Their fields are private to this module, so the only way to
+/// make one is its `unsafe fn new`, whose `# Safety` section says what the caller promises.
+mod guard {
+    use std::ffi::c_void;
+    use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, HANDLE};
 
-impl Drop for LocalBlock {
-    fn drop(&mut self) {
-        // SAFETY: the pointer came from a Win32 call that allocates with LocalAlloc, this guard
-        // is its only owner, and this is the only place that frees it.
-        unsafe { LocalFree(self.0) };
+    /// A block that `LocalAlloc` handed out (a security descriptor, a SID string).
+    /// `LocalFree` runs when the guard goes out of scope, on every path out of a function.
+    pub(super) struct LocalBlock(*mut c_void);
+
+    impl LocalBlock {
+        /// # Safety
+        /// `block` must be NULL or a block that a Win32 call allocated with `LocalAlloc`, and
+        /// nothing else may free it.
+        pub(super) unsafe fn new(block: *mut c_void) -> Self {
+            LocalBlock(block)
+        }
+
+        pub(super) fn as_ptr(&self) -> *mut c_void {
+            self.0
+        }
+    }
+
+    impl Drop for LocalBlock {
+        fn drop(&mut self) {
+            // SAFETY: the caller of `new` promised the pointer is NULL or a LocalAlloc block that
+            // nothing else frees, and this guard is its only owner.
+            unsafe { LocalFree(self.0) };
+        }
+    }
+
+    /// A process token, closed when the guard goes out of scope.
+    pub(super) struct Token(HANDLE);
+
+    impl Token {
+        /// # Safety
+        /// `handle` must be an open handle that the caller owns, such as one from a successful
+        /// `OpenProcessToken`, and nothing else may close it.
+        pub(super) unsafe fn new(handle: HANDLE) -> Self {
+            Token(handle)
+        }
+
+        pub(super) fn handle(&self) -> HANDLE {
+            self.0
+        }
+    }
+
+    impl Drop for Token {
+        fn drop(&mut self) {
+            // SAFETY: the caller of `new` promised the handle is open and owned by this guard
+            // alone.
+            unsafe { CloseHandle(self.0) };
+        }
     }
 }
 
-/// The current process's token, closed when the guard goes out of scope.
-struct Token(HANDLE);
-
-impl Drop for Token {
-    fn drop(&mut self) {
-        // SAFETY: the handle came from a successful OpenProcessToken, this guard is its only
-        // owner, and this is the only place that closes it.
-        unsafe { CloseHandle(self.0) };
-    }
-}
+use guard::{LocalBlock, Token};
 
 /// The UTF-16 text a Win32 call returned, up to its NUL.
 ///
@@ -128,6 +163,16 @@ fn known_folder(id: &GUID, name: &str) -> Result<PathBuf, AdapterError> {
     path
 }
 
+/// The SID, or an error when the pointer is NULL. A security descriptor can have no owner, and
+/// `sid_string` must only ever be given a SID.
+fn non_null_sid(sid: PSID, context: &str) -> Result<PSID, AdapterError> {
+    if sid.is_null() {
+        Err(AdapterError::new(context, "there is no SID"))
+    } else {
+        Ok(sid)
+    }
+}
+
 /// # Safety
 /// `sid` must point to a valid SID.
 unsafe fn sid_string(sid: PSID) -> Result<String, AdapterError> {
@@ -137,10 +182,11 @@ unsafe fn sid_string(sid: PSID) -> Result<String, AdapterError> {
     if converted == 0 {
         return Err(last_error("ConvertSidToStringSidW"));
     }
-    // The string was allocated with LocalAlloc; the guard frees it after the text is copied out.
-    let s = LocalBlock(s.cast::<c_void>());
+    // SAFETY: success gave a string that ConvertSidToStringSidW allocated with LocalAlloc, and
+    // nothing else frees it; the guard does, after the text is copied out.
+    let s = unsafe { LocalBlock::new(s.cast::<c_void>()) };
     // SAFETY: success gives a NUL-terminated UTF-16 string, valid until the guard drops.
-    let text = unsafe { from_wide_ptr(s.0.cast::<u16>()) };
+    let text = unsafe { from_wide_ptr(s.as_ptr().cast::<u16>()) };
     Ok(text.to_string_lossy().into_owned())
 }
 
@@ -152,10 +198,11 @@ fn current_user_sid() -> Result<String, AdapterError> {
     if opened == 0 {
         return Err(last_error("OpenProcessToken"));
     }
-    let token = Token(handle);
+    // SAFETY: `handle` came from the successful OpenProcessToken above, and nothing else closes it.
+    let token = unsafe { Token::new(handle) };
     let mut len = 0u32;
     // SAFETY: a size query: no buffer with length 0 is allowed, and `len` receives the size needed.
-    unsafe { GetTokenInformation(token.0, TokenUser, std::ptr::null_mut(), 0, &mut len) };
+    unsafe { GetTokenInformation(token.handle(), TokenUser, std::ptr::null_mut(), 0, &mut len) };
     if len == 0 {
         return Err(last_error("GetTokenInformation (size)"));
     }
@@ -164,7 +211,7 @@ fn current_user_sid() -> Result<String, AdapterError> {
     // SAFETY: `buf` holds at least `len` writable bytes, which is the length passed.
     let got = unsafe {
         GetTokenInformation(
-            token.0,
+            token.handle(),
             TokenUser,
             buf.as_mut_ptr().cast::<c_void>(),
             len,
@@ -174,9 +221,11 @@ fn current_user_sid() -> Result<String, AdapterError> {
     if got == 0 {
         return Err(last_error("GetTokenInformation"));
     }
-    // SAFETY: success wrote a TOKEN_USER at the start of `buf`, which is 8-byte aligned; its SID
-    // points into `buf` as well, and `buf` outlives the call.
-    unsafe { sid_string((*buf.as_ptr().cast::<TOKEN_USER>()).User.Sid) }
+    // SAFETY: success wrote a TOKEN_USER at the start of `buf`, which is 8-byte aligned.
+    let sid = unsafe { (*buf.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+    let sid = non_null_sid(sid, "GetTokenInformation")?;
+    // SAFETY: `sid` is not NULL (just checked) and points into `buf`, which outlives the call.
+    unsafe { sid_string(sid) }
 }
 
 /// Allow-entries of an access list: (SID, rights).
@@ -209,9 +258,13 @@ fn owner_and_allowed(dir: &Path) -> Result<(String, Option<AllowEntries>), Adapt
             std::io::Error::from_raw_os_error(rc as i32).to_string(),
         ));
     }
-    // `owner` and `dacl` point into this descriptor, so it stays until the function returns.
-    let _descriptor = LocalBlock(sd);
-    // SAFETY: `owner` is the SID inside the descriptor, which the guard keeps alive.
+    // SAFETY: GetNamedSecurityInfoW allocated the descriptor with LocalAlloc, and nothing else
+    // frees it. `owner` and `dacl` point into it, so the guard keeps it until the function returns.
+    let _descriptor = unsafe { LocalBlock::new(sd) };
+    // `owner` is NULL when the descriptor has no owner.
+    let owner = non_null_sid(owner, &format!("GetNamedSecurityInfoW {}", dir.display()))?;
+    // SAFETY: `owner` is not NULL (just checked), so it is the owner SID inside the descriptor,
+    // which the guard keeps alive.
     let owner = unsafe { sid_string(owner) }?;
     if dacl.is_null() {
         return Ok((owner, None));
@@ -284,11 +337,12 @@ pub(crate) fn create_dir_with_sddl(dir: &Path, sddl: &str) -> Result<Created, Ad
             "ConvertStringSecurityDescriptorToSecurityDescriptorW",
         ));
     }
-    // Allocated with LocalAlloc by the call above; freed on every path out of here.
-    let descriptor = LocalBlock(sd);
+    // SAFETY: the call above allocated the descriptor with LocalAlloc, and nothing else frees it;
+    // the guard frees it on every path out of here.
+    let descriptor = unsafe { LocalBlock::new(sd) };
     let attributes = SECURITY_ATTRIBUTES {
         nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
-        lpSecurityDescriptor: descriptor.0,
+        lpSecurityDescriptor: descriptor.as_ptr(),
         bInheritHandle: 0,
     };
     let path = wide(dir.as_os_str());
@@ -523,6 +577,13 @@ impl Host for WinHost {
     }
 
     fn private_dir_state(&self, dir: &Path) -> Result<DirState, AdapterError> {
+        // The path is looked at twice: here, for what it is (a link, a file, a folder), and in
+        // `owner_and_allowed` for who owns it and who may write to it. Another user could swap
+        // the path between the two looks, and that is harmless: GetNamedSecurityInfoW reads a
+        // link's own descriptor and does not follow it (the test
+        // `a_link_is_read_as_itself_and_not_as_its_target` checks that for a junction). So
+        // whatever is put in the folder's place, a link or a folder, is owned by the user who
+        // made it, and `judge` calls it Unsafe.
         let meta = match std::fs::symlink_metadata(dir) {
             Ok(m) => m,
             Err(e) if e.kind() == ErrorKind::NotFound => return Ok(DirState::Absent),
@@ -535,6 +596,7 @@ impl Host for WinHost {
             return Ok(DirState::Unsafe("it is not a folder".into()));
         }
         let me = current_user_sid()?;
+        // The second look, of the path itself (see the note above).
         let (owner, allowed) = owner_and_allowed(dir)?;
         Ok(judge(&me, &owner, allowed.as_deref()))
     }
@@ -599,7 +661,37 @@ mod tests {
             "8.3 names on this volume: {}",
             short.to_str().is_some_and(str::is_ascii)
         );
+        // The check above also passes for a short_path that hands its input back. The shell
+        // makes the short form on its own: where it gets a plain-ASCII one, the volume makes
+        // 8.3 names and ours has to be that same name.
+        let theirs = cmd_short_path(&long);
+        if theirs.is_ascii() {
+            println!("short name: ours {short:?}, the shell's {theirs:?}");
+            assert!(
+                short
+                    .to_str()
+                    .is_some_and(|ours| ours.eq_ignore_ascii_case(&theirs)),
+                "ours {short:?}, the shell's {theirs:?}"
+            );
+        } else {
+            println!("the shell made no short name either: nothing to compare");
+        }
         assert!(WinHost.short_path(&tmp.path().join("missing")).is_err());
+    }
+
+    /// The short form of a path as cmd prints it (`%~sI` in a `for` loop): the shell's own answer.
+    /// `/d` keeps AutoRun out; `raw_arg` hands cmd the text as written, quotes included.
+    fn cmd_short_path(path: &Path) -> String {
+        let out = std::process::Command::new("cmd")
+            .raw_arg(format!(
+                r#"/d /c for %I in ("{}") do @echo %~sI"#,
+                path.display()
+            ))
+            .stdin(std::process::Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
     #[test]
@@ -858,7 +950,9 @@ mod tests {
             )
         };
         assert_eq!(rc, 0, "{}", path.display());
-        let _descriptor = LocalBlock(sd);
+        // SAFETY: GetNamedSecurityInfoW allocated the descriptor with LocalAlloc, and nothing
+        // else frees it.
+        let _descriptor = unsafe { LocalBlock::new(sd) };
         assert!(!dacl.is_null(), "{} has no access list", path.display());
         // SAFETY: `dacl` is not NULL (just asserted), so it is the ACL inside the descriptor,
         // which the guard keeps alive.
@@ -895,7 +989,9 @@ mod tests {
             )
         };
         assert_eq!(rc, 0, "{}", path.display());
-        let _descriptor = LocalBlock(sd);
+        // SAFETY: GetNamedSecurityInfoW allocated the descriptor with LocalAlloc, and nothing
+        // else frees it.
+        let _descriptor = unsafe { LocalBlock::new(sd) };
         let (mut control, mut revision) = (0u16, 0u32);
         // SAFETY: `sd` is the descriptor from the call above, kept alive by the guard;
         // `control` and `revision` are valid out-pointers.
@@ -1065,6 +1161,58 @@ mod tests {
         let state = WinHost.private_dir_state(&windows).unwrap();
         println!("{} is {state:?}", windows.display());
         assert!(matches!(state, DirState::Unsafe(_)), "{state:?}");
+    }
+
+    /// `mklink /J`: a junction, the kind of link that needs no privilege.
+    fn make_junction(link: &Path, target: &Path) {
+        let status = std::process::Command::new("cmd")
+            .args(["/d", "/c", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .stdout(std::process::Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .status()
+            .unwrap();
+        assert!(status.success(), "mklink /J failed: {status}");
+    }
+
+    #[test]
+    fn a_link_is_read_as_itself_and_not_as_its_target() {
+        // private_dir_state looks at a path twice, with a gap between the looks: is it a link,
+        // then who owns it and who may write to it. The gap is harmless because the second look
+        // does not follow a link, so a link put in a folder's place is judged by its own owner
+        // and list. (A directory symlink needs a privilege this test user lacks, so only the
+        // junction is tried.)
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("target");
+        create_dir_with_sddl(&target, "D:P(A;OICI;FA;;;WD)").unwrap(); // Everyone, nobody else
+        let link = tmp.path().join("link");
+        make_junction(&link, &target);
+        let sids = |dir: &Path| -> Vec<String> {
+            let (_, allowed) = owner_and_allowed(dir).unwrap();
+            allowed.unwrap().into_iter().map(|(sid, _)| sid).collect()
+        };
+        assert_eq!(sids(&target), ["S-1-1-0"], "the target is Everyone's alone");
+        let of_link = sids(&link);
+        assert!(
+            !of_link.iter().any(|sid| sid == "S-1-1-0"),
+            "the link was read as its target: {of_link:?}"
+        );
+        // Its owner is whoever made it: the test user, or Administrators when elevated.
+        let (owner, _) = owner_and_allowed(&link).unwrap();
+        let me = WinHost.user_sid().unwrap();
+        assert!(owner == me || owner == ADMINISTRATORS, "{owner}");
+    }
+
+    #[test]
+    fn a_missing_sid_is_an_error_before_anything_reads_it() {
+        // A security descriptor may have no owner, and sid_string must only be given a SID.
+        let err = non_null_sid(std::ptr::null_mut(), r"GetNamedSecurityInfoW C:\x").unwrap_err();
+        assert_eq!(err.context, r"GetNamedSecurityInfoW C:\x");
+        assert!(err.message.contains("no SID"), "{err}");
+        // A pointer that is there passes through as it is; nothing here reads it.
+        let some = std::ptr::dangling_mut::<c_void>();
+        assert_eq!(non_null_sid(some, "x").unwrap(), some);
     }
 
     // Registry facts: a read that fails must not turn into an answer. These tests hand
