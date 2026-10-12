@@ -10,7 +10,8 @@ permissions:
   contents: read
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # A new push cancels the older run of the same branch or pull request, but never a run on main.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 jobs:
   windows:
     runs-on: windows-latest
@@ -19,7 +20,11 @@ jobs:
       CARGO_TERM_COLOR: always
     steps:
       - uses: actions/checkout@v4
+      # bash, not the default PowerShell: bash stops at the first failing command (-e), while
+      # PowerShell would report only the last command's exit code, so a failing
+      # `rustup toolchain install` would pass when `cargo --version` still worked.
       - name: Install the toolchain pinned in rust-toolchain.toml
+        shell: bash
         run: |
           rustup --version
           rustup toolchain install
@@ -53,9 +58,12 @@ jobs:
         shell: powershell
         run: ./scripts/fetch-resources.ps1
       # `cargo test --workspace` builds the core with the `fake` feature (see above). The
-      # second step builds it without, so code that needs the fakes without being marked
-      # cfg(feature = "fake") fails here. Two steps, not two lines of one: PowerShell
-      # reports only the last command's exit code, so a failure in the first would be lost.
+      # core's own unit tests have the fakes either way (they sit behind
+      # cfg(any(test, feature = "fake"))), so the second step guards the rest: the core's
+      # integration tests (crates/core/tests) and the library they link, built without the
+      # feature. The no-fake clippy run above is the stronger check of the library itself.
+      # Two steps, not two lines of one: PowerShell reports only the last command's exit
+      # code, so a failure in the first would be lost.
       - name: Tests
         run: cargo test --workspace
       - name: Tests of the core alone (no fake adapters)
@@ -65,8 +73,9 @@ jobs:
         env:
           # Exactly '1': any other value skips the test and prints SKIPPED. The system
           # tests (crates/cli/tests/system.rs, system_real_autorun_round_trips,
-          # system_real_font_install_and_remove) and the symlink test read the first; the
-          # Oh My Posh render test (crates/core/tests/omp_render.rs) has a gate of its own.
+          # system_real_font_install_and_remove), the symlink tests and the 8.3 name test read
+          # the first; the Oh My Posh render test (crates/core/tests/omp_render.rs) has a gate
+          # of its own.
           CMDSTUDIO_SYSTEM_TESTS: '1'
           CMDSTUDIO_OMP_TESTS: '1'
           # The log is an artifact for people to read, so no colour codes in it.
@@ -79,8 +88,10 @@ jobs:
           # the log too.
           cargo test --workspace -- --test-threads=1 --nocapture 2>&1 | tee system-tests.txt
           # CI is where the gated tests prove themselves: a SKIPPED line anywhere means one
-          # did not run. grep -n prints each line it finds.
-          if grep -n SKIPPED system-tests.txt; then
+          # did not run. grep -n prints each line it finds; -a treats the log as text even if
+          # a test printed a stray control or non-UTF-8 byte (grep would answer "Binary file
+          # matches" and print no line).
+          if grep -a -n SKIPPED system-tests.txt; then
             echo "::error::a test printed SKIPPED in the system-test run (lines above); every test must run here"
             exit 1
           fi
