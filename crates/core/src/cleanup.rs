@@ -216,9 +216,11 @@ pub fn revert_all(sys: System<'_>, ctx: &Ctx) -> Result<Report, ActionError> {
 /// - It never deletes the only record of what the user's settings were: while something is not
 ///   put back or cannot be known to be (state.json could not be used, or its AutoRun original
 ///   is damaged; a settings.json or a font or AutoRun is left as it is; a rollback record names
-///   a target that is still CMD Studio's; the start could not read every record, or found a
-///   restore point it cannot read), state.json, its damaged copies and the restore points stay,
-///   and a failed step says so and how to finish by hand.
+///   a target that is still CMD Studio's; the start could not read every record; a damaged
+///   state.json set aside, a restore point set aside or that cannot be read, or a rollback
+///   record that cannot be read is on disk), state.json, its damaged copies and the restore
+///   points stay, and a failed step says so and how to finish by hand. Each of these is found
+///   anew by every run, so a later `--cleanup` gives the same answer.
 /// - The folders are worked out from `Paths` and the user's SID, not from state.json; a
 ///   ProgramData folder state.json names besides goes only when it is directly in the
 ///   ProgramData folder, private, and named like CMD Studio's. A folder that someone else may
@@ -288,12 +290,18 @@ pub fn cleanup(sys: System<'_>, ctx: &Ctx, remove_themes: bool) -> Result<Report
     let not_back = state
         .as_ref()
         .is_some_and(|s| holds_what_is_not_back(&s.baseline));
-    let keep_records = unusable.is_some() || unread.is_some() || not_back || unresolved;
+    // Looked for on disk by every run, so a later --cleanup gives the same answer.
+    let in_doubt = records_in_doubt(sys, ctx);
+    let keep_records =
+        unusable.is_some() || in_doubt.is_some() || unread.is_some() || not_back || unresolved;
     remove_data(sys, ctx, remove_themes, keep_records, &mut report);
     if keep_records {
         report.fail(
             format!("Delete {}", data.display()),
-            unusable.or(unread).unwrap_or("E_ROLLBACK_INCOMPLETE"),
+            unusable
+                .or(in_doubt)
+                .or(unread)
+                .unwrap_or("E_ROLLBACK_INCOMPLETE"),
             format!(
                 "state.json and the restore points were kept in {}: not everything is known to \
                  be back as it was before CMD Studio, and they record what it was",
@@ -382,10 +390,22 @@ fn revert_steps(sys: System<'_>, ctx: &Ctx, state: State, report: &mut Report) -
         program_data_dir: base.program_data_dir.clone(),
         ..Baseline::default()
     };
+    let damaged = original_damaged(base);
+    if damaged {
+        report.fail(
+            AUTORUN_STEP,
+            "E_STATE_INVALID",
+            "what AutoRun held before CMD Studio cannot be read back from state.json (it is not \
+             hex), so a Clink of another program that CMD Studio turned off, if there was one, \
+             is not turned back on; CMD Studio's own part is taken out all the same",
+            Some(autorun_original_by_hand(sys, ctx)),
+        );
+    }
     let autorun_done = autorun_step(sys, &ctx.paths, base, &mut ops, report);
-    if !autorun_done {
+    if !autorun_done || damaged {
         // Only the original: it says which other Clink to turn back on, and whether the value
-        // was there before, once AutoRun can be edited.
+        // was there before, once AutoRun can be edited. A damaged one stays while it is
+        // damaged, so that every later --cleanup keeps the restore point that holds it whole.
         left.autorun = base.autorun.clone();
     }
     for file in &base.wt {
@@ -393,7 +413,6 @@ fn revert_steps(sys: System<'_>, ctx: &Ctx, state: State, report: &mut Report) -
             left.wt.push(file.clone());
         }
     }
-    let damaged = original_damaged(base);
     let ran = transaction(sys, ctx, ops, report);
     if !ran.committed {
         return Reverted {
@@ -421,6 +440,9 @@ fn revert_steps(sys: System<'_>, ctx: &Ctx, state: State, report: &mut Report) -
     }
 }
 
+/// What the AutoRun steps are about.
+const AUTORUN_STEP: &str = "Take CMD Studio's part out of AutoRun";
+
 /// Step 1: queues what AutoRun becomes. Whether AutoRun needs nothing more: a change is queued,
 /// or none is needed. A value that cannot be read, or is left for a hand edit, is a failed step.
 fn autorun_step(
@@ -430,7 +452,7 @@ fn autorun_step(
     ops: &mut Vec<Op>,
     report: &mut Report,
 ) -> bool {
-    const WHAT: &str = "Take CMD Studio's part out of AutoRun";
+    const WHAT: &str = AUTORUN_STEP;
     let profile = paths.clink_profile().display().to_string();
     let value = match sys.autorun.read_user() {
         Ok(value) => value,
@@ -467,16 +489,6 @@ fn autorun_step(
             if let Some(value) = next {
                 ops.push(Op::SetAutoRun { value });
             }
-            if original_damaged(base) {
-                report.fail(
-                    WHAT,
-                    "E_STATE_INVALID",
-                    "what AutoRun held before CMD Studio cannot be read back from state.json \
-                     (it is not hex), so a Clink of another program that CMD Studio turned off, \
-                     if there was one, is not turned back on; CMD Studio's own part was taken out",
-                    None,
-                );
-            }
             true
         }
         Err(e) => {
@@ -502,6 +514,79 @@ fn original_damaged(base: &Baseline) -> bool {
         .as_ref()
         .and_then(|a| a.value.as_ref())
         .is_some_and(|record| record.to_reg().is_none())
+}
+
+/// Where AutoRun as it was before CMD Studio still is, when state.json's copy is damaged: the
+/// oldest apply that changed AutoRun keeps it as that step's prior state. Names the restore
+/// point, its file, and the value when it can be read, and how to put back by hand a Clink of
+/// another program that CMD Studio turned off.
+fn autorun_original_by_hand(sys: System<'_>, ctx: &Ctx) -> FixByHand {
+    let key = COMMAND_PROCESSOR_KEY;
+    let root = ctx.paths.snapshots();
+    let store = SnapshotStore::new(sys.fs, &root);
+    let found = store.ids().unwrap_or_default().into_iter().find_map(|id| {
+        if store.manifest(&id).ok()?.kind != SnapshotKind::Apply {
+            return None;
+        }
+        let journal = store.journal(&id).ok()?;
+        let index = journal
+            .ops
+            .iter()
+            .position(|o| matches!(o, Op::SetAutoRun { .. }))?;
+        let prior = journal
+            .snapshots
+            .iter()
+            .find(|s| s.op_index == index)?
+            .prior
+            .clone()?;
+        let record = serde_json::from_slice::<AutoRunRecord>(&prior).ok();
+        let payload = store.payload_path(&id, index);
+        Some((id, payload, record))
+    });
+    let Some((id, payload, record)) = found else {
+        return FixByHand {
+            en: format!(
+                "No restore point holds a copy that can be read either. In Registry Editor, open \
+                 {key} and look at AutoRun: if a Clink of another program used to start from it, \
+                 add its command back by hand."
+            ),
+            th: format!(
+                "ไม่มีจุดย้อนกลับใดเก็บสำเนาที่อ่านได้ไว้เช่นกัน เปิด Registry Editor (regedit) ไปที่ {key} \
+                 แล้วดูค่า AutoRun ถ้าเคยมี Clink ของโปรแกรมอื่นเริ่มจากค่านี้ ให้เพิ่มคำสั่งนั้นกลับเข้าไปเอง"
+            ),
+        };
+    };
+    let payload = payload.display();
+    let was = record.map(|r| r.value.map(|v| v.to_reg().and_then(|v| v.text())));
+    let (was_en, was_th) = match was {
+        Some(None) => (
+            "there was no AutoRun value".to_string(),
+            "ตอนนั้นไม่มีค่า AutoRun".to_string(),
+        ),
+        Some(Some(Some(text))) => (
+            format!("AutoRun was: {text}"),
+            format!("ค่า AutoRun ตอนนั้นคือ: {text}"),
+        ),
+        _ => (
+            "its value is kept there as hex".to_string(),
+            "ค่าในไฟล์นั้นเก็บเป็นเลขฐานสิบหก".to_string(),
+        ),
+    };
+    FixByHand {
+        en: format!(
+            "Restore point {id} keeps what AutoRun held before CMD Studio, in {payload}; \
+             {was_en}. In Registry Editor, open {key}: if a command of another program's Clink \
+             from it is missing from AutoRun now, add it back by hand. While state.json's copy \
+             is damaged, CMD Studio says this again and --cleanup keeps its records."
+        ),
+        th: format!(
+            "จุดย้อนกลับ {id} เก็บค่า AutoRun ก่อนใช้ CMD Studio ไว้ในไฟล์ {payload} \
+             {was_th} เปิด Registry Editor (regedit) ไปที่ {key} ถ้าคำสั่งของ Clink \
+             ของโปรแกรมอื่นจากค่านั้นหายไปจาก AutoRun ให้เพิ่มกลับเข้าไปเอง \
+             ระหว่างที่สำเนาใน state.json ยังเสียอยู่ CMD Studio จะแจ้งข้อนี้อีก \
+             และ --cleanup จะเก็บบันทึกไว้"
+        ),
+    }
 }
 
 /// The text of a string value that is not valid UTF-16, with U+FFFD in place of what is not, to
@@ -1287,11 +1372,48 @@ fn remove_private(sys: System<'_>, dir: &Path, report: &mut Report) {
 /// Whether `path`, in the data folder, is one of the records `--cleanup` keeps while something
 /// is not put back: state.json, a damaged state.json set aside, the restore points.
 fn is_record(ctx: &Ctx, path: &Path) -> bool {
-    let set_aside = path
-        .file_name()
+    is_damaged_copy(path)
+        || same_path(path, &ctx.paths.state_file())
+        || same_path(path, &ctx.paths.snapshots())
+}
+
+/// Whether `path` is a damaged state.json that a revert set aside (`state.json.damaged-<ms>`).
+fn is_damaged_copy(path: &Path) -> bool {
+    path.file_name()
         .and_then(|n| n.to_str())
-        .is_some_and(|n| n.to_ascii_lowercase().starts_with("state.json.damaged-"));
-    set_aside || same_path(path, &ctx.paths.state_file()) || same_path(path, &ctx.paths.snapshots())
+        .is_some_and(|n| n.to_ascii_lowercase().starts_with("state.json.damaged-"))
+}
+
+/// What on disk says the records may hold the only copy of the user's values, looked for anew
+/// by every `--cleanup`, so that a later one gives the same answer: a damaged state.json set
+/// aside, a restore point set aside or that cannot be read, the record of a rollback that cannot
+/// be read. Its code, when there is such a thing; a listing that fails counts as one.
+fn records_in_doubt(sys: System<'_>, ctx: &Ctx) -> Option<&'static str> {
+    let damaged_copy = sys
+        .fs
+        .list_dir(&ctx.paths.data)
+        .is_ok_and(|entries| entries.iter().any(|e| is_damaged_copy(&e.path)));
+    if damaged_copy {
+        return Some("E_STATE_INVALID");
+    }
+    let root = ctx.paths.snapshots();
+    let store = SnapshotStore::new(sys.fs, &root);
+    let ids = match store.ids() {
+        Ok(ids) => ids,
+        Err(f) => return Some(f.code),
+    };
+    match store.unreadable() {
+        Ok(found) if !found.is_empty() => return Some("E_SNAPSHOT_READ"),
+        Ok(_) => {}
+        Err(f) => return Some(f.code),
+    }
+    ids.iter().find_map(|id| {
+        if store.is_set_aside(id) {
+            Some("E_SNAPSHOT_READ")
+        } else {
+            store.incomplete(id).err().map(|f| f.code)
+        }
+    })
 }
 
 /// Step 4 for the data folder: every entry but the lock file this run holds, `themes\` unless
@@ -2938,6 +3060,10 @@ mod tests {
                 .any(|s| s.what.starts_with("Delete") && s.fix.is_some()),
             "{report:?}"
         );
+        // The next --cleanup finds the damaged copy on disk and gives the same answer.
+        let again = cleanup(m.system(), &later(&ctx, 2), true).unwrap();
+        assert_same_records_kept(&m, &ctx, &report, &again);
+        assert!(m.fs.exists(&aside));
     }
 
     // ---- A rollback record is never dropped by a revert. ----
@@ -3072,6 +3198,23 @@ mod tests {
         assert!(!m.fs.exists(&ctx.paths.lock_file()), "{report:?}");
     }
 
+    /// The failed step that says what --cleanup kept in the data folder.
+    fn kept_step(ctx: &Ctx, report: &Report) -> Step {
+        let data = format!("Delete {}", ctx.paths.data.display());
+        report
+            .steps
+            .iter()
+            .find(|s| !s.ok && s.what == data)
+            .cloned()
+            .unwrap_or_else(|| panic!("nothing kept: {report:?}"))
+    }
+
+    /// A later --cleanup kept the records too, and said the same.
+    fn assert_same_records_kept(m: &FakeMachine, ctx: &Ctx, first: &Report, again: &Report) {
+        assert_records_kept(m, ctx, again);
+        assert_eq!(kept_step(ctx, again), kept_step(ctx, first));
+    }
+
     /// Where restore point `id` keeps the prior state of its first op that `pick` chooses.
     fn payload_of(ctx: &Ctx, m: &FakeMachine, id: &str, pick: fn(&Op) -> bool) -> PathBuf {
         let root = ctx.paths.snapshots();
@@ -3158,6 +3301,33 @@ mod tests {
                 && s.what.starts_with("Delete")),
             "{report:?}"
         );
+        // The AutoRun step says where the original is, and what it was.
+        let autorun_step = |report: &Report| {
+            report
+                .steps
+                .iter()
+                .find(|s| s.code == Some("E_STATE_INVALID") && s.what.contains("AutoRun"))
+                .cloned()
+                .unwrap_or_else(|| panic!("{report:?}"))
+        };
+        let step = autorun_step(&report);
+        let fix = step.fix.as_ref().unwrap();
+        for text in [&fix.en, &fix.th] {
+            assert!(
+                text.contains(&id)
+                    && text.contains(&prior.display().to_string())
+                    && text.contains("clink.bat")
+                    && text.contains(COMMAND_PROCESSOR_KEY),
+                "{text}"
+            );
+        }
+        // state.json keeps the damaged original while it is damaged, so the next --cleanup
+        // gives the same answer.
+        assert!(state(&m, &ctx).baseline.autorun.is_some());
+        let again = cleanup(m.system(), &later(&ctx, 2), true).unwrap();
+        assert_same_records_kept(&m, &ctx, &report, &again);
+        assert_eq!(autorun_step(&again), step);
+        assert!(m.fs.exists(&prior));
     }
 
     #[test]
@@ -3179,6 +3349,11 @@ mod tests {
             Some(SETTINGS.as_bytes()),
             "the only copy of the user's settings.json is still there"
         );
+        // The next start reads its own newer restore point, but the damaged record is still on
+        // disk: the same answer.
+        let again = cleanup(m.system(), &later(&ctx, 2), true).unwrap();
+        assert_same_records_kept(&m, &ctx, &report, &again);
+        assert!(m.fs.exists(&copy));
 
         // A restore point the start finds damaged, and sets aside.
         let (m, ctx) = machine();
@@ -3196,5 +3371,26 @@ mod tests {
                 && s.what.starts_with("Delete")),
             "{report:?}"
         );
+        // Only that start reports it; the next --cleanup finds it set aside on disk.
+        let again = cleanup(m.system(), &later(&ctx, 2), true).unwrap();
+        assert!(again.start.unreadable.is_empty(), "{again:?}");
+        assert_same_records_kept(&m, &ctx, &report, &again);
+        assert!(m.fs.exists(&ctx.paths.snapshots().join(&id)));
+    }
+
+    #[test]
+    fn a_clean_cleanup_still_removes_everything_the_first_time() {
+        // A rollback record the revert clears, and an earlier one that a later apply ended,
+        // keep nothing.
+        let (m, ctx) = machine();
+        apply(&m, &ctx, Target::All);
+        apply_that_cannot_roll_back(&m, &later(&ctx, 1));
+        apply(&m, &later(&ctx, 2), Target::Wt);
+        apply_that_cannot_roll_back(&m, &later(&ctx, 3));
+        let report = cleanup(m.system(), &later(&ctx, 4), true).unwrap();
+        assert!(report.ok(), "{report:?}");
+        assert!(!m.fs.exists(&ctx.paths.data), "{report:?}");
+        assert_eq!(autorun_text(&m), None);
+        assert_eq!(m.fs.file(WT).unwrap(), SETTINGS.as_bytes());
     }
 }

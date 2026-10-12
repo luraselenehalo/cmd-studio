@@ -290,7 +290,9 @@ impl<'a> SnapshotStore<'a> {
 
     /// Whether the restore point was set aside (see [`SnapshotStore::set_aside`]): it has no
     /// `journal.json`, and has either the renamed journal or the note that stands for one.
-    fn is_set_aside(&self, id: &str) -> bool {
+    /// `--cleanup` keeps the restore points while one is: its files may be the only copy of
+    /// what it changed.
+    pub fn is_set_aside(&self, id: &str) -> bool {
         let dir = self.dir(id);
         !self.fs.exists(&dir.join(JOURNAL))
             && (self.fs.exists(&dir.join(JOURNAL_ASIDE)) || self.fs.exists(&dir.join(NO_JOURNAL)))
@@ -513,7 +515,13 @@ impl<'a> SnapshotStore<'a> {
         let Some(id) = self.ids()?.into_iter().rev().find(|id| self.ran(id)) else {
             return Ok(None);
         };
-        let path = self.dir(&id).join(INCOMPLETE);
+        self.incomplete(&id)
+    }
+
+    /// The `incomplete.json` of restore point `id`, newest or not; `None` when it has none. One
+    /// that cannot be read, or is damaged, is an error (`E_SNAPSHOT_READ`).
+    pub fn incomplete(&self, id: &str) -> Result<Option<Incomplete>, Failure> {
+        let path = self.dir(id).join(INCOMPLETE);
         match self.fs.read(&path).map_err(read_fail)? {
             None => Ok(None),
             Some(bytes) => serde_json::from_slice(&bytes)
