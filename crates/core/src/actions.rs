@@ -270,6 +270,15 @@ pub fn prepare_apply(
                 if let Some((_, file, value_name)) = font_target(sys, &ctx.resources, family) {
                     // Installed again, its file is no longer one to delete later.
                     state.pending_deletes.retain(|p| !same_path(p, &file));
+                    // Before CMD Studio's first font: whether the registration key it will add
+                    // the font to is there yet, so that revert all deletes only a key it made.
+                    if state.baseline.fonts.is_empty() {
+                        let existed = sys
+                            .fonts
+                            .registration_key_exists()
+                            .map_err(DetectError::Read)?;
+                        state.baseline.fonts_key_existed = Some(existed);
+                    }
                     state.baseline.note_font(FontRecord {
                         family: family.clone(),
                         file,

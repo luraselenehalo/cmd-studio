@@ -248,6 +248,12 @@ pub struct Baseline {
     pub fonts: Vec<FontRecord>,
     /// The user's ProgramData folder, when CMD Studio created it (spec §6.3 step 4).
     pub program_data_dir: Option<PathBuf>,
+    /// Whether the per-user font registration key existed before CMD Studio installed its first
+    /// font; `None` while it has installed none. Revert all deletes the key once it is empty
+    /// only when CMD Studio created it. Not written while `None`, so a state without it stays
+    /// byte for byte what it was before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fonts_key_existed: Option<bool>,
 }
 
 impl Baseline {
@@ -443,6 +449,18 @@ mod tests {
             snapshot_id: "20261011-120000-ab12".into(),
             applied_at_ms: 1_791_720_000_000,
         }
+    }
+
+    #[test]
+    fn whether_cmd_studio_made_the_fonts_key_is_kept_in_camel_case() {
+        let mut s = State::default();
+        s.baseline.fonts_key_existed = Some(false);
+        let text = String::from_utf8(s.to_bytes().unwrap()).unwrap();
+        assert!(text.contains("\"fontsKeyExisted\": false"), "{text}");
+        let fs = FakeFs::new();
+        let p = Path::new(r"C:\d\state.json");
+        fs.put(p, &text);
+        assert_eq!(State::load(&fs, p).unwrap(), s);
     }
 
     #[test]
