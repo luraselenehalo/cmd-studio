@@ -40,15 +40,34 @@ struct RuntimePrior {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct FontPrior {
+    /// The installed font file (`font_target`'s second path), for the fix-by-hand text. A
+    /// restore works on the path `font_target` gives, never on one read from a record.
+    file: PathBuf,
     file_existed: bool,
     dir_existed: bool,
     /// A new account may not have the registration key yet; restore deletes the one apply made.
     key_existed: bool,
     registration: Option<String>,
-    /// The file's bytes, as hex, when it was there with bytes other than the bundled file's
-    /// (apply replaces it). A file that was the bundled one comes back from the bundle.
+    /// Where the file comes back from when it was there; `None` when it was not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    file_hex: Option<String>,
+    source: Option<FileSource>,
+}
+
+/// Where a font file that was there before comes back from.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "from",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+enum FileSource {
+    /// It was the bundled file at `path`. A restore takes the bundled file only while the
+    /// bundle still pins this hash, so an update of CMD Studio that ships another build of the
+    /// font cannot change what a restore writes.
+    Bundle { path: PathBuf, sha256: String },
+    /// Its own bytes, as hex: another file of the same name (apply replaces it), or one whose
+    /// pinned hash could not be read when it was captured.
+    Bytes { hex: String },
 }
 
 fn to_hex(bytes: &[u8]) -> String {
@@ -132,6 +151,14 @@ fn path_text(path: &Path) -> Result<&str, Failure> {
     })
 }
 
+/// Whether two paths name the same place: Windows ignores the letter case of a path.
+fn same_path(a: &Path, b: &Path) -> bool {
+    a == b
+        || a.to_str()
+            .zip(b.to_str())
+            .is_some_and(|(a, b)| a.eq_ignore_ascii_case(b))
+}
+
 /// A sibling name in the same folder: `.<name>.<what>-<8 hex>`.
 fn sibling(dir: &Path, what: &str) -> PathBuf {
     let name = dir
@@ -198,14 +225,31 @@ impl<'a> SystemExecutor<'a> {
     }
 
     /// The user's own ProgramData folder when `dir` goes directly inside it (spec §5.4 step 3).
+    /// Only a folder whose parent is named like it (`ai.resincore.cmdstudio-<SID>`, in any
+    /// letter case) asks the host for the known folder and the SID; a lookup that fails is a
+    /// failed read of the machine, not a path problem.
     fn private_parent(&self, dir: &Path) -> Result<Option<PathBuf>, Failure> {
+        let Some(parent) = dir.parent() else {
+            return Ok(None);
+        };
+        // The name `program_data_dir` gives every such folder, without the SID.
+        let prefix = program_data_dir(Path::new(""), "");
+        let named_like_it = match (parent.file_name().and_then(|n| n.to_str()), prefix.to_str()) {
+            (Some(name), Some(prefix)) => name
+                .to_ascii_lowercase()
+                .starts_with(&prefix.to_ascii_lowercase()),
+            _ => false,
+        };
+        if !named_like_it {
+            return Ok(None);
+        }
         let host = self.sys.host;
-        let pd = host
-            .program_data()
-            .map_err(|e| failure("E_CLINK_PATH", e))?;
-        let sid = host.user_sid().map_err(|e| failure("E_CLINK_PATH", e))?;
-        let own = program_data_dir(&pd, &sid);
-        Ok((dir.parent() == Some(own.as_path())).then_some(own))
+        let read = |e| failure("E_MACHINE_READ", e);
+        let own = program_data_dir(
+            &host.program_data().map_err(read)?,
+            &host.user_sid().map_err(read)?,
+        );
+        Ok(same_path(parent, &own).then_some(own))
     }
 
     /// The user's own ProgramData folder: create it private, or check that
@@ -378,24 +422,31 @@ impl<'a> SystemExecutor<'a> {
     fn restore_font(&mut self, family: &str, prior: &Option<Vec<u8>>) -> Result<(), Failure> {
         let p: FontPrior = from_json(prior)?;
         let (src, dest, value_name) = self.font_target(family)?;
-        if p.file_existed {
-            self.put_font_back(&p, &src, &dest, &value_name)
-        } else {
-            self.remove_font(&p, &dest, &value_name)
+        match (p.file_existed, &p.source) {
+            (false, _) => self.remove_font(&p, &dest, &value_name),
+            (true, Some(source)) => self.put_font_back(&p, source, &src, &dest, &value_name),
+            (true, None) => Err(failure(
+                "E_SNAPSHOT_READ",
+                "the restore point says the font file was there but not where it comes back from",
+            )),
         }
     }
 
     /// The font file was not there before: the font is uninstalled in the order G12 proved
-    /// (spec §5.4): out of the session's font table (`unload`, which also broadcasts the
-    /// change), then the registration, then the file. Once the registration is gone the font is
-    /// uninstalled. A file that would not unload or delete (Windows Terminal may hold it) is
-    /// left for a later delete and listed by `held_files`.
+    /// (spec §5.4): out of the session's font table, then the registration, then a broadcast of
+    /// the change, then the file. Once the registration is gone the font is uninstalled. A file
+    /// that would not unload or delete (Windows Terminal may hold it) is left for a later delete
+    /// and listed by `held_files`.
     fn remove_font(&mut self, p: &FontPrior, dest: &Path, value_name: &str) -> Result<(), Failure> {
         let (fs, fonts) = (self.sys.fs, self.sys.fonts);
         // An unload that fails leaves the font in this session only; the delete below then
         // fails too, and the file is listed.
         let _ = fonts.unload(dest);
         self.put_registration_back(p, value_name)?;
+        // The broadcast after the registration changed: `Fonts` has no call of its own for it,
+        // and `unload` ends with one. Its removal finds nothing left loaded (or fails again as
+        // above), so this changes nothing else.
+        let _ = fonts.unload(dest);
         if fs.remove_file(dest).is_err() && fs.exists(dest) {
             self.note_held(dest);
         } else {
@@ -415,14 +466,15 @@ impl<'a> SystemExecutor<'a> {
     fn put_font_back(
         &mut self,
         p: &FontPrior,
+        source: &FileSource,
         src: &Path,
         dest: &Path,
         value_name: &str,
     ) -> Result<(), Failure> {
         let (fs, fonts) = (self.sys.fs, self.sys.fonts);
         let now = fs.read(dest).map_err(|e| failure("E_FONT_INSTALL", e))?;
-        let replacement = match &p.file_hex {
-            Some(hex) => {
+        let replacement = match source {
+            FileSource::Bytes { hex } => {
                 let bytes = from_hex(hex).ok_or_else(|| {
                     failure(
                         "E_SNAPSHOT_READ",
@@ -431,18 +483,24 @@ impl<'a> SystemExecutor<'a> {
                 })?;
                 (now.as_deref() != Some(bytes.as_slice())).then_some(bytes)
             }
-            None => {
-                // The bundled file: read it only when the one in place is not it.
-                let in_place = match &now {
-                    Some(bytes) => self
-                        .pinned_font_hash(src)
-                        .is_ok_and(|hash| sha256_hex(bytes) == hash),
-                    None => false,
-                };
-                if in_place {
+            FileSource::Bundle { sha256, .. } => {
+                if now
+                    .as_deref()
+                    .is_some_and(|bytes| sha256_hex(bytes) == *sha256)
+                {
                     None
-                } else {
+                } else if self.pinned_font_hash(src)? == *sha256 {
+                    // `bundled_font` checks the file against that same pin.
                     Some(self.bundled_font(src)?)
+                } else {
+                    return Err(failure(
+                        "E_RUNTIME_MISSING",
+                        format!(
+                            "{} cannot be put back: the bundled font is another build now \
+                             (its pinned hash changed since the restore point was made)",
+                            dest.display()
+                        ),
+                    ));
                 }
             }
         };
@@ -543,24 +601,26 @@ impl Executor for SystemExecutor<'_> {
                 let key_existed = fonts.registration_key_exists().map_err(read)?;
                 let dir_existed = fs.is_dir(&fonts.user_fonts_dir());
                 let file = fs.read(&dest).map_err(read)?;
-                // The bundled file comes back from the bundle; any other is kept here. Without
-                // a readable pin the bytes are kept too, so an undo never needs the bundle.
-                let file_hex = match &file {
-                    Some(bytes)
-                        if !self
-                            .pinned_font_hash(&src)
-                            .is_ok_and(|hash| sha256_hex(bytes) == hash) =>
-                    {
-                        Some(to_hex(bytes))
+                // The bundled file comes back from the bundle, at this hash; any other is kept
+                // here. Without a readable pin the bytes are kept too, so an undo never needs
+                // the bundle.
+                let source = match &file {
+                    None => None,
+                    Some(bytes) => {
+                        let sha256 = sha256_hex(bytes);
+                        Some(match self.pinned_font_hash(&src) {
+                            Ok(pin) if pin == sha256 => FileSource::Bundle { path: src, sha256 },
+                            _ => FileSource::Bytes { hex: to_hex(bytes) },
+                        })
                     }
-                    _ => None,
                 };
                 to_json(&FontPrior {
+                    file: dest,
                     file_existed: file.is_some(),
                     dir_existed,
                     key_existed,
                     registration,
-                    file_hex,
+                    source,
                 })
                 .map(Some)
             }
@@ -786,20 +846,16 @@ pub fn fix_by_hand(op: &Op, prior: &Option<Vec<u8>>, payload: &Path) -> FixByHan
             ),
         },
         Op::SetAutoRun { .. } => {
-            let text = from_json::<AutoRunRecord>(prior)
-                .ok()
-                .map(|r| r.value.map(|v| v.to_reg().and_then(|v| v.text())));
-            match text {
+            let value = from_json::<AutoRunRecord>(prior).ok().map(|r| {
+                r.value
+                    .map(|v| v.to_reg().and_then(|v| v.text().map(|text| (v.kind, text))))
+            });
+            match value {
                 Some(None) => (
                     format!("In Registry Editor, open {key} and delete the AutoRun value."),
                     format!("เปิด Registry Editor (regedit) ไปที่ {key} แล้วลบค่า AutoRun"),
                 ),
-                Some(Some(Some(text))) => (
-                    format!("In Registry Editor, open {key} and set AutoRun back to: {text}"),
-                    format!(
-                        "เปิด Registry Editor (regedit) ไปที่ {key} แล้วแก้ค่า AutoRun กลับเป็น: {text}"
-                    ),
-                ),
+                Some(Some(Some((kind, text)))) => autorun_back_to(kind, &text),
                 // A record that cannot be read, or a value that is not text.
                 Some(Some(None)) | None => (
                     format!("Close every cmd window, then {cleanup_en}."),
@@ -807,18 +863,117 @@ pub fn fix_by_hand(op: &Op, prior: &Option<Vec<u8>>, payload: &Path) -> FixByHan
                 ),
             }
         }
-        Op::InstallFont { family } => (
+        Op::InstallFont { family } => font_back_to(family, prior),
+    };
+    FixByHand { en, th }
+}
+
+/// Setting AutoRun back by hand to `text`, of registry type `kind`.
+fn autorun_back_to(kind: u32, text: &str) -> (String, String) {
+    let key = COMMAND_PROCESSOR_KEY;
+    // Registry Editor makes a new value a String Value; the old type must be named to get it.
+    let (typed_en, typed_th) = if kind == REG_EXPAND_SZ {
+        (
+            ", as an Expandable String Value (REG_EXPAND_SZ),",
+            " ชนิด Expandable String Value (REG_EXPAND_SZ)",
+        )
+    } else {
+        ("", "")
+    };
+    if text.is_empty() {
+        (
             format!(
-                "Close Windows Terminal, then {cleanup_en}: it uninstalls the font {family} once \
-                 nothing uses it."
+                "In Registry Editor, open {key} and set AutoRun{typed_en} back to an empty \
+                 value: keep the value, with no text in it."
             ),
             format!(
-                "ปิด Windows Terminal แล้ว{cleanup_th} คำสั่งนี้จะถอนฟอนต์ {family} \
-                 เมื่อไม่มีโปรแกรมไหนใช้ฟอนต์นี้อยู่"
+                "เปิด Registry Editor (regedit) ไปที่ {key} แล้วแก้ค่า AutoRun{typed_th} \
+                 ให้เป็นค่าว่าง (ให้มีค่า AutoRun อยู่ แต่ไม่มีข้อความ)"
+            ),
+        )
+    } else {
+        (
+            format!("In Registry Editor, open {key} and set AutoRun{typed_en} back to: {text}"),
+            format!(
+                "เปิด Registry Editor (regedit) ไปที่ {key} แล้วแก้ค่า AutoRun{typed_th} กลับเป็น: {text}"
+            ),
+        )
+    }
+}
+
+/// The per-user font registrations, as Registry Editor shows the key.
+const FONTS_KEY: &str = r"HKEY_CURRENT_USER\Software\Microsoft\Windows NT\CurrentVersion\Fonts";
+
+/// Putting the font back by hand, from what the restore point captured: the registration value
+/// first, then the file. `--cleanup` is no answer here: it uninstalls only the fonts state.json
+/// lists, and a rolled-back apply has put state.json back first.
+fn font_back_to(family: &str, prior: &Option<Vec<u8>>) -> (String, String) {
+    let value = format!("{family} (TrueType)");
+    let Ok(p) = from_json::<FontPrior>(prior) else {
+        return (
+            format!(
+                "In Registry Editor, open {FONTS_KEY} and look at the value {value}. If CMD \
+                 Studio added it, close Windows Terminal, delete the font file it names, then \
+                 delete the value."
+            ),
+            format!(
+                "เปิด Registry Editor (regedit) ไปที่ {FONTS_KEY} แล้วดูค่า {value} \
+                 ถ้า CMD Studio เป็นผู้เพิ่มค่านี้ ให้ปิด Windows Terminal ลบไฟล์ฟอนต์ที่ค่านี้ระบุ \
+                 แล้วลบค่านี้"
+            ),
+        );
+    };
+    let (registry_en, registry_th) = match &p.registration {
+        None => (
+            format!("In Registry Editor, open {FONTS_KEY} and delete the value {value}."),
+            format!("เปิด Registry Editor (regedit) ไปที่ {FONTS_KEY} แล้วลบค่า {value}"),
+        ),
+        Some(old) => (
+            format!(
+                "In Registry Editor, open {FONTS_KEY} and set the value {value} back to \"{old}\"."
+            ),
+            format!(
+                "เปิด Registry Editor (regedit) ไปที่ {FONTS_KEY} แล้วแก้ค่า {value} กลับเป็น \"{old}\""
             ),
         ),
     };
-    FixByHand { en, th }
+    let file = p.file.display();
+    let (file_en, file_th) = match (p.file_existed, &p.source) {
+        (false, _) => (
+            format!(
+                "Then close Windows Terminal and delete {file}; if Windows says the file is in \
+                 use, sign out and back in first."
+            ),
+            format!(
+                "จากนั้นปิด Windows Terminal แล้วลบไฟล์ {file} \
+                 ถ้า Windows บอกว่าไฟล์ถูกใช้อยู่ ให้ออกจากระบบแล้วเข้าใหม่ก่อน"
+            ),
+        ),
+        (true, Some(FileSource::Bundle { path, .. })) => (
+            format!(
+                "Then close Windows Terminal and, if {file} is missing, copy {} to it.",
+                path.display()
+            ),
+            format!(
+                "จากนั้นปิด Windows Terminal ถ้าไม่มีไฟล์ {file} ให้คัดลอก {} ไปไว้ที่นั่น",
+                path.display()
+            ),
+        ),
+        (true, _) => (
+            format!(
+                "Then close Windows Terminal and put back the font file that was at {file} \
+                 before CMD Studio replaced it, for example by installing that font again."
+            ),
+            format!(
+                "จากนั้นปิด Windows Terminal แล้วนำไฟล์ฟอนต์ที่เคยอยู่ที่ {file} \
+                 ก่อน CMD Studio แทนที่ กลับมาไว้ที่เดิม เช่น ติดตั้งฟอนต์นั้นใหม่"
+            ),
+        ),
+    };
+    (
+        format!("{registry_en} {file_en}"),
+        format!("{registry_th} {file_th}"),
+    )
 }
 
 /// Whether two captured states of `op`'s target mean the same thing. Files and settings
@@ -899,8 +1054,8 @@ pub fn sweep(sys: System<'_>, paths: &Paths) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::fake::{FakeFonts, FakeFs, FakeMachine};
-    use crate::adapters::{AdapterError, AutoRun, DirEntry, Fonts, Fs};
+    use crate::adapters::fake::{FakeFonts, FakeFs, FakeHost, FakeMachine};
+    use crate::adapters::{AdapterError, AutoRun, DirEntry, Fonts, Fs, Host, SystemInfo};
     use crate::plan::NERD_FONT_FAMILY;
     use crate::resources::fake_resources;
     use crate::resources::NERD_FONT_FILE;
@@ -1249,9 +1404,13 @@ mod tests {
             ))),
         })
         .unwrap();
-        assert!(fix_by_hand(&autorun, &Some(before), payload)
-            .en
-            .ends_with("set AutoRun back to: %A% & echo hi"));
+        // The value was a REG_EXPAND_SZ, so the text names that type too.
+        let en = fix_by_hand(&autorun, &Some(before), payload).en;
+        assert!(en.ends_with("back to: %A% & echo hi"), "{en}");
+        assert!(
+            en.contains("Expandable String Value (REG_EXPAND_SZ)"),
+            "{en}"
+        );
         let absent = to_json(&AutoRunRecord {
             key_existed: true,
             value: None,
@@ -1260,22 +1419,25 @@ mod tests {
         assert!(fix_by_hand(&autorun, &Some(absent), payload)
             .en
             .ends_with("delete the AutoRun value."));
-        for op in [
-            Op::InstallRuntime {
-                component: Component::Omp,
-                dir: PathBuf::from(r"C:\d\runtime\omp-31.5.0"),
-            },
-            Op::InstallFont {
-                family: NERD_FONT_FAMILY.into(),
-            },
-        ] {
-            assert!(
-                fix_by_hand(&op, &None, payload)
-                    .en
-                    .contains("cmdstudio --cleanup"),
-                "{op:?}"
-            );
-        }
+        let runtime = Op::InstallRuntime {
+            component: Component::Omp,
+            dir: PathBuf::from(r"C:\d\runtime\omp-31.5.0"),
+        };
+        assert!(fix_by_hand(&runtime, &None, payload)
+            .en
+            .contains("cmdstudio --cleanup"));
+        // `--cleanup` only uninstalls fonts state.json lists, and a rolled-back apply has put
+        // state.json back first: the font's text names the registry value instead.
+        let font = Op::InstallFont {
+            family: NERD_FONT_FAMILY.into(),
+        };
+        let en = fix_by_hand(&font, &None, payload).en;
+        assert!(!en.contains("--cleanup"), "{en}");
+        assert!(
+            en.contains(r"HKEY_CURRENT_USER\Software\Microsoft\Windows NT\CurrentVersion\Fonts")
+                && en.contains("CaskaydiaCove NF (TrueType)"),
+            "{en}"
+        );
     }
 
     #[test]
@@ -1337,19 +1499,31 @@ mod tests {
             fix.th
         );
         let runtime = PathBuf::from(r"C:\d\runtime\omp-31.5.0");
-        for op in [
-            Op::InstallRuntime {
+        let fix = fix_by_hand(
+            &Op::InstallRuntime {
                 component: Component::Omp,
                 dir: runtime.clone(),
             },
-            Op::InstallFont {
+            &None,
+            payload,
+        );
+        assert!(fix.th.contains("cmdstudio --cleanup"), "{}", fix.th);
+        assert_ne!(fix.th, fix.en);
+        let fix = fix_by_hand(
+            &Op::InstallFont {
                 family: NERD_FONT_FAMILY.into(),
             },
-        ] {
-            let fix = fix_by_hand(&op, &None, payload);
-            assert!(fix.th.contains("cmdstudio --cleanup"), "{op:?}: {}", fix.th);
-            assert_ne!(fix.th, fix.en);
-        }
+            &None,
+            payload,
+        );
+        assert!(
+            fix.th.contains("Registry Editor (regedit)")
+                && fix.th.contains("CaskaydiaCove NF (TrueType)")
+                && !fix.th.contains("--cleanup"),
+            "{}",
+            fix.th
+        );
+        assert_ne!(fix.th, fix.en);
         assert!(fix_by_hand(
             &Op::InstallRuntime {
                 component: Component::Omp,
@@ -1623,7 +1797,8 @@ mod tests {
 
     #[test]
     fn a_font_is_removed_in_the_order_g12_proved() {
-        // Unload (which broadcasts), then the registration, then the file (spec §5.4, G12).
+        // Unload, then the registration, then a broadcast of the change (a second unload, which
+        // finds nothing loaded and broadcasts), then the file (spec §5.4, G12).
         let (m, res, _) = setup();
         let op = Op::InstallFont {
             family: NERD_FONT_FAMILY.into(),
@@ -1639,6 +1814,7 @@ mod tests {
             [
                 "unload",
                 "unregister",
+                "unload",
                 "delete CaskaydiaCoveNerdFont-Regular.ttf"
             ]
         );
@@ -1698,6 +1874,7 @@ mod tests {
             [
                 "unload",
                 "unregister",
+                "unload",
                 "delete CaskaydiaCoveNerdFont-Regular.ttf"
             ]
         );
@@ -1964,7 +2141,11 @@ mod tests {
             }),
         })
         .unwrap();
-        let bad_font = br#"{"fileExisted":true,"dirExisted":true,"keyExisted":true,"registration":null,"fileHex":"0g"}"#;
+        // A copy of the font file that is not hex, and a file that was there with no source.
+        let bad_fonts: [&[u8]; 2] = [
+            br#"{"file":"C:\\f.ttf","fileExisted":true,"dirExisted":true,"keyExisted":true,"registration":null,"source":{"from":"bytes","hex":"0g"}}"#,
+            br#"{"file":"C:\\f.ttf","fileExisted":true,"dirExisted":true,"keyExisted":true,"registration":null}"#,
+        ];
         let before = (m.fs.snapshot(), m.autorun.snapshot(), m.fonts.snapshot());
         let mut ex = SystemExecutor::new(m.system(), &res);
         for op in &ops {
@@ -1980,12 +2161,14 @@ mod tests {
             ex.restore(&ops[1], &Some(bad_hex)).unwrap_err().code,
             "E_SNAPSHOT_READ"
         );
-        assert_eq!(
-            ex.restore(&ops[2], &Some(bad_font.to_vec()))
-                .unwrap_err()
-                .code,
-            "E_SNAPSHOT_READ"
-        );
+        for bad in bad_fonts {
+            assert_eq!(
+                ex.restore(&ops[2], &Some(bad.to_vec())).unwrap_err().code,
+                "E_SNAPSHOT_READ",
+                "{}",
+                String::from_utf8_lossy(bad)
+            );
+        }
         assert_eq!(
             (m.fs.snapshot(), m.autorun.snapshot(), m.fonts.snapshot()),
             before
@@ -2098,11 +2281,12 @@ mod tests {
         let prior = |file_existed, registration: Option<&str>| {
             Some(
                 to_json(&FontPrior {
+                    file: PathBuf::from(r"C:\f.ttf"),
                     file_existed,
                     dir_existed: true,
                     key_existed: true,
                     registration: registration.map(str::to_string),
-                    file_hex: None,
+                    source: file_existed.then(|| FileSource::Bytes { hex: "00".into() }),
                 })
                 .unwrap(),
             )
@@ -2389,5 +2573,308 @@ mod tests {
             }),
             "font CaskaydiaCove NF"
         );
+    }
+
+    // ---- Review round 1 ----
+
+    const FONTS_KEY_TEXT: &str =
+        r"HKEY_CURRENT_USER\Software\Microsoft\Windows NT\CurrentVersion\Fonts";
+
+    /// The font's fix-by-hand text, from a prior captured on `m`.
+    fn font_fix(m: &FakeMachine, res: &Resources) -> FixByHand {
+        let op = Op::InstallFont {
+            family: NERD_FONT_FAMILY.into(),
+        };
+        let prior = SystemExecutor::new(m.system(), res).capture(&op).unwrap();
+        fix_by_hand(&op, &prior, Path::new(r"C:\d\snapshots\1-a\payload\4.bin"))
+    }
+
+    #[test]
+    fn the_font_fix_by_hand_names_the_registry_value_and_the_file() {
+        let (m, res, _) = setup();
+        let dest = m
+            .fonts
+            .user_fonts_dir()
+            .join(NERD_FONT_FILE)
+            .display()
+            .to_string();
+        let bundled = Path::new(RES)
+            .join("fonts")
+            .join(NERD_FONT_FILE)
+            .display()
+            .to_string();
+        // Absent before: delete the value, then the file.
+        let fix = font_fix(&m, &res);
+        for text in [&fix.en, &fix.th] {
+            assert!(
+                text.contains(FONTS_KEY_TEXT)
+                    && text.contains("CaskaydiaCove NF (TrueType)")
+                    && text.contains(&dest),
+                "{text}"
+            );
+            assert!(!text.contains("--cleanup"), "{text}");
+        }
+        assert!(
+            fix.en
+                .contains("delete the value CaskaydiaCove NF (TrueType)"),
+            "{}",
+            fix.en
+        );
+        assert!(fix.en.contains(&format!("delete {dest}")), "{}", fix.en);
+        assert!(
+            fix.th.contains("Registry Editor (regedit)")
+                && fix.th.contains("ลบค่า CaskaydiaCove NF (TrueType)")
+                && fix.th.contains(&format!("ลบไฟล์ {dest}")),
+            "{}",
+            fix.th
+        );
+
+        // Registered before, to another file: the value goes back to it; our file still goes.
+        let (m, res, _) = setup();
+        m.fonts
+            .register("CaskaydiaCove NF (TrueType)", r"D:\Fonts\other.ttf")
+            .unwrap();
+        let fix = font_fix(&m, &res);
+        assert!(
+            fix.en.contains(
+                r#"set the value CaskaydiaCove NF (TrueType) back to "D:\Fonts\other.ttf""#
+            ),
+            "{}",
+            fix.en
+        );
+        assert!(fix.en.contains(&format!("delete {dest}")), "{}", fix.en);
+        assert!(
+            fix.th.contains(r#"กลับเป็น "D:\Fonts\other.ttf""#)
+                && fix.th.contains(&format!("ลบไฟล์ {dest}")),
+            "{}",
+            fix.th
+        );
+
+        // The file was there before (the bundled one, installed): the value goes back to it and
+        // the file is put back, never deleted.
+        let (m, res, _) = setup();
+        m.fs.put(&dest, b"font-bytes");
+        m.fonts
+            .register("CaskaydiaCove NF (TrueType)", &dest)
+            .unwrap();
+        let fix = font_fix(&m, &res);
+        assert!(
+            fix.en.contains(&format!("back to \"{dest}\"")),
+            "{}",
+            fix.en
+        );
+        assert!(
+            fix.en
+                .contains(&format!("if {dest} is missing, copy {bundled} to it")),
+            "{}",
+            fix.en
+        );
+        assert!(!fix.en.contains(&format!("delete {dest}")), "{}", fix.en);
+        assert!(
+            fix.th.contains(&bundled) && !fix.th.contains(&format!("ลบไฟล์ {dest}")),
+            "{}",
+            fix.th
+        );
+        // Another file of the same name was there: that file has to come back, not the bundled one.
+        let (m, res, _) = setup();
+        m.fs.put(&dest, b"an older font");
+        let fix = font_fix(&m, &res);
+        assert!(
+            fix.en
+                .contains("delete the value CaskaydiaCove NF (TrueType)"),
+            "{}",
+            fix.en
+        );
+        assert!(
+            fix.en
+                .contains(&format!("put back the font file that was at {dest}")),
+            "{}",
+            fix.en
+        );
+        assert!(
+            !fix.en.contains(&bundled) && !fix.th.contains(&bundled),
+            "{fix:?}"
+        );
+        assert!(
+            fix.th.contains(&dest) && !fix.th.contains(&format!("ลบไฟล์ {dest}")),
+            "{}",
+            fix.th
+        );
+    }
+
+    /// An update of CMD Studio that ships another build of the font: new bytes, new pin.
+    fn update_bundled_font(m: &FakeMachine, res: &Resources, bytes: &[u8]) {
+        let mut manifest = res.manifest(&m.fs).unwrap();
+        manifest
+            .fonts
+            .files
+            .insert(NERD_FONT_FILE.into(), sha256_hex(bytes));
+        m.fs.put(
+            Path::new(RES).join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        );
+        m.fs.put(Path::new(RES).join("fonts").join(NERD_FONT_FILE), bytes);
+    }
+
+    #[test]
+    fn a_restore_never_writes_a_bundled_font_that_changed_since() {
+        let op = Op::InstallFont {
+            family: NERD_FONT_FAMILY.into(),
+        };
+        let (m, res, _) = setup();
+        let dest = m.fonts.user_fonts_dir().join(NERD_FONT_FILE);
+        let mut ex = SystemExecutor::new(m.system(), &res);
+        let before = ex.capture(&op).unwrap();
+        ex.apply(&op).unwrap();
+        let themed = ex.capture(&op).unwrap();
+        update_bundled_font(&m, &res, b"font-v2");
+        // A run after the update: the file in place is the one the restore point names, so a
+        // restore keeps it, though the bundle now pins another.
+        let mut ex = SystemExecutor::new(m.system(), &res);
+        ex.restore(&op, &themed).unwrap();
+        assert_eq!(m.fs.file(&dest), Some(b"font-bytes".to_vec()));
+        // Once it is gone it cannot come back from a bundle that no longer holds it: the
+        // restore fails and writes nothing.
+        ex.restore(&op, &before).unwrap();
+        assert!(!m.fs.exists(&dest));
+        let err = ex.restore(&op, &themed).unwrap_err();
+        assert_eq!(err.code, "E_RUNTIME_MISSING");
+        assert!(!m.fs.exists(&dest));
+        // With that build bundled again, it comes back.
+        update_bundled_font(&m, &res, b"font-bytes");
+        let mut ex = SystemExecutor::new(m.system(), &res);
+        ex.restore(&op, &themed).unwrap();
+        assert_eq!(m.fs.file(&dest), Some(b"font-bytes".to_vec()));
+    }
+
+    #[test]
+    fn the_autorun_fix_names_an_expandable_value_and_an_empty_one() {
+        let autorun = Op::SetAutoRun { value: None };
+        let payload = Path::new(r"C:\d\snapshots\1-a\payload\5.bin");
+        let fix = |kind, text: &str| {
+            let prior = to_json(&AutoRunRecord {
+                key_existed: true,
+                value: Some(RegValueRecord::from_reg(&RegValue::from_text(kind, text))),
+            })
+            .unwrap();
+            fix_by_hand(&autorun, &Some(prior), payload)
+        };
+        let typed = "Expandable String Value (REG_EXPAND_SZ)";
+        let f = fix(REG_EXPAND_SZ, "%A% & echo hi");
+        assert!(
+            f.en.contains(typed) && f.en.ends_with("back to: %A% & echo hi"),
+            "{}",
+            f.en
+        );
+        assert!(
+            f.th.contains(typed) && f.th.ends_with("กลับเป็น: %A% & echo hi"),
+            "{}",
+            f.th
+        );
+        let f = fix(REG_SZ, "echo hi");
+        assert!(
+            !f.en.contains("REG_EXPAND_SZ") && !f.th.contains("REG_EXPAND_SZ"),
+            "{f:?}"
+        );
+        assert!(f.en.ends_with("set AutoRun back to: echo hi"), "{}", f.en);
+        // An empty value is said in words, not as "back to: " with nothing after it.
+        for kind in [REG_SZ, REG_EXPAND_SZ] {
+            let f = fix(kind, "");
+            assert!(
+                !f.en.trim_end().ends_with(':') && f.en.contains("empty"),
+                "{}",
+                f.en
+            );
+            assert!(
+                !f.th.trim_end().ends_with(':') && f.th.contains("ค่าว่าง"),
+                "{}",
+                f.th
+            );
+            assert_eq!(f.en.contains(typed), kind == REG_EXPAND_SZ, "{}", f.en);
+            assert_eq!(f.th.contains(typed), kind == REG_EXPAND_SZ, "{}", f.th);
+        }
+    }
+
+    /// The fake host, except that the ProgramData known folder and the user's SID cannot be read.
+    struct NoKnownFolders<'a>(&'a FakeHost);
+
+    impl Host for NoKnownFolders<'_> {
+        fn local_app_data(&self) -> Result<PathBuf, AdapterError> {
+            self.0.local_app_data()
+        }
+        fn program_data(&self) -> Result<PathBuf, AdapterError> {
+            Err(AdapterError::new(
+                "SHGetKnownFolderPath ProgramData",
+                "failed (injected)",
+            ))
+        }
+        fn user_sid(&self) -> Result<String, AdapterError> {
+            Err(AdapterError::new(
+                "GetTokenInformation",
+                "failed (injected)",
+            ))
+        }
+        fn short_path(&self, path: &Path) -> Result<PathBuf, AdapterError> {
+            self.0.short_path(path)
+        }
+        fn private_dir_state(&self, dir: &Path) -> Result<DirState, AdapterError> {
+            self.0.private_dir_state(dir)
+        }
+        fn create_private_dir(&self, dir: &Path) -> Result<Created, AdapterError> {
+            self.0.create_private_dir(dir)
+        }
+        fn system_info(&self) -> SystemInfo {
+            self.0.system_info()
+        }
+    }
+
+    #[test]
+    fn only_a_runtime_that_may_be_in_program_data_asks_the_host() {
+        let (m, res, paths) = setup();
+        let host = NoKnownFolders(&m.host);
+        let sys = System {
+            host: &host,
+            ..m.system()
+        };
+        let mut ex = SystemExecutor::new(sys, &res);
+        // Runtimes in the data folder never need the host's known folders.
+        for op in [
+            Op::InstallRuntime {
+                component: Component::Omp,
+                dir: paths.omp_dir(),
+            },
+            Op::InstallRuntime {
+                component: Component::Clink,
+                dir: paths.clink_dir(),
+            },
+        ] {
+            ex.apply(&op).unwrap();
+            ex.apply(&op).unwrap();
+        }
+        // One named like the user's ProgramData folder cannot be checked without them: a
+        // failed read, not a path problem, and nothing is installed.
+        let pd = Op::InstallRuntime {
+            component: Component::Clink,
+            dir: PathBuf::from(PD).join("clink-1.9.34"),
+        };
+        let err = ex.apply(&pd).unwrap_err();
+        assert_eq!(err.code, "E_MACHINE_READ");
+        assert!(err.message.contains("(injected)"), "{}", err.message);
+        assert!(!m.fs.exists(Path::new(PD)));
+    }
+
+    #[test]
+    fn a_program_data_runtime_spelled_in_other_letter_case_is_still_checked() {
+        // Windows paths ignore letter case, so another spelling is the same folder.
+        let (m, res, _) = setup();
+        m.host
+            .set_dir_state(PD, DirState::Unsafe("S-1-5-32-545 may change it".into()));
+        let mut ex = SystemExecutor::new(m.system(), &res);
+        let op = Op::InstallRuntime {
+            component: Component::Clink,
+            dir: PathBuf::from(PD.to_ascii_lowercase()).join("clink-1.9.34"),
+        };
+        assert_eq!(ex.apply(&op).unwrap_err().code, "E_CLINK_PATH");
+        assert!(!m.fs.exists(&PathBuf::from(PD.to_ascii_lowercase())));
     }
 }
