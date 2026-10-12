@@ -19,6 +19,7 @@ struct FsState {
     dirs: BTreeSet<PathBuf>,
     fail_writes: BTreeSet<PathBuf>,
     fail_removes: BTreeSet<PathBuf>,
+    fail_reads: BTreeSet<PathBuf>,
 }
 
 /// Files and folders in memory. Paths compare exactly (case-sensitive).
@@ -58,6 +59,16 @@ impl FakeFs {
             .insert(path.as_ref().to_path_buf());
     }
 
+    /// Makes every later read of exactly `path` fail, as when the file is locked or the user may
+    /// not read it. The file, if there, stays: `exists`, `file` and `put` are not affected, and a
+    /// write does not clear it.
+    pub fn fail_reads_of(&self, path: impl AsRef<Path>) {
+        self.state
+            .borrow_mut()
+            .fail_reads
+            .insert(path.as_ref().to_path_buf());
+    }
+
     /// Makes every later removal of `path` fail, as when a file is in use: `remove_file` or
     /// `remove_dir` of that path, and `remove_dir_all` or `rename` of that path or of a folder
     /// above it.
@@ -86,7 +97,11 @@ fn parent_exists(dirs: &BTreeSet<PathBuf>, path: &Path) -> bool {
 
 impl Fs for FakeFs {
     fn read(&self, path: &Path) -> Result<Option<Vec<u8>>, AdapterError> {
-        Ok(self.state.borrow().files.get(path).cloned())
+        let s = self.state.borrow();
+        if s.fail_reads.contains(path) {
+            return Err(err(path, "read failed (injected)"));
+        }
+        Ok(s.files.get(path).cloned())
     }
 
     fn write_atomic(&self, path: &Path, bytes: &[u8]) -> Result<(), AdapterError> {
@@ -720,6 +735,41 @@ mod tests {
         fs.rename(Path::new("loose.txt"), Path::new("kept.txt"))
             .unwrap();
         assert_eq!(fs.file("kept.txt"), Some(b"l".to_vec()));
+    }
+
+    #[test]
+    fn fake_fs_can_fail_the_read_of_one_path() {
+        let fs = FakeFs::new();
+        let f = Path::new(r"C:\d\a.txt");
+        let other = Path::new(r"C:\d\b.txt");
+        fs.put(f, b"a");
+        fs.put(other, b"b");
+        assert_eq!(fs.read(f).unwrap(), Some(b"a".to_vec()));
+
+        fs.fail_reads_of(f);
+        let e = fs.read(f).unwrap_err();
+        assert!(e.message.contains("(injected)"), "{e}");
+        assert!(
+            fs.read(f).is_err(),
+            "it keeps failing, as the other hooks do"
+        );
+        // Only that exact path, and only reads: the file is still there.
+        assert_eq!(fs.read(other).unwrap(), Some(b"b".to_vec()));
+        assert!(fs.exists(f));
+        assert_eq!(fs.file(f), Some(b"a".to_vec()));
+        fs.write_atomic(f, b"new").unwrap();
+        assert!(fs.read(f).is_err(), "a write does not clear it");
+        assert_eq!(fs.file(f), Some(b"new".to_vec()));
+
+        // A path that has no file fails too, and a path inside a failing folder name does not.
+        fs.fail_reads_of(r"C:\d\none.txt");
+        assert!(fs.read(Path::new(r"C:\d\none.txt")).is_err());
+        fs.fail_reads_of(r"C:\d\dir");
+        fs.put(r"C:\d\dir\x.txt", b"x");
+        assert_eq!(
+            fs.read(Path::new(r"C:\d\dir\x.txt")).unwrap(),
+            Some(b"x".to_vec())
+        );
     }
 
     #[test]

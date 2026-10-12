@@ -319,10 +319,18 @@ pub enum StateError {
     /// The file is there but could not be read (locked, no access, a folder in its place).
     #[error("state.json could not be read: {0}")]
     Read(String),
-    /// The file was read but is not one this version can use: not a state file, damaged, or
-    /// written by a newer CMD Studio. The message says which.
+    /// The file was read but is damaged: not JSON, not a state file, or a version no release
+    /// wrote. The message says which.
     #[error("{0}")]
     Invalid(String),
+    /// The file is a valid state of a newer CMD Studio (`version` above `STATE_VERSION`). It
+    /// is not damaged and holds a baseline this version could lose on a save, so a caller must
+    /// leave it where it is, not set it aside as it may a damaged one.
+    #[error(
+        "state.json was written by a newer CMD Studio (version {found}); \
+         this version understands version {STATE_VERSION}"
+    )]
+    Newer { found: u64 },
     /// A save failed.
     #[error("{0}")]
     Io(String),
@@ -332,7 +340,9 @@ impl StateError {
     /// Stable code shown to users (spec §5.9). A read never carries a write code.
     pub fn code(&self) -> &'static str {
         match self {
-            StateError::Read(_) | StateError::Invalid(_) => "E_STATE_INVALID",
+            StateError::Read(_) | StateError::Invalid(_) | StateError::Newer { .. } => {
+                "E_STATE_INVALID"
+            }
             StateError::Io(_) => "E_DATA_WRITE",
         }
     }
@@ -345,9 +355,10 @@ impl State {
     ///
     /// The `version` field decides first, before the rest is read:
     /// - `STATE_VERSION` (1) loads;
-    /// - a larger number is a state from a newer CMD Studio. It is refused, because saving it
-    ///   again would drop the fields this version does not know, and with them the baseline that
-    ///   undoing everything needs. Its shape is not looked at, so the message names the version;
+    /// - a larger number is a state from a newer CMD Studio: `StateError::Newer`, not
+    ///   `Invalid`, so a caller can tell it from damage. It is refused, because saving it again
+    ///   would drop the fields this version does not know, and with them the baseline that
+    ///   undoing everything needs. Its shape is not looked at, so the error names the version;
     /// - 0 was never written by any version, so it is damage;
     /// - a missing `version` (serde: "missing field `version`") or one that is not a whole
     ///   number is damage. `applied` and `baseline` may be missing: they read as none and as the
@@ -367,11 +378,8 @@ impl State {
                      this version understands version {STATE_VERSION}"
                 )))
             }
-            Some(v) if v > u64::from(STATE_VERSION) => {
-                return Err(StateError::Invalid(format!(
-                    "state.json was written by a newer CMD Studio (version {v}); \
-                     this version understands version {STATE_VERSION}"
-                )))
+            Some(found) if found > u64::from(STATE_VERSION) => {
+                return Err(StateError::Newer { found })
             }
             _ => {}
         }
@@ -392,52 +400,12 @@ impl State {
 mod tests {
     use super::*;
     use crate::adapters::fake::FakeFs;
-    use crate::adapters::{AdapterError, DirEntry, REG_EXPAND_SZ, REG_SZ};
+    use crate::adapters::{REG_EXPAND_SZ, REG_SZ};
     use crate::wt_edit::WtChange;
     use serde_json::json;
 
-    /// A disk whose reads fail, as when the file is locked or its folder cannot be reached.
-    /// `FakeFs` has no failing read: reading a folder there says "no such file".
-    struct UnreadableFs;
-
-    fn denied(path: &Path) -> AdapterError {
-        AdapterError::new(path.display().to_string(), "access denied")
-    }
-
-    impl Fs for UnreadableFs {
-        fn read(&self, path: &Path) -> Result<Option<Vec<u8>>, AdapterError> {
-            Err(denied(path))
-        }
-        fn write_atomic(&self, path: &Path, _bytes: &[u8]) -> Result<(), AdapterError> {
-            Err(denied(path))
-        }
-        fn remove_file(&self, path: &Path) -> Result<(), AdapterError> {
-            Err(denied(path))
-        }
-        fn exists(&self, _path: &Path) -> bool {
-            true
-        }
-        fn is_dir(&self, _path: &Path) -> bool {
-            false
-        }
-        fn create_dir_all(&self, path: &Path) -> Result<(), AdapterError> {
-            Err(denied(path))
-        }
-        fn remove_dir(&self, path: &Path) -> Result<(), AdapterError> {
-            Err(denied(path))
-        }
-        fn remove_dir_all(&self, path: &Path) -> Result<(), AdapterError> {
-            Err(denied(path))
-        }
-        fn rename(&self, from: &Path, _to: &Path) -> Result<(), AdapterError> {
-            Err(denied(from))
-        }
-        fn list_dir(&self, path: &Path) -> Result<Vec<DirEntry>, AdapterError> {
-            Err(denied(path))
-        }
-    }
-
-    /// `state.json` as it was before `pendingDeletes` existed.
+    /// `state.json` as version 1 wrote it before `pendingDeletes` existed. The 1 is deliberate:
+    /// it is a stored file, not "the current version".
     const STATE_WITHOUT_PENDING: &str = "{\n  \"version\": 1,\n  \"applied\": null,\n  \"baseline\": {\n    \"autorun\": null,\n    \"autorunWritten\": null,\n    \"wt\": [],\n    \"fonts\": [],\n    \"programDataDir\": null\n  }\n}\n";
 
     fn edited(changes: Vec<WtChange>, created: Vec<WtCreated>) -> WtEdited {
@@ -610,14 +578,18 @@ mod tests {
         );
     }
 
-    // --- Ruling Q25 (a): a read that fails is not a write error. ---
+    // --- A read that fails is not a write error. ---
 
     #[test]
     fn a_failed_read_is_reported_as_an_unreadable_state_not_as_a_write_error() {
-        let err = State::load(&UnreadableFs, Path::new(r"C:\d\state.json")).unwrap_err();
+        let fs = FakeFs::new();
+        let p = Path::new(r"C:\d\state.json");
+        fs.put(p, State::default().to_bytes().unwrap());
+        fs.fail_reads_of(p);
+        let err = State::load(&fs, p).unwrap_err();
         assert!(matches!(err, StateError::Read(_)), "{err:?}");
         assert_eq!(err.code(), "E_STATE_INVALID");
-        assert!(err.to_string().contains("access denied"), "{err}");
+        assert!(err.to_string().contains("(injected)"), "{err}");
     }
 
     #[test]
@@ -625,9 +597,10 @@ mod tests {
         assert_eq!(StateError::Io("disk full".into()).code(), "E_DATA_WRITE");
         assert_eq!(StateError::Invalid("x".into()).code(), "E_STATE_INVALID");
         assert_eq!(StateError::Read("x".into()).code(), "E_STATE_INVALID");
+        assert_eq!(StateError::Newer { found: 2 }.code(), "E_STATE_INVALID");
     }
 
-    // --- Ruling Q25 (b): font files that could not be deleted are remembered. ---
+    // --- Font files that could not be deleted are remembered. ---
 
     #[test]
     fn an_old_state_file_without_pending_deletes_loads_with_an_empty_list() {
@@ -683,54 +656,62 @@ mod tests {
         );
     }
 
-    // --- More coverage of the brief's rules. ---
-
     // --- The file's version. ---
 
     #[test]
     fn a_state_from_a_newer_cmd_studio_is_refused_and_left_alone() {
         let fs = FakeFs::new();
         let p = Path::new(r"C:\d\state.json");
-        let files: [&[u8]; 4] = [
+        let newer = u64::from(STATE_VERSION) + 1;
+        let files: [(String, u64); 4] = [
             // The shape of today's state plus a field a newer version added.
-            br#"{"version":2,"applied":null,"baseline":{"autorun":null,"autorunWritten":null,"wt":[],"fonts":[],"programDataDir":null},"extra":[1]}"#,
+            (
+                format!(
+                    r#"{{"version":{newer},"applied":null,"baseline":{{"autorun":null,"autorunWritten":null,"wt":[],"fonts":[],"programDataDir":null}},"extra":[1]}}"#
+                ),
+                newer,
+            ),
             // A shape this version cannot read at all: the version is what gets reported.
-            br#"{"version":2,"applied":"another shape","baseline":[]}"#,
-            br#"{"version":3}"#,
+            (
+                format!(r#"{{"version":{newer},"applied":"another shape","baseline":[]}}"#),
+                newer,
+            ),
+            (format!(r#"{{"version":{}}}"#, newer + 1), newer + 1),
             // Larger than `u32`.
-            br#"{"version":99999999999}"#,
+            (r#"{"version":99999999999}"#.to_string(), 99_999_999_999),
         ];
-        for bytes in files {
+        for (text, found) in files {
+            let bytes = text.as_bytes();
             fs.put(p, bytes);
             let err = State::load(&fs, p).unwrap_err();
-            assert!(matches!(err, StateError::Invalid(_)), "{err:?}");
+            // Neither `Invalid` nor `Read`: a caller that renames a damaged file aside must be
+            // able to tell a newer state, which it has to leave alone.
+            assert_eq!(err, StateError::Newer { found }, "{text}");
             assert_eq!(err.code(), "E_STATE_INVALID");
-            let text = err.to_string();
-            assert!(
-                text.contains("newer CMD Studio") && text.contains("understands version 1"),
-                "{text}"
-            );
             assert_eq!(
                 fs.file(p).as_deref(),
                 Some(bytes),
                 "load must not touch the file"
             );
         }
-        let text = {
-            fs.put(p, br#"{"version":2}"#);
-            State::load(&fs, p).unwrap_err().to_string()
-        };
+    }
+
+    #[test]
+    fn the_newer_version_message_names_both_versions() {
+        // The numbers are written out on purpose: raising STATE_VERSION must show up here, so
+        // the new version's handling of old files is decided.
+        assert_eq!(STATE_VERSION, 1);
         assert_eq!(
-            text,
+            StateError::Newer { found: 2 }.to_string(),
             "state.json was written by a newer CMD Studio (version 2); this version understands version 1"
         );
     }
 
     #[test]
-    fn only_version_one_is_understood_a_missing_or_odd_version_is_damage() {
+    fn only_the_current_version_is_understood_a_missing_or_odd_version_is_damage() {
         let fs = FakeFs::new();
         let p = Path::new(r"C:\d\state.json");
-        fs.put(p, br#"{"version":1}"#);
+        fs.put(p, format!(r#"{{"version":{STATE_VERSION}}}"#));
         assert_eq!(State::load(&fs, p).unwrap().version, STATE_VERSION);
         // `applied` and `baseline` may be missing (serde reads a missing Option as None and the
         // baseline has a default); `version` may not: serde's "missing field `version`".
@@ -772,7 +753,10 @@ mod tests {
     fn a_state_that_is_saved_carries_the_current_version() {
         assert_eq!(State::default().version, STATE_VERSION);
         let text = String::from_utf8(State::default().to_bytes().unwrap()).unwrap();
-        assert!(text.contains("\"version\": 1,"), "{text}");
+        assert!(
+            text.contains(&format!("\"version\": {STATE_VERSION},")),
+            "{text}"
+        );
     }
 
     #[test]
@@ -783,6 +767,7 @@ mod tests {
         for junk in [&b""[..], b"{ nope", b"[]", b"{}", b"{\"version\":\"one\"}"] {
             fs.put(p, junk);
             let err = State::load(&fs, p).unwrap_err();
+            assert!(matches!(err, StateError::Invalid(_)), "{junk:?}: {err:?}");
             assert_eq!(err.code(), "E_STATE_INVALID", "{junk:?}");
             assert_eq!(
                 fs.file(p).as_deref(),
@@ -1121,6 +1106,130 @@ mod tests {
             }
             assert_eq!(serde_json::from_str::<State>(&text).unwrap(), s);
         }
+    }
+
+    /// Other files store these types as they are (the journal keeps an `AutoRunRecord`), so a
+    /// renamed field would make files written by an earlier version unreadable. This only pins
+    /// what the code does today: it passed as soon as it was written.
+    #[test]
+    fn the_names_that_other_files_store_are_pinned() {
+        fn pin<T>(value: &T, expected: Value)
+        where
+            T: Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+        {
+            assert_eq!(serde_json::to_value(value).unwrap(), expected);
+            // And the stored text reads back as the same value.
+            let back: T = serde_json::from_str(&expected.to_string()).unwrap();
+            assert_eq!(&back, value);
+        }
+
+        pin(
+            &AutoRunRecord {
+                key_existed: true,
+                value: Some(RegValueRecord {
+                    kind: REG_EXPAND_SZ,
+                    data_hex: "2500".into(),
+                }),
+            },
+            json!({"keyExisted": true, "value": {"kind": 2, "dataHex": "2500"}}),
+        );
+        pin(
+            &AutoRunRecord {
+                key_existed: false,
+                value: None,
+            },
+            json!({"keyExisted": false, "value": null}),
+        );
+        pin(
+            &AutoRunWritten {
+                value: Some("x".into()),
+            },
+            json!({"value": "x"}),
+        );
+        pin(&AutoRunWritten { value: None }, json!({"value": null}));
+        pin(
+            &FontRecord {
+                family: "F".into(),
+                file: PathBuf::from("f.ttf"),
+                value_name: "F (TrueType)".into(),
+            },
+            json!({"family": "F", "file": "f.ttf", "valueName": "F (TrueType)"}),
+        );
+
+        // One settings.json with every kind of key, an absent original, a null one, and every
+        // container.
+        let mut b = Baseline::default();
+        b.note_wt(
+            Path::new(r"C:\wt\settings.json"),
+            &edited(
+                vec![
+                    change(&WtKey::Scheme, None, json!({"name": "CMD Studio"})),
+                    change(&WtKey::DefaultProfile, Some(json!("{x}")), json!("{y}")),
+                    change(
+                        &WtKey::Profile {
+                            key: "opacity".into(),
+                        },
+                        Some(json!(80)),
+                        json!(96),
+                    ),
+                    change(
+                        &WtKey::Profile { key: "icon".into() },
+                        Some(Value::Null),
+                        json!("i"),
+                    ),
+                    change(
+                        &WtKey::ProfileSub {
+                            key: "font".into(),
+                            sub: "face".into(),
+                        },
+                        None,
+                        json!("F"),
+                    ),
+                ],
+                vec![
+                    WtCreated::CmdProfile,
+                    WtCreated::ProfileList,
+                    WtCreated::Profiles,
+                    WtCreated::Schemes,
+                ],
+            ),
+        );
+        let scheme = json!({"at": "scheme"});
+        let default_profile = json!({"at": "defaultProfile"});
+        let opacity = json!({"at": "profile", "key": "opacity"});
+        let icon = json!({"at": "profile", "key": "icon"});
+        let face = json!({"at": "profileSub", "key": "font", "sub": "face"});
+        pin(
+            &b.wt[0],
+            json!({
+                "settings": r"C:\wt\settings.json",
+                "originals": [
+                    {"key": scheme, "original": {"was": "absent"}},
+                    {"key": default_profile, "original": {"was": "present", "value": "{x}"}},
+                    {"key": opacity, "original": {"was": "present", "value": 80}},
+                    {"key": icon, "original": {"was": "present", "value": null}},
+                    {"key": face, "original": {"was": "absent"}},
+                ],
+                "written": [
+                    {"key": scheme, "value": {"name": "CMD Studio"}},
+                    {"key": default_profile, "value": "{y}"},
+                    {"key": opacity, "value": 96},
+                    {"key": icon, "value": "i"},
+                    {"key": face, "value": "F"},
+                ],
+                "created": ["cmdProfile", "profileList", "profiles", "schemes"],
+            }),
+        );
+        pin(
+            &Baseline::default(),
+            json!({
+                "autorun": null,
+                "autorunWritten": null,
+                "wt": [],
+                "fonts": [],
+                "programDataDir": null,
+            }),
+        );
     }
 
     #[test]
