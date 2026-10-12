@@ -3,6 +3,7 @@
 //! everything else goes through the adapter traits in `adapters`.
 pub mod actions;
 pub mod adapters;
+pub mod cleanup;
 pub mod color;
 pub mod detect;
 pub mod exec;

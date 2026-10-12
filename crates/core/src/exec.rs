@@ -946,7 +946,7 @@ fn take_ours_out_of_autorun(written: Option<&str>) -> (String, String) {
 }
 
 /// The per-user font registrations, as Registry Editor shows the key.
-const FONTS_KEY: &str = r"HKEY_CURRENT_USER\Software\Microsoft\Windows NT\CurrentVersion\Fonts";
+pub const FONTS_KEY: &str = r"HKEY_CURRENT_USER\Software\Microsoft\Windows NT\CurrentVersion\Fonts";
 
 /// Putting the font back by hand, from what the restore point captured: the registration value
 /// first, then the file. `--cleanup` is no answer here: it uninstalls only the fonts state.json
