@@ -756,8 +756,9 @@ fn d8(sys: System<'_>, state: &Result<State, StateError>) -> Check {
             "D8",
             Status::Skipped,
             None,
-            "ธีมไม่ได้ตั้งฟอนต์ เพราะไม่มี Windows Terminal",
-            "The theme set no font, because Windows Terminal is not installed",
+            "ธีมไม่ได้ตั้งฟอนต์ เพราะตอนใช้ธีมไม่พบไฟล์ตั้งค่าของ Windows Terminal",
+            "The theme set no font, because no Windows Terminal settings file was found when it \
+             was applied",
             "",
         );
     };
@@ -1030,11 +1031,12 @@ fn records(sys: System<'_>, ctx: &Ctx) -> Vec<Check> {
             Status::Warn,
             Some("E_TXN_INTERRUPTED"),
             "การเปลี่ยนแปลงครั้งก่อนถูกตัดกลางทาง (โปรแกรมหยุดทำงานก่อนเสร็จ) และยังไม่ได้ย้อนกลับ \
-             CMD Studio จะย้อนให้เองเมื่อเปลี่ยนการตั้งค่าครั้งถัดไป (ใช้ธีม ย้อนกลับ หรือ --cleanup) \
+             CMD Studio จะย้อนให้เองเมื่อเปลี่ยนการตั้งค่าครั้งถัดไป \
+             (ใช้ธีม ย้อนกลับ ย้อนทุกอย่าง หรือ --cleanup) \
              ระหว่างนี้ผลตรวจข้างบนอาจเห็นการเปลี่ยนแปลงที่ทำไปครึ่งเดียว",
             "An earlier change was cut off (the app stopped) and is not rolled back yet. CMD \
-             Studio rolls it back the next time it changes something (apply, undo or --cleanup); \
-             until then the checks above may see it half done",
+             Studio rolls it back the next time it changes something (apply, undo, Revert \
+             everything or --cleanup); until then the checks above may see it half done",
             format!("restore point {}", j.id),
         )),
         Err(f) => {
@@ -1150,15 +1152,16 @@ fn cannot_recover(id: &str, kind: Option<UnreadableKind>, f: &Failure) -> Check 
             Some(f.code),
             format!(
                 "ยังตรวจการเปลี่ยนแปลงครั้งก่อนไม่ได้ เพราะตอนนี้อ่านจุดย้อนกลับ {id} ของมันไม่ได้ \
-                 ระหว่างนี้ CMD Studio จะไม่เปลี่ยนการตั้งค่าใดๆ (ใช้ธีม ย้อนกลับ และ --cleanup \
-                 จะไม่ทำงาน) ลองใหม่อีกครั้งในอีกสักครู่ ถ้าจุดนี้อ่านไม่ได้ตลอด ให้รันคำสั่ง \
+                 ระหว่างนี้ CMD Studio จะไม่เปลี่ยนการตั้งค่าใดๆ (ใช้ธีม ย้อนกลับ ย้อนทุกอย่าง \
+                 และ --cleanup จะไม่ทำงาน) ลองใหม่อีกครั้งในอีกสักครู่ ถ้าจุดนี้อ่านไม่ได้ตลอด ให้รันคำสั่ง \
                  `cmdstudio set-aside {id}` เพื่อกันจุดนี้ไว้ต่างหาก แต่สิ่งที่การเปลี่ยนแปลงนั้นทำไว้ \
                  จะไม่ถูกย้อนเอง ต้องแก้ด้วยมือ"
             ),
             format!(
                 "An earlier change could not be checked yet: its restore point {id} can't be \
-                 read right now. Until it can, CMD Studio changes nothing (apply, undo and \
-                 --cleanup are refused). Try again in a moment. If it never becomes readable, \
+                 read right now. Until it can, CMD Studio changes nothing (apply, undo, Revert \
+                 everything and --cleanup are refused). Try again in a moment. If it never \
+                 becomes readable, \
                  run `cmdstudio set-aside {id}` to set it aside; what that change did is then \
                  not rolled back by itself, and must be fixed by hand"
             ),
@@ -1669,6 +1672,10 @@ mod tests {
         assert!(r1.message_en.contains(&way_out), "{r1:?}");
         assert!(r1.message_th.contains(&way_out), "{r1:?}");
         assert!(r1.message_en.contains("Try again"), "{r1:?}");
+        // Every command that changes the machine starts the same way, Revert everything too.
+        let refused = "(apply, undo, Revert everything and --cleanup are refused)";
+        assert!(r1.message_en.contains(refused), "{r1:?}");
+        assert!(r1.message_th.contains("ย้อนทุกอย่าง"), "{r1:?}");
 
         // Readable again: still not rolled back by doctor, only reported.
         m.fs.stop_failing(&journal);
@@ -1679,6 +1686,9 @@ mod tests {
             "{r1:?}"
         );
         assert!(r1.details.contains(&id), "{r1:?}");
+        let rolls_back = "(apply, undo, Revert everything or --cleanup)";
+        assert!(r1.message_en.contains(rolls_back), "{r1:?}");
+        assert!(r1.message_th.contains("ย้อนทุกอย่าง"), "{r1:?}");
         assert!(
             m.fs.exists(&ctx.paths.omp_dir()),
             "the crash is still there"
@@ -2029,5 +2039,89 @@ mod tests {
                 && statuses(&checks).contains(&("D8", Status::Skipped)),
             "{checks:#?}"
         );
+    }
+
+    #[test]
+    fn d8_says_no_settings_file_was_there_when_the_theme_set_no_font() {
+        // Windows Terminal installed but never opened has no settings.json: the planner wrote
+        // no font, though Windows Terminal is installed.
+        let (m, ctx) = machine();
+        m.fs.remove_file(std::path::Path::new(WT)).unwrap();
+        m.process.answer("oh-my-posh.exe", "version", 0, "31.5.0\n");
+        let p = prepare_apply(m.system(), &ctx, &terracotta(), &request(Target::All)).unwrap();
+        assert_eq!(run_apply(m.system(), &ctx, p), Outcome::Committed);
+        let d8 = by_id(&run(&m, &ctx), "D8");
+        assert_eq!((d8.status, d8.code), (Status::Skipped, None));
+        assert!(
+            d8.message_en
+                .contains("no Windows Terminal settings file was found"),
+            "{d8:?}"
+        );
+        assert!(!d8.message_en.contains("not installed"), "{d8:?}");
+    }
+
+    /// Settings.json after `themed`, with `from` replaced by `to` once (which must be there).
+    fn edit_wt(m: &FakeMachine, from: &str, to: &str) {
+        let text = String::from_utf8(m.fs.file(WT).unwrap()).unwrap();
+        let edited = text.replacen(from, to, 1);
+        assert_ne!(edited, text, "{from} is not in settings.json");
+        m.fs.put(WT, edited);
+    }
+
+    #[test]
+    fn d7_checks_the_scheme_itself_the_default_profile_and_the_plain_commandline() {
+        let wrong = |m: &FakeMachine, ctx: &Ctx, what: &str| {
+            let d7 = by_id(&run(m, ctx), "D7");
+            assert_eq!(
+                (d7.status, d7.code),
+                (Status::Fail, Some("E_WT_WRITE")),
+                "{what}: {d7:?}"
+            );
+            assert!(d7.details.contains(what), "{what}: {d7:?}");
+        };
+        // The profile names the scheme, but the scheme is gone.
+        let (m, ctx) = themed(Target::All);
+        edit_wt(&m, r#""name": "CMD Studio""#, r#""name": "Someone else's""#);
+        wrong(&m, &ctx, "does not use the CMD Studio scheme");
+
+        // The user chose cmd as the default profile, and something changed it back.
+        let (m, ctx) = themed(Target::All);
+        edit_wt(
+            &m,
+            r#""defaultProfile": "{0caa0dad-35be-5f56-a8ff-afceeeaa6101}""#,
+            r#""defaultProfile": "{61c54bbd-c2c6-5271-96e7-009a87ff44bf}""#,
+        );
+        wrong(&m, &ctx, "defaultProfile");
+        // Only checked when the user chose it.
+        let (m, ctx) = machine();
+        m.process.answer("oh-my-posh.exe", "version", 0, "31.5.0\n");
+        let mut not_default = request(Target::All);
+        not_default.set_wt_default_profile = false;
+        let p = prepare_apply(m.system(), &ctx, &terracotta(), &not_default).unwrap();
+        assert_eq!(run_apply(m.system(), &ctx, p), Outcome::Committed);
+        assert_eq!(by_id(&run(&m, &ctx), "D7").status, Status::Ok);
+
+        // Every cmd window: anything after cmd.exe loses the colors of windows opened from Run
+        // (spec §2.2 lesson 2).
+        let (m, ctx) = themed(Target::All);
+        edit_wt(
+            &m,
+            r#""commandline": "%SystemRoot%\\System32\\cmd.exe""#,
+            r#""commandline": "%SystemRoot%\\System32\\cmd.exe /k echo hi""#,
+        );
+        wrong(&m, &ctx, "commandline is");
+    }
+
+    #[test]
+    fn d9_counts_a_generated_file_that_was_deleted() {
+        let (m, ctx) = themed(Target::All);
+        let init = ctx.paths.generated().join("init.lua");
+        m.fs.remove_file(&init).unwrap();
+        let d9 = by_id(&run(&m, &ctx), "D9");
+        assert_eq!(
+            (d9.status, d9.code),
+            (Status::Warn, Some("E_GENERATED_EDITED"))
+        );
+        assert_eq!(d9.details, init.display().to_string());
     }
 }

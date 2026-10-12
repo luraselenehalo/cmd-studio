@@ -544,8 +544,9 @@ pub struct StartReport {
     /// point's journal now, and left it for a later start (`recovered` is then
     /// `RollbackIncomplete` with no failed ops). While it is, a command that changes the machine
     /// is refused with `E_SNAPSHOT_READ`, because its own restore point would become the newest
-    /// and recovery would never look at the crashed one again. `recover_at_start` (doctor,
-    /// `--cleanup`) reports it and goes on.
+    /// and recovery would never look at the crashed one again. `recover_at_start` reports it and
+    /// goes on. Doctor never runs it: doctor only reads, and reports a waiting transaction from
+    /// the restore points themselves (`doctor` R1).
     pub recovery_pending: bool,
 }
 
@@ -608,9 +609,9 @@ pub(crate) fn next_id(store: &SnapshotStore<'_>, now_ms: u64) -> String {
     new_id(newest.map_or(now_ms, |n| now_ms.max(n.saturating_add(1))))
 }
 
-/// [`begin`] without the refusal: for [`recover_at_start`], which doctor and `--cleanup` run and
-/// which only reports a transaction that waits to be rolled back. A caller that goes on to run
-/// a transaction of its own buries the waiting one (see [`begin`]).
+/// [`begin`] without the refusal: for [`recover_at_start`], which only reports a transaction that
+/// waits to be rolled back. A caller that goes on to run a transaction of its own buries the
+/// waiting one (see [`begin`]).
 pub(crate) fn begin_anyway(
     sys: System<'_>,
     ctx: &Ctx,
@@ -694,7 +695,9 @@ fn start(sys: System<'_>, ctx: &Ctx) -> StartReport {
     report
 }
 
-/// What every run does first (the CLI runs it before every command, Task 16): takes the lock,
+/// What every command that changes the machine does first (apply, undo, revert-all and
+/// `--cleanup` do it through `begin`; the CLI may run it on its own before one of them, never
+/// before doctor or `--help`, which only read and must not take the lock): takes the lock,
 /// rolls back a transaction a crash cut off (spec §5.5), reports restore points that cannot be
 /// read and sets aside those that will not mend, deletes half-made runtime folders, and finds
 /// what a rollback left for a hand to fix. `E_BUSY` while another run holds the lock: a
@@ -1598,7 +1601,7 @@ mod tests {
         m.fs.fail_reads_of(&journal);
         let crashed = (everything(&m), files_but_the_lock(&m, &ctx));
 
-        // The start that doctor and --cleanup run says so and goes on.
+        // The start that `recover_at_start` runs says so and goes on.
         let start = recover_at_start(m.system(), &later(&ctx, 1)).unwrap();
         assert!(start.recovery_pending, "{start:?}");
         // A change is refused, and nothing changes.
