@@ -221,9 +221,18 @@ pub(crate) struct TestKey {
     pub(crate) subkey: String,
 }
 
+/// How many `TestKey`s are alive in this process. The shared folder is removed only when the
+/// last one goes: tests run in parallel, and a folder that looks empty may belong to a test that
+/// has not created its own key yet (deleting it then fails that test: "marked for deletion").
+#[cfg(test)]
+static LIVE_TEST_KEYS: std::sync::Mutex<usize> = std::sync::Mutex::new(0);
+
 #[cfg(test)]
 impl TestKey {
     pub(crate) fn new() -> Self {
+        *LIVE_TEST_KEYS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
         TestKey {
             subkey: format!(r"{TEST_ROOT}\{}", uuid::Uuid::new_v4().simple()),
         }
@@ -236,28 +245,38 @@ impl TestKey {
 #[cfg(test)]
 impl Drop for TestKey {
     fn drop(&mut self) {
+        // Counting out and deleting are one step: the lock stays held to the end, so neither
+        // `TestKey::new` nor another drop can slip in between.
+        let mut live = LIVE_TEST_KEYS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Every key counted itself in with `new`, so every key counts out, whatever follows.
+        *live = live.saturating_sub(1);
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
         // `delete_subkey_all` removes a whole tree, so it only ever runs on a key below our own folder.
         let ours = self
             .subkey
             .strip_prefix(TEST_ROOT)
             .is_some_and(|rest| rest.starts_with('\\'));
-        if !ours {
+        if ours {
+            // Only "already gone" is fine: any other error leaves a key behind, so it is said out loud.
+            match hkcu.delete_subkey_all(&self.subkey) {
+                Ok(()) => {}
+                Err(e) if e.kind() == ErrorKind::NotFound => {}
+                Err(e) => eprintln!("TestKey: could not delete HKCU\\{}: {e}", self.subkey),
+            }
+        } else {
             eprintln!(
                 "TestKey: not deleting HKCU\\{}, it is not below HKCU\\{TEST_ROOT}",
                 self.subkey
             );
+        }
+        // The shared folder goes with the last test key. `RegDeleteKeyExW` refuses a folder that
+        // still has subkeys ("access denied"), so it also stays when something else keeps a key
+        // in it, and it may be gone already.
+        if *live > 0 {
             return;
         }
-        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-        // Only "already gone" is fine: any other error leaves a key behind, so it is said out loud.
-        match hkcu.delete_subkey_all(&self.subkey) {
-            Ok(()) => {}
-            Err(e) if e.kind() == ErrorKind::NotFound => {}
-            Err(e) => eprintln!("TestKey: could not delete HKCU\\{}: {e}", self.subkey),
-        }
-        // The folder goes too once it is empty. `RegDeleteKeyExW` refuses a key that still has
-        // subkeys ("access denied"), so while another test's key lives (tests run in parallel) that
-        // refusal is expected, and so is a folder another test has already removed.
         match hkcu.delete_subkey(TEST_ROOT) {
             Ok(()) => {}
             Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::PermissionDenied) => {}
@@ -468,5 +487,28 @@ mod tests {
         drop(restore);
         assert_eq!(a.read_user().unwrap(), before);
         assert_eq!(a.user_key_exists().unwrap(), existed);
+    }
+
+    /// The race behind "marked for deletion" (os error 1018): tests run in parallel, and the
+    /// shared folder can look empty while it belongs to a test that has not made its key yet.
+    #[test]
+    fn the_shared_folder_stays_while_another_test_key_is_alive() {
+        let first = TestKey::new();
+        let second = TestKey::new();
+        first
+            .location("Command Processor")
+            .write_raw(AUTORUN, &RegValue::from_text(SZ, "echo hi"))
+            .unwrap();
+        drop(first);
+        assert!(
+            RegLocation::user(TEST_ROOT).exists().unwrap(),
+            "the shared folder was deleted while another test key was alive"
+        );
+        // The second key has not been made yet, and still can be.
+        let location = second.location("Command Processor");
+        location
+            .write_raw(AUTORUN, &RegValue::from_text(SZ, "echo hi"))
+            .unwrap();
+        assert!(location.exists().unwrap());
     }
 }
