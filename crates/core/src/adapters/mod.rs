@@ -207,16 +207,25 @@ pub enum DefaultTerminal {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SystemInfo {
-    /// `CurrentBuildNumber`; `None` when it could not be read.
+    /// `CurrentBuildNumber`; `None` when absent or unreadable (see `unreadable`).
     pub build: Option<u32>,
     pub arch: Arch,
+    /// The setting behind Windows 11's default terminal; `LetWindowsDecide` when it is absent
+    /// or unreadable (see `unreadable`).
     pub default_terminal: DefaultTerminal,
-    /// WebView2 Runtime version (`pv`), for Phase 4.
+    /// WebView2 Runtime version (`pv`), for Phase 4; `None` when absent or unreadable (see
+    /// `unreadable`).
     pub webview2: Option<String>,
     /// The app runs inside an MSIX package (spec §2.2 lesson 1, D10).
     pub packaged: bool,
     /// `GetUserDefaultUILanguage`; Thai is 0x041E.
     pub ui_language: u16,
+    /// The registry facts above that could not be read, one `"<fact>: <error>"` entry each, with
+    /// the facts named `build`, `default terminal` and `WebView2`. A value that is merely absent
+    /// is not listed. A fact listed here is not an answer: its field holds the "absent" value,
+    /// and a check that needs it must say it could not run.
+    #[serde(default)]
+    pub unreadable: Vec<String>,
 }
 
 /// Identity, known folders, 8.3 names and the private ProgramData folder.
@@ -234,6 +243,8 @@ pub trait Host {
     /// Creates the folder and its protected security descriptor in one call:
     /// `D:P(A;OICI;FA;;;<user SID>)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)`.
     fn create_private_dir(&self, dir: &Path) -> Result<Created, AdapterError>;
+    /// The machine's facts. A registry fact that cannot be read is named in
+    /// `SystemInfo::unreadable`, never passed off as an answer.
     fn system_info(&self) -> SystemInfo;
 }
 

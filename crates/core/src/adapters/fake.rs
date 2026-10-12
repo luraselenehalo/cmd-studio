@@ -497,6 +497,7 @@ impl Default for FakeHost {
                 webview2: None,
                 packaged: false,
                 ui_language: 0x0409,
+                unreadable: Vec::new(),
             },
             private: RefCell::new(BTreeMap::new()),
         }

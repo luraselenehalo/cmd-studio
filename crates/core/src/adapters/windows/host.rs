@@ -2,7 +2,9 @@
 //! (spec §5.4 `<clink-launch>` step 3) and system facts.
 use super::registry::RegLocation;
 use super::{io_err, last_error, wide};
-use crate::adapters::{AdapterError, Arch, Created, DefaultTerminal, DirState, Host, SystemInfo};
+use crate::adapters::{
+    AdapterError, Arch, Created, DefaultTerminal, DirState, Host, RegValue, SystemInfo,
+};
 use std::ffi::{c_void, OsStr, OsString};
 use std::io::ErrorKind;
 use std::os::windows::ffi::OsStringExt;
@@ -54,6 +56,7 @@ const WRITE_RIGHTS: u32 = 0x0000_0002 // FILE_WRITE_DATA / FILE_ADD_FILE
     | 0x1000_0000 // GENERIC_ALL
     | 0x4000_0000; // GENERIC_WRITE
 
+const WINDOWS_VERSION: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion";
 const CONSOLE_STARTUP: &str = r"Console\%%Startup";
 const WEBVIEW2_CLIENT: &str = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}";
 
@@ -323,8 +326,108 @@ pub(crate) fn judge(me: &str, owner: &str, allowed: Option<&[(String, u32)]>) ->
     }
 }
 
-fn read_text(loc: &RegLocation, name: &str) -> Option<String> {
-    loc.read_raw(name).ok().flatten().and_then(|v| v.text())
+/// How the registry facts read one value. `WinHost` passes `RegLocation::read_raw`; tests pass
+/// readers that fail, answer from a table, or record what they were asked.
+pub(crate) type RegRead<'a> =
+    &'a dyn Fn(&RegLocation, &str) -> Result<Option<RegValue>, AdapterError>;
+
+/// The facts that come from the registry, and the ones that could not be read.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct RegistryFacts {
+    pub(crate) build: Option<u32>,
+    pub(crate) default_terminal: DefaultTerminal,
+    pub(crate) webview2: Option<String>,
+    /// `"<fact>: <error>"`, one per fact that could not be read.
+    pub(crate) unreadable: Vec<String>,
+}
+
+/// Where a key lives, for the messages: `LocalMachine\SOFTWARE\...`.
+fn place(loc: &RegLocation) -> String {
+    format!("{:?}\\{}", loc.hive, loc.subkey)
+}
+
+/// The text of one value. `Ok(None)` when it is absent; `Err` with the reason when the read
+/// failed or the value is not text.
+fn read_text(read: RegRead<'_>, loc: &RegLocation, name: &str) -> Result<Option<String>, String> {
+    match read(loc, name) {
+        Ok(None) => Ok(None),
+        Ok(Some(value)) => value
+            .text()
+            .map(Some)
+            .ok_or_else(|| format!("{name} in {} is not text", place(loc))),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+fn build_number(read: RegRead<'_>) -> Result<Option<u32>, String> {
+    let loc = RegLocation::machine(WINDOWS_VERSION);
+    let Some(text) = read_text(read, &loc, "CurrentBuildNumber")? else {
+        return Ok(None);
+    };
+    text.trim().parse().map(Some).map_err(|_| {
+        format!(
+            "CurrentBuildNumber in {} is not a number: {text:?}",
+            place(&loc)
+        )
+    })
+}
+
+fn default_terminal_setting(read: RegRead<'_>) -> Result<DefaultTerminal, String> {
+    let loc = RegLocation::user(CONSOLE_STARTUP);
+    let value = read_text(read, &loc, "DelegationConsole")?;
+    Ok(terminal_from(value.as_deref()))
+}
+
+/// The WebView2 Runtime version, from the machine's key and then the user's. A version found in
+/// either counts, whatever the other says or fails to say. With none found, a key that could not
+/// be read leaves "not installed" unknown, which is an error naming every key that failed.
+fn webview2_version(read: RegRead<'_>) -> Result<Option<String>, String> {
+    let keys = [
+        RegLocation::machine(&format!(
+            r"SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{WEBVIEW2_CLIENT}"
+        )),
+        RegLocation::user(&format!(
+            r"Software\Microsoft\EdgeUpdate\Clients\{WEBVIEW2_CLIENT}"
+        )),
+    ];
+    let mut failures = Vec::new();
+    for key in &keys {
+        match read_text(read, key, "pv") {
+            Ok(Some(version)) if is_installed_version(&version) => return Ok(Some(version)),
+            Ok(_) => {}
+            Err(why) => failures.push(why),
+        }
+    }
+    if failures.is_empty() {
+        Ok(None)
+    } else {
+        Err(failures.join("; "))
+    }
+}
+
+/// The facts that come from the registry. What cannot be read is not answered: its field holds
+/// the "absent" value and `unreadable` says why. A value that is simply not there is absent, and
+/// not listed.
+pub(crate) fn registry_facts(read: RegRead<'_>) -> RegistryFacts {
+    let mut unreadable = Vec::new();
+    let build = build_number(read).unwrap_or_else(|why| {
+        unreadable.push(format!("build: {why}"));
+        None
+    });
+    let default_terminal = default_terminal_setting(read).unwrap_or_else(|why| {
+        unreadable.push(format!("default terminal: {why}"));
+        DefaultTerminal::LetWindowsDecide
+    });
+    let webview2 = webview2_version(read).unwrap_or_else(|why| {
+        unreadable.push(format!("WebView2: {why}"));
+        None
+    });
+    RegistryFacts {
+        build,
+        default_terminal,
+        webview2,
+        unreadable,
+    }
 }
 
 /// The terminal `DelegationConsole` names; the values are from
@@ -339,28 +442,9 @@ fn terminal_from(delegation_console: Option<&str>) -> DefaultTerminal {
     }
 }
 
-fn default_terminal() -> DefaultTerminal {
-    let value = read_text(&RegLocation::user(CONSOLE_STARTUP), "DelegationConsole");
-    terminal_from(value.as_deref())
-}
-
 /// Edge Update writes `0.0.0.0` as the version when the runtime is not installed.
 fn is_installed_version(pv: &str) -> bool {
     !pv.is_empty() && pv != "0.0.0.0"
-}
-
-fn webview2() -> Option<String> {
-    let keys = [
-        RegLocation::machine(&format!(
-            r"SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{WEBVIEW2_CLIENT}"
-        )),
-        RegLocation::user(&format!(
-            r"Software\Microsoft\EdgeUpdate\Clients\{WEBVIEW2_CLIENT}"
-        )),
-    ];
-    keys.iter()
-        .filter_map(|k| read_text(k, "pv"))
-        .find(|v| is_installed_version(v))
 }
 
 /// The machine's architecture, not the process's: x64 code emulated on ARM64 is still on ARM64.
@@ -464,20 +548,17 @@ impl Host for WinHost {
     }
 
     fn system_info(&self) -> SystemInfo {
-        let build = read_text(
-            &RegLocation::machine(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion"),
-            "CurrentBuildNumber",
-        )
-        .and_then(|b| b.trim().parse().ok());
+        let facts = registry_facts(&|loc, name| loc.read_raw(name));
         // SAFETY: GetUserDefaultUILanguage takes no arguments and only returns a language id.
         let ui_language = unsafe { GetUserDefaultUILanguage() };
         SystemInfo {
-            build,
+            build: facts.build,
             arch: arch(),
-            default_terminal: default_terminal(),
-            webview2: webview2(),
+            default_terminal: facts.default_terminal,
+            webview2: facts.webview2,
             packaged: packaged(),
             ui_language,
+            unreadable: facts.unreadable,
         }
     }
 }
@@ -485,6 +566,9 @@ impl Host for WinHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::windows::registry::Hive;
+    use crate::adapters::{RegValue, REG_SZ};
+    use std::cell::RefCell;
     use std::os::windows::process::CommandExt;
     use windows_sys::Win32::Security::{
         GetSecurityDescriptorControl, CONTAINER_INHERIT_ACE, INHERITED_ACE, INHERIT_ONLY_ACE,
@@ -607,6 +691,7 @@ mod tests {
         assert!(info.build.is_some_and(|b| b >= 17763), "{info:?}");
         assert_eq!(info.arch, Arch::X64);
         assert!(!info.packaged, "a test runner is not an MSIX package");
+        assert!(info.unreadable.is_empty(), "a real read failed: {info:?}");
     }
 
     // The tests below pin what the ones above cannot see, because a temp folder's parent
@@ -980,5 +1065,203 @@ mod tests {
         let state = WinHost.private_dir_state(&windows).unwrap();
         println!("{} is {state:?}", windows.display());
         assert!(matches!(state, DirState::Unsafe(_)), "{state:?}");
+    }
+
+    // Registry facts: a read that fails must not turn into an answer. These tests hand
+    // `registry_facts` their own reader, so they touch no registry.
+
+    type Reply = Result<Option<RegValue>, AdapterError>;
+
+    fn text(s: &str) -> Reply {
+        Ok(Some(RegValue::from_text(REG_SZ, s)))
+    }
+
+    fn denied(loc: &RegLocation, name: &str) -> AdapterError {
+        AdapterError::new(
+            format!("open {:?}\\{} ({name})", loc.hive, loc.subkey),
+            "Access is denied. (os error 5)",
+        )
+    }
+
+    #[test]
+    fn facts_that_cannot_be_read_are_listed_and_never_answered() {
+        let failing = |loc: &RegLocation, name: &str| -> Reply { Err(denied(loc, name)) };
+        let facts = registry_facts(&failing);
+        // The fields hold their "absent" values ...
+        assert_eq!(facts.build, None);
+        assert_eq!(facts.default_terminal, DefaultTerminal::LetWindowsDecide);
+        assert_eq!(facts.webview2, None);
+        // ... and each fact says why, once, in this order.
+        let names = ["build", "default terminal", "WebView2"];
+        assert_eq!(
+            facts.unreadable.len(),
+            names.len(),
+            "{:?}",
+            facts.unreadable
+        );
+        for (entry, fact) in facts.unreadable.iter().zip(names) {
+            assert!(entry.starts_with(&format!("{fact}: ")), "{entry}");
+            assert!(entry.contains("Access is denied"), "{entry}");
+        }
+        // WebView2 is read in two places, and its one entry names both.
+        let webview2 = facts.unreadable.last().unwrap();
+        assert!(
+            webview2.contains("LocalMachine") && webview2.contains("CurrentUser"),
+            "{webview2}"
+        );
+    }
+
+    #[test]
+    fn a_missing_value_is_absent_not_unreadable() {
+        let absent = |_: &RegLocation, _: &str| -> Reply { Ok(None) };
+        assert_eq!(
+            registry_facts(&absent),
+            RegistryFacts {
+                build: None,
+                default_terminal: DefaultTerminal::LetWindowsDecide,
+                webview2: None,
+                unreadable: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn webview2_from_either_key_counts_and_a_failed_key_is_listed_only_without_an_answer() {
+        const VERSION: &str = "154.0.4258.62";
+        // What the machine key (HKLM) and the user key (HKCU) answer; every other value is absent.
+        let facts = |machine: Reply, user: Reply| {
+            let reader = move |loc: &RegLocation, name: &str| -> Reply {
+                match (loc.hive, name) {
+                    (Hive::LocalMachine, "pv") => machine.clone(),
+                    (Hive::CurrentUser, "pv") => user.clone(),
+                    _ => Ok(None),
+                }
+            };
+            registry_facts(&reader)
+        };
+        let fails = |hive: Hive| -> Reply {
+            let loc = RegLocation {
+                hive,
+                subkey: "the key".to_string(),
+            };
+            Err(denied(&loc, "pv"))
+        };
+        // The user key answers although the machine key cannot be read: the answer counts.
+        let f = facts(fails(Hive::LocalMachine), text(VERSION));
+        assert_eq!(f.webview2.as_deref(), Some(VERSION));
+        assert!(f.unreadable.is_empty(), "{:?}", f.unreadable);
+        // The machine key answers: the user key is not needed, whatever it would say.
+        let f = facts(text(VERSION), fails(Hive::CurrentUser));
+        assert_eq!(f.webview2.as_deref(), Some(VERSION));
+        assert!(f.unreadable.is_empty(), "{:?}", f.unreadable);
+        // No version from the keys that could be read, and one that could not: "not installed"
+        // is not known, so it is listed, and only the key that failed is named.
+        let f = facts(fails(Hive::LocalMachine), Ok(None));
+        assert_eq!(f.webview2, None);
+        assert_eq!(f.unreadable.len(), 1, "{:?}", f.unreadable);
+        let entry = f.unreadable.first().unwrap();
+        assert!(entry.starts_with("WebView2: "), "{entry}");
+        assert!(
+            entry.contains("LocalMachine") && !entry.contains("CurrentUser"),
+            "{entry}"
+        );
+        let f = facts(text("0.0.0.0"), fails(Hive::CurrentUser));
+        assert_eq!(f.webview2, None);
+        let entry = f.unreadable.first().unwrap();
+        assert!(
+            entry.contains("CurrentUser") && !entry.contains("LocalMachine"),
+            "{entry}"
+        );
+        // Both keys readable, and neither holds a runtime: absent, with nothing to report.
+        for (machine, user) in [(Ok(None), Ok(None)), (text("0.0.0.0"), text(""))] {
+            let f = facts(machine, user);
+            assert_eq!(f.webview2, None);
+            assert!(f.unreadable.is_empty(), "{:?}", f.unreadable);
+        }
+    }
+
+    #[test]
+    fn the_registry_facts_read_exactly_these_places() {
+        let seen = RefCell::new(Vec::new());
+        let recording = |loc: &RegLocation, name: &str| -> Reply {
+            seen.borrow_mut().push((loc.clone(), name.to_string()));
+            Ok(None)
+        };
+        registry_facts(&recording);
+        let place = |loc: RegLocation, name: &str| (loc, name.to_string());
+        assert_eq!(
+            seen.into_inner(),
+            vec![
+                place(
+                    RegLocation::machine(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion"),
+                    "CurrentBuildNumber"
+                ),
+                place(RegLocation::user(r"Console\%%Startup"), "DelegationConsole"),
+                place(
+                    RegLocation::machine(
+                        r"SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+                    ),
+                    "pv"
+                ),
+                place(
+                    RegLocation::user(
+                        r"Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+                    ),
+                    "pv"
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_values_become_the_facts() {
+        let answers = |loc: &RegLocation, name: &str| -> Reply {
+            match (loc.hive, name) {
+                (Hive::LocalMachine, "CurrentBuildNumber") => text(" 26300 "),
+                (Hive::CurrentUser, "DelegationConsole") => {
+                    text("{2eaca947-7f5f-4cfa-ba87-8f7fbeefbe69}")
+                }
+                (Hive::CurrentUser, "pv") => text("154.0.4258.62"),
+                _ => Ok(None),
+            }
+        };
+        assert_eq!(
+            registry_facts(&answers),
+            RegistryFacts {
+                build: Some(26300),
+                default_terminal: DefaultTerminal::WindowsTerminal,
+                webview2: Some("154.0.4258.62".to_string()),
+                unreadable: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_value_that_is_not_what_it_should_be_is_unreadable_too() {
+        let odd = |_: &RegLocation, name: &str| -> Reply {
+            match name {
+                "CurrentBuildNumber" => text("twenty-six"),
+                // A REG_DWORD where text belongs.
+                "DelegationConsole" => Ok(Some(RegValue {
+                    kind: 4,
+                    bytes: vec![1, 0, 0, 0],
+                })),
+                _ => Ok(None),
+            }
+        };
+        let facts = registry_facts(&odd);
+        assert_eq!(facts.build, None);
+        assert_eq!(facts.default_terminal, DefaultTerminal::LetWindowsDecide);
+        assert_eq!(facts.webview2, None);
+        assert_eq!(facts.unreadable.len(), 2, "{:?}", facts.unreadable);
+        let (build, terminal) = (&facts.unreadable[0], &facts.unreadable[1]);
+        assert!(
+            build.starts_with("build: ") && build.contains("not a number"),
+            "{build}"
+        );
+        assert!(
+            terminal.starts_with("default terminal: ") && terminal.contains("not text"),
+            "{terminal}"
+        );
     }
 }
