@@ -6,6 +6,7 @@ use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 
+pub mod fonts;
 pub mod fs;
 pub mod host;
 pub mod registry;
