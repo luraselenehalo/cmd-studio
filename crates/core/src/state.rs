@@ -319,8 +319,9 @@ pub enum StateError {
     /// The file is there but could not be read (locked, no access, a folder in its place).
     #[error("state.json could not be read: {0}")]
     Read(String),
-    /// The file was read but is not a state file.
-    #[error("state.json is not a valid state file: {0}")]
+    /// The file was read but is not one this version can use: not a state file, damaged, or
+    /// written by a newer CMD Studio. The message says which.
+    #[error("{0}")]
     Invalid(String),
     /// A save failed.
     #[error("{0}")]
@@ -340,13 +341,41 @@ impl StateError {
 impl State {
     /// The saved state; a fresh one when there is no file yet. A file that cannot be read or is
     /// damaged is an error, never replaced by a fresh state: that would forget the baseline.
+    /// Reading only: this never writes the file.
+    ///
+    /// The `version` field decides first, before the rest is read:
+    /// - `STATE_VERSION` (1) loads;
+    /// - a larger number is a state from a newer CMD Studio. It is refused, because saving it
+    ///   again would drop the fields this version does not know, and with them the baseline that
+    ///   undoing everything needs. Its shape is not looked at, so the message names the version;
+    /// - 0 was never written by any version, so it is damage;
+    /// - a missing `version` (serde: "missing field `version`") or one that is not a whole
+    ///   number is damage. `applied` and `baseline` may be missing: they read as none and as the
+    ///   default.
     pub fn load(fs: &dyn Fs, path: &Path) -> Result<State, StateError> {
-        match fs.read(path).map_err(|e| StateError::Read(e.to_string()))? {
-            None => Ok(State::default()),
-            Some(bytes) => {
-                serde_json::from_slice(&bytes).map_err(|e| StateError::Invalid(e.to_string()))
+        let Some(bytes) = fs.read(path).map_err(|e| StateError::Read(e.to_string()))? else {
+            return Ok(State::default());
+        };
+        let damaged = |e: serde_json::Error| {
+            StateError::Invalid(format!("state.json is not a valid state file: {e}"))
+        };
+        let value: Value = serde_json::from_slice(&bytes).map_err(damaged)?;
+        match value.get("version").and_then(Value::as_u64) {
+            Some(0) => {
+                return Err(StateError::Invalid(format!(
+                    "state.json has version 0, which no CMD Studio wrote; \
+                     this version understands version {STATE_VERSION}"
+                )))
             }
+            Some(v) if v > u64::from(STATE_VERSION) => {
+                return Err(StateError::Invalid(format!(
+                    "state.json was written by a newer CMD Studio (version {v}); \
+                     this version understands version {STATE_VERSION}"
+                )))
+            }
+            _ => {}
         }
+        serde_json::from_value(value).map_err(damaged)
     }
 
     /// Pretty JSON with a final newline. A failure here is a failure to save (the in-memory
@@ -655,6 +684,96 @@ mod tests {
     }
 
     // --- More coverage of the brief's rules. ---
+
+    // --- The file's version. ---
+
+    #[test]
+    fn a_state_from_a_newer_cmd_studio_is_refused_and_left_alone() {
+        let fs = FakeFs::new();
+        let p = Path::new(r"C:\d\state.json");
+        let files: [&[u8]; 4] = [
+            // The shape of today's state plus a field a newer version added.
+            br#"{"version":2,"applied":null,"baseline":{"autorun":null,"autorunWritten":null,"wt":[],"fonts":[],"programDataDir":null},"extra":[1]}"#,
+            // A shape this version cannot read at all: the version is what gets reported.
+            br#"{"version":2,"applied":"another shape","baseline":[]}"#,
+            br#"{"version":3}"#,
+            // Larger than `u32`.
+            br#"{"version":99999999999}"#,
+        ];
+        for bytes in files {
+            fs.put(p, bytes);
+            let err = State::load(&fs, p).unwrap_err();
+            assert!(matches!(err, StateError::Invalid(_)), "{err:?}");
+            assert_eq!(err.code(), "E_STATE_INVALID");
+            let text = err.to_string();
+            assert!(
+                text.contains("newer CMD Studio") && text.contains("understands version 1"),
+                "{text}"
+            );
+            assert_eq!(
+                fs.file(p).as_deref(),
+                Some(bytes),
+                "load must not touch the file"
+            );
+        }
+        let text = {
+            fs.put(p, br#"{"version":2}"#);
+            State::load(&fs, p).unwrap_err().to_string()
+        };
+        assert_eq!(
+            text,
+            "state.json was written by a newer CMD Studio (version 2); this version understands version 1"
+        );
+    }
+
+    #[test]
+    fn only_version_one_is_understood_a_missing_or_odd_version_is_damage() {
+        let fs = FakeFs::new();
+        let p = Path::new(r"C:\d\state.json");
+        fs.put(p, br#"{"version":1}"#);
+        assert_eq!(State::load(&fs, p).unwrap().version, STATE_VERSION);
+        // `applied` and `baseline` may be missing (serde reads a missing Option as None and the
+        // baseline has a default); `version` may not: serde's "missing field `version`".
+        let bad: [&[u8]; 8] = [
+            br#"{"version":0}"#,
+            br#"{"applied":null}"#,
+            br#"{"version":null}"#,
+            br#"{"version":"1"}"#,
+            br#"{"version":-1}"#,
+            br#"{"version":1.5}"#,
+            br#"{"version":true}"#,
+            br#"{"version":[1]}"#,
+        ];
+        for bytes in bad {
+            fs.put(p, bytes);
+            let err = State::load(&fs, p).unwrap_err();
+            assert!(matches!(err, StateError::Invalid(_)), "{bytes:?}: {err:?}");
+            assert_eq!(err.code(), "E_STATE_INVALID");
+            assert!(!err.to_string().contains("newer"), "{bytes:?}: {err}");
+            assert_eq!(
+                fs.file(p).as_deref(),
+                Some(bytes),
+                "load must not touch the file"
+            );
+        }
+        fs.put(p, br#"{"applied":null}"#);
+        assert!(State::load(&fs, p)
+            .unwrap_err()
+            .to_string()
+            .contains("version"));
+        fs.put(p, br#"{"version":0}"#);
+        assert!(State::load(&fs, p)
+            .unwrap_err()
+            .to_string()
+            .contains("version 0"));
+    }
+
+    #[test]
+    fn a_state_that_is_saved_carries_the_current_version() {
+        assert_eq!(State::default().version, STATE_VERSION);
+        let text = String::from_utf8(State::default().to_bytes().unwrap()).unwrap();
+        assert!(text.contains("\"version\": 1,"), "{text}");
+    }
 
     #[test]
     fn a_damaged_file_is_reported_and_left_alone() {
