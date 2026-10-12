@@ -492,13 +492,28 @@ mod tests {
 
     #[test]
     fn a_relative_path_is_refused_even_when_it_leads_to_an_allowed_program() {
-        let tmp = tempfile::tempdir().unwrap();
+        // A relative path leads somewhere only on the current folder's drive, and cargo runs
+        // the tests from this crate's folder. The TEMP folder may be on another drive (a CI
+        // runner keeps the checkout on D: and TEMP on C:), so the program goes under the
+        // repository's /target/ instead (ignored by git), which shares a drive with this
+        // crate whatever CARGO_TARGET_DIR says. The folder is removed when `tmp` drops.
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .unwrap();
+        let target = repo.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        let tmp = tempfile::Builder::new()
+            .prefix("cmdstudio-relative-path-")
+            .tempdir_in(&target)
+            .unwrap();
         let allowed = tmp.path().join("rt");
         touch(&allowed.join("a.exe"));
         let program = std::fs::canonicalize(allowed.join("a.exe")).unwrap();
         let here = std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
         let Some(relative) = relative_to(&here, &program) else {
-            eprintln!("SKIPPED the relative path check: the temp folder is on another drive");
+            // Not reachable when the tests run from this crate's folder, as cargo does.
+            eprintln!("SKIPPED the relative path check: the current folder is on another drive than /target/");
             return;
         };
         assert!(relative.is_relative(), "{}", relative.display());
@@ -660,7 +675,13 @@ mod tests {
                 symlink_file(&target, &link)
             };
             if let Err(e) = made {
-                // Creating a symbolic link needs Developer Mode or a privilege.
+                // Creating a symbolic link needs Developer Mode or a privilege. CI runners and
+                // the test VMs have it, so there (CMDSTUDIO_SYSTEM_TESTS=1) the test must run,
+                // not skip.
+                assert!(
+                    std::env::var("CMDSTUDIO_SYSTEM_TESTS").as_deref() != Ok("1"),
+                    "cannot create a symlink: {e}"
+                );
                 eprintln!("SKIPPED the symbolic link check: {e}");
                 return;
             }
@@ -689,6 +710,12 @@ mod tests {
             .short_path(&long)
             .unwrap();
         if short_dir == long {
+            // CI runners and the test VMs make 8.3 names on the TEMP volume, so there
+            // (CMDSTUDIO_SYSTEM_TESTS=1) the test must run, not skip.
+            assert!(
+                std::env::var("CMDSTUDIO_SYSTEM_TESTS").as_deref() != Ok("1"),
+                "this volume makes no 8.3 names"
+            );
             eprintln!("SKIPPED the 8.3 name check: this volume makes no 8.3 names");
             return;
         }
