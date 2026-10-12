@@ -800,6 +800,9 @@ pub struct FixByHand {
 /// parts, and how to fix them by hand). `prior` is what the transaction captured before the op,
 /// and `payload` the restore point's file that holds it.
 pub fn fix_by_hand(op: &Op, prior: &Option<Vec<u8>>, payload: &Path) -> FixByHand {
+    // Only for a runtime folder: `--cleanup` deletes the data folder and the private ProgramData
+    // folder from paths it works out itself, so it holds after a rollback put state.json back.
+    // AutoRun and the font need state.json's baseline, so their texts say what to edit instead.
     let cleanup_en = "run `cmdstudio --cleanup`, which takes out what CMD Studio changed";
     let cleanup_th = "รันคำสั่ง `cmdstudio --cleanup` ซึ่งจะเอาสิ่งที่ CMD Studio เปลี่ยนออก";
     let (payload, key) = (payload.display(), COMMAND_PROCESSOR_KEY);
@@ -845,7 +848,7 @@ pub fn fix_by_hand(op: &Op, prior: &Option<Vec<u8>>, payload: &Path) -> FixByHan
                 format!("ปิด Windows Terminal แล้วลบ {}", settings.display()),
             ),
         },
-        Op::SetAutoRun { .. } => {
+        Op::SetAutoRun { value: written } => {
             let value = from_json::<AutoRunRecord>(prior).ok().map(|r| {
                 r.value
                     .map(|v| v.to_reg().and_then(|v| v.text().map(|text| (v.kind, text))))
@@ -857,10 +860,7 @@ pub fn fix_by_hand(op: &Op, prior: &Option<Vec<u8>>, payload: &Path) -> FixByHan
                 ),
                 Some(Some(Some((kind, text)))) => autorun_back_to(kind, &text),
                 // A record that cannot be read, or a value that is not text.
-                Some(Some(None)) | None => (
-                    format!("Close every cmd window, then {cleanup_en}."),
-                    format!("ปิดหน้าต่าง cmd ทุกหน้าต่าง แล้ว{cleanup_th}"),
-                ),
+                Some(Some(None)) | None => take_ours_out_of_autorun(written.as_deref()),
             }
         }
         Op::InstallFont { family } => font_back_to(family, prior),
@@ -899,6 +899,45 @@ fn autorun_back_to(kind: u32, text: &str) -> (String, String) {
             ),
         )
     }
+}
+
+/// Taking CMD Studio's entry out of AutoRun by hand, when what was there before cannot be
+/// written back from the record. `--cleanup` is no answer here: a rolled-back apply has put
+/// state.json back first, so it may not know the entry. `written` is the value the op wrote;
+/// the planner always puts our entry first in it, so its text is named for the user to search.
+fn take_ours_out_of_autorun(written: Option<&str>) -> (String, String) {
+    let key = COMMAND_PROCESSOR_KEY;
+    let entry = written
+        .and_then(|v| crate::plan::autorun::scan(v).parts.into_iter().next())
+        .map(|first| first.text)
+        .filter(|first| {
+            let lower = first.to_ascii_lowercase();
+            lower.starts_with("(if exist \"")
+                && lower.contains(" inject --autorun --quiet --profile ")
+        });
+    let shape = r#"(if exist "…" "…" inject --autorun --quiet --profile "…")"#;
+    let (what_en, what_th) = match &entry {
+        Some(entry) => (
+            format!("CMD Studio's part is this entry, with the ` & ` after it: {entry}"),
+            format!("ส่วนของ CMD Studio คือคำสั่งนี้ พร้อม ` & ` ที่ตามหลัง: {entry}"),
+        ),
+        None => (
+            format!("CMD Studio's part is the entry {shape}, with the ` & ` after it."),
+            format!("ส่วนของ CMD Studio คือคำสั่ง {shape} พร้อม ` & ` ที่ตามหลัง"),
+        ),
+    };
+    (
+        format!(
+            "In Registry Editor, open {key} and look at the AutoRun value. Take out only CMD \
+             Studio's part and keep everything else as it is; if AutoRun holds nothing else, \
+             delete the value. {what_en}"
+        ),
+        format!(
+            "เปิด Registry Editor (regedit) ไปที่ {key} แล้วดูค่า AutoRun \
+             ให้เอาออกเฉพาะส่วนของ CMD Studio และเก็บส่วนอื่นไว้ตามเดิม \
+             ถ้า AutoRun ไม่มีอะไรอื่นเหลือ ให้ลบค่านี้ {what_th}"
+        ),
+    )
 }
 
 /// The per-user font registrations, as Registry Editor shows the key.
@@ -1536,7 +1575,55 @@ mod tests {
         .contains(&runtime.display().to_string()));
         // An AutoRun prior that is not readable as a record still gets advice in both languages.
         let fix = fix_by_hand(&autorun, &Some(b"not json".to_vec()), payload);
-        assert!(fix.en.contains("cmdstudio --cleanup") && fix.th.contains("cmdstudio --cleanup"));
+        assert!(
+            fix.en.contains(COMMAND_PROCESSOR_KEY) && fix.th.contains(COMMAND_PROCESSOR_KEY),
+            "{fix:?}"
+        );
+    }
+
+    #[test]
+    fn an_autorun_that_cannot_be_put_back_says_which_part_is_ours() {
+        // `--cleanup` is no answer: a rolled-back apply has put state.json back first, so it
+        // may not know CMD Studio's entry. The text says which part to take out, by its text.
+        let payload = Path::new(r"C:\d\snapshots\1-a\payload\5.bin");
+        let entry = r#"(if exist "C:\d\runtime\clink-1.9.34\clink_x64.exe" "C:\d\runtime\clink-1.9.34\clink_x64.exe" inject --autorun --quiet --profile "C:\d\clink-profile")"#;
+        let not_text = to_json(&AutoRunRecord {
+            key_existed: true,
+            value: Some(RegValueRecord::from_reg(&RegValue {
+                kind: 4,
+                bytes: vec![1, 0, 0, 0],
+            })),
+        })
+        .unwrap();
+        for prior in [Some(not_text), Some(b"not json".to_vec()), None] {
+            for value in [Some(format!("{entry} & echo hi")), Some(entry.to_string())] {
+                let op = Op::SetAutoRun { value };
+                let fix = fix_by_hand(&op, &prior, payload);
+                for text in [&fix.en, &fix.th] {
+                    assert!(!text.contains("--cleanup"), "{text}");
+                    assert!(text.contains(COMMAND_PROCESSOR_KEY), "{text}");
+                    assert!(text.ends_with(entry), "the entry to search for: {text}");
+                    assert!(text.contains("` & `"), "{text}");
+                }
+                assert!(fix.en.contains("delete the value"), "{}", fix.en);
+                assert!(
+                    fix.th.contains("Registry Editor (regedit)") && fix.th.contains("ลบค่านี้"),
+                    "{}",
+                    fix.th
+                );
+            }
+            // A value without our entry in front (or none at all): the entry is described.
+            for value in [None, Some("echo hi".to_string())] {
+                let fix = fix_by_hand(&Op::SetAutoRun { value }, &prior, payload);
+                let shape = r#"(if exist "…" "…" inject --autorun --quiet --profile "…")"#;
+                for text in [&fix.en, &fix.th] {
+                    assert!(
+                        !text.contains("--cleanup") && text.contains(shape),
+                        "{text}"
+                    );
+                }
+            }
+        }
     }
 
     // ---- The rulings that came after the brief ----
