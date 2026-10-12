@@ -1,6 +1,7 @@
 //! CMD Studio core: theme model, palette, generators, planner, the transactional apply
 //! engine, and what runs it on a real machine. Only `adapters::windows` touches the machine;
 //! everything else goes through the adapter traits in `adapters`.
+pub mod actions;
 pub mod adapters;
 pub mod color;
 pub mod detect;

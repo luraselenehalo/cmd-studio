@@ -103,6 +103,16 @@ impl FakeFs {
             .insert(path.as_ref().to_path_buf());
     }
 
+    /// Ends what `fail_writes_to`, `fail_reads_of` and `fail_removes_of` started for exactly
+    /// `path`, as when the program that held the file lets go of it.
+    pub fn stop_failing(&self, path: impl AsRef<Path>) {
+        let mut s = self.state.borrow_mut();
+        let path = path.as_ref();
+        s.fail_writes.remove(path);
+        s.fail_reads.remove(path);
+        s.fail_removes.remove(path);
+    }
+
     /// Makes every later removal of `path` fail, as when a file is in use: `remove_file` or
     /// `remove_dir` of that path, and `remove_dir_all` or `rename` of that path or of a folder
     /// above it.
@@ -838,6 +848,17 @@ mod tests {
         fs.write_atomic(f, b"new").unwrap();
         assert!(fs.read(f).is_err(), "a write does not clear it");
         assert_eq!(fs.file(f), Some(b"new".to_vec()));
+
+        // Until the program that held it lets go.
+        fs.fail_writes_to(other);
+        fs.fail_removes_of(other);
+        fs.fail_reads_of(other);
+        assert!(fs.read(other).is_err() && fs.write_atomic(other, b"c").is_err());
+        fs.stop_failing(other);
+        fs.write_atomic(other, b"c").unwrap();
+        assert_eq!(fs.read(other).unwrap(), Some(b"c".to_vec()));
+        fs.remove_file(other).unwrap();
+        assert!(fs.read(f).is_err(), "other paths still fail");
 
         // A path that has no file fails too, and a path inside a failing folder name does not.
         fs.fail_reads_of(r"C:\d\none.txt");
