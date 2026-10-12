@@ -311,10 +311,11 @@ fn split_bom(text: &str) -> (&'static str, &str) {
 /// a 1 MB stack (a Windows main thread) that overflowed from about 440 levels.
 const MAX_DEPTH: usize = 64;
 
-/// Refuses text nested deeper than `MAX_DEPTH` before jsonc-parser sees it.
+/// Refuses text nested deeper than `MAX_DEPTH` before jsonc-parser sees it. Such
+/// text may be valid JSON with comments, so it is a `Shape` error.
 fn parse(text: &str) -> Result<CstRootNode, WtError> {
     if nesting_depth(text) > MAX_DEPTH {
-        return Err(WtError::Parse(format!(
+        return Err(WtError::Shape(format!(
             "objects and lists nest deeper than {MAX_DEPTH} levels"
         )));
     }
@@ -1177,11 +1178,13 @@ mod tests {
                 read_value(&text, &font).err(),
                 revert(&text, &BTreeMap::new(), &BTreeMap::new(), &[]).err(),
             ] {
+                // Valid JSON with comments, so `Shape`, not `Parse`.
                 let err = err.unwrap();
                 assert_eq!(err.code(), "E_WT_PARSE");
-                assert!(
-                    matches!(&err, WtError::Parse(m) if m.contains("deeper than 64 levels")),
-                    "{levels}: {err}"
+                assert!(matches!(err, WtError::Shape(_)), "{levels}: {err:?}");
+                assert_eq!(
+                    err.to_string(),
+                    "settings.json has an unexpected shape: objects and lists nest deeper than 64 levels"
                 );
             }
         }
