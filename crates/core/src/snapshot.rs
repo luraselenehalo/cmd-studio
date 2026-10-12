@@ -77,6 +77,20 @@ struct JournalFile {
     stage: Stage,
 }
 
+impl JournalFile {
+    /// The transaction ended, as [`Journal::is_finished`] says, judged from the stage alone: the
+    /// payload files are not looked at.
+    fn is_finished(&self) -> bool {
+        Journal {
+            id: String::new(),
+            ops: Vec::new(),
+            snapshots: Vec::new(),
+            stage: self.stage.clone(),
+        }
+        .is_finished()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PayloadRef {
@@ -233,8 +247,18 @@ impl<'a> SnapshotStore<'a> {
         self.read_journal(id).map_err(|e| e.failure)
     }
 
+    /// `journal.json` as it is on disk, with the payload files not read yet.
+    fn read_journal_file(&self, id: &str) -> Result<JournalFile, ReadError> {
+        self.read_json(&self.dir(id).join(JOURNAL))
+    }
+
     fn read_journal(&self, id: &str) -> Result<Journal, ReadError> {
-        let file: JournalFile = self.read_json(&self.dir(id).join(JOURNAL))?;
+        let file = self.read_journal_file(id)?;
+        self.load_payloads(id, file)
+    }
+
+    /// The journal of `file` with every prior state read from its payload file.
+    fn load_payloads(&self, id: &str, file: JournalFile) -> Result<Journal, ReadError> {
         let mut snapshots = Vec::with_capacity(file.snapshots.len());
         for s in file.snapshots {
             let prior = match s.payload {
@@ -396,18 +420,22 @@ impl<'a> SnapshotStore<'a> {
 
     /// Deletes all but the first-ever and the `keep` newest restore points, and returns the
     /// deleted ids. A restore point that was set aside counts like any other: among the newest
-    /// it stays, older it goes. Never deletes one whose journal is unfinished, nor one whose
-    /// journal cannot be read and has not been set aside: it may be an unfinished transaction,
-    /// and its payload files may be the only copy of a user's file. A folder that cannot be
-    /// deleted does not keep the others from going; the first such failure is returned at the end.
+    /// it stays, older it goes. Unless it was set aside, a restore point is never deleted when
+    /// its payload files may be the only copy of a user's file:
+    /// - its journal is unfinished, or cannot be read (it may be an unfinished transaction);
+    /// - its rollback ended `RollbackIncomplete`, which counts as finished but left something
+    ///   that could not be put back;
+    /// - it has an `incomplete.json`, which says what to copy back from where.
+    ///
+    /// A folder that cannot be deleted does not keep the others from going; the first such
+    /// failure is returned at the end.
     pub fn prune(&self, keep: usize) -> Result<Vec<String>, Failure> {
         let ids = self.ids()?;
         let cut = ids.len().saturating_sub(keep);
         let mut deleted = Vec::new();
         let mut first_failure = None;
         for id in ids.iter().skip(1).take(cut.saturating_sub(1)) {
-            let may_go = self.is_set_aside(id) || self.journal(id).is_ok_and(|j| j.is_finished());
-            if !may_go {
+            if !self.may_go(id) {
                 continue;
             }
             match self.fs.remove_dir_all(&self.dir(id)) {
@@ -421,6 +449,18 @@ impl<'a> SnapshotStore<'a> {
             Some(failure) => Err(failure),
             None => Ok(deleted),
         }
+    }
+
+    /// Whether [`SnapshotStore::prune`] may delete the restore point, once it is old enough.
+    fn may_go(&self, id: &str) -> bool {
+        if self.is_set_aside(id) {
+            return true;
+        }
+        if self.fs.exists(&self.dir(id).join(INCOMPLETE)) {
+            return false;
+        }
+        self.journal(id)
+            .is_ok_and(|j| j.is_finished() && !matches!(j.stage, Stage::RollbackIncomplete { .. }))
     }
 
     /// A journal store for a new transaction `manifest.id`.
@@ -584,8 +624,10 @@ impl JournalStore for DiskJournal<'_> {
     }
 
     /// The newest restore point's journal, when it is unfinished. A newest restore point with no
-    /// `journal.json` (its first write failed, or it was set aside) has nothing to recover.
-    /// One whose journal cannot be read is an error until it is set aside.
+    /// `journal.json` (its first write failed, or it was set aside) has nothing to recover, nor
+    /// has one whose journal says it ended: its payload files are not read. A journal that
+    /// cannot be read, or an unfinished one with a payload that cannot be, is an error until the
+    /// restore point is set aside.
     fn load_unfinished(&mut self) -> Result<Option<Journal>, Failure> {
         let store = SnapshotStore {
             fs: self.fs,
@@ -597,10 +639,13 @@ impl JournalStore for DiskJournal<'_> {
         if !self.fs.exists(&store.dir(&id).join(JOURNAL)) {
             return Ok(None);
         }
-        let j = store.journal(&id)?;
-        if j.is_finished() {
+        // The stage first: a journal that has ended needs no payload, and one that is gone or
+        // locked must not make a finished transaction look like a failed recovery.
+        let file = store.read_journal_file(&id).map_err(|e| e.failure)?;
+        if file.is_finished() {
             return Ok(None);
         }
+        let j = store.load_payloads(&id, file).map_err(|e| e.failure)?;
         self.written = j
             .snapshots
             .iter()
@@ -1521,6 +1566,115 @@ mod tests {
         assert!(left.contains(&"0000000000004-x".to_string()));
         assert!(left.contains(&"0000000000024-x".to_string()));
         assert_eq!(left.len(), 22);
+    }
+
+    #[test]
+    fn prune_keeps_what_a_rollback_could_not_put_back_until_it_is_set_aside() {
+        // The payload files of a rollback that ended RollbackIncomplete may be the only copy of
+        // what it failed to put back, and incomplete.json says where. The journal counts as
+        // finished, but prune must not take them.
+        let fs = FakeFs::new();
+        let store = SnapshotStore::new(&fs, Path::new(ROOT));
+        for i in 1..=25u64 {
+            let stage = if i == 2 {
+                // its record could not be written (writing it is best effort)
+                Stage::RollbackIncomplete { failed: vec![0] }
+            } else {
+                Stage::Committed
+            };
+            point(&store, &format!("{i:013}-x"), stage);
+        }
+        // a record with a journal that otherwise looks finished
+        store.write_incomplete(&record("0000000000003-x")).unwrap();
+        let ids =
+            |nums: &[u64]| -> Vec<String> { nums.iter().map(|i| format!("{i:013}-x")).collect() };
+        assert_eq!(store.prune(KEEP).unwrap(), ids(&[4, 5]));
+        let left = store.ids().unwrap();
+        assert!(left.contains(&ids(&[2])[0]) && left.contains(&ids(&[3])[0]));
+        assert!(fs.file(store.payload_path("0000000000002-x", 0)).is_some());
+        assert!(fs.file(at("0000000000003-x", "incomplete.json")).is_some());
+        // a person has been told and set them aside: now they go like any other
+        store.set_aside("0000000000002-x").unwrap();
+        store.set_aside("0000000000003-x").unwrap();
+        assert_eq!(store.prune(KEEP).unwrap(), ids(&[2, 3]));
+    }
+
+    #[test]
+    fn recovery_does_not_read_the_payloads_of_a_journal_that_has_ended() {
+        // A payload that is gone or locked is no reason to roll back a transaction that ended.
+        let id = "0000000000001-a";
+        let ended = [
+            Stage::Committed,
+            Stage::RolledBack,
+            Stage::RollbackIncomplete { failed: vec![0] },
+        ];
+        for stage in ended {
+            for lock in [true, false] {
+                let fs = FakeFs::new();
+                let store = SnapshotStore::new(&fs, Path::new(ROOT));
+                point(&store, id, stage.clone());
+                if lock {
+                    fs.fail_reads_of(at(id, r"payload\0.bin"));
+                } else {
+                    fs.remove_file(Path::new(&at(id, r"payload\0.bin")))
+                        .unwrap();
+                }
+                assert_eq!(
+                    store.recovery().load_unfinished().unwrap(),
+                    None,
+                    "{stage:?}, payload locked: {lock}"
+                );
+            }
+        }
+        // a journal that cannot be read at all is still an error: its stage is not known
+        let fs = FakeFs::new();
+        let store = SnapshotStore::new(&fs, Path::new(ROOT));
+        point(&store, id, Stage::Committed);
+        fs.put(at(id, "journal.json"), b"{");
+        let err = store.recovery().load_unfinished().unwrap_err();
+        assert_eq!(err.code, "E_SNAPSHOT_READ");
+    }
+
+    #[test]
+    fn recovery_of_an_unfinished_journal_needs_its_payloads() {
+        let id = "0000000000001-a";
+        let fs = FakeFs::new();
+        let store = SnapshotStore::new(&fs, Path::new(ROOT));
+        point(&store, id, Stage::Applying { done: 1 });
+        let j = store.recovery().load_unfinished().unwrap().unwrap();
+        assert_eq!(j.snapshots.first().unwrap().prior, Some(b"old a".to_vec()));
+        fs.fail_reads_of(at(id, r"payload\0.bin"));
+        let err = store.recovery().load_unfinished().unwrap_err();
+        assert_eq!(err.code, "E_SNAPSHOT_READ");
+        let fs = FakeFs::new();
+        let store = SnapshotStore::new(&fs, Path::new(ROOT));
+        point(&store, id, Stage::Verifying);
+        fs.remove_file(Path::new(&at(id, r"payload\2.bin")))
+            .unwrap();
+        let err = store.recovery().load_unfinished().unwrap_err();
+        assert_eq!(err.code, "E_SNAPSHOT_READ");
+        assert!(err.message.contains("2.bin"), "{}", err.message);
+    }
+
+    #[test]
+    fn a_later_mark_does_not_overwrite_an_earlier_one() {
+        // An apply that an undo reversed stays reversed by that undo when a revert-all marks it
+        // again: the manifest keeps who reversed it, and is not even written.
+        let fs = FakeFs::new();
+        let store = SnapshotStore::new(&fs, Path::new(ROOT));
+        let a = "0000000000001-a".to_string();
+        point(&store, &a, Stage::Committed);
+        store
+            .mark_undone(std::slice::from_ref(&a), "0000000000002-u")
+            .unwrap();
+        fs.fail_writes_to(at(&a, "manifest.json"));
+        store
+            .mark_undone(std::slice::from_ref(&a), "0000000000003-r")
+            .unwrap();
+        assert_eq!(
+            store.manifest(&a).unwrap().undone_by.as_deref(),
+            Some("0000000000002-u")
+        );
     }
 
     // ---- the fix by hand, in both languages ----
