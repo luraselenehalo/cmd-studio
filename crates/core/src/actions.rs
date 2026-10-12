@@ -381,12 +381,14 @@ pub fn run_apply(sys: System<'_>, ctx: &Ctx, prepared: Prepared) -> Outcome {
     } = prepared;
     // The ops, the lock and the state.json it writes belong to the data folder it was planned
     // in; another one would get a restore point and a state.json that no lock protects.
+    // prepare_apply may already have deleted font files CMD Studio left to delete, so only the
+    // user's settings are said to be as they were.
     if ctx.paths != paths || ctx.resources != resources {
         return Outcome::RolledBack {
             code: "E_DATA_WRITE",
             reason: format!(
-                "nothing was changed: this apply was prepared for the data folder {} and the \
-                 bundled files in {}, but was run with {} and {}",
+                "your settings were not changed: this apply was prepared for the data folder {} \
+                 and the bundled files in {}, but was run with {} and {}",
                 paths.data.display(),
                 resources.root.display(),
                 ctx.paths.data.display(),
@@ -1673,6 +1675,12 @@ mod tests {
         let out = run_apply(m.system(), &elsewhere, p);
         assert!(
             matches!(&out, Outcome::RolledBack { code: "E_DATA_WRITE", reason } if reason.contains(r"C:\elsewhere")),
+            "{out:?}"
+        );
+        // prepare_apply may have deleted font files CMD Studio left to delete, so only the
+        // user's settings are promised to be as they were.
+        assert!(
+            matches!(&out, Outcome::RolledBack { reason, .. } if reason.starts_with("your settings were not changed: ")),
             "{out:?}"
         );
         assert_eq!((everything(&m), files_but_the_lock(&m, &ctx)), before);
