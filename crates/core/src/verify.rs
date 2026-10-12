@@ -45,6 +45,9 @@ pub fn omp_config_error(stdout: &str) -> Option<&'static str> {
         .find(|marker| stdout.contains(marker))
 }
 
+/// Where cmd's AutoRun value lives, for a message.
+const AUTORUN_KEY: &str = r"HKEY_CURRENT_USER\Software\Microsoft\Command Processor";
+
 fn fail(code: &'static str, message: impl std::fmt::Display) -> Failure {
     Failure {
         code,
@@ -116,6 +119,13 @@ impl<'a> SystemVerifier<'a> {
                 if got.as_deref() != Some(contents.as_bytes()) {
                     return Err(mismatch(path.display().to_string()));
                 }
+                // Check 4 for a settings.json that is written back as a plain file (a revert
+                // of everything does): it is also read the way Windows Terminal reads it.
+                // `contents` is what is there, as the check above showed.
+                if self.is_wt_settings(path) {
+                    check_parses(contents)
+                        .map_err(|e| fail(e.code(), format!("{}: {e}", path.display())))?;
+                }
             }
             Op::WtApply {
                 settings,
@@ -185,7 +195,7 @@ impl<'a> SystemVerifier<'a> {
                     _ => false,
                 };
                 if !ok {
-                    return Err(mismatch("AutoRun".to_string()));
+                    return Err(mismatch(format!("AutoRun in {AUTORUN_KEY}")));
                 }
             }
             Op::InstallFont { family } => {
@@ -221,9 +231,27 @@ impl<'a> SystemVerifier<'a> {
                     .zip(dest.to_str())
                     .is_some_and(|(a, b)| a.eq_ignore_ascii_case(b));
                 let file = fs.read(&dest).map_err(|e| fail("E_VERIFY_READBACK", e))?;
-                let pinned_file = file.as_deref().is_some_and(|b| sha256_hex(b) == pin);
-                if !registered_here || !pinned_file {
-                    return Err(mismatch(format!("font {family}")));
+                // Say which part is wrong: the registration, the file, or both.
+                let mut wrong = Vec::new();
+                if !registered_here {
+                    wrong.push(format!(
+                        "its registration ({value_name}) does not name {}",
+                        dest.display()
+                    ));
+                }
+                match &file {
+                    None => wrong.push(format!("{} is missing", dest.display())),
+                    Some(bytes) if sha256_hex(bytes) != pin => wrong.push(format!(
+                        "{} is not the pinned file (its hash differs)",
+                        dest.display()
+                    )),
+                    Some(_) => {}
+                }
+                if !wrong.is_empty() {
+                    return Err(fail(
+                        "E_VERIFY_READBACK",
+                        format!("font {family}: {}", wrong.join("; ")),
+                    ));
                 }
             }
             Op::InstallRuntime { component, dir } => {
@@ -251,23 +279,37 @@ impl<'a> SystemVerifier<'a> {
             .process
             .run(&self.paths.omp_exe(), &args)
             .map_err(|e| fail("E_VERIFY_OMP", e))?;
+        let config = config.display();
         if out.status != 0 {
             return Err(fail(
                 "E_VERIFY_OMP",
-                format!("oh-my-posh exited {}: {}", out.status, clip(&out.stderr)),
+                format!(
+                    "oh-my-posh exited {} on {config}: {}",
+                    out.status,
+                    clip(&out.stderr)
+                ),
             ));
         }
         if let Some(marker) = omp_config_error(&out.stdout) {
-            return Err(fail("E_VERIFY_OMP", format!("oh-my-posh says {marker}")));
+            return Err(fail(
+                "E_VERIFY_OMP",
+                format!(
+                    "oh-my-posh says {marker} about {config}: {}",
+                    clip(&out.stdout)
+                ),
+            ));
         }
         if out.stdout.trim().is_empty() {
-            return Err(fail("E_VERIFY_OMP", "oh-my-posh printed nothing"));
+            return Err(fail(
+                "E_VERIFY_OMP",
+                format!("oh-my-posh printed nothing for {config}"),
+            ));
         }
         Ok(())
     }
 
-    /// Check 3: `<clink-launch> --profile <p> set clink.logo`; only its output
-    /// shows a Lua error, because it always exits 0 (G5).
+    /// Check 3: `<clink-launch> --profile <p> set clink.logo`. It always exits 0 (G5), so a Lua
+    /// error shows only in its output, and any other exit status is a failure.
     fn clink_loads(&self) -> Result<(), Failure> {
         let profile = self.paths.clink_profile();
         let args = [
@@ -287,10 +329,40 @@ impl<'a> SystemVerifier<'a> {
             .run(&launch.exe(), &args)
             .map_err(|e| fail("E_VERIFY_CLINK", e))?;
         let all = format!("{}\n{}", out.stdout, out.stderr);
-        match lua_error_line(&all) {
+        let lua = lua_error_line(&all);
+        // `set` always exits 0 (G5): any other status means Clink did not run as it should,
+        // whatever it printed.
+        if out.status != 0 {
+            let said = lua.map(clip).unwrap_or_else(|| {
+                clip(if out.stderr.trim().is_empty() {
+                    &out.stdout
+                } else {
+                    &out.stderr
+                })
+            });
+            let message = if said.is_empty() {
+                format!("clink exited {}", out.status)
+            } else {
+                format!("clink exited {}: {said}", out.status)
+            };
+            return Err(fail("E_VERIFY_CLINK", message));
+        }
+        match lua {
             Some(line) => Err(fail("E_VERIFY_CLINK", clip(line))),
             None => Ok(()),
         }
+    }
+
+    /// Whether `path` is one of Windows Terminal's settings files on this machine. Windows
+    /// ignores the letter case of a path.
+    fn is_wt_settings(&self, path: &Path) -> bool {
+        self.sys.wt.locations().iter().any(|l| {
+            l.settings == path
+                || l.settings
+                    .to_str()
+                    .zip(path.to_str())
+                    .is_some_and(|(a, b)| a.eq_ignore_ascii_case(b))
+        })
     }
 
     /// Whether Clink loads the file when it starts: its settings, or a Lua script.
@@ -754,17 +826,24 @@ mod tests {
             .unwrap();
         let err = verify_ops(&m, &paths, &res, &launch, &delete).unwrap_err();
         assert_eq!(err.code, "E_VERIFY_READBACK");
+        // The message says whose value it is, so the user can look at it.
+        let key = r"HKEY_CURRENT_USER\Software\Microsoft\Command Processor";
+        assert!(err.message.contains(key), "{err:?}");
+        assert!(err.message.contains("AutoRun"), "{err:?}");
         // A value is expected and none is there.
         m.autorun.delete_user().unwrap();
         let set = [Op::SetAutoRun {
             value: Some("ours".into()),
         }];
-        assert_eq!(
-            verify_ops(&m, &paths, &res, &launch, &set)
-                .unwrap_err()
-                .code,
-            "E_VERIFY_READBACK"
-        );
+        let err = verify_ops(&m, &paths, &res, &launch, &set).unwrap_err();
+        assert_eq!(err.code, "E_VERIFY_READBACK");
+        assert!(err.message.contains(key), "{err:?}");
+        // Another text is there.
+        m.autorun
+            .write_user(&RegValue::from_text(REG_SZ, "theirs"))
+            .unwrap();
+        let err = verify_ops(&m, &paths, &res, &launch, &set).unwrap_err();
+        assert!(err.message.contains(key), "{err:?}");
         // REG_EXPAND_SZ keeps its text, unexpanded.
         m.autorun
             .write_user(&RegValue::from_text(REG_EXPAND_SZ, "ours"))
@@ -784,37 +863,46 @@ mod tests {
         let value_name = format!("{} (TrueType)", crate::plan::NERD_FONT_FAMILY);
         let dest = m.fonts.user_fonts_dir().join(NERD_FONT_FILE);
         let registered = m.fonts.registration(&value_name).unwrap().unwrap();
+        let failure = || verify_ops(&m, &paths, &res, &launch, &font).unwrap_err();
 
-        // The file is another file than the pinned one.
+        // The file is another file than the pinned one: the message says it is the file (its
+        // hash), not the registration.
         m.fs.put(&dest, b"another font");
-        assert_eq!(
-            verify_ops(&m, &paths, &res, &launch, &font)
-                .unwrap_err()
-                .code,
-            "E_VERIFY_READBACK"
-        );
+        let err = failure();
+        assert_eq!(err.code, "E_VERIFY_READBACK");
+        assert!(err.message.contains("hash differs"), "{err:?}");
+        assert!(err.message.contains(&dest.display().to_string()), "{err:?}");
+        assert!(!err.message.contains("registration"), "{err:?}");
+        // The file is gone.
+        m.fs.remove_file(&dest).unwrap();
+        let err = failure();
+        assert!(err.message.contains("is missing"), "{err:?}");
+        assert!(!err.message.contains("registration"), "{err:?}");
         m.fs.put(&dest, b"font-bytes");
         verify_ops(&m, &paths, &res, &launch, &font).unwrap();
 
-        // The registration names another file, or none; letter case does not matter.
+        // The registration names another file, or none; letter case does not matter. The
+        // message says it is the registration, not the file.
         m.fonts
             .register(&value_name, &registered.to_ascii_uppercase())
             .unwrap();
         verify_ops(&m, &paths, &res, &launch, &font).unwrap();
         m.fonts.register(&value_name, r"C:\other.ttf").unwrap();
-        assert_eq!(
-            verify_ops(&m, &paths, &res, &launch, &font)
-                .unwrap_err()
-                .code,
-            "E_VERIFY_READBACK"
-        );
+        let err = failure();
+        assert_eq!(err.code, "E_VERIFY_READBACK");
+        assert!(err.message.contains("registration"), "{err:?}");
+        assert!(err.message.contains(&value_name), "{err:?}");
+        assert!(!err.message.contains("hash"), "{err:?}");
         m.fonts.unregister(&value_name).unwrap();
-        assert_eq!(
-            verify_ops(&m, &paths, &res, &launch, &font)
-                .unwrap_err()
-                .code,
-            "E_VERIFY_READBACK"
-        );
+        let err = failure();
+        assert_eq!(err.code, "E_VERIFY_READBACK");
+        assert!(err.message.contains("registration"), "{err:?}");
+
+        // Both wrong: both are named.
+        m.fs.put(&dest, b"another font");
+        let err = failure();
+        assert!(err.message.contains("registration"), "{err:?}");
+        assert!(err.message.contains("hash differs"), "{err:?}");
 
         // A family nothing is bundled for cannot be checked, so it fails.
         let unknown = [Op::InstallFont {
@@ -864,6 +952,12 @@ mod tests {
             let err = verify_ops(&m, &paths, &res, &launch, &ops).unwrap_err();
             assert_eq!(err.code, "E_VERIFY_OMP", "{stdout:?}");
             assert!(err.message.contains(wanted), "{err:?}");
+            // Which config it was, and (for a marker) what Oh My Posh printed.
+            let config = paths.omp_config().display().to_string();
+            assert!(err.message.contains(&config), "{err:?}");
+            if wanted != "exited 1" && wanted != "printed nothing" {
+                assert!(err.message.contains(stdout.trim()), "{err:?}");
+            }
             // The Clink check does not run after a failed Oh My Posh check.
             assert_eq!(m.process.calls().len(), 1);
         }
@@ -953,7 +1047,8 @@ mod tests {
         // When it fails, its error output is the message.
         let err = verify_programs(printed(2, "", "  bad flag \n"), clean()).unwrap_err();
         assert_eq!(err.code, "E_VERIFY_OMP");
-        assert!(err.message.ends_with("exited 2: bad flag"), "{err:?}");
+        assert!(err.message.contains("exited 2 on "), "{err:?}");
+        assert!(err.message.ends_with(": bad flag"), "{err:?}");
 
         // Clink cannot run.
         let clink = Err(AdapterError::new("run clink", "not allowed"));
@@ -981,6 +1076,139 @@ mod tests {
         let err = verify_ops(&m, &paths, &res, &None, &ops).unwrap_err();
         assert_eq!(err.code, "E_VERIFY_CLINK");
         assert!(err.message.contains("<clink-launch>"), "{err:?}");
+    }
+
+    #[test]
+    fn a_long_oh_my_posh_message_is_clipped() {
+        let m = FakeMachine::new();
+        let long = format!(" CONFIG PARSE ERROR {}", "x".repeat(2000));
+        m.process.answer("oh-my-posh.exe", "print", 0, &long);
+        let (res, paths, ops, launch) = applied(&m);
+        apply_all(&m, &res, &ops);
+        let err = verify_ops(&m, &paths, &res, &launch, &ops).unwrap_err();
+        assert_eq!(err.code, "E_VERIFY_OMP");
+        assert!(err.message.contains("CONFIG PARSE ERROR"), "{err:?}");
+        assert!(err.message.chars().count() < 600, "{}", err.message.len());
+    }
+
+    #[test]
+    fn clink_that_exits_non_zero_fails_even_with_nothing_printed() {
+        // Clink's `set` always exits 0 (G5), so any other status means it did not run as it
+        // should, whatever it printed.
+        let prompt = || printed(0, "> ", "");
+        let err = verify_programs(prompt(), printed(3, "", "")).unwrap_err();
+        assert_eq!(err.code, "E_VERIFY_CLINK");
+        assert!(err.message.contains("exited 3"), "{err:?}");
+        let err =
+            verify_programs(prompt(), printed(-1, "Setting 'clink.logo'", " why \n")).unwrap_err();
+        assert_eq!(err.code, "E_VERIFY_CLINK");
+        assert!(err.message.contains("exited -1"), "{err:?}");
+        assert!(err.message.ends_with("why"), "{err:?}");
+        // A Lua error is still the message when Clink also exited non-zero.
+        let lua = printed(1, r"C:\d\init.lua:2: boom", "");
+        let err = verify_programs(prompt(), lua).unwrap_err();
+        assert!(err.message.contains("exited 1"), "{err:?}");
+        assert!(err.message.contains("init.lua:2: boom"), "{err:?}");
+        // Exit 0 and nothing wrong passes.
+        verify_programs(prompt(), printed(0, "", "")).unwrap();
+    }
+
+    #[test]
+    fn a_written_file_that_changed_or_vanished_fails_the_readback() {
+        let m = FakeMachine::new();
+        let (res, paths, _, launch) = applied(&m);
+        let path = paths.generated().join("notes.txt");
+        let op = Op::WriteFile {
+            path: path.clone(),
+            contents: "one".into(),
+        };
+        apply_all(&m, &res, std::slice::from_ref(&op));
+        verify_ops(&m, &paths, &res, &launch, std::slice::from_ref(&op)).unwrap();
+
+        m.fs.put(&path, "two");
+        let err = verify_ops(&m, &paths, &res, &launch, std::slice::from_ref(&op)).unwrap_err();
+        assert_eq!(err.code, "E_VERIFY_READBACK");
+        assert!(err.message.contains(&path.display().to_string()), "{err:?}");
+
+        // One byte more, and an empty file, are not the written contents either.
+        for other in ["one ", ""] {
+            m.fs.put(&path, other);
+            let err = verify_ops(&m, &paths, &res, &launch, std::slice::from_ref(&op)).unwrap_err();
+            assert_eq!(err.code, "E_VERIFY_READBACK", "{other:?}");
+        }
+
+        m.fs.remove_file(&path).unwrap();
+        let err = verify_ops(&m, &paths, &res, &launch, std::slice::from_ref(&op)).unwrap_err();
+        assert_eq!(err.code, "E_VERIFY_READBACK");
+        assert!(err.message.contains(&path.display().to_string()), "{err:?}");
+    }
+
+    fn wt_location(settings: &str) -> crate::adapters::WtLocation {
+        crate::adapters::WtLocation {
+            variant: crate::adapters::WtVariant::Store,
+            installed: true,
+            settings: PathBuf::from(settings),
+        }
+    }
+
+    #[test]
+    fn a_settings_json_written_as_a_plain_file_must_still_parse() {
+        // A revert of everything puts a settings.json back with `WriteFile`; the file is also
+        // checked as Windows Terminal reads it.
+        let mut m = FakeMachine::new();
+        m.wt.locations = vec![wt_location(WT_SETTINGS)];
+        let (res, paths, _, launch) = applied(&m);
+        let write = |path: &str, contents: &str| {
+            let op = Op::WriteFile {
+                path: PathBuf::from(path),
+                contents: contents.into(),
+            };
+            apply_all(&m, &res, std::slice::from_ref(&op));
+            op
+        };
+        let broken = "{ \"profiles\": [ ";
+
+        // At a Windows Terminal location: the editor's reason, and which file.
+        let op = write(WT_SETTINGS, broken);
+        let err = verify_ops(&m, &paths, &res, &launch, &[op]).unwrap_err();
+        assert_eq!(err.code, "E_WT_PARSE");
+        assert!(err.message.starts_with(WT_SETTINGS), "{err:?}");
+        assert!(err.message.contains("not valid JSON"), "{err:?}");
+        // Windows ignores letter case in a path.
+        let op = write(&WT_SETTINGS.to_ascii_uppercase(), broken);
+        let err = verify_ops(&m, &paths, &res, &launch, &[op]).unwrap_err();
+        assert_eq!(err.code, "E_WT_PARSE");
+        // Nested deeper than the editor reads: refused with its reason, not passed on.
+        let deep = format!("{}{}", "[".repeat(80), "]".repeat(80));
+        let op = write(WT_SETTINGS, &deep);
+        let err = verify_ops(&m, &paths, &res, &launch, &[op]).unwrap_err();
+        assert_eq!(err.code, "E_WT_PARSE");
+        assert!(err.message.contains("deeper than 64 levels"), "{err:?}");
+        // Bytes that are not what was written are a readback failure first.
+        let op = write(WT_SETTINGS, fine_json());
+        m.fs.put(WT_SETTINGS, broken);
+        let err = verify_ops(&m, &paths, &res, &launch, &[op]).unwrap_err();
+        assert_eq!(err.code, "E_VERIFY_READBACK");
+
+        // A file that parses passes: comments, a trailing comma and a BOM are fine.
+        let op = write(
+            WT_SETTINGS,
+            "\u{feff}{\n  // mine\n  \"profiles\": { \"list\": [], },\n}\n",
+        );
+        verify_ops(&m, &paths, &res, &launch, &[op]).unwrap();
+
+        // The same unparseable bytes anywhere else only get the byte-for-byte check.
+        let op = write(r"C:\Users\tester\Documents\settings.json", broken);
+        verify_ops(&m, &paths, &res, &launch, &[op]).unwrap();
+        let op = write(
+            r"C:\Users\tester\AppData\Local\Packages\Other\LocalState\settings.json",
+            broken,
+        );
+        verify_ops(&m, &paths, &res, &launch, &[op]).unwrap();
+    }
+
+    fn fine_json() -> &'static str {
+        "{ \"profiles\": { \"list\": [] } }"
     }
 
     #[test]

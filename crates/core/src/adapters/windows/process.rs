@@ -1,8 +1,8 @@
 //! Runs CMD Studio's own bundled programs (spec §5.10): only executables
 //! under the given folders, fixed arguments, no shell, no console window, a
-//! time limit. The caller never waits longer than that limit plus a short
-//! grace for the output, even when the program started another program that
-//! keeps its output open.
+//! time limit. The caller never waits longer than that limit plus a short grace for the
+//! output, even when the program started another program that keeps its output open; a
+//! program that cannot be killed is given up on after the same grace and reported.
 use crate::adapters::{AdapterError, Output, Process};
 use std::ffi::OsStr;
 use std::io::Read;
@@ -120,9 +120,49 @@ fn collect(
     Ok((stdout, stderr))
 }
 
-fn stop(child: &mut Child) {
-    let _ = child.kill();
-    let _ = child.wait();
+/// What `stop` needs of a running program; a `Child`, or a stand-in in a test.
+trait Running {
+    fn kill(&mut self) -> std::io::Result<()>;
+    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>>;
+}
+
+impl Running for Child {
+    fn kill(&mut self) -> std::io::Result<()> {
+        Child::kill(self)
+    }
+    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        Child::try_wait(self)
+    }
+}
+
+/// Kills the program and waits at most `wait` for it to end. `Err` says why it may still be
+/// running: a program that cannot be killed (or does not end) never holds the caller up.
+fn stop(child: &mut impl Running, wait: Duration) -> Result<(), String> {
+    let killed = child.kill();
+    let since = Instant::now();
+    loop {
+        match child.try_wait() {
+            // Ended: by the kill, or by itself before it (then a failed kill does not matter).
+            Ok(Some(_)) => return Ok(()),
+            Ok(None) if since.elapsed() >= wait => {
+                return Err(match killed {
+                    Err(e) => format!("could not be stopped: {e}"),
+                    Ok(()) => format!("did not stop within {wait:?} after it was killed"),
+                })
+            }
+            Ok(None) => std::thread::sleep(POLL),
+            Err(e) => return Err(format!("could not be stopped: {e}")),
+        }
+    }
+}
+
+/// What a failed `stop` adds to the message of the failure that made the caller stop the
+/// program: it may still be running.
+fn unstopped(stopped: Result<(), String>) -> String {
+    match stopped {
+        Ok(()) => String::new(),
+        Err(why) => format!("; it may still be running ({why})"),
+    }
 }
 
 impl Process for WinProcess {
@@ -158,21 +198,21 @@ impl Process for WinProcess {
         let expected = match readers {
             Ok(count) => count,
             Err(e) => {
-                stop(&mut child);
-                return Err(fail(format!("could not read its output: {e}")));
+                let note = unstopped(stop(&mut child, OUTPUT_GRACE));
+                return Err(fail(format!("could not read its output: {e}{note}")));
             }
         };
         let status = loop {
             match child.try_wait() {
                 Ok(Some(status)) => break status,
                 Ok(None) if started.elapsed() >= self.timeout => {
-                    stop(&mut child);
-                    return Err(fail(format!("no answer after {:?}", self.timeout)));
+                    let note = unstopped(stop(&mut child, OUTPUT_GRACE));
+                    return Err(fail(format!("no answer after {:?}{note}", self.timeout)));
                 }
                 Ok(None) => std::thread::sleep(POLL),
                 Err(e) => {
-                    stop(&mut child);
-                    return Err(fail(e.to_string()));
+                    let note = unstopped(stop(&mut child, OUTPUT_GRACE));
+                    return Err(fail(format!("{e}{note}")));
                 }
             }
         };
@@ -430,6 +470,146 @@ mod tests {
         let both = WinProcess::new(vec![evil.clone(), allowed.clone()], Duration::from_secs(30));
         assert!(both.permitted(&evil.join("c.exe")) && both.permitted(&allowed.join("a.exe")));
         assert!(!WinProcess::new(vec![], Duration::from_secs(30)).permitted(&allowed.join("a.exe")));
+    }
+
+    /// `to` as a path relative to `from` (both canonical); `None` when they share no root.
+    fn relative_to(from: &Path, to: &Path) -> Option<PathBuf> {
+        let (from, to): (Vec<_>, Vec<_>) = (from.components().collect(), to.components().collect());
+        let common = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
+        // Without the drive in common, no relative path leads there.
+        if common == 0 {
+            return None;
+        }
+        let mut rel = PathBuf::new();
+        for _ in common..from.len() {
+            rel.push("..");
+        }
+        for part in &to[common..] {
+            rel.push(part);
+        }
+        Some(rel)
+    }
+
+    #[test]
+    fn a_relative_path_is_refused_even_when_it_leads_to_an_allowed_program() {
+        let tmp = tempfile::tempdir().unwrap();
+        let allowed = tmp.path().join("rt");
+        touch(&allowed.join("a.exe"));
+        let program = std::fs::canonicalize(allowed.join("a.exe")).unwrap();
+        let here = std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
+        let Some(relative) = relative_to(&here, &program) else {
+            eprintln!("SKIPPED the relative path check: the temp folder is on another drive");
+            return;
+        };
+        assert!(relative.is_relative(), "{}", relative.display());
+        // The relative path really does lead to the program ...
+        assert_eq!(std::fs::canonicalize(&relative).unwrap(), program);
+        // ... and the same program by its full path is allowed ...
+        let p = WinProcess::new(vec![allowed.clone()], Duration::from_secs(30));
+        assert!(p.permitted(&program));
+        // ... but a relative path depends on the current folder, so it is refused, and nothing
+        // starts.
+        assert!(!p.permitted(&relative), "{}", relative.display());
+        let err = p.run(&relative, &[]).unwrap_err();
+        assert!(
+            err.message.contains("not one of CMD Studio's own programs"),
+            "{err}"
+        );
+    }
+
+    #[derive(Default)]
+    struct Stuck {
+        kills: u32,
+        kill_fails: bool,
+        exits_after_kill: bool,
+        exited_before: bool,
+        wait_fails: bool,
+    }
+
+    impl Running for Stuck {
+        fn kill(&mut self) -> std::io::Result<()> {
+            self.kills += 1;
+            if self.kill_fails {
+                Err(std::io::Error::other("access denied"))
+            } else {
+                Ok(())
+            }
+        }
+        fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+            use std::os::windows::process::ExitStatusExt;
+            if self.wait_fails {
+                return Err(std::io::Error::other("wait broke"));
+            }
+            let gone = self.exited_before || (self.exits_after_kill && self.kills > 0);
+            Ok(gone.then(|| std::process::ExitStatus::from_raw(1)))
+        }
+    }
+
+    #[test]
+    fn stop_never_waits_forever_for_a_program_that_will_not_die() {
+        let wait = Duration::from_millis(100);
+        // Killed and gone.
+        let mut ok = Stuck {
+            exits_after_kill: true,
+            ..Stuck::default()
+        };
+        assert_eq!(stop(&mut ok, wait), Ok(()));
+        assert_eq!(ok.kills, 1);
+        // The kill failed, but it had ended by itself: nothing is left to stop.
+        let mut ended = Stuck {
+            kill_fails: true,
+            exited_before: true,
+            ..Stuck::default()
+        };
+        assert_eq!(stop(&mut ended, wait), Ok(()));
+
+        // The kill failed and it still runs: back after the wait, with the reason.
+        let mut stuck = Stuck {
+            kill_fails: true,
+            ..Stuck::default()
+        };
+        let started = Instant::now();
+        let why = stop(&mut stuck, wait).unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(
+            why.contains("could not be stopped") && why.contains("access denied"),
+            "{why}"
+        );
+        // The kill went through but it did not end.
+        let mut slow = Stuck::default();
+        let started = Instant::now();
+        let why = stop(&mut slow, wait).unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(why.contains("did not stop"), "{why}");
+        // Its state cannot be read.
+        let mut unreadable = Stuck {
+            wait_fails: true,
+            ..Stuck::default()
+        };
+        let why = stop(&mut unreadable, wait).unwrap_err();
+        assert!(why.contains("wait broke"), "{why}");
+
+        // What the caller adds to its message.
+        assert_eq!(unstopped(Ok(())), "");
+        assert_eq!(
+            unstopped(Err("did not stop".into())),
+            "; it may still be running (did not stop)"
+        );
+    }
+
+    #[test]
+    fn a_stopped_program_is_really_gone() {
+        // The real thing: a child that is killed has ended when `stop` returns.
+        let mut child = std::process::Command::new(system32().join("PING.EXE"))
+            .args(["-n", "30", "127.0.0.1"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .unwrap();
+        assert_eq!(stop(&mut child, Duration::from_secs(5)), Ok(()));
+        assert!(child.try_wait().unwrap().is_some());
     }
 
     #[test]
