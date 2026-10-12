@@ -1868,6 +1868,26 @@ mod tests {
     }
 
     #[test]
+    fn a_bad_color_is_quoted_as_written_and_still_cleaned() {
+        // Thai letters come out as they are, not as `\u{..}` escapes...
+        let thai = FIXTURE.replacen("\"#e3b66b\"", "\"#สีส้ม\"", 1);
+        let text = invalid_text(thai.as_bytes());
+        assert!(
+            text.starts_with("colors.ansi[3]: not a #rrggbb color: \"#สีส้ม\""),
+            "{text}"
+        );
+        assert!(!text.contains("\\u{"), "{text}");
+        // ...and an escape sequence in the value never reaches the terminal.
+        let hostile = FIXTURE.replacen("\"#e3b66b\"", "\"\\u001b[31m#e3b66\"", 1);
+        let text = invalid_text(hostile.as_bytes());
+        assert!(
+            text.starts_with("colors.ansi[3]: not a #rrggbb color: \"#e3b66\""),
+            "{text}"
+        );
+        assert!(!text.contains('\u{1b}') && !text.contains("\\u{"), "{text}");
+    }
+
+    #[test]
     fn errors_carry_line_and_column() {
         let bad = FIXTURE.replacen("\"#e3b66b\"", "\"#e3b66\"", 1);
         assert_ne!(bad, FIXTURE);

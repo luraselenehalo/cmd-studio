@@ -11,8 +11,11 @@ pub struct Rgb {
     pub b: u8,
 }
 
+/// The text is quoted as it was written, not with `{:?}`, which would escape Thai vowels and
+/// tone marks. A theme file's error is cleaned of escape sequences and control characters
+/// before anyone sees it (`model::invalid`).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("not a #rrggbb color: {0:?}")]
+#[error("not a #rrggbb color: \"{0}\"")]
 pub struct ParseColorError(pub String);
 
 impl FromStr for Rgb {
@@ -137,6 +140,13 @@ mod tests {
         ] {
             assert!(s.parse::<Rgb>().is_err(), "{s:?} should not parse");
         }
+    }
+
+    #[test]
+    fn a_color_that_is_not_one_is_quoted_as_it_was_written() {
+        // Thai vowels and tone marks are characters `{:?}` would escape.
+        let e = "#สีส้ม".parse::<Rgb>().unwrap_err();
+        assert_eq!(e.to_string(), "not a #rrggbb color: \"#สีส้ม\"");
     }
 
     #[test]
