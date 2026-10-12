@@ -529,6 +529,23 @@ fn packaged() -> bool {
     rc != APPMODEL_ERROR_NO_PACKAGE
 }
 
+/// All the facts, with the registry read through `read`. `WinHost::system_info` passes the real
+/// reader; tests pass their own.
+pub(crate) fn system_info_with(read: RegRead<'_>) -> SystemInfo {
+    let facts = registry_facts(read);
+    // SAFETY: GetUserDefaultUILanguage takes no arguments and only returns a language id.
+    let ui_language = unsafe { GetUserDefaultUILanguage() };
+    SystemInfo {
+        build: facts.build,
+        arch: arch(),
+        default_terminal: facts.default_terminal,
+        webview2: facts.webview2,
+        packaged: packaged(),
+        ui_language,
+        unreadable: facts.unreadable,
+    }
+}
+
 impl Host for WinHost {
     fn local_app_data(&self) -> Result<PathBuf, AdapterError> {
         known_folder(&FOLDERID_LocalAppData, "LocalAppData")
@@ -610,18 +627,7 @@ impl Host for WinHost {
     }
 
     fn system_info(&self) -> SystemInfo {
-        let facts = registry_facts(&|loc, name| loc.read_raw(name));
-        // SAFETY: GetUserDefaultUILanguage takes no arguments and only returns a language id.
-        let ui_language = unsafe { GetUserDefaultUILanguage() };
-        SystemInfo {
-            build: facts.build,
-            arch: arch(),
-            default_terminal: facts.default_terminal,
-            webview2: facts.webview2,
-            packaged: packaged(),
-            ui_language,
-            unreadable: facts.unreadable,
-        }
+        system_info_with(&|loc, name| loc.read_raw(name))
     }
 }
 
@@ -662,10 +668,10 @@ mod tests {
             short.to_str().is_some_and(str::is_ascii)
         );
         // The check above also passes for a short_path that hands its input back. The shell
-        // makes the short form on its own: where it gets a plain-ASCII one, the volume makes
+        // makes the short form on its own: where it gets a real short name, the volume makes
         // 8.3 names and ours has to be that same name.
         let theirs = cmd_short_path(&long);
-        if theirs.is_ascii() {
+        if is_short_name(&theirs) {
             println!("short name: ours {short:?}, the shell's {theirs:?}");
             assert!(
                 short
@@ -677,6 +683,35 @@ mod tests {
             println!("the shell made no short name either: nothing to compare");
         }
         assert!(WinHost.short_path(&tmp.path().join("missing")).is_err());
+    }
+
+    #[test]
+    fn the_shells_answer_is_trusted_only_when_it_is_a_real_short_name() {
+        // What cmd printed here for a folder with a Thai name: a real short name.
+        assert!(is_short_name(
+            r"C:\Users\x\AppData\Local\Temp\TMP3UR~1\3607~1"
+        ));
+        // The same folder in its long form, and a path with a component that has no short name:
+        // cmd could not print the Thai letters and printed '?' for each, which is still ASCII.
+        assert!(!is_short_name(
+            r"C:\Users\x\AppData\Local\Temp\.tmp3UrrCE\???????? ???"
+        ));
+        assert!(!is_short_name(
+            r"C:\Users\x\AppData\Local\Temp\TMP3UR~1\????? ????????"
+        ));
+        // Nothing at all: a wildcard that matched nothing, or a cmd that printed nothing.
+        assert!(!is_short_name(""));
+        // Not ASCII: a console that did print the letters.
+        assert!(!is_short_name(r"C:\Users\x\ผู้ทดสอบ ไทย"));
+    }
+
+    /// Whether the shell's answer is a short name that ours can be compared with: not empty, plain
+    /// ASCII and without a '?'. Where cmd cannot print a letter (Thai, on an English console) it
+    /// prints '?' for it, which is still ASCII, and '?' is never valid in a Windows file name, so
+    /// one marks a name that was not made short (a volume or a folder without an 8.3 name).
+    /// An empty answer is cmd printing nothing.
+    fn is_short_name(answer: &str) -> bool {
+        !answer.is_empty() && answer.is_ascii() && !answer.contains('?')
     }
 
     /// The short form of a path as cmd prints it (`%~sI` in a `for` loop): the shell's own answer.
@@ -1411,5 +1446,48 @@ mod tests {
             terminal.starts_with("default terminal: ") && terminal.contains("not text"),
             "{terminal}"
         );
+    }
+
+    // The last hop: from the registry facts into `SystemInfo`. The one test that calls the real
+    // `system_info` runs on a healthy machine, where nothing is unreadable, so these two drive
+    // the whole of it through a reader of their own.
+
+    #[test]
+    fn system_info_carries_what_could_not_be_read() {
+        let failing = |loc: &RegLocation, name: &str| -> Reply { Err(denied(loc, name)) };
+        let info = system_info_with(&failing);
+        assert_eq!(info.build, None);
+        assert_eq!(info.default_terminal, DefaultTerminal::LetWindowsDecide);
+        assert_eq!(info.webview2, None);
+        let names = ["build", "default terminal", "WebView2"];
+        assert_eq!(info.unreadable.len(), names.len(), "{:?}", info.unreadable);
+        for (entry, fact) in info.unreadable.iter().zip(names) {
+            assert!(entry.starts_with(&format!("{fact}: ")), "{entry}");
+        }
+        // What does not come from the registry is still read from the machine.
+        assert_ne!(info.ui_language, 0);
+    }
+
+    #[test]
+    fn system_info_carries_what_was_read() {
+        let answers = |loc: &RegLocation, name: &str| -> Reply {
+            match (loc.hive, name) {
+                (Hive::LocalMachine, "CurrentBuildNumber") => text("26300"),
+                (Hive::CurrentUser, "DelegationConsole") => {
+                    text("{06EC847C-C0A5-46B8-92CB-7C92F6E35CD5}")
+                }
+                (Hive::LocalMachine, "pv") => text("154.0.4258.62"),
+                _ => Ok(None),
+            }
+        };
+        let info = system_info_with(&answers);
+        assert_eq!(info.build, Some(26300));
+        assert_eq!(
+            info.default_terminal,
+            DefaultTerminal::WindowsTerminalPreview
+        );
+        assert_eq!(info.webview2.as_deref(), Some("154.0.4258.62"));
+        assert!(info.unreadable.is_empty(), "{:?}", info.unreadable);
+        assert_ne!(info.ui_language, 0);
     }
 }
