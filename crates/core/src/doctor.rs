@@ -805,11 +805,16 @@ fn d9(sys: System<'_>, state: &Result<State, StateError>) -> Check {
                     "CMD Studio's record (state.json) was written by a newer CMD Studio. Use that \
                      version, or update CMD Studio",
                 ),
+                // "Revert everything" is a button of the app; the command line's way is
+                // `--cleanup`, which also deletes CMD Studio's data but the themes.
                 StateError::Invalid(_) => (
-                    "บันทึกของ CMD Studio (state.json) เสียหรือถูกแก้ ให้ใช้ \"ย้อนทุกอย่าง\" \
-                     แล้วใช้ธีมใหม่",
+                    "บันทึกของ CMD Studio (state.json) เสียหรือถูกแก้ ให้ใช้ \"ย้อนทุกอย่าง\" ในแอป \
+                     (ในบรรทัดคำสั่ง ให้รัน `cmdstudio --cleanup` ซึ่งจะลบข้อมูลของ CMD Studio \
+                     ด้วย ยกเว้นธีม) แล้วใช้ธีมใหม่",
                     "CMD Studio's record (state.json) is damaged or was edited. Use Revert \
-                     everything, then apply a theme again",
+                     everything in the app (on the command line, run `cmdstudio --cleanup`, \
+                     which also deletes CMD Studio's data but your themes), then apply a theme \
+                     again",
                 ),
             };
             return check("D9", Status::Fail, Some(e.code()), th, en, e.to_string());
@@ -1604,6 +1609,22 @@ mod tests {
                 assert_eq!(by_id(&checks, id).status, Status::Ok, "{how}: {id}");
             }
         }
+    }
+
+    #[test]
+    fn a_damaged_state_file_names_the_command_line_way_out_too() {
+        // "Revert everything" is a button of the app; the CLI's way is `--cleanup`.
+        let (m, ctx) = themed(Target::All);
+        m.fs.put(ctx.paths.state_file(), b"{ not json");
+        let d9 = by_id(&run(&m, &ctx), "D9");
+        for text in [&d9.message_en, &d9.message_th] {
+            assert!(text.contains("`cmdstudio --cleanup`"), "{d9:?}");
+        }
+        assert!(
+            d9.message_en.contains("Revert everything in the app"),
+            "{d9:?}"
+        );
+        assert!(d9.message_th.contains("\"ย้อนทุกอย่าง\" ในแอป"), "{d9:?}");
     }
 
     #[test]
