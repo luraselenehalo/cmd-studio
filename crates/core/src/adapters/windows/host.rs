@@ -1,7 +1,7 @@
 //! Identity, known folders, 8.3 names, the private ProgramData folder
 //! (spec §5.4 `<clink-launch>` step 3) and system facts.
 use super::registry::RegLocation;
-use super::{io_err, last_error, wide};
+use super::{english_io_error, io_err, last_error, wide};
 use crate::adapters::{
     AdapterError, Arch, Created, DefaultTerminal, DirState, Host, RegValue, SystemInfo,
 };
@@ -255,7 +255,7 @@ fn owner_and_allowed(dir: &Path) -> Result<(String, Option<AllowEntries>), Adapt
     if rc != 0 {
         return Err(AdapterError::new(
             format!("GetNamedSecurityInfoW {}", dir.display()),
-            std::io::Error::from_raw_os_error(rc as i32).to_string(),
+            english_io_error(&std::io::Error::from_raw_os_error(rc as i32)),
         ));
     }
     // SAFETY: GetNamedSecurityInfoW allocated the descriptor with LocalAlloc, and nothing else
@@ -356,7 +356,7 @@ pub(crate) fn create_dir_with_sddl(dir: &Path, sddl: &str) -> Result<Created, Ad
         (0, ERROR_ALREADY_EXISTS) => Ok(Created::AlreadyExisted),
         (0, _) => Err(AdapterError::new(
             format!("CreateDirectoryW {}", dir.display()),
-            std::io::Error::from_raw_os_error(code as i32).to_string(),
+            english_io_error(&std::io::Error::from_raw_os_error(code as i32)),
         )),
         _ => Ok(Created::New),
     }
