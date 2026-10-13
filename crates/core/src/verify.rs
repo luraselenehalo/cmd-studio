@@ -453,7 +453,6 @@ mod tests {
         let req = Request {
             target: Target::All,
             set_wt_default_profile: false,
-            lang: crate::generate::lua::Lang::En,
             replace_foreign_clink: false,
         };
         let p = plan(&terracotta(), &req, &machine, &paths).unwrap();
@@ -613,7 +612,6 @@ mod tests {
         let req = Request {
             target: Target::All,
             set_wt_default_profile: set_default,
-            lang: crate::generate::lua::Lang::En,
             replace_foreign_clink: false,
         };
         let p = plan(&terracotta(), &req, &machine, &paths).unwrap();

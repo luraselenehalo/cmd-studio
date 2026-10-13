@@ -7,7 +7,6 @@ use crate::exec::{
     fix_by_hand, font_target, op_label, same_path, sweep, FontLeft, SystemExecutor, UndoExecutor,
     UndoVerifier, CLEANUP_FIX_EN, CLEANUP_FIX_TH,
 };
-use crate::generate::lua::Lang;
 use crate::model::Theme;
 use crate::plan::{
     plan, Op, Paths, Plan, PlanError, Request, CLINK_VERSION, NERD_FONT_FAMILY, OMP_VERSION,
@@ -178,13 +177,6 @@ pub struct Prepared {
     lock: FsLock,
 }
 
-fn lang_code(lang: Lang) -> &'static str {
-    match lang {
-        Lang::Th => "th",
-        Lang::En => "en",
-    }
-}
-
 /// Takes the lock and does what every command does first (see [`StartReport`]; the report is
 /// in [`Prepared::start`]), deletes the font files an earlier run left to delete, then detects,
 /// plans and works out the new state.json without changing anything else. A settings.json that
@@ -318,7 +310,6 @@ pub fn prepare_apply(
         theme_name: theme.name.clone(),
         target: req.target,
         set_default: req.set_wt_default_profile,
-        lang: lang_code(req.lang).to_string(),
         launch: (&plan.launch).into(),
         omp_version: OMP_VERSION.to_string(),
         clink_version: CLINK_VERSION.to_string(),
@@ -1138,7 +1129,6 @@ pub(crate) mod testing {
         Request {
             target,
             set_wt_default_profile: true,
-            lang: Lang::En,
             replace_foreign_clink: false,
         }
     }

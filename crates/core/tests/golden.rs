@@ -24,7 +24,7 @@
     clippy::indexing_slicing
 )]
 
-use cmdstudio_core::generate::lua::{self, Lang};
+use cmdstudio_core::generate::lua;
 use cmdstudio_core::generate::{clink, omp, wt};
 use cmdstudio_core::model::{Layout, Segment, Target, Theme};
 use cmdstudio_core::presets;
@@ -233,8 +233,8 @@ golden_tests! {
         &under_data(r"runtime\omp-31.5.0\oh-my-posh.exe"),
         &under_data(r"generated\theme.omp.json"),
     );
-    thai_banner: "terracotta.banner.th.lua" = lua::banner_lua(&terracotta(), Lang::Th);
-    english_banner: "terracotta.banner.en.lua" = lua::banner_lua(&terracotta(), Lang::En);
+    // the welcome box, English on every Windows
+    english_banner: "terracotta.banner.en.lua" = lua::banner_lua(&terracotta());
     clink_settings: "terracotta.clink_settings" = clink::settings(true, &under_data("generated"));
     clink_settings_without_transient: "terracotta.no-transient.clink_settings" =
         clink::settings(false, &under_data("generated"));

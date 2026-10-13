@@ -9,7 +9,7 @@
 //! run no recovery, so another run never blocks them.
 pub mod args;
 
-use args::{parse, Args, Command, UsageError, USAGE, USAGE_TH};
+use args::{parse, Args, Command, Lang, UsageError, USAGE, USAGE_TH};
 use cmdstudio_core::actions::{
     pending_incomplete, prepare_apply, record_not_saved, recover_at_start, run_apply, undo,
     ActionError, Ctx, Handled, StartReport, UndoReport, UndoResult, UnreadablePoint, BUSY_TH,
@@ -19,7 +19,6 @@ use cmdstudio_core::adapters::{DirEntry, Host, System};
 use cmdstudio_core::cleanup::{cleanup, Report};
 use cmdstudio_core::doctor::{doctor, Status};
 use cmdstudio_core::exec::{op_label, CLEANUP_FIX_EN, CLEANUP_FIX_TH, COMMAND_PROCESSOR_KEY};
-use cmdstudio_core::generate::lua::Lang;
 use cmdstudio_core::model::{parse_theme, Target};
 use cmdstudio_core::plan::{
     Op, Paths, PlanError, Request, Warning, AUTORUN_NOT_TEXT, AUTORUN_NOT_TEXT_TH, NERD_FONT_FAMILY,
@@ -116,12 +115,10 @@ pub fn run_with(args: &[OsString], io: &mut Io<'_>, sys: System<'_>, defaults: &
             replace_other_clink,
             lang: _,
         } => {
-            // The welcome box speaks the language the messages do (`chosen_lang`).
             let req = Request {
                 target,
                 // Like the wizard's checkbox, which is ticked by default (spec §4.2 page 4).
                 set_wt_default_profile: true,
-                lang: say.lang,
                 replace_foreign_clink: replace_other_clink,
             };
             say.apply(sys, &ctx, &theme, &req)

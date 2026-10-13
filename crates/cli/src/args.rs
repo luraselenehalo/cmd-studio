@@ -1,9 +1,15 @@
 //! Command-line parsing (spec §5.7). Hand-written so every mistake maps to
 //! exit code 2 with the usage text, in English and in Thai (spec §5.9).
-use cmdstudio_core::generate::lua::Lang;
 use cmdstudio_core::model::Target;
 use std::ffi::OsString;
 use std::path::PathBuf;
+
+/// The language of the CLI's messages.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lang {
+    Th,
+    En,
+}
 
 pub const USAGE: &str = "\
 Usage:

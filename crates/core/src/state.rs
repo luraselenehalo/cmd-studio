@@ -63,6 +63,10 @@ impl State {
 }
 
 /// The theme that is on the machine now.
+///
+/// A state.json written by Phase 1b also holds `"lang": "th"` or `"en"`, the language its
+/// welcome box was made in. The box is English only now, so the field is no longer written,
+/// and one that is there is ignored when the file is read: unknown fields are not refused.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Applied {
@@ -70,8 +74,6 @@ pub struct Applied {
     pub theme_name: String,
     pub target: Target,
     pub set_default: bool,
-    /// `th` or `en`: the language the banner was generated in.
-    pub lang: String,
     pub launch: Launch,
     pub omp_version: String,
     pub clink_version: String,
@@ -436,7 +438,6 @@ mod tests {
             theme_name: "Aurora".into(),
             target: Target::All,
             set_default: true,
-            lang: "th".into(),
             launch,
             omp_version: "31.5.0".into(),
             clink_version: "1.9.34".into(),
@@ -1109,7 +1110,6 @@ mod tests {
                 "\"themeName\"",
                 "\"target\": \"all\"",
                 "\"setDefault\": true",
-                "\"lang\": \"th\"",
                 "\"ompVersion\"",
                 "\"clinkVersion\"",
                 "\"generated\"",
@@ -1122,7 +1122,42 @@ mod tests {
             ] {
                 assert!(text.contains(word), "{word} missing in {text}");
             }
+            // The language of the welcome box is no longer stored: the box is English only.
+            assert!(!text.contains("\"lang\""), "{text}");
             assert_eq!(serde_json::from_str::<State>(&text).unwrap(), s);
+        }
+    }
+
+    #[test]
+    fn a_state_that_phase_1b_wrote_with_the_banner_language_still_loads() {
+        // Phase 1b stored `"lang": "th"` or `"en"` in `applied`, after `setDefault`. The file is
+        // still version 1 and loads as it is, the field ignored; a save leaves it out.
+        let fs = FakeFs::new();
+        let p = Path::new(r"C:\d\state.json");
+        let s = State {
+            applied: Some(applied(Launch::Direct {
+                exe: PathBuf::from(r"C:\a.exe"),
+            })),
+            ..State::default()
+        };
+        let today = String::from_utf8(s.to_bytes().unwrap()).unwrap();
+        for lang in ["th", "en"] {
+            let phase_1b = today.replacen(
+                "\"setDefault\": true,\n",
+                &format!("\"setDefault\": true,\n    \"lang\": \"{lang}\",\n"),
+                1,
+            );
+            assert!(
+                phase_1b.contains(&format!("\n    \"lang\": \"{lang}\",\n    \"launch\"")),
+                "{phase_1b}"
+            );
+            fs.put(p, &phase_1b);
+            let loaded = State::load(&fs, p).unwrap();
+            assert_eq!(loaded, s, "{lang}");
+            assert_eq!(
+                String::from_utf8(loaded.to_bytes().unwrap()).unwrap(),
+                today
+            );
         }
     }
 

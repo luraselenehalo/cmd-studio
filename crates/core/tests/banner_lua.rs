@@ -9,7 +9,7 @@
     clippy::indexing_slicing
 )]
 
-use cmdstudio_core::generate::lua::{banner_lua, init_lua, Lang};
+use cmdstudio_core::generate::lua::{banner_lua, init_lua};
 use cmdstudio_core::model::Theme;
 use cmdstudio_core::presets;
 use mlua::{Function, Lua, Table, Value};
@@ -67,14 +67,14 @@ fn strip_ansi(s: &str) -> String {
 
 #[test]
 fn loading_the_banner_prints_nothing() -> mlua::Result<()> {
-    let lua = load(&banner_lua(&terracotta(), Lang::En), &[])?;
+    let lua = load(&banner_lua(&terracotta()), &[])?;
     assert!(printed(&lua)?.is_empty());
     Ok(())
 }
 
 #[test]
 fn banner_prints_once_per_session() -> mlua::Result<()> {
-    let lua = load(&banner_lua(&terracotta(), Lang::En), &[])?;
+    let lua = load(&banner_lua(&terracotta()), &[])?;
     inject(&lua)?;
     inject(&lua)?;
     assert_eq!(printed(&lua)?.len(), 1);
@@ -83,7 +83,7 @@ fn banner_prints_once_per_session() -> mlua::Result<()> {
 
 #[test]
 fn box_lines_line_up_and_the_last_line_is_one_space() -> mlua::Result<()> {
-    let lua = load(&banner_lua(&terracotta(), Lang::Th), &[])?;
+    let lua = load(&banner_lua(&terracotta()), &[])?;
     inject(&lua)?;
     let out = printed(&lua)?;
     let lines: Vec<&str> = out[0].split('\n').collect();
@@ -107,12 +107,12 @@ fn clears_the_cmd_header_only_when_it_is_on_top() -> mlua::Result<()> {
         "Microsoft Windows [Version 10.0.26300.9550]",
         "(c) Microsoft Corporation. All rights reserved.",
     ];
-    let lua = load(&banner_lua(&terracotta(), Lang::En), &header)?;
+    let lua = load(&banner_lua(&terracotta()), &header)?;
     inject(&lua)?;
     assert!(printed(&lua)?[0].starts_with("<NONL>"));
 
     let lua = load(
-        &banner_lua(&terracotta(), Lang::En),
+        &banner_lua(&terracotta()),
         &["C:\\>dir", "Microsoft Windows [Version 10.0]"],
     )?;
     inject(&lua)?;
@@ -126,20 +126,23 @@ fn clears_the_cmd_header_only_when_it_is_on_top() -> mlua::Result<()> {
 fn hostile_titles_stay_literal() -> mlua::Result<()> {
     let mut t = terracotta();
     t.banner.title = r#"a"]]\x {foo} {user}"#.to_string();
-    let lua = load(&banner_lua(&t, Lang::En), &[])?;
+    let lua = load(&banner_lua(&t), &[])?;
     inject(&lua)?;
     assert!(printed(&lua)?[0].contains(r#"a"]]\x {foo} ทดสอบ"#));
     Ok(())
 }
 
 #[test]
-fn thai_dates_use_the_buddhist_year() -> mlua::Result<()> {
+fn dates_use_the_gregorian_year() -> mlua::Result<()> {
+    // On every Windows: what CMD Studio writes into cmd is English, never the Buddhist era.
     let mut t = terracotta();
     t.banner.lines = vec!["{date}".to_string()];
-    let lua = load(&banner_lua(&t, Lang::Th), &[])?;
-    let year: i64 = lua.load("return os.date('*t').year + 543").eval()?;
+    let lua = load(&banner_lua(&t), &[])?;
+    let year: i64 = lua.load("return os.date('*t').year").eval()?;
     inject(&lua)?;
-    assert!(printed(&lua)?[0].contains(&year.to_string()));
+    let shown = strip_ansi(&printed(&lua)?[0]);
+    assert!(shown.contains(&format!(" {year} ")), "{shown}");
+    assert!(!shown.contains(&(year + 543).to_string()), "{shown}");
     Ok(())
 }
 
@@ -149,7 +152,7 @@ fn no_lines_and_no_tips_still_print_a_valid_box() -> mlua::Result<()> {
     let mut t = terracotta();
     t.banner.lines.clear();
     t.banner.tips = false;
-    let lua = load(&banner_lua(&t, Lang::En), &[])?;
+    let lua = load(&banner_lua(&t), &[])?;
     inject(&lua)?;
     let out = printed(&lua)?;
     assert_eq!(strip_ansi(&out[0]).lines().count(), 4);
@@ -160,15 +163,13 @@ fn no_lines_and_no_tips_still_print_a_valid_box() -> mlua::Result<()> {
 fn disabled_banner_registers_no_callback() -> mlua::Result<()> {
     let mut t = terracotta();
     t.banner.enabled = false;
-    let lua = load(&banner_lua(&t, Lang::En), &[])?;
+    let lua = load(&banner_lua(&t), &[])?;
     let cb: Value = lua.globals().get("__oninject")?;
     assert!(cb.is_nil());
     Ok(())
 }
 
 // ---- Beyond the eight above: the icon, the dates, the options, text from the theme, init.lua ----
-
-const LANGS: [Lang; 2] = [Lang::Th, Lang::En];
 
 /// What cmd prints on top of a fresh window (spec §3.6, G4).
 const CMD_HEADER: [&str; 2] = [
@@ -192,8 +193,8 @@ fn set_cwd(lua: &Lua, dir: &str) -> mlua::Result<()> {
 }
 
 /// The clock of a script. `os.date` then answers only "*t" (numbers) and "%H:%M" (digits).
-/// Any other format would give names in the language of Windows and not of the app, which is
-/// what the generator must not depend on (spec §3.6), so the stand-in raises an error.
+/// Any other format would give names in the language of Windows (Thai on Thai Windows), which
+/// is what the generator must not depend on (spec §3.6), so the stand-in raises an error.
 struct Clock {
     year: u32,
     month: u32,
@@ -228,7 +229,7 @@ impl Clock {
     }
 }
 
-/// Friday 9 October 2026 at 16:47, the date that spec §3.6 writes out in both languages.
+/// Friday 9 October 2026 at 16:47, the date that spec §3.6 writes out.
 const FRIDAY: Clock = Clock {
     year: 2026,
     month: 10,
@@ -265,11 +266,10 @@ fn with_lines(lines: &[&str]) -> Theme {
 /// was printed.
 fn run(
     theme: &Theme,
-    lang: Lang,
     screen: &[&str],
     before: impl FnOnce(&Lua) -> mlua::Result<()>,
 ) -> mlua::Result<Vec<String>> {
-    let lua = load(&banner_lua(theme, lang), screen)?;
+    let lua = load(&banner_lua(theme), screen)?;
     before(&lua)?;
     inject(&lua)?;
     printed(&lua)
@@ -281,17 +281,11 @@ fn run(
 fn the_icon_is_the_star_glyph_in_windows_terminal() -> mlua::Result<()> {
     // Windows Terminal sets WT_SESSION in every tab, and it falls back to another font
     // for U+273B when the font of the profile has none.
-    for lang in LANGS {
-        let out = run(&terracotta(), lang, &[], |lua| {
-            set_env(lua, "WT_SESSION", "0d4c3ab1-1d2e-4a60-9b6c-6a1f4d9b8e11")
-        })?;
-        let rows = plain_rows(&out[0]);
-        assert!(
-            rows[1].starts_with("\u{2502} \u{273b} "),
-            "{lang:?}: {}",
-            rows[1]
-        );
-    }
+    let out = run(&terracotta(), &[], |lua| {
+        set_env(lua, "WT_SESSION", "0d4c3ab1-1d2e-4a60-9b6c-6a1f4d9b8e11")
+    })?;
+    let rows = plain_rows(&out[0]);
+    assert!(rows[1].starts_with("\u{2502} \u{273b} "), "{}", rows[1]);
     Ok(())
 }
 
@@ -299,19 +293,17 @@ fn the_icon_is_the_star_glyph_in_windows_terminal() -> mlua::Result<()> {
 fn the_icon_falls_back_to_an_asterisk_outside_windows_terminal() -> mlua::Result<()> {
     // conhost on Windows 10 draws U+273B as an empty box (spec §3.6): without WT_SESSION the
     // glyph must not be printed at all, and the asterisk takes its cell
-    for lang in LANGS {
-        let out = run(&terracotta(), lang, &[], |_| Ok(()))?;
-        let rows = plain_rows(&out[0]);
-        assert!(rows[1].starts_with("\u{2502} * "), "{lang:?}: {}", rows[1]);
-        assert!(!out[0].contains('\u{273b}'), "{lang:?}");
-    }
+    let out = run(&terracotta(), &[], |_| Ok(()))?;
+    let rows = plain_rows(&out[0]);
+    assert!(rows[1].starts_with("\u{2502} * "), "{}", rows[1]);
+    assert!(!out[0].contains('\u{273b}'));
     Ok(())
 }
 
 #[test]
 fn the_icon_is_chosen_when_the_box_is_printed_not_when_the_script_loads() -> mlua::Result<()> {
     // `clink set` loads the script too, and the terminal is only known once cmd is running
-    let lua = load(&banner_lua(&terracotta(), Lang::En), &[])?;
+    let lua = load(&banner_lua(&terracotta()), &[])?;
     set_env(&lua, "WT_SESSION", "x")?;
     inject(&lua)?;
     assert!(printed(&lua)?[0].contains('\u{273b}'));
@@ -321,38 +313,18 @@ fn the_icon_is_chosen_when_the_box_is_printed_not_when_the_script_loads() -> mlu
 // -- dates and time (spec §3.6) --
 
 #[test]
-fn dates_are_written_in_the_app_language_as_the_spec_shows_them() -> mlua::Result<()> {
+fn dates_are_written_in_english_as_the_spec_shows_them() -> mlua::Result<()> {
     let t = with_lines(&["{date}|{time}"]);
-    for (lang, want) in [
-        (Lang::Th, "ศ. 9 ต.ค. 2569|16:47"),
-        (Lang::En, "Fri 09 Oct 2026|16:47"),
-    ] {
-        let out = run(&t, lang, &[], |lua| FRIDAY.set(lua))?;
-        let shown = plain_rows(&out[0]).join("\n");
-        assert!(shown.contains(want), "{lang:?}: {shown}");
-    }
+    let out = run(&t, &[], |lua| FRIDAY.set(lua))?;
+    let shown = plain_rows(&out[0]).join("\n");
+    assert!(shown.contains("Fri 09 Oct 2026|16:47"), "{shown}");
     Ok(())
 }
 
 #[test]
-fn every_day_and_month_has_its_name_in_both_languages() -> mlua::Result<()> {
+fn every_day_and_month_has_its_english_name() -> mlua::Result<()> {
     // The names are typed again here and not read from the generator, so a slipped entry or an
     // off-by-one in one of its tables fails.
-    const DAYS_TH: [&str; 7] = ["อา.", "จ.", "อ.", "พ.", "พฤ.", "ศ.", "ส."];
-    const MONTHS_TH: [&str; 12] = [
-        "ม.ค.",
-        "ก.พ.",
-        "มี.ค.",
-        "เม.ย.",
-        "พ.ค.",
-        "มิ.ย.",
-        "ก.ค.",
-        "ส.ค.",
-        "ก.ย.",
-        "ต.ค.",
-        "พ.ย.",
-        "ธ.ค.",
-    ];
     const DAYS_EN: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
     const MONTHS_EN: [&str; 12] = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
@@ -369,37 +341,23 @@ fn every_day_and_month_has_its_name_in_both_languages() -> mlua::Result<()> {
                 ..FRIDAY
             };
             let (w, m) = (wday as usize - 1, month as usize - 1);
-            for (lang, want) in [
-                (
-                    Lang::Th,
-                    format!("{} {} {} {}", DAYS_TH[w], day, MONTHS_TH[m], 2026 + 543),
-                ),
-                (
-                    Lang::En,
-                    format!("{} {:02} {} {}", DAYS_EN[w], day, MONTHS_EN[m], 2026),
-                ),
-            ] {
-                let out = run(&t, lang, &[], |lua| clock.set(lua))?;
-                let shown = plain_rows(&out[0]).join("\n");
-                assert!(
-                    shown.contains(&want),
-                    "{lang:?} {wday}/{month}/{day}: {shown}"
-                );
-            }
+            let want = format!("{} {:02} {} {}", DAYS_EN[w], day, MONTHS_EN[m], 2026);
+            let out = run(&t, &[], |lua| clock.set(lua))?;
+            let shown = plain_rows(&out[0]).join("\n");
+            assert!(shown.contains(&want), "{wday}/{month}/{day}: {shown}");
         }
     }
     Ok(())
 }
 
 #[test]
-fn the_buddhist_year_follows_the_calendar_year() -> mlua::Result<()> {
+fn the_year_is_the_gregorian_year_of_the_calendar() -> mlua::Result<()> {
     let t = with_lines(&["{date}"]);
-    for (year, th) in [(1999, 2542), (2026, 2569), (2099, 2642)] {
+    for year in [1999, 2026, 2099] {
         let clock = Clock { year, ..FRIDAY };
-        let out = run(&t, Lang::Th, &[], |lua| clock.set(lua))?;
-        assert!(out[0].contains(&format!("ต.ค. {th}")), "{year}");
-        let out = run(&t, Lang::En, &[], |lua| clock.set(lua))?;
+        let out = run(&t, &[], |lua| clock.set(lua))?;
         assert!(out[0].contains(&format!("Oct {year}")), "{year}");
+        assert!(!out[0].contains(&(year + 543).to_string()), "{year}");
     }
     Ok(())
 }
@@ -412,13 +370,8 @@ fn the_time_is_hours_and_minutes_with_two_digits() -> mlua::Result<()> {
         min: 5,
         ..FRIDAY
     };
-    for lang in LANGS {
-        let out = run(&t, lang, &[], |lua| clock.set(lua))?;
-        assert!(
-            plain_rows(&out[0]).join("\n").contains(" 07:05 "),
-            "{lang:?}"
-        );
-    }
+    let out = run(&t, &[], |lua| clock.set(lua))?;
+    assert!(plain_rows(&out[0]).join("\n").contains(" 07:05 "));
     Ok(())
 }
 
@@ -430,28 +383,22 @@ fn variables_are_read_when_the_box_is_printed_and_stay_literal() -> mlua::Result
     t.banner.title = "{user}".to_string();
     // a value full of characters that mean something to Lua, to string.format and to patterns
     let hostile = r#"%s%d]]"\027 (x)[a-z]%1"#;
-    for lang in LANGS {
-        let out = run(&t, lang, &[], |lua| {
-            set_env(lua, "USERNAME", hostile)?;
-            set_env(lua, "COMPUTERNAME", "WORKSTATION")?;
-            FRIDAY.set(lua)
-        })?;
-        let rows = plain_rows(&out[0]);
-        assert!(
-            rows[1].contains(&format!(" {hostile} ")),
-            "{lang:?}: {}",
-            rows[1]
-        );
-        let want = format!("{hostile}|WORKSTATION|C:\\Users\\ทดสอบ|16:47");
-        assert!(rows[3].contains(&want), "{lang:?}: {}", rows[3]);
-    }
+    let out = run(&t, &[], |lua| {
+        set_env(lua, "USERNAME", hostile)?;
+        set_env(lua, "COMPUTERNAME", "WORKSTATION")?;
+        FRIDAY.set(lua)
+    })?;
+    let rows = plain_rows(&out[0]);
+    assert!(rows[1].contains(&format!(" {hostile} ")), "{}", rows[1]);
+    let want = format!("{hostile}|WORKSTATION|C:\\Users\\ทดสอบ|16:47");
+    assert!(rows[3].contains(&want), "{}", rows[3]);
     Ok(())
 }
 
 #[test]
 fn a_missing_variable_is_an_empty_text_and_not_an_error() -> mlua::Result<()> {
     let t = with_lines(&["[{user}][{host}]"]);
-    let out = run(&t, Lang::En, &[], |lua| {
+    let out = run(&t, &[], |lua| {
         // both variables unset: the stand-in answers nil for a key it does not know
         lua.load("os.getenv = function() return nil end").exec()
     })?;
@@ -467,26 +414,24 @@ fn user_host_and_folder_lose_control_and_direction_characters() -> mlua::Result<
     // may reach the screen.
     let mut t = with_lines(&["{user}|{host}|{cwd}"]);
     t.banner.title = "{user}".to_string();
-    for lang in LANGS {
-        let out = run(&t, lang, &[], |lua| {
-            set_env(lua, "USERNAME", "ad\u{202e}min\u{85}x\u{1b}[31mred")?;
-            set_env(lua, "COMPUTERNAME", "PC\u{2066}-\u{1b}01\u{7}")?;
-            set_cwd(lua, "C:\\work\u{202e}fdp.exe\\\u{85}proj\u{1b}")
-        })?;
-        let shown = without_our_colors(&out[0]);
-        for bad in ['\u{1b}', '\u{7}', '\u{85}', '\u{202e}', '\u{2066}'] {
-            assert!(!shown.contains(bad), "{lang:?}: {bad:?} in {shown:?}");
-        }
-        // what is left is the text around the dropped characters; the `[31m` that followed an
-        // escape character is plain text without it
-        let rows: Vec<&str> = shown.split('\n').collect();
-        assert!(rows[1].contains("adminx[31mred"), "{lang:?}: {}", rows[1]);
-        assert!(
-            rows[3].contains("adminx[31mred|PC-01|C:\\workfdp.exe\\proj"),
-            "{lang:?}: {}",
-            rows[3]
-        );
+    let out = run(&t, &[], |lua| {
+        set_env(lua, "USERNAME", "ad\u{202e}min\u{85}x\u{1b}[31mred")?;
+        set_env(lua, "COMPUTERNAME", "PC\u{2066}-\u{1b}01\u{7}")?;
+        set_cwd(lua, "C:\\work\u{202e}fdp.exe\\\u{85}proj\u{1b}")
+    })?;
+    let shown = without_our_colors(&out[0]);
+    for bad in ['\u{1b}', '\u{7}', '\u{85}', '\u{202e}', '\u{2066}'] {
+        assert!(!shown.contains(bad), "{bad:?} in {shown:?}");
     }
+    // what is left is the text around the dropped characters; the `[31m` that followed an
+    // escape character is plain text without it
+    let rows: Vec<&str> = shown.split('\n').collect();
+    assert!(rows[1].contains("adminx[31mred"), "{}", rows[1]);
+    assert!(
+        rows[3].contains("adminx[31mred|PC-01|C:\\workfdp.exe\\proj"),
+        "{}",
+        rows[3]
+    );
     Ok(())
 }
 
@@ -514,7 +459,7 @@ fn exactly_the_control_and_direction_characters_are_dropped() -> mlua::Result<()
     for (chars, stays) in [(&dropped[..], false), (&kept[..], true)] {
         for &c in chars {
             let user = format!("a{c}b");
-            let out = run(&t, Lang::En, &[], |lua| set_env(lua, "USERNAME", &user))?;
+            let out = run(&t, &[], |lua| set_env(lua, "USERNAME", &user))?;
             let shown = without_our_colors(&out[0]);
             let rows: Vec<&str> = shown.split('\n').collect();
             // top, title, bottom and the closing space: a line break that stayed would add a row
@@ -549,17 +494,15 @@ fn hostile_lines_stay_literal_too() -> mlua::Result<()> {
         "ไทย \u{b7} \u{2713} ผู้ใช้",
     ];
     for lines in [&hostile[..], &thai_and_emoji[..]] {
-        for lang in LANGS {
-            let out = run(&with_lines(lines), lang, &[], |_| Ok(()))?;
-            // `\027` and `\n` stay the characters they are written with: had the first become
-            // an escape character, strip_ansi would take it out together with `[0m`
-            let shown = plain_rows(&out[0]).join("\n");
-            for line in lines {
-                // the variables are the only part that changes: the stand-in user is ทดสอบ and
-                // the stand-in host is PC-01
-                let want = line.replace("{user}", "ทดสอบ").replace("{host}", "PC-01");
-                assert!(shown.contains(&want), "{lang:?}: {want:?} in {shown}");
-            }
+        let out = run(&with_lines(lines), &[], |_| Ok(()))?;
+        // `\027` and `\n` stay the characters they are written with: had the first become
+        // an escape character, strip_ansi would take it out together with `[0m`
+        let shown = plain_rows(&out[0]).join("\n");
+        for line in lines {
+            // the variables are the only part that changes: the stand-in user is ทดสอบ and
+            // the stand-in host is PC-01
+            let want = line.replace("{user}", "ทดสอบ").replace("{host}", "PC-01");
+            assert!(shown.contains(&want), "{want:?} in {shown}");
         }
     }
     Ok(())
@@ -572,29 +515,24 @@ fn control_characters_in_a_theme_never_reach_the_terminal() -> mlua::Result<()> 
     // place that can keep an escape sequence out of the terminal.
     let mut t = with_lines(&["a\u{1b}[31mb\r\nc\u{202e}d\u{7}"]);
     t.banner.title = "hi\u{1b}]0;evil\u{7}\n{user}".to_string();
-    for lang in LANGS {
-        let out = run(&t, lang, &[], |_| Ok(()))?;
-        // strip_ansi drops every escape character it meets, together with what follows it up
-        // to the next `m`, so the rows below cannot show one. In the raw output, with only the
-        // generator's own colors taken off, no escape character may be left.
-        let raw = without_our_colors(&out[0]);
-        assert!(!raw.contains('\u{1b}'), "{lang:?}: an escape in {raw:?}");
-        let rows = plain_rows(&out[0]);
-        for row in &rows {
-            for bad in ['\u{1b}', '\u{7}', '\r', '\u{202e}'] {
-                assert!(!row.contains(bad), "{lang:?}: {bad:?} in {row:?}");
-            }
+    let out = run(&t, &[], |_| Ok(()))?;
+    // strip_ansi drops every escape character it meets, together with what follows it up
+    // to the next `m`, so the rows below cannot show one. In the raw output, with only the
+    // generator's own colors taken off, no escape character may be left.
+    let raw = without_our_colors(&out[0]);
+    assert!(!raw.contains('\u{1b}'), "an escape in {raw:?}");
+    let rows = plain_rows(&out[0]);
+    for row in &rows {
+        for bad in ['\u{1b}', '\u{7}', '\r', '\u{202e}'] {
+            assert!(!row.contains(bad), "{bad:?} in {row:?}");
         }
-        // top, title, blank, the one line, bottom, tips, the closing space: the newlines in
-        // the texts did not add rows
-        assert_eq!(rows.len(), 7, "{lang:?}: {rows:?}");
-        assert!(rows[1].contains("hi0;evil"), "{lang:?}: {}", rows[1]);
-        assert!(
-            rows[1].contains("ทดสอบ"),
-            "{lang:?}: the variable still works"
-        );
-        assert!(rows[3].contains("abcd"), "{lang:?}: {}", rows[3]);
     }
+    // top, title, blank, the one line, bottom, tips, the closing space: the newlines in
+    // the texts did not add rows
+    assert_eq!(rows.len(), 7, "{rows:?}");
+    assert!(rows[1].contains("hi0;evil"), "{}", rows[1]);
+    assert!(rows[1].contains("ทดสอบ"), "the variable still works");
+    assert!(rows[3].contains("abcd"), "{}", rows[3]);
     Ok(())
 }
 
@@ -602,7 +540,7 @@ fn control_characters_in_a_theme_never_reach_the_terminal() -> mlua::Result<()> 
 
 #[test]
 fn the_frame_is_the_accent_and_the_extra_rows_are_the_muted_color() -> mlua::Result<()> {
-    let out = run(&terracotta(), Lang::En, &[], |_| Ok(()))?;
+    let out = run(&terracotta(), &[], |_| Ok(()))?;
     let rows: Vec<&str> = out[0].split('\n').collect();
     assert!(rows[0].starts_with(&format!("{ACCENT_SGR}\u{256d}")));
     assert!(rows[1].starts_with(&format!("{ACCENT_SGR}\u{2502}")));
@@ -621,7 +559,7 @@ fn the_frame_is_the_accent_and_the_extra_rows_are_the_muted_color() -> mlua::Res
     let mut t = terracotta();
     t.colors.accent = "#010203".parse().unwrap();
     t.colors.muted = "#0a0b0c".parse().unwrap();
-    let out = run(&t, Lang::En, &[], |_| Ok(()))?;
+    let out = run(&t, &[], |_| Ok(()))?;
     let rows: Vec<&str> = out[0].split('\n').collect();
     assert!(
         rows[0].starts_with("\u{1b}[38;2;1;2;3m\u{256d}"),
@@ -638,23 +576,15 @@ fn the_frame_is_the_accent_and_the_extra_rows_are_the_muted_color() -> mlua::Res
 }
 
 #[test]
-fn the_tips_line_is_in_the_app_language() -> mlua::Result<()> {
-    for (lang, want) in [
-        (
-            Lang::Th,
-            " ทิป: help ดูคำสั่ง \u{b7} cls ล้างจอ \u{b7} \u{2191} ดูประวัติ",
-        ),
-        (
-            Lang::En,
-            " Tips: help for commands \u{b7} cls to clear \u{b7} \u{2191} for history",
-        ),
-    ] {
-        let out = run(&terracotta(), lang, &[], |_| Ok(()))?;
-        let rows = plain_rows(&out[0]);
-        // the box, then the tips, then the one space that closes the print
-        assert_eq!(rows[rows.len() - 2], want, "{lang:?}");
-        assert_eq!(rows[rows.len() - 1], " ", "{lang:?}");
-    }
+fn the_tips_line_is_in_english() -> mlua::Result<()> {
+    let out = run(&terracotta(), &[], |_| Ok(()))?;
+    let rows = plain_rows(&out[0]);
+    // the box, then the tips, then the one space that closes the print
+    assert_eq!(
+        rows[rows.len() - 2],
+        " Tips: help for commands \u{b7} cls to clear \u{b7} \u{2191} for history"
+    );
+    assert_eq!(rows[rows.len() - 1], " ");
     Ok(())
 }
 
@@ -662,7 +592,7 @@ fn the_tips_line_is_in_the_app_language() -> mlua::Result<()> {
 
 #[test]
 fn the_screen_is_cleared_with_one_sequence_before_the_box() -> mlua::Result<()> {
-    let out = run(&terracotta(), Lang::En, &CMD_HEADER, |_| Ok(()))?;
+    let out = run(&terracotta(), &CMD_HEADER, |_| Ok(()))?;
     assert_eq!(out.len(), 2);
     assert_eq!(out[0], "<NONL>\u{1b}[2J\u{1b}[3J\u{1b}[H");
     assert!(out[1].contains("Welcome back"), "{}", out[1]);
@@ -697,7 +627,7 @@ fn the_screen_is_never_cleared_unless_both_lines_are_the_cmd_header() -> mlua::R
         ),
     ];
     for (why, theme, screen) in screens {
-        let out = run(&theme, Lang::En, &screen, |_| Ok(()))?;
+        let out = run(&theme, &screen, |_| Ok(()))?;
         assert_eq!(out.len(), 1, "{why}: {out:?}");
         assert!(!out.iter().any(|s| s.contains("[2J")), "{why}");
     }
@@ -706,26 +636,24 @@ fn the_screen_is_never_cleared_unless_both_lines_are_the_cmd_header() -> mlua::R
 
 // -- every combination of the switches --
 
-/// A theme for every language and every combination of the switches that change the script.
-fn variants() -> Vec<(Theme, Lang, String)> {
+/// A theme for every combination of the switches that change the script.
+fn variants() -> Vec<(Theme, String)> {
     let mut all = Vec::new();
-    for lang in LANGS {
-        for enabled in [true, false] {
-            for clear_logo in [true, false] {
-                for tips in [true, false] {
-                    for count in 0..=4 {
-                        let mut t = terracotta();
-                        t.banner.enabled = enabled;
-                        t.banner.clear_logo = clear_logo;
-                        t.banner.tips = tips;
-                        t.banner.lines = (0..count)
-                            .map(|i| format!("line {i} {{user}} {{date}} {{foo}}"))
-                            .collect();
-                        let why = format!(
-                            "{lang:?} enabled={enabled} clearLogo={clear_logo} tips={tips} lines={count}"
-                        );
-                        all.push((t, lang, why));
-                    }
+    for enabled in [true, false] {
+        for clear_logo in [true, false] {
+            for tips in [true, false] {
+                for count in 0..=4 {
+                    let mut t = terracotta();
+                    t.banner.enabled = enabled;
+                    t.banner.clear_logo = clear_logo;
+                    t.banner.tips = tips;
+                    t.banner.lines = (0..count)
+                        .map(|i| format!("line {i} {{user}} {{date}} {{foo}}"))
+                        .collect();
+                    let why = format!(
+                        "enabled={enabled} clearLogo={clear_logo} tips={tips} lines={count}"
+                    );
+                    all.push((t, why));
                 }
             }
         }
@@ -737,8 +665,8 @@ fn variants() -> Vec<(Theme, Lang, String)> {
 fn loading_does_nothing_whatever_the_theme() -> mlua::Result<()> {
     // spec §2.2 #4: `clink set` loads every script, so loading may neither print nor set a
     // variable; the only thing it may do is register the callback, and only when enabled
-    for (theme, lang, why) in variants() {
-        let lua = load(&banner_lua(&theme, lang), &CMD_HEADER)?;
+    for (theme, why) in variants() {
+        let lua = load(&banner_lua(&theme), &CMD_HEADER)?;
         assert!(printed(&lua)?.is_empty(), "{why}");
         let env: Table = lua.globals().get("__env")?;
         assert_eq!(
@@ -754,9 +682,9 @@ fn loading_does_nothing_whatever_the_theme() -> mlua::Result<()> {
 
 #[test]
 fn every_theme_prints_one_valid_box_once_per_session() -> mlua::Result<()> {
-    for (theme, lang, why) in variants().into_iter().filter(|(t, ..)| t.banner.enabled) {
+    for (theme, why) in variants().into_iter().filter(|(t, _)| t.banner.enabled) {
         let b = &theme.banner;
-        let lua = load(&banner_lua(&theme, lang), &CMD_HEADER)?;
+        let lua = load(&banner_lua(&theme), &CMD_HEADER)?;
         inject(&lua)?;
         inject(&lua)?;
         let out = printed(&lua)?;
