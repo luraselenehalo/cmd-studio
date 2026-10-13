@@ -1,6 +1,13 @@
 //! Theme → Oh My Posh config, format version 4 (spec §3.5). Built only from
 //! whitelisted segment types; `text` carries only our own frame glyphs.
+//!
+//! What each segment looks like in each layout (`drawn`), which segments the left side
+//! holds (`left_parts`), the palette (`Swatch`) and the frame characters are shared with
+//! the preview emulator (`crate::preview`), which draws the same prompt without running Oh
+//! My Posh. The parity test (`tests/parity.rs`) holds the two together.
+use crate::color::Rgb;
 use crate::model::{Layout, Segment, Theme};
+use crate::palette::Colors;
 use serde_json::{json, Map, Value};
 
 /// Segment types this generator may emit (doctrine guard, spec §3.7 #2).
@@ -19,24 +26,214 @@ const TIME_FORMAT: &str = "15:04";
 /// text that uses it closes the `if` with `{{ end }}`.
 const IF_CHANGED: &str = "{{ if or .Working.Changed .Staging.Changed }}";
 
+/// The top left corner of the box and the line that starts it.
+pub(crate) const BOX_TOP: &str = "\u{256d}\u{2500} ";
+/// What closes the box's top line when nothing comes before it but the filler.
+pub(crate) const BOX_CLOSE: &str = "\u{2500}\u{256e}";
+/// What closes the box's top line after the time: a space sets the corner off from it.
+pub(crate) const BOX_CLOSE_AFTER_TIME: &str = " \u{2500}\u{256e}";
+/// The character the box's top line is filled with, up to the right side.
+pub(crate) const BOX_FILLER: &str = "\u{2500}";
+/// The start of the box's second line, the line the command is typed on.
+pub(crate) const BOX_SIDE: &str = "\u{2502} ";
+/// The prompt character of the box, after [`BOX_SIDE`].
+pub(crate) const BOX_PROMPT: &str = ">";
+/// The right prompt of the box: its right side, drawn by Clink at the right edge.
+pub(crate) const BOX_RIGHT: &str = "\u{2502}";
+/// The prompt character of the line layout.
+pub(crate) const LINE_PROMPT: &str = "\u{276f}";
+/// The prompt character of the powerline layout; the space sets it off from the last arrow.
+pub(crate) const POWERLINE_PROMPT: &str = " \u{276f}";
+/// The arrow between powerline segments (a Nerd Font glyph).
+pub(crate) const POWERLINE_SYMBOL: &str = "\u{e0b0}";
+/// What an earlier prompt shrinks to when the theme turns the transient prompt on.
+pub(crate) const TRANSIENT_PROMPT: &str = "> ";
+/// Git's separator from the path in the box layout, in the muted color.
+pub(crate) const GIT_SEPARATOR: &str = "\u{b7} ";
+/// After the branch: something changed.
+pub(crate) const GIT_DIRTY_MARK: &str = " *";
+/// After the branch: nothing changed.
+pub(crate) const GIT_CLEAN_MARK: &str = " \u{2713}";
+/// Before the exit code of the status segment.
+pub(crate) const STATUS_MARK: &str = "\u{2717} ";
+/// The duration segment shows from this many milliseconds on (spec §3.5).
+pub(crate) const DURATION_THRESHOLD_MS: u64 = 2000;
+
+/// A color of the config's palette, which the segments name as `p:<name>`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Swatch {
+    Bg,
+    Fg,
+    Accent,
+    Muted,
+    Frame,
+    Red,
+    Ok,
+    Dirty,
+    Blue,
+}
+
+impl Swatch {
+    const ALL: [Swatch; 9] = [
+        Swatch::Bg,
+        Swatch::Fg,
+        Swatch::Accent,
+        Swatch::Muted,
+        Swatch::Frame,
+        Swatch::Red,
+        Swatch::Ok,
+        Swatch::Dirty,
+        Swatch::Blue,
+    ];
+
+    /// The name in the palette.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Swatch::Bg => "bg",
+            Swatch::Fg => "fg",
+            Swatch::Accent => "accent",
+            Swatch::Muted => "muted",
+            Swatch::Frame => "frame",
+            Swatch::Red => "red",
+            Swatch::Ok => "ok",
+            Swatch::Dirty => "dirty",
+            Swatch::Blue => "blue",
+        }
+    }
+
+    /// The theme color the palette gives this name.
+    pub(crate) fn color(self, colors: &Colors) -> Rgb {
+        // ansi 1 to 4 are red, green, yellow and blue; destructuring cannot index out of range
+        let [_, red, green, yellow, blue, ..] = colors.ansi;
+        match self {
+            Swatch::Bg => colors.background,
+            Swatch::Fg => colors.foreground,
+            Swatch::Accent => colors.accent,
+            Swatch::Muted => colors.muted,
+            Swatch::Frame => colors.frame,
+            Swatch::Red => red,
+            Swatch::Ok => green,
+            Swatch::Dirty => yellow,
+            Swatch::Blue => blue,
+        }
+    }
+
+    /// How a segment names the color: `p:accent`.
+    fn reference(self) -> String {
+        format!("p:{}", self.name())
+    }
+}
+
+/// One Oh My Posh segment of the left side, or the box's right side: one per theme segment,
+/// except that `user` and `host` share one `Session`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Part {
+    Path,
+    Git,
+    Time,
+    Session { user: bool, host: bool },
+    Status,
+    Duration,
+}
+
+/// How a segment is colored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Look {
+    /// Text in `fg`, with nothing behind it.
+    Plain { fg: Swatch },
+    /// Text in `fg` on a block of `bg`, joined to the next segment by an arrow.
+    Powerline { bg: Swatch, fg: Swatch },
+}
+
+/// A segment as a layout draws it: its colors, and the text on either side of its data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Drawn {
+    pub(crate) look: Look,
+    /// Text in a color of its own at the very start (`<p:muted>· </>` before git in the box).
+    pub(crate) lead: Option<(Swatch, &'static str)>,
+    pub(crate) before: &'static str,
+    pub(crate) after: &'static str,
+}
+
+/// How `layout` draws `part`. Powerline puts a space on each side of the data, inside the
+/// block of color. Box and line put one space after it, except the time on the box's right
+/// side, which has its space before.
+pub(crate) fn drawn(layout: Layout, part: Part) -> Drawn {
+    match layout {
+        Layout::Powerline => {
+            let (bg, fg) = match part {
+                Part::Path | Part::Time => (Swatch::Frame, Swatch::Fg),
+                Part::Git => (Swatch::Ok, Swatch::Bg),
+                Part::Session { .. } => (Swatch::Accent, Swatch::Bg),
+                Part::Status => (Swatch::Red, Swatch::Bg),
+                Part::Duration => (Swatch::Dirty, Swatch::Bg),
+            };
+            Drawn {
+                look: Look::Powerline { bg, fg },
+                lead: None,
+                before: " ",
+                after: " ",
+            }
+        }
+        Layout::Box | Layout::Line => {
+            let in_box = layout == Layout::Box;
+            let fg = match part {
+                Part::Path if in_box => Swatch::Muted,
+                Part::Path => Swatch::Blue,
+                Part::Git => Swatch::Ok,
+                Part::Time => Swatch::Muted,
+                Part::Session { .. } => Swatch::Fg,
+                Part::Status => Swatch::Red,
+                Part::Duration => Swatch::Dirty,
+            };
+            let lead = (in_box && part == Part::Git).then_some((Swatch::Muted, GIT_SEPARATOR));
+            let (before, after) = if in_box && part == Part::Time {
+                (" ", "")
+            } else {
+                ("", " ")
+            };
+            Drawn {
+                look: Look::Plain { fg },
+                lead,
+                before,
+                after,
+            }
+        }
+    }
+}
+
+/// The character the user types after, in the accent color: on the box's second line, or at
+/// the end of the one line of the other layouts.
+pub(crate) fn prompt_char(layout: Layout) -> &'static str {
+    match layout {
+        Layout::Box => BOX_PROMPT,
+        Layout::Line => LINE_PROMPT,
+        Layout::Powerline => POWERLINE_PROMPT,
+    }
+}
+
 /// The Oh My Posh config for `theme`, format version 4. It reads the theme's colors, layout
 /// and segment list and nothing else, so no text from the theme file ends up in it. The
 /// transient prompt is always described; whether Clink uses it is Clink's own
 /// `prompt.transient` setting.
 pub fn config(theme: &Theme) -> Value {
-    let blocks = match theme.prompt.layout {
+    let layout = theme.prompt.layout;
+    let blocks = match layout {
         Layout::Box => box_blocks(theme),
-        Layout::Line => single_line(theme, "\u{276f}"),
-        Layout::Powerline => single_line(theme, " \u{276f}"),
+        Layout::Line | Layout::Powerline => single_line(theme),
     };
     json!({
         "$schema": "https://raw.githubusercontent.com/JanDeDobbeleer/oh-my-posh/main/themes/schema.json",
         "version": 4,
         "final_space": true,
         "console_title_template": "{{ .Folder }}",
-        "palette": palette(theme),
+        "palette": palette(&theme.colors),
         "blocks": blocks,
-        "transient_prompt": { "foreground": "p:accent", "background": "transparent", "template": "> " }
+        "transient_prompt": {
+            "foreground": Swatch::Accent.reference(),
+            "background": "transparent",
+            "template": TRANSIENT_PROMPT
+        }
     })
 }
 
@@ -47,21 +244,17 @@ pub fn config_text(theme: &Theme) -> Result<String, serde_json::Error> {
     Ok(text)
 }
 
-fn palette(theme: &Theme) -> Value {
-    let c = &theme.colors;
-    // ansi 1 to 4 are red, green, yellow and blue; destructuring cannot index out of range
-    let [_, red, green, yellow, blue, ..] = c.ansi;
-    json!({
-        "bg": c.background.to_string(),
-        "fg": c.foreground.to_string(),
-        "accent": c.accent.to_string(),
-        "muted": c.muted.to_string(),
-        "frame": c.frame.to_string(),
-        "red": red.to_string(),
-        "ok": green.to_string(),
-        "dirty": yellow.to_string(),
-        "blue": blue.to_string()
-    })
+fn palette(colors: &Colors) -> Value {
+    let names: Map<String, Value> = Swatch::ALL
+        .iter()
+        .map(|swatch| {
+            (
+                swatch.name().to_string(),
+                Value::String(swatch.color(colors).to_string()),
+            )
+        })
+        .collect();
+    Value::Object(names)
 }
 
 /// One Oh My Posh segment under construction. It holds a JSON object, so setting a key
@@ -75,25 +268,18 @@ impl Seg {
         self
     }
 
-    /// Text in `fg`, with nothing behind it.
-    fn plain(kind: &str, fg: &str, template: &str) -> Self {
-        Seg::default()
-            .set("type", kind)
-            .set("style", "plain")
-            .set("foreground", fg)
-            .set("template", template)
-    }
-
-    /// Text in `fg` on a block of `bg`, joined to the next segment by an arrow (a Nerd Font
-    /// glyph).
-    fn powerline(kind: &str, bg: &str, fg: &str, template: &str) -> Self {
-        Seg::default()
-            .set("type", kind)
-            .set("style", "powerline")
-            .set("powerline_symbol", "\u{e0b0}")
-            .set("background", bg)
-            .set("foreground", fg)
-            .set("template", template)
+    /// A segment of `kind` with `look` and `template`.
+    fn new(kind: &str, look: Look, template: &str) -> Self {
+        let seg = Seg::default().set("type", kind).set("template", template);
+        match look {
+            Look::Plain { fg } => seg.set("style", "plain").set("foreground", fg.reference()),
+            // the arrow to the next segment is a Nerd Font glyph
+            Look::Powerline { bg, fg } => seg
+                .set("style", "powerline")
+                .set("powerline_symbol", POWERLINE_SYMBOL)
+                .set("background", bg.reference())
+                .set("foreground", fg.reference()),
+        }
     }
 }
 
@@ -103,8 +289,9 @@ impl From<Seg> for Value {
     }
 }
 
-fn text(fg: &str, template: &str) -> Value {
-    Seg::plain("text", fg, template).into()
+/// A `text` segment: one of our own frame characters, in `swatch`.
+fn text(swatch: Swatch, template: &str) -> Value {
+    Seg::new("text", Look::Plain { fg: swatch }, template).into()
 }
 
 /// Git's icons are Nerd Font glyphs unless they are replaced; only powerline keeps them.
@@ -119,147 +306,149 @@ fn git_options(layout: Layout) -> Value {
     }
 }
 
-fn path(layout: Layout) -> Value {
-    let seg = match layout {
-        Layout::Box => Seg::plain("path", "p:muted", "{{ .Path }} "),
-        Layout::Line => Seg::plain("path", "p:blue", "{{ .Path }} "),
-        Layout::Powerline => Seg::powerline("path", "p:frame", "p:fg", " {{ .Path }} "),
-    };
-    seg.set("options", json!({ "style": "full", "home_icon": "~" }))
-        .into()
+/// The Oh My Posh type of a part, and the Go template of its data.
+fn kind_and_body(part: Part) -> (&'static str, String) {
+    match part {
+        Part::Path => ("path", "{{ .Path }}".to_string()),
+        // the branch, then `*` when something changed or `✓` when nothing did (spec §3.5)
+        Part::Git => (
+            "git",
+            [
+                "{{ .HEAD }}",
+                IF_CHANGED,
+                GIT_DIRTY_MARK,
+                "{{ else }}",
+                GIT_CLEAN_MARK,
+                "{{ end }}",
+            ]
+            .concat(),
+        ),
+        Part::Time => ("time", "{{ .CurrentDate | date .Format }}".to_string()),
+        // only built when the theme lists `user` or `host`, so `(false, _)` is host alone
+        Part::Session { user, host } => (
+            "session",
+            match (user, host) {
+                (true, true) => "{{ .UserName }}@{{ .HostName }}",
+                (true, false) => "{{ .UserName }}",
+                (false, _) => "{{ .HostName }}",
+            }
+            .to_string(),
+        ),
+        Part::Status => ("status", format!("{STATUS_MARK}{{{{ .Code }}}}")),
+        Part::Duration => ("executiontime", "{{ .FormattedMs }}".to_string()),
+    }
 }
 
-fn git(layout: Layout) -> Value {
-    // The branch, then `*` when something changed or `✓` when nothing did (spec §3.5).
-    let state = ["{{ .HEAD }}", IF_CHANGED, " *{{ else }} \u{2713}{{ end }}"].concat();
-    // Oh My Posh uses the first color template that gives a non-empty result, and the plain
-    // color when none does. So the segment is `p:ok` while nothing has changed, and this
-    // template makes it `p:dirty` once something has.
-    let dirty_color = [IF_CHANGED, "p:dirty{{ end }}"].concat();
-    let seg = match layout {
-        Layout::Box => Seg::plain("git", "p:ok", &format!("<p:muted>\u{b7} </>{state} "))
-            .set("foreground_templates", json!([dirty_color])),
-        Layout::Line => Seg::plain("git", "p:ok", &format!("{state} "))
-            .set("foreground_templates", json!([dirty_color])),
-        // Here the block behind the text changes color. The text stays `p:bg`, which reads
-        // on `p:ok` and on `p:dirty` alike.
-        Layout::Powerline => Seg::powerline("git", "p:ok", "p:bg", &format!(" {state} "))
-            .set("background_templates", json!([dirty_color])),
-    };
-    seg.set("options", git_options(layout)).into()
-}
-
-fn time(layout: Layout) -> Value {
-    let seg = match layout {
-        Layout::Box => Seg::plain("time", "p:muted", " {{ .CurrentDate | date .Format }}"),
-        Layout::Line => Seg::plain("time", "p:muted", "{{ .CurrentDate | date .Format }} "),
-        Layout::Powerline => Seg::powerline(
-            "time",
-            "p:frame",
-            "p:fg",
-            " {{ .CurrentDate | date .Format }} ",
+/// The segment of `part` in `layout`, with the options it needs.
+fn segment(layout: Layout, part: Part) -> Value {
+    let drawn = drawn(layout, part);
+    let (kind, body) = kind_and_body(part);
+    let lead = drawn
+        .lead
+        .map(|(swatch, text)| format!("<{}>{text}</>", swatch.reference()))
+        .unwrap_or_default();
+    let template = [lead.as_str(), drawn.before, body.as_str(), drawn.after].concat();
+    let seg = Seg::new(kind, drawn.look, &template);
+    let seg = match part {
+        Part::Path => seg.set("options", json!({ "style": "full", "home_icon": "~" })),
+        Part::Git => {
+            // Oh My Posh uses the first color template that gives a non-empty result, and the
+            // plain color when none does. So git is `p:ok` while nothing has changed, and this
+            // template makes it `p:dirty` once something has: the text in box and line, the
+            // block behind the text in powerline (whose text stays `p:bg`, readable on both).
+            let when_changed = [IF_CHANGED, "p:dirty{{ end }}"].concat();
+            let dirty = json!([when_changed]);
+            let seg = match drawn.look {
+                Look::Plain { .. } => seg.set("foreground_templates", dirty),
+                Look::Powerline { .. } => seg.set("background_templates", dirty),
+            };
+            seg.set("options", git_options(layout))
+        }
+        Part::Time => seg.set("options", json!({ "time_format": TIME_FORMAT })),
+        Part::Session { .. } | Part::Status => seg,
+        Part::Duration => seg.set(
+            "options",
+            json!({ "threshold": DURATION_THRESHOLD_MS, "style": "austin" }),
         ),
     };
-    seg.set("options", json!({ "time_format": TIME_FORMAT }))
-        .into()
+    seg.into()
 }
 
-fn session(layout: Layout, user: bool, host: bool) -> Value {
-    // Only called when the theme lists `user` or `host`, so `(false, _)` is host alone.
-    let body = match (user, host) {
-        (true, true) => "{{ .UserName }}@{{ .HostName }}",
-        (true, false) => "{{ .UserName }}",
-        (false, _) => "{{ .HostName }}",
-    };
-    match layout {
-        Layout::Powerline => Seg::powerline("session", "p:accent", "p:bg", &format!(" {body} ")),
-        Layout::Box | Layout::Line => Seg::plain("session", "p:fg", &format!("{body} ")),
-    }
-    .into()
-}
-
-fn status(layout: Layout) -> Value {
-    match layout {
-        Layout::Powerline => Seg::powerline("status", "p:red", "p:bg", " \u{2717} {{ .Code }} "),
-        Layout::Box | Layout::Line => Seg::plain("status", "p:red", "\u{2717} {{ .Code }} "),
-    }
-    .into()
-}
-
-fn duration(layout: Layout) -> Value {
-    let seg = match layout {
-        Layout::Powerline => {
-            Seg::powerline("executiontime", "p:dirty", "p:bg", " {{ .FormattedMs }} ")
-        }
-        Layout::Box | Layout::Line => Seg::plain("executiontime", "p:dirty", "{{ .FormattedMs }} "),
-    };
-    seg.set("options", json!({ "threshold": 2000, "style": "austin" }))
-        .into()
-}
-
-/// The segments drawn on the left side, one per theme segment, in theme order. `user` and
-/// `host` share one `session` segment, placed where the first of them is listed. Time is not
-/// drawn in list order: the box layout puts it on the right side, and the other two put it
-/// last on the left, whatever its place in the list (spec §3.5).
-fn left_segments(theme: &Theme) -> Vec<Value> {
-    let layout = theme.prompt.layout;
+/// The parts drawn on the left side, one per theme segment, in theme order. `user` and `host`
+/// share one `session` segment, placed where the first of them is listed. Time is not drawn in
+/// list order: the box layout puts it on the right side, and the other two put it last on the
+/// left, whatever its place in the list (spec §3.5).
+pub(crate) fn left_parts(theme: &Theme) -> Vec<Part> {
     let list = &theme.prompt.segments;
     let user = list.contains(&Segment::User);
     let host = list.contains(&Segment::Host);
     let mut session_done = false;
     let mut out = Vec::new();
     for seg in list {
-        let v = match seg {
+        let part = match seg {
             Segment::Time => continue,
             Segment::User | Segment::Host => {
                 if session_done {
                     continue;
                 }
                 session_done = true;
-                session(layout, user, host)
+                Part::Session { user, host }
             }
-            Segment::Path => path(layout),
-            Segment::Git => git(layout),
-            Segment::Status => status(layout),
-            Segment::Duration => duration(layout),
+            Segment::Path => Part::Path,
+            Segment::Git => Part::Git,
+            Segment::Status => Part::Status,
+            Segment::Duration => Part::Duration,
         };
-        out.push(v);
+        out.push(part);
     }
     if has_time(theme) {
-        match layout {
+        match theme.prompt.layout {
             Layout::Box => {} // drawn on the right side, by `box_blocks`
-            Layout::Line | Layout::Powerline => out.push(time(layout)),
+            Layout::Line | Layout::Powerline => out.push(Part::Time),
         }
     }
     out
 }
 
-fn has_time(theme: &Theme) -> bool {
+/// Whether the theme lists the time.
+pub(crate) fn has_time(theme: &Theme) -> bool {
     theme.prompt.segments.contains(&Segment::Time)
 }
 
+fn left_segments(theme: &Theme) -> Vec<Value> {
+    let layout = theme.prompt.layout;
+    left_parts(theme)
+        .into_iter()
+        .map(|part| segment(layout, part))
+        .collect()
+}
+
 fn box_blocks(theme: &Theme) -> Vec<Value> {
-    let mut left = vec![text("p:frame", "\u{256d}\u{2500} ")];
+    let mut left = vec![text(Swatch::Frame, BOX_TOP)];
     left.extend(left_segments(theme));
     // With time, a space sets the closing corner off from it. Without time only the filler
     // comes before the corner, and a space there would show as a gap.
     let right = if has_time(theme) {
-        vec![time(Layout::Box), text("p:frame", " \u{2500}\u{256e}")]
+        vec![
+            segment(Layout::Box, Part::Time),
+            text(Swatch::Frame, BOX_CLOSE_AFTER_TIME),
+        ]
     } else {
-        vec![text("p:frame", "\u{2500}\u{256e}")]
+        vec![text(Swatch::Frame, BOX_CLOSE)]
     };
+    let filler = format!("<{}>{BOX_FILLER}</>", Swatch::Frame.reference());
     vec![
         json!({ "type": "prompt", "alignment": "left", "segments": left }),
-        json!({ "type": "prompt", "alignment": "right", "filler": "<p:frame>\u{2500}</>", "segments": right }),
-        json!({ "type": "prompt", "alignment": "left", "newline": true, "segments": [text("p:frame", "\u{2502} "), text("p:accent", ">")] }),
-        json!({ "type": "rprompt", "segments": [text("p:frame", "\u{2502}")] }),
+        json!({ "type": "prompt", "alignment": "right", "filler": filler, "segments": right }),
+        json!({ "type": "prompt", "alignment": "left", "newline": true, "segments": [text(Swatch::Frame, BOX_SIDE), text(Swatch::Accent, BOX_PROMPT)] }),
+        json!({ "type": "rprompt", "segments": [text(Swatch::Frame, BOX_RIGHT)] }),
     ]
 }
 
 /// The one-line layouts: the left segments, then the prompt character.
-fn single_line(theme: &Theme, prompt_char: &str) -> Vec<Value> {
+fn single_line(theme: &Theme) -> Vec<Value> {
     let mut list = left_segments(theme);
-    list.push(text("p:accent", prompt_char));
+    list.push(text(Swatch::Accent, prompt_char(theme.prompt.layout)));
     vec![json!({ "type": "prompt", "alignment": "left", "segments": list })]
 }
 
@@ -1014,5 +1203,144 @@ mod tests {
         assert_eq!(serde_json::from_str::<Value>(&text).unwrap(), config(&t));
         assert!(text.starts_with("{\n  \""), "{text}");
         assert!(text.ends_with("}\n") && !text.ends_with("\n\n"));
+    }
+
+    // ---- the parts the preview shares (crate::preview draws the same prompt) ----
+
+    /// Every part, `Session` with both names.
+    const PARTS: [Part; 6] = [
+        Part::Path,
+        Part::Git,
+        Part::Time,
+        Part::Session {
+            user: true,
+            host: true,
+        },
+        Part::Status,
+        Part::Duration,
+    ];
+
+    #[test]
+    fn every_swatch_is_in_the_palette_with_its_theme_color() {
+        let t = terracotta();
+        let c = config(&t);
+        let palette = c["palette"].as_object().unwrap();
+        assert_eq!(palette.len(), Swatch::ALL.len());
+        for swatch in Swatch::ALL {
+            assert_eq!(
+                palette[swatch.name()],
+                swatch.color(&t.colors).to_string(),
+                "{swatch:?}"
+            );
+        }
+        // the four ansi colors the prompt uses: red, green, yellow and blue
+        assert_eq!(Swatch::Red.color(&t.colors), t.colors.ansi[1]);
+        assert_eq!(Swatch::Ok.color(&t.colors), t.colors.ansi[2]);
+        assert_eq!(Swatch::Dirty.color(&t.colors), t.colors.ansi[3]);
+        assert_eq!(Swatch::Blue.color(&t.colors), t.colors.ansi[4]);
+    }
+
+    #[test]
+    fn the_looks_are_the_ones_spec_3_5_was_built_with() {
+        use Swatch as S;
+        let plain = |fg| Look::Plain { fg };
+        let block = |bg, fg| Look::Powerline { bg, fg };
+        let session = Part::Session {
+            user: true,
+            host: false,
+        };
+        for (layout, part, look) in [
+            (Layout::Box, Part::Path, plain(S::Muted)),
+            (Layout::Box, Part::Git, plain(S::Ok)),
+            (Layout::Box, Part::Time, plain(S::Muted)),
+            (Layout::Box, session, plain(S::Fg)),
+            (Layout::Box, Part::Status, plain(S::Red)),
+            (Layout::Box, Part::Duration, plain(S::Dirty)),
+            (Layout::Line, Part::Path, plain(S::Blue)),
+            (Layout::Line, Part::Git, plain(S::Ok)),
+            (Layout::Line, Part::Time, plain(S::Muted)),
+            (Layout::Line, session, plain(S::Fg)),
+            (Layout::Line, Part::Status, plain(S::Red)),
+            (Layout::Line, Part::Duration, plain(S::Dirty)),
+            (Layout::Powerline, Part::Path, block(S::Frame, S::Fg)),
+            (Layout::Powerline, Part::Git, block(S::Ok, S::Bg)),
+            (Layout::Powerline, Part::Time, block(S::Frame, S::Fg)),
+            (Layout::Powerline, session, block(S::Accent, S::Bg)),
+            (Layout::Powerline, Part::Status, block(S::Red, S::Bg)),
+            (Layout::Powerline, Part::Duration, block(S::Dirty, S::Bg)),
+        ] {
+            assert_eq!(drawn(layout, part).look, look, "{layout:?} {part:?}");
+        }
+        // only git in the box has a lead, and only the box's time has its space before
+        assert_eq!(
+            drawn(Layout::Box, Part::Git).lead,
+            Some((S::Muted, GIT_SEPARATOR))
+        );
+        assert_eq!(
+            (
+                drawn(Layout::Box, Part::Time).before,
+                drawn(Layout::Box, Part::Time).after
+            ),
+            (" ", "")
+        );
+    }
+
+    #[test]
+    fn every_segment_is_drawn_as_the_shared_table_says() {
+        for layout in LAYOUTS {
+            for part in PARTS {
+                let d = drawn(layout, part);
+                let seg = segment(layout, part);
+                let template = seg["template"].as_str().unwrap();
+                let lead = d
+                    .lead
+                    .map(|(swatch, text)| format!("<p:{}>{text}</>", swatch.name()))
+                    .unwrap_or_default();
+                let why = format!("{layout:?} {part:?}: {template:?}");
+                assert!(
+                    template.starts_with(&format!("{lead}{}", d.before)),
+                    "{why}"
+                );
+                assert!(template.ends_with(d.after), "{why}");
+                match d.look {
+                    Look::Plain { fg } => {
+                        assert_eq!(seg["style"], "plain", "{why}");
+                        assert_eq!(seg["foreground"], format!("p:{}", fg.name()), "{why}");
+                        assert!(seg.get("background").is_none(), "{why}");
+                    }
+                    Look::Powerline { bg, fg } => {
+                        assert_eq!(seg["style"], "powerline", "{why}");
+                        assert_eq!(seg["background"], format!("p:{}", bg.name()), "{why}");
+                        assert_eq!(seg["foreground"], format!("p:{}", fg.name()), "{why}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn left_parts_follow_the_list_with_one_session_and_time_last() {
+        let list = [
+            Segment::Time,
+            Segment::Host,
+            Segment::Path,
+            Segment::User,
+            Segment::Git,
+        ];
+        let session = Part::Session {
+            user: true,
+            host: true,
+        };
+        assert_eq!(
+            left_parts(&themed(Layout::Line, &list)),
+            [session, Part::Path, Part::Git, Part::Time]
+        );
+        // the box keeps time for its right side
+        assert_eq!(
+            left_parts(&themed(Layout::Box, &list)),
+            [session, Part::Path, Part::Git]
+        );
+        assert!(has_time(&themed(Layout::Box, &list)));
+        assert!(left_parts(&themed(Layout::Powerline, &[])).is_empty());
     }
 }
