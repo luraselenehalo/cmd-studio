@@ -55,7 +55,10 @@ pub(crate) struct Scan {
     /// separator (a separator first, or two with nothing between), `&&` or `||` last, a pipe
     /// with no command before or after it, a redirection with no file or handle after it, a
     /// `(` never closed, or an empty command inside parentheses (`(& a)`, `(a &)`, `()`). A
-    /// single `&` last is fine, and so is a `)` that closes nothing, which cmd reads as text.
+    /// single `&` last is fine, and so is a `)` that closes nothing, which cmd reads as text
+    /// in a command (`echo a)`). Right after a block, as in `(echo a) )`, cmd refuses such a
+    /// `)`, and this reading does not: it is one of the few values cmd rejects that pass here
+    /// (ruling P68), and the doctor finds them from a real cmd window (D3).
     ///
     /// Every `(` starts a block here, as after `if` and `for`. In the middle of a command such
     /// as `echo (& a)`, cmd reads it as text and runs the value; it is refused all the same,
@@ -347,26 +350,38 @@ const CLINK_LAUNCHERS: [&str; 7] = [
 ];
 
 /// Whether `command` injects Clink into cmd: a word that names one of [`CLINK_LAUNCHERS`],
-/// with or without a folder, quoted or not, and after it the word `inject`, both in any case.
-/// Only `inject` loads Clink into cmd, so a call of Clink without it (`clink.bat set
-/// clink.logo none`) is not an injection, and a command that only mentions Clink, such as
-/// `doskey /macrofile="C:\tools\clink\macros.txt"` or `cd /d C:\clink-notes`, is another
-/// program's own. The AutoRun editor (another Clink, asked about and taken out with the user's
-/// agreement) and the warning about Clink in HKLM both read commands this way.
+/// with or without a folder, quoted or not, whose verb (see [`clink_verb`]) is `inject`, both
+/// in any case. Only `inject` loads Clink into cmd, so a call of Clink with another verb
+/// (`clink.bat set clink.logo none`) is not an injection, nor is a command where `inject` is
+/// not Clink's verb (`type "C:\clink\clink.bat" | find "inject"`), and a command that only
+/// mentions Clink, such as `doskey /macrofile="C:\tools\clink\macros.txt"` or
+/// `cd /d C:\clink-notes`, is another program's own. The AutoRun editor (another Clink, asked
+/// about and taken out with the user's agreement), the warning about Clink in HKLM and the
+/// doctor (D5) all read commands this way.
 pub(crate) fn runs_clink(command: &str) -> bool {
     let words = command_words(command);
-    words
-        .iter()
-        .position(|word| {
-            let name = word.rsplit(['\\', '/']).next().unwrap_or(word);
-            CLINK_LAUNCHERS.iter().any(|l| name.eq_ignore_ascii_case(l))
-        })
-        .is_some_and(|launcher| {
-            words
-                .iter()
-                .skip(launcher + 1)
-                .any(|word| word.eq_ignore_ascii_case("inject"))
-        })
+    words.iter().enumerate().any(|(i, word)| {
+        let name = word.rsplit(['\\', '/']).next().unwrap_or(word);
+        CLINK_LAUNCHERS.iter().any(|l| name.eq_ignore_ascii_case(l))
+            && clink_verb(words.get(i + 1..).unwrap_or_default())
+                .is_some_and(|verb| verb.eq_ignore_ascii_case("inject"))
+    })
+}
+
+/// The verb of a Clink command, given the words after the launcher: the first word that is not
+/// one of Clink's options. `--profile` takes the word after it as its value (`clink
+/// --profile <dir> set clink.logo`, as the verifier runs it); any other word that starts with
+/// `-` is an option on its own. `None` when the words hold no verb.
+fn clink_verb(after_launcher: &[String]) -> Option<&str> {
+    let mut words = after_launcher.iter();
+    while let Some(word) = words.next() {
+        if word.eq_ignore_ascii_case("--profile") {
+            words.next();
+        } else if !word.starts_with('-') {
+            return Some(word);
+        }
+    }
+    None
 }
 
 /// The words of a command as cmd splits them: at spaces and tabs, and at `<`, `>`, `|`, `(`
@@ -397,7 +412,8 @@ fn command_words(command: &str) -> Vec<String> {
 }
 
 /// Whether `text` runs another Clink: it injects Clink (see [`runs_clink`]) and is not ours.
-fn is_foreign(text: &str, profile: &str) -> bool {
+/// The cleanup turns back on exactly the commands this called another Clink.
+pub(crate) fn is_foreign(text: &str, profile: &str) -> bool {
     !holds_ours(text, profile) && runs_clink(text)
 }
 
@@ -841,7 +857,7 @@ mod tests {
     #[test]
     fn only_a_command_that_injects_clink_is_another_clink() {
         // A launcher of Clink as a whole word, with or without a folder, quoted or not, and
-        // after it the word `inject`, in any case.
+        // `inject` as its verb, in any case. Clink takes `--profile <dir>` before its verb.
         for command in [
             "clink inject",
             r#""C:\x\clink.bat" inject --autorun"#,
@@ -857,11 +873,13 @@ mod tests {
             "x | clink inject",
             "clink inject>nul",
             r#""C:\clink\clink.bat" inject --autorun >nul 2>&1"#,
+            r#""C:\clink\clink.bat" --profile "D:\my profile" inject --autorun"#,
+            "clink --PROFILE p INJECT",
         ] {
             assert!(runs_clink(command), "{command}");
         }
         // Commands that only mention Clink are other programs' own; so is a call of Clink that
-        // does not inject it into cmd.
+        // does not inject it into cmd, and one where `inject` is not Clink's verb.
         for command in [
             r#"doskey /macrofile="C:\tools\clink\macros.txt""#,
             r"cd /d C:\clink-notes",
@@ -873,6 +891,10 @@ mod tests {
             "echo clinker inject",
             // Inside an unclosed quote cmd runs no Clink: the quote holds the whole rest.
             r#""C:\x.bat & clink inject"#,
+            r#"type "C:\clink\clink.bat" | find "inject""#,
+            "clink.bat set inject",
+            "clink --profile inject",
+            "clink",
         ] {
             assert!(!runs_clink(command), "{command}");
         }

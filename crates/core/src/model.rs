@@ -79,6 +79,8 @@ pub struct Theme {
     /// Where editors find the JSON Schema of this file. Optional; CMD Studio reads it,
     /// ignores it and does not write it back.
     // The unit type is the point: nothing is kept, so this never changes what a theme equals.
+    // Hidden from the API docs: it holds nothing, and code that builds a theme writes
+    // `schema: ()` only because a struct literal has to name every field.
     #[serde(
         rename = "$schema",
         default,
@@ -86,6 +88,7 @@ pub struct Theme {
         deserialize_with = "string_and_forget"
     )]
     #[schemars(with = "String")]
+    #[doc(hidden)]
     pub schema: (),
 }
 
@@ -219,7 +222,8 @@ pub enum ThemeError {
     /// The file is not JSON, or does not fit the format. The text starts with the path of the
     /// field that is wrong (`colors.ansi[3]: ...`) and usually ends with a line and column.
     /// It is safe to print: the file can be quoted in it, so it has been cleaned like the
-    /// file's own text, and it is at most 300 characters.
+    /// file's own text, and the whole message, `not a valid theme file: ` included, is at
+    /// most 300 characters (spec §3.3).
     #[error("not a valid theme file: {0}")]
     Invalid(String),
     #[error("invalid {field}: {reason}")]
@@ -243,20 +247,26 @@ fn field(field: &'static str, reason: &'static str) -> Result<(), ThemeError> {
     Err(ThemeError::Field { field, reason })
 }
 
-/// The most characters of a parser's message that an `Invalid` error keeps.
+/// What an `Invalid` error says in front of the parser's message (see its `#[error]`).
+const INVALID_START: &str = "not a valid theme file: ";
+/// The most characters an `Invalid` error's whole message has, its start included (spec §3.3).
 const MAX_MESSAGE_CHARS: usize = 300;
+/// The most characters of the parser's message that an `Invalid` error keeps. The start is
+/// ASCII, so its length in bytes is its length in characters.
+const MAX_KEPT_CHARS: usize = MAX_MESSAGE_CHARS - INVALID_START.len();
 
 /// The `Invalid` error for the message a parser gave. That message can quote the file
 /// itself (an unknown key, an unknown variant), and the file is not to be trusted with
 /// what a screen or a log prints, so the message is cleaned like the file's own text and
-/// cut to `MAX_MESSAGE_CHARS`. The field path is what the message starts with, and the cut
-/// is made at the end, so the path stays.
+/// cut to `MAX_KEPT_CHARS`, which keeps the whole message within `MAX_MESSAGE_CHARS`. The
+/// field path is what the message starts with, and the cut is made at the end, so the path
+/// stays.
 fn invalid(message: &str) -> ThemeError {
     let clean = sanitize_text(message);
-    if clean.chars().count() <= MAX_MESSAGE_CHARS {
+    if clean.chars().count() <= MAX_KEPT_CHARS {
         return ThemeError::Invalid(clean);
     }
-    let mut cut: String = clean.chars().take(MAX_MESSAGE_CHARS - 3).collect();
+    let mut cut: String = clean.chars().take(MAX_KEPT_CHARS - 3).collect();
     cut.push_str("...");
     ThemeError::Invalid(cut)
 }
@@ -304,6 +314,36 @@ fn check_objects(value: &serde_json::Value) -> Result<(), ThemeError> {
         .is_some_and(|v| !v.is_null() && !v.is_object())
     {
         return Err(invalid("simple: expected an object or null"));
+    }
+    Ok(())
+}
+
+/// The words of the format, as JSON pointers and as the paths an error names them by. Each of
+/// `prompt.segments` is a word as well.
+const WORDS: [(&str, &str); 3] = [
+    ("/tone", "tone"),
+    ("/terminal/cursorShape", "terminal.cursorShape"),
+    ("/prompt/layout", "prompt.layout"),
+];
+
+/// A word of the format (`tone`, `terminal.cursorShape`, `prompt.layout` and each of
+/// `prompt.segments`) is a string. serde also reads a word from a one-key object, so without
+/// this `"layout": {"box": null}` would parse; the format and its published schema say string.
+/// Only objects are refused here: any other wrong value is for serde to report.
+fn check_words(value: &serde_json::Value) -> Result<(), ThemeError> {
+    for (pointer, path) in WORDS {
+        if value
+            .pointer(pointer)
+            .is_some_and(serde_json::Value::is_object)
+        {
+            return Err(invalid(&format!("{path}: expected a string")));
+        }
+    }
+    let segments = value
+        .pointer("/prompt/segments")
+        .and_then(serde_json::Value::as_array);
+    if let Some(i) = segments.and_then(|s| s.iter().position(serde_json::Value::is_object)) {
+        return Err(invalid(&format!("prompt.segments[{i}]: expected a string")));
     }
     Ok(())
 }
@@ -428,7 +468,8 @@ impl Theme {
 /// field that is wrong, for example `colors.ansi[3]: not a #rrggbb color` (spec §3.7 #5),
 /// and ends with the line and column. A key that appears twice is refused, and so is a
 /// part that should be an object but is a list or anything else (`banner: expected an
-/// object`). The message quotes the file at times, so it is cleaned and cut short. Text is
+/// object`), and a word of the format written as an object (`prompt.layout: expected a
+/// string`). The message quotes the file at times, so it is cleaned and cut short. Text is
 /// sanitized before the limits are checked.
 pub fn parse_theme(bytes: &[u8]) -> Result<Theme, ThemeError> {
     check_size(bytes.len())?;
@@ -445,6 +486,7 @@ pub fn parse_theme(bytes: &[u8]) -> Result<Theme, ThemeError> {
         })?;
     check_schema_version(version)?;
     check_objects(&value)?;
+    check_words(&value)?;
     // Second pass: the theme itself, from the bytes and not from `value`. A `Value` keeps
     // the last of two equal keys and no longer knows where anything was, so it could not
     // refuse a repeated key or give a line and column. The first pass has seen the whole
@@ -521,6 +563,35 @@ mod tests {
         assert!(with(|v| v["prompt"]["layout"] = json!("fancy")).is_err());
         assert!(with(|v| v["prompt"]["segments"] = json!(["path", "command"])).is_err());
         assert!(with(|v| v["terminal"]["cursorShape"] = json!("vintage")).is_err());
+    }
+
+    #[test]
+    fn a_word_of_the_format_is_a_string_and_never_an_object() {
+        // serde reads `{"box": null}` as the word `box`; the format and its schema do not.
+        for (pointer, word, path) in [
+            ("/tone", "dark", "tone"),
+            ("/terminal/cursorShape", "filledBox", "terminal.cursorShape"),
+            ("/prompt/layout", "box", "prompt.layout"),
+        ] {
+            let mut object = serde_json::Map::new();
+            object.insert(word.to_string(), Value::Null);
+            assert_eq!(
+                at(pointer, Value::Object(object)).unwrap_err(),
+                ThemeError::Invalid(format!("{path}: expected a string")),
+                "{pointer}"
+            );
+            assert!(at(pointer, json!(word)).is_ok(), "{pointer}");
+        }
+        assert_eq!(
+            at("/prompt/segments", json!(["path", { "git": null }])).unwrap_err(),
+            ThemeError::Invalid("prompt.segments[1]: expected a string".into())
+        );
+        // any other wrong value is still reported by the reader, with its line and column
+        let text = invalid_text_with(|v| v["prompt"]["layout"] = json!(5));
+        assert!(
+            text.starts_with("prompt.layout: expected value at line 1"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -993,18 +1064,25 @@ mod tests {
             invalid("a\u{1b}[31mb\nc\u{7}"),
             ThemeError::Invalid("abc".into())
         );
-        // the cap counts characters, not bytes: 300 stay whole, 301 are cut to 300 with dots
+        // the whole message is at most 300 characters (spec §3.3), and its start takes 24 of
+        // them; the cap counts characters, not bytes: 276 stay whole, 277 are cut to 276 with
+        // dots
+        assert_eq!(INVALID_START.chars().count(), 24);
+        assert_eq!(
+            ThemeError::Invalid(String::new()).to_string(),
+            INVALID_START
+        );
         for c in ["x", "ก", "👋"] {
-            assert_eq!(invalid(&c.repeat(300)), ThemeError::Invalid(c.repeat(300)));
-            assert_eq!(
-                invalid(&c.repeat(301)),
-                ThemeError::Invalid(format!("{}...", c.repeat(297)))
-            );
+            assert_eq!(invalid(&c.repeat(276)), ThemeError::Invalid(c.repeat(276)));
+            let cut = invalid(&c.repeat(277));
+            assert_eq!(cut, ThemeError::Invalid(format!("{}...", c.repeat(273))));
+            assert_eq!(cut.to_string().chars().count(), 300);
+            assert!(invalid(&c.repeat(10_000)).to_string().chars().count() <= 300);
         }
         // the cut is made after the cleaning, so controls do not use up the room
         assert_eq!(
-            invalid(&format!("{}{}", "\u{7}".repeat(1000), "y".repeat(300))),
-            ThemeError::Invalid("y".repeat(300))
+            invalid(&format!("{}{}", "\u{7}".repeat(1000), "y".repeat(276))),
+            ThemeError::Invalid("y".repeat(276))
         );
         assert_eq!(invalid("x").code(), "E_THEME_INVALID");
     }
@@ -1787,6 +1865,26 @@ mod tests {
             parse_theme(one_then_seven.as_bytes()).unwrap_err(),
             ThemeError::NewerSchema(7)
         );
+    }
+
+    #[test]
+    fn a_bad_color_is_quoted_as_written_and_still_cleaned() {
+        // Thai letters come out as they are, not as `\u{..}` escapes...
+        let thai = FIXTURE.replacen("\"#e3b66b\"", "\"#สีส้ม\"", 1);
+        let text = invalid_text(thai.as_bytes());
+        assert!(
+            text.starts_with("colors.ansi[3]: not a #rrggbb color: \"#สีส้ม\""),
+            "{text}"
+        );
+        assert!(!text.contains("\\u{"), "{text}");
+        // ...and an escape sequence in the value never reaches the terminal.
+        let hostile = FIXTURE.replacen("\"#e3b66b\"", "\"\\u001b[31m#e3b66\"", 1);
+        let text = invalid_text(hostile.as_bytes());
+        assert!(
+            text.starts_with("colors.ansi[3]: not a #rrggbb color: \"#e3b66\""),
+            "{text}"
+        );
+        assert!(!text.contains('\u{1b}') && !text.contains("\\u{"), "{text}");
     }
 
     #[test]

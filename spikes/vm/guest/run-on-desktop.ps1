@@ -14,7 +14,9 @@ $id = [guid]::NewGuid().ToString('N').Substring(0, 8)
 $out = Join-Path $outDir "desktop-$id.txt"
 $done = "$out.done"
 $cmd = "& '$Script' $ScriptArgs *>&1 | Out-File -Encoding utf8 -LiteralPath '$out'; Set-Content -LiteralPath '$done' -Value `$LASTEXITCODE"
-$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -Command `"$cmd`""
+# conhost.exe hosts the console itself. On Windows 11 the default terminal would otherwise put
+# it in Windows Terminal, and a script that closes Windows Terminal would end itself.
+$action = New-ScheduledTaskAction -Execute 'conhost.exe' -Argument "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command `"$cmd`""
 $principal = New-ScheduledTaskPrincipal -UserId $me -LogonType Interactive
 $name = "cmdstudio-desktop-$id"
 Register-ScheduledTask -TaskName $name -Action $action -Principal $principal | Out-Null

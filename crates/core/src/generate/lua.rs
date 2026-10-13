@@ -103,9 +103,10 @@ const DATE_EN: DateStyle = DateStyle {
 /// `sanitize_text` takes a whole escape sequence: here the escape character goes and the
 /// rest of the sequence stays as plain text. Each pattern starts at a lead byte, or at a
 /// byte (C0, DEL) that never occurs inside a multi-byte character, so on UTF-8 none of them
-/// can match in the middle of another character.
+/// can match in the middle of another character. The first class names NUL as `\0`: Lua 5.2,
+/// which Clink runs, takes it in a pattern, and has deprecated the `%z` of Lua 5.1.
 const VARS_BODY: &str = r#"local function clean(s)
-  s = s:gsub("[%z\1-\31\127]", "")
+  s = s:gsub("[\0\1-\31\127]", "")
   s = s:gsub("\194[\128-\159]", "")
   s = s:gsub("\226\128[\168-\174]", "")
   s = s:gsub("\226\129[\166-\169]", "")

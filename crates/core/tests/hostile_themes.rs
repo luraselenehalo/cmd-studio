@@ -15,7 +15,9 @@
 //! 2. No Oh My Posh config, and no `command` segment: `command-segment`,
 //!    `omp-config-injected` and `omp-config-as-theme`.
 //! 3. Every text is cleaned of control characters, escape sequences, line breaks and direction
-//!    controls: `escape-in-name`, `escape-in-text-fields`, `newline-in-banner` and `bidi-name`.
+//!    controls: `escape-in-name`, `escape-in-text-fields`, `newline-in-banner`, `bidi-name`,
+//!    `c1-and-nul` (NUL, DEL and the C1 controls U+0080 to U+009F) and `bidi-isolates`
+//!    (U+2066 to U+2069).
 //! 4. Lua strings are escaped in one place: `lua-breakers`, run in Lua 5.2.
 //! 5. At most 64 KB, and a file that is not JSON or does not fit the format is refused, with
 //!    the field that is wrong: `malformed-json`, `bad-color` and `bad-id`, and the files that
@@ -38,6 +40,9 @@ use mlua::{Function, Lua, Table, Value as LuaValue};
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+
+mod common;
+use common::PRELUDE;
 
 // ---- the table of samples ----
 
@@ -100,6 +105,11 @@ sample_tests! {
     newline_in_banner: "newline-in-banner" => Accepted;
     // U+202E in `name`
     bidi_name: "bidi-name" => Accepted;
+    // NUL, DEL and C1 controls (among them U+009B and U+009D, the one-character CSI and OSC
+    // some terminals take) in every text field
+    c1_and_nul: "c1-and-nul" => Accepted;
+    // the bidi isolates U+2066 to U+2069 in every text field
+    bidi_isolates: "bidi-isolates" => Accepted;
 
     // -- §3.7 #1 and #4: the text is data, and Lua keeps it as text --
 
@@ -173,9 +183,9 @@ fn is_unsafe(c: char) -> bool {
     )
 }
 
-/// The longest refusal: spec §3.3 allows a message 300 characters, and `E_THEME_INVALID` puts
-/// "not a valid theme file: " (24 characters) in front of it.
-const MAX_REFUSAL_CHARS: usize = 300 + 24;
+/// The longest refusal: spec §3.3 allows a message 300 characters, the "not a valid theme
+/// file: " (24 characters) that `E_THEME_INVALID` puts in front of the reader's text included.
+const MAX_REFUSAL_CHARS: usize = 300;
 
 /// A refusal is printed on a screen and written to a log, and it can quote the file.
 fn assert_safe_to_print(name: &str, error: &ThemeError) {
@@ -266,40 +276,6 @@ fn plain_rows(printed: &str) -> Vec<String> {
     }
     plain.split('\n').map(String::from).collect()
 }
-
-/// Stand-ins for the parts of Clink and Windows that `banner.lua` uses, so that it runs in
-/// plain Lua 5.2. `tests/banner_lua.rs` has the same ones; every file under `tests/` is a
-/// crate of its own, so this file keeps a copy.
-const PRELUDE: &str = r#"
-__out = {}
-__env = {}
-__lines = {}
-NONL = {}
-clink = {
-  print = function(s, flag)
-    if flag == NONL then s = "<NONL>" .. s end
-    __out[#__out + 1] = s
-  end,
-  oninject = function(f) __oninject = f end,
-}
-console = {
-  cellcount = function(s)
-    local plain = s:gsub("\27%[[%d;]*m", "")
-    local _, n = plain:gsub("[^\128-\191]", "")
-    return n
-  end,
-  getlinetext = function(n) return __lines[n] end,
-}
-os.getenv = function(k)
-  if __env[k] ~= nil then return __env[k] end
-  if k == "USERNAME" then return "ทดสอบ" end
-  if k == "COMPUTERNAME" then return "PC-01" end
-  return nil
-end
-os.setenv = function(k, v) __env[k] = v end
-os.getcwd = function() return "C:\\Users\\ทดสอบ" end
-log = { info = function() end }
-"#;
 
 /// The user name that the stand-in `os.getenv` gives for `{user}`.
 const STAND_IN_USER: &str = "ทดสอบ";
@@ -558,6 +534,36 @@ fn a_direction_control_in_the_name_is_cut_out() {
     assert!(!theme.name.contains('\u{202e}'));
 }
 
+#[test]
+fn nul_del_and_c1_controls_are_cut_out_of_every_text_field() -> mlua::Result<()> {
+    let theme = accepted("c1-and-nul");
+    // U+009B is a whole CSI in some terminals: it goes, and the `31m` after it is only text
+    assert_eq!(theme.name, "Calm31m Theme");
+    assert_eq!(theme.author, "xy");
+    assert_eq!(theme.terminal.font, "Cascadia Mono");
+    assert_eq!(theme.banner.title, "0;pwnedHi {user}");
+    assert_eq!(theme.banner.lines, ["31mred", "nul and DEL."]);
+    for lang in [Lang::Th, Lang::En] {
+        let rows = banner_rows(&theme, lang)?;
+        assert!(
+            rows[1].contains(&format!("0;pwnedHi {STAND_IN_USER}")),
+            "{lang:?}: {}",
+            rows[1]
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn bidi_isolates_are_cut_out_of_every_text_field() {
+    let theme = accepted("bidi-isolates");
+    assert_eq!(theme.name, "Calmtxt.exe");
+    assert_eq!(theme.author, "ab");
+    assert_eq!(theme.terminal.font, "Cascadia Mono");
+    assert_eq!(theme.banner.title, "Hi {user}");
+    assert_eq!(theme.banner.lines, ["cwd: {cwd}", "{date} - {time}"]);
+}
+
 // -- §3.7 #1 and #4: the text is data, and Lua keeps it as text --
 
 #[test]
@@ -566,7 +572,7 @@ fn text_that_breaks_a_lua_string_is_printed_as_it_is_and_never_runs() -> mlua::R
     // what the file says, spelled out here so that a change to the file shows
     let title = r#"Hi ]] [==[ \ " ' ไทย 👋"#;
     let lines = [
-        "\"); __pwned = true; --",
+        "\")} end __pwned = true local function f() return {--",
         "']]; __pwned = true; --[[ [==[ ]==]",
         r"C:\Users\นักทดสอบ\",
         concat!(
@@ -576,6 +582,22 @@ fn text_that_breaks_a_lua_string_is_printed_as_it_is_and_never_runs() -> mlua::R
     ];
     assert_eq!(theme.banner.title, title);
     assert_eq!(theme.banner.lines, lines);
+
+    // The first line is a real attack, so the check below can fail: put into a table of the
+    // banner's shape between plain quotes, it closes the string, the table and the function,
+    // sets the global as the script loads, and opens a function that the rest of the script
+    // closes. The script still parses, so a quoting bug would not show as a load error.
+    let naive = format!(
+        "local function build()\n  return {{\n    (\"{}\"),\n  }}\nend\n",
+        lines[0]
+    );
+    let lua = Lua::new();
+    lua.load(naive.as_str()).exec()?;
+    let pwned: LuaValue = lua.globals().get("__pwned")?;
+    assert!(
+        matches!(pwned, LuaValue::Boolean(true)),
+        "the sample line no longer gets out of a plain string: {pwned:?}"
+    );
 
     for lang in [Lang::Th, Lang::En] {
         let (lua, printed) = run_banner(&theme, lang)?;
@@ -654,10 +676,10 @@ fn a_hostile_key_of_400_letters_gives_a_message_that_is_clean_and_cut_short() {
     let ThemeError::Invalid(text) = &error else {
         panic!("not an Invalid refusal: {error:?}");
     };
-    // the escape sequence is cut out of the key, the key is the path, and the message is cut
-    // at 300 characters with three dots
+    // the escape sequence is cut out of the key, the key is the path, and the reader's text is
+    // cut at 276 characters with three dots, so that the whole message is 300
     assert!(text.starts_with("red0;pwnedkkkk"), "{text}");
-    assert_eq!(text.chars().count(), 300, "{text}");
+    assert_eq!(text.chars().count(), 276, "{text}");
     assert!(text.ends_with("..."), "{text}");
     assert_eq!(error.to_string().chars().count(), MAX_REFUSAL_CHARS);
     assert_safe_to_print("hostile-key", &error);

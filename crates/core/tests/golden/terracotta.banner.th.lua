@@ -7,7 +7,7 @@ local MONTHS = { "ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.
 local DATE_FORMAT = "%s %d %s %d"
 local YEAR_OFFSET = 543
 local function clean(s)
-  s = s:gsub("[%z\1-\31\127]", "")
+  s = s:gsub("[\0\1-\31\127]", "")
   s = s:gsub("\194[\128-\159]", "")
   s = s:gsub("\226\128[\168-\174]", "")
   s = s:gsub("\226\129[\166-\169]", "")

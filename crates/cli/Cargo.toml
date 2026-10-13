@@ -1,0 +1,27 @@
+[package]
+name = "cmdstudio-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+name = "cmdstudio_cli"
+
+[[bin]]
+name = "cmdstudio"
+path = "src/main.rs"
+
+[dependencies]
+cmdstudio-core = { path = "../core" }
+serde_json = "1"
+thiserror = "2"
+
+[dev-dependencies]
+# The in-memory machine: the CLI's tests never touch this computer. A dev-dependency only, so a
+# release build never contains the fakes.
+cmdstudio-core = { path = "../core", features = ["fake"] }
+tempfile = "3"

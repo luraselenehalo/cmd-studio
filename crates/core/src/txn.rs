@@ -248,6 +248,9 @@ pub fn run(
 /// A journal that can't be read gives `RollbackIncomplete`, with the store's own code: the
 /// machine may be half applied and nothing says how.
 ///
+/// The reason says what the user can count on: a run cut off in `Planned` had not changed
+/// anything yet, and its reason says so.
+///
 /// The result must be looked at, like an [`Outcome`]: the compiler warns about a dropped one,
 /// and this example turns the warning into an error:
 ///
@@ -282,9 +285,14 @@ pub fn recover(exec: &mut dyn Executor, store: &mut dyn JournalStore) -> Option<
         // Whatever the store says, a journal that has ended is not rolled back again.
         Stage::Committed | Stage::RolledBack | Stage::RollbackIncomplete { .. } => return None,
     };
+    let message = if j.stage == Stage::Planned {
+        "the previous apply was interrupted before it changed anything"
+    } else {
+        "the previous apply was interrupted"
+    };
     let cause = Failure {
         code: "E_TXN_INTERRUPTED",
-        message: "the previous apply was interrupted".to_string(),
+        message: message.to_string(),
     };
     Some(rollback(&mut j, touched, exec, store, cause))
 }
@@ -1118,7 +1126,16 @@ mod tests {
                 stage: stage.clone(),
             });
             let out = recover(&mut exec, &mut store);
-            assert_eq!(out, Some(interrupted()), "{stage:?}");
+            // A run cut off before it applied anything says so: the user has nothing to check.
+            let want = if stage == Stage::Planned {
+                Outcome::RolledBack {
+                    code: "E_TXN_INTERRUPTED",
+                    reason: "the previous apply was interrupted before it changed anything".into(),
+                }
+            } else {
+                interrupted()
+            };
+            assert_eq!(out, Some(want), "{stage:?}");
             assert_eq!(restores(&trace), restored, "{stage:?}");
             assert!(store.saved.last().unwrap().is_finished(), "{stage:?}");
         }

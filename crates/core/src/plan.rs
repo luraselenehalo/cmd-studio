@@ -1,6 +1,7 @@
 //! The planner (spec §5.2 `plan`): theme + request + machine facts → the
 //! operations to run and a plain-language summary (spec §4.2 page 5).
 //! Pure: it reads nothing and writes nothing.
+use crate::adapters::RegText;
 use crate::generate::{clink, lua, omp, wt};
 use crate::model::{Target, Theme};
 use serde::{Deserialize, Serialize};
@@ -15,6 +16,16 @@ pub const CLINK_VERSION: &str = "1.9.34";
 /// `font.face` written to Windows Terminal, and the fallback font
 /// (spec §3.3, §5.4, G12).
 pub const NERD_FONT_FAMILY: &str = "CaskaydiaCove NF";
+
+/// The `part` of [`PlanError::AutoRunNeedsHandEdit`] when the AutoRun value is there but is not
+/// plain text: it is never edited, nor taken for an absent value (spec §5.4).
+pub const AUTORUN_NOT_TEXT: &str = "the AutoRun value is not plain text (it is not a String \
+                                    Value (REG_SZ) or an Expandable String Value \
+                                    (REG_EXPAND_SZ), or its text is not valid)";
+/// [`AUTORUN_NOT_TEXT`] in Thai.
+pub const AUTORUN_NOT_TEXT_TH: &str = "ค่า AutoRun ไม่ใช่ข้อความธรรมดา (ไม่ใช่ชนิด String Value \
+                                       (REG_SZ) หรือ Expandable String Value (REG_EXPAND_SZ) \
+                                       หรือมีข้อความที่ไม่ถูกต้อง)";
 
 /// Where CMD Studio keeps its data (spec §5.3).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -53,10 +64,13 @@ impl Paths {
 pub struct Machine {
     /// settings.json of every Windows Terminal variant found.
     pub wt_settings: Vec<PathBuf>,
-    /// Current HKCU AutoRun value.
-    pub autorun_hkcu: Option<String>,
-    /// Current HKLM AutoRun value (read only; CMD Studio never writes HKLM).
-    pub autorun_hklm: Option<String>,
+    /// Current HKCU AutoRun value as the registry holds it: the raw text, never expanded, so a
+    /// `%USERPROFILE%` in it stays as written; or absent; or there but not plain text, which
+    /// the planner never edits (spec §5.4).
+    pub autorun_hkcu: RegText,
+    /// Current HKLM AutoRun value, read in the same way (read only; CMD Studio never writes
+    /// HKLM).
+    pub autorun_hklm: RegText,
     /// Family names of the installed fonts, as GDI lists them. Whether the
     /// fonts packaged inside Windows Terminal count is decided in Phase 1b.
     pub fonts: Vec<String>,
@@ -132,13 +146,18 @@ pub enum Op {
         path: PathBuf,
         contents: String,
     },
+    /// Writes the `CMD Studio` scheme and the cmd profile's keys into one settings.json. A key
+    /// whose value is an object (`font`) is merged into the user's object key by key, so keys
+    /// of the user's own in it, such as `font.weight`, stay.
     WtApply {
         settings: PathBuf,
         scheme: Value,
         profile: Map<String, Value>,
         set_default: bool,
     },
-    /// The complete new HKCU AutoRun value; `None` deletes it.
+    /// The complete new HKCU AutoRun value, raw as the registry holds it (never expanded);
+    /// `None` deletes it. Writing it keeps the value's registry type: a `REG_EXPAND_SZ` stays
+    /// `REG_EXPAND_SZ`, and a value that was not there is written as `REG_SZ` (spec §5.4).
     SetAutoRun {
         value: Option<String>,
     },
@@ -172,13 +191,23 @@ pub struct Plan {
 pub enum PlanError {
     /// Another Clink runs from AutoRun. `existing` is every command that turning it off takes
     /// out, so the user sees all of them before agreeing.
-    #[error("another Clink runs from cmd's AutoRun, in these commands: {existing:?}")]
+    #[error(
+        "another Clink runs from cmd's AutoRun, in these commands: {}",
+        quoted(existing)
+    )]
     ForeignClink { existing: Vec<String> },
     /// A path that would go into a cmd command or into Clink's settings holds `%`, `"` or
     /// `;`, or is not Unicode (spec §5.4).
-    #[error("cmd or Clink can't take this path: it holds %, a double quote, ; or text that is not Unicode: {0:?}")]
+    #[error(
+        "cmd or Clink can't take this path: it holds %, a double quote, ; or text that is not \
+         Unicode: \"{}\"",
+        .0.display()
+    )]
     UnsupportedPath(PathBuf),
-    #[error("Clink can't start from {0:?}, and no 8.3 or ProgramData path is available instead")]
+    #[error(
+        "Clink can't start from \"{}\", and no 8.3 or ProgramData path is available instead",
+        .0.display()
+    )]
     NoClinkPath(PathBuf),
     #[error("could not build the Oh My Posh config: {0}")]
     Generate(String),
@@ -186,7 +215,8 @@ pub enum PlanError {
     /// fault: one that holds our profile path without being one of our entries, or another
     /// Clink the user agreed to turn off that a pipe, parentheses or an unclosed quote combine
     /// with other commands. It is the whole value when cmd itself rejects the value: nothing
-    /// in it runs then, and our entry in front of it would not run either.
+    /// in it runs then, and our entry in front of it would not run either. It is
+    /// [`AUTORUN_NOT_TEXT`] when the value is there but is not plain text.
     #[error("AutoRun holds a command that CMD Studio can't safely change, so it needs a hand edit: {part}")]
     AutoRunNeedsHandEdit { part: String },
 }
@@ -201,6 +231,15 @@ impl PlanError {
             PlanError::Generate(_) => "E_THEME_INVALID",
         }
     }
+}
+
+/// Each text in plain quotes, as it is written, one after the other.
+fn quoted(texts: &[String]) -> String {
+    texts
+        .iter()
+        .map(|t| format!("\"{t}\""))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn is_ascii(p: &Path) -> bool {
@@ -293,7 +332,8 @@ fn wt_font(theme: &Theme, machine: &Machine, warnings: &mut Vec<Warning>) -> Str
 /// is touched, with `E_CLINK_PATH` when cmd or Clink can't take a path (see
 /// [`clink_launch`] and [`autorun_entry`]), with `E_AUTORUN_FOREIGN_CLINK` when another
 /// Clink runs from AutoRun and the user has not agreed to turn it off, and with
-/// `E_AUTORUN_WRITE` when AutoRun can't be changed safely (see `autorun::edit_autorun`).
+/// `E_AUTORUN_WRITE` when AutoRun can't be changed safely (see `autorun::edit_autorun`) or, for
+/// every cmd window, is there but is not plain text ([`AUTORUN_NOT_TEXT`]).
 pub fn plan(
     theme: &Theme,
     req: &Request,
@@ -373,46 +413,62 @@ pub fn plan(
     }
 
     // A Clink that cmd injects for every user of the machine, in any command of the value; a
-    // command that only mentions Clink is none (see `autorun::runs_clink`).
-    if machine.autorun_hklm.as_deref().is_some_and(|v| {
-        autorun::scan(v)
+    // command that only mentions Clink is none (see `autorun::runs_clink`). A value that is not
+    // plain text gives no warning: what it holds cannot be told (doctor D5 says so).
+    if let RegText::Text(v) = &machine.autorun_hklm {
+        if autorun::scan(v)
             .parts
             .iter()
             .any(|p| autorun::runs_clink(&p.text))
-    }) {
-        warnings.push(Warning::MachineWideClink);
+        {
+            warnings.push(Warning::MachineWideClink);
+        }
     }
 
-    let current = machine.autorun_hkcu.as_deref().unwrap_or_default();
-    // `autorun_entry` has refused a profile path cmd can't take; this gets its text.
-    let profile = paths.clink_profile();
-    let edit = autorun::edit_autorun(
-        current,
-        req.target,
-        &entry,
-        checked(&profile)?,
-        req.replace_foreign_clink,
-    )?;
-    if edit.removed_foreign {
-        th.push("ปิดส่วนเสริมของ cmd ตัวเดิมที่ติดตั้งไว้ก่อน (ย้อนกลับได้)");
-        en.push("Turn off the cmd add-on that was set up before (can be undone)");
-    }
-    if edit.value != current {
-        match req.target {
-            Target::All => {
-                th.push("ให้ cmd ทุกหน้าต่างใช้ธีมนี้");
-                en.push("Use this theme in every cmd window");
-            }
-            // Only when ours goes: taking out another Clink stops no theme of ours.
-            Target::Wt if edit.removed_ours => {
-                th.push("หยุดโหลดธีมในหน้าต่าง cmd นอก Windows Terminal");
-                en.push("Stop loading the theme in cmd windows outside Windows Terminal");
-            }
-            Target::Wt => {}
+    let current = match (&machine.autorun_hkcu, req.target) {
+        (RegText::Text(text), _) => Some(text.as_str()),
+        (RegText::Absent, _) => Some(""),
+        // A value that is there but is not plain text is never edited, nor taken for an
+        // absent one: writing our entry would replace it (spec §5.4).
+        (RegText::NotText, Target::All) => {
+            return Err(PlanError::AutoRunNeedsHandEdit {
+                part: AUTORUN_NOT_TEXT.to_string(),
+            })
         }
-        // A value with nothing but whitespace left is deleted.
-        let value = (!edit.value.trim().is_empty()).then_some(edit.value);
-        ops.push(Op::SetAutoRun { value });
+        // Windows Terminal only: AutoRun is left as it is.
+        (RegText::NotText, Target::Wt) => None,
+    };
+    if let Some(current) = current {
+        // `autorun_entry` has refused a profile path cmd can't take; this gets its text.
+        let profile = paths.clink_profile();
+        let edit = autorun::edit_autorun(
+            current,
+            req.target,
+            &entry,
+            checked(&profile)?,
+            req.replace_foreign_clink,
+        )?;
+        if edit.removed_foreign {
+            th.push("ปิดส่วนเสริมของ cmd ตัวเดิมที่ติดตั้งไว้ก่อน (ย้อนกลับได้)");
+            en.push("Turn off the cmd add-on that was set up before (can be undone)");
+        }
+        if edit.value != current {
+            match req.target {
+                Target::All => {
+                    th.push("ให้ cmd ทุกหน้าต่างใช้ธีมนี้");
+                    en.push("Use this theme in every cmd window");
+                }
+                // Only when ours goes: taking out another Clink stops no theme of ours.
+                Target::Wt if edit.removed_ours => {
+                    th.push("หยุดโหลดธีมในหน้าต่าง cmd นอก Windows Terminal");
+                    en.push("Stop loading the theme in cmd windows outside Windows Terminal");
+                }
+                Target::Wt => {}
+            }
+            // A value with nothing but whitespace left is deleted.
+            let value = (!edit.value.trim().is_empty()).then_some(edit.value);
+            ops.push(Op::SetAutoRun { value });
+        }
     }
 
     Ok(Plan {
@@ -489,7 +545,7 @@ mod tests {
     /// `current`; `None` when the plan leaves the value as it is.
     fn set_autorun(current: Option<&str>, target: Target) -> Option<Option<String>> {
         let mut m = machine();
-        m.autorun_hkcu = current.map(str::to_string);
+        m.autorun_hkcu = current.map_or(RegText::Absent, |c| RegText::Text(c.to_string()));
         autorun(&plan(&terracotta(), &req(target), &m, &paths()).unwrap())
     }
 
@@ -590,11 +646,15 @@ mod tests {
         // G19: never write a command that makes every cmd window show an error.
         let mut m = machine();
         m.data_short = None;
+        let err = plan(&terracotta(), &req(Target::All), &m, &paths()).unwrap_err();
+        assert_eq!(err.code(), "E_CLINK_PATH");
         assert_eq!(
-            plan(&terracotta(), &req(Target::All), &m, &paths())
-                .unwrap_err()
-                .code(),
-            "E_CLINK_PATH"
+            err.to_string(),
+            format!(
+                "Clink can't start from \"{}\", and no 8.3 or ProgramData path is available \
+                 instead",
+                paths().clink_exe().display()
+            )
         );
         // Each candidate must itself be all ASCII (spec §5.4).
         m.data_short = Some(PathBuf::from(r"C:\Users\ÉTÉ~1\AppData\Local\AIRESI~1.CMD"));
@@ -617,7 +677,7 @@ mod tests {
     fn keeps_other_programs_autorun_verbatim() {
         let anaconda = r#""C:\ProgramData\anaconda3\condabin\conda_hook.bat""#;
         let mut m = machine();
-        m.autorun_hkcu = Some(anaconda.to_string());
+        m.autorun_hkcu = RegText::Text(anaconda.to_string());
         let p = plan(&terracotta(), &req(Target::All), &m, &paths()).unwrap();
         assert_eq!(autorun(&p), Some(Some(format!("{} & {anaconda}", entry()))));
     }
@@ -626,7 +686,7 @@ mod tests {
     fn replaces_our_older_entry_instead_of_adding_another() {
         let old = old_entry();
         let mut m = machine();
-        m.autorun_hkcu = Some(format!("echo hi & {old}"));
+        m.autorun_hkcu = RegText::Text(format!("echo hi & {old}"));
         let p = plan(&terracotta(), &req(Target::All), &m, &paths()).unwrap();
         assert_eq!(autorun(&p), Some(Some(format!("{} & echo hi", entry()))));
     }
@@ -634,7 +694,7 @@ mod tests {
     #[test]
     fn nothing_to_do_when_autorun_is_already_ours() {
         let mut m = machine();
-        m.autorun_hkcu = Some(entry());
+        m.autorun_hkcu = RegText::Text(entry());
         let p = plan(&terracotta(), &req(Target::All), &m, &paths()).unwrap();
         assert_eq!(autorun(&p), None);
     }
@@ -643,7 +703,7 @@ mod tests {
     fn a_foreign_clink_needs_permission() {
         let foreign = r#""C:\Program Files (x86)\clink\clink.bat" inject --autorun"#;
         let mut m = machine();
-        m.autorun_hkcu = Some(foreign.to_string());
+        m.autorun_hkcu = RegText::Text(foreign.to_string());
         let err = plan(&terracotta(), &req(Target::All), &m, &paths()).unwrap_err();
         assert_eq!(err.code(), "E_AUTORUN_FOREIGN_CLINK");
         assert_eq!(
@@ -652,9 +712,10 @@ mod tests {
                 existing: vec![foreign.to_string()]
             }
         );
+        // Each command as it is written, in plain quotes (no `{:?}` escapes).
         assert_eq!(
             err.to_string(),
-            r#"another Clink runs from cmd's AutoRun, in these commands: ["\"C:\\Program Files (x86)\\clink\\clink.bat\" inject --autorun"]"#
+            r#"another Clink runs from cmd's AutoRun, in these commands: ""C:\Program Files (x86)\clink\clink.bat" inject --autorun""#
         );
         let mut r = req(Target::All);
         r.replace_foreign_clink = true;
@@ -671,7 +732,7 @@ mod tests {
     #[test]
     fn wt_target_removes_our_entry_and_injects_from_the_profile() {
         let mut m = machine();
-        m.autorun_hkcu = Some(format!("{} & echo hi", entry()));
+        m.autorun_hkcu = RegText::Text(format!("{} & echo hi", entry()));
         let p = plan(&terracotta(), &req(Target::Wt), &m, &paths()).unwrap();
         assert_eq!(autorun(&p), Some(Some("echo hi".to_string())));
         assert_eq!(
@@ -685,7 +746,7 @@ mod tests {
     #[test]
     fn wt_target_with_only_our_entry_deletes_the_value() {
         let mut m = machine();
-        m.autorun_hkcu = Some(entry());
+        m.autorun_hkcu = RegText::Text(entry());
         let p = plan(&terracotta(), &req(Target::Wt), &m, &paths()).unwrap();
         assert_eq!(autorun(&p), Some(None));
     }
@@ -709,7 +770,7 @@ mod tests {
         let clink = r#""C:\Program Files\clink\clink.bat" inject --autorun"#;
         let mut m = machine();
         for v in [clink.to_string(), format!("echo hi & {clink}")] {
-            m.autorun_hklm = Some(v.clone());
+            m.autorun_hklm = RegText::Text(v.clone());
             let p = plan(&terracotta(), &req(Target::All), &m, &paths()).unwrap();
             assert!(p.warnings.contains(&Warning::MachineWideClink), "{v}");
         }
@@ -718,7 +779,7 @@ mod tests {
             r#"doskey /macrofile="C:\tools\clink\macros.txt""#,
             r"cd /d C:\clink-notes",
         ] {
-            m.autorun_hklm = Some(v.to_string());
+            m.autorun_hklm = RegText::Text(v.to_string());
             let p = plan(&terracotta(), &req(Target::All), &m, &paths()).unwrap();
             assert!(!p.warnings.contains(&Warning::MachineWideClink), "{v}");
         }
@@ -734,6 +795,30 @@ mod tests {
             set_autorun(Some(doskey), Target::All),
             Some(Some(format!("{} & {doskey}", entry())))
         );
+    }
+
+    #[test]
+    fn a_value_that_is_not_plain_text_is_never_edited() {
+        // Every cmd window: refused, nothing planned, a hand edit in Registry Editor.
+        let mut m = machine();
+        m.autorun_hkcu = RegText::NotText;
+        let err = plan(&terracotta(), &req(Target::All), &m, &paths()).unwrap_err();
+        assert_eq!(
+            err,
+            PlanError::AutoRunNeedsHandEdit {
+                part: AUTORUN_NOT_TEXT.to_string()
+            }
+        );
+        assert_eq!(err.code(), "E_AUTORUN_WRITE");
+        // Windows Terminal only: AutoRun is not touched, so the rest is planned.
+        let p = plan(&terracotta(), &req(Target::Wt), &m, &paths()).unwrap();
+        assert_eq!(autorun(&p), None);
+        assert!(p.ops.iter().any(|o| matches!(o, Op::WtApply { .. })));
+        // A machine-wide value that is not text gives no warning: nothing says what it holds.
+        let mut m = machine();
+        m.autorun_hklm = RegText::NotText;
+        let p = plan(&terracotta(), &req(Target::All), &m, &paths()).unwrap();
+        assert!(!p.warnings.contains(&Warning::MachineWideClink));
     }
 
     #[test]
@@ -800,6 +885,12 @@ mod tests {
         };
         let err = plan(&terracotta(), &req(Target::All), &m, &p).unwrap_err();
         assert_eq!(err, PlanError::UnsupportedPath(p.clink_profile()));
+        // The path is said as it is written, Thai letters and all (no `{:?}` escapes).
+        assert!(
+            err.to_string()
+                .ends_with(r#": "D:\ข้อมูล;เก่า\ai.resincore.cmdstudio\clink-profile""#),
+            "{err}"
+        );
     }
 
     #[cfg(windows)]
@@ -852,7 +943,7 @@ mod tests {
     #[test]
     fn double_ampersand_between_foreign_parts_is_preserved() {
         let mut m = machine();
-        m.autorun_hkcu = Some("a && b".to_string());
+        m.autorun_hkcu = RegText::Text("a && b".to_string());
         let p = plan(&terracotta(), &req(Target::All), &m, &paths()).unwrap();
         assert_eq!(autorun(&p), Some(Some(format!("{} & a && b", entry()))));
     }
@@ -886,7 +977,7 @@ mod tests {
         r.replace_foreign_clink = true;
         // Only another Clink goes: nothing of ours was loading the theme there.
         let mut m = machine();
-        m.autorun_hkcu = Some(r#""C:\clink\clink.bat" inject & echo hi"#.to_string());
+        m.autorun_hkcu = RegText::Text(r#""C:\clink\clink.bat" inject & echo hi"#.to_string());
         let p = plan(&terracotta(), &r, &m, &paths()).unwrap();
         assert_eq!(autorun(&p), Some(Some("echo hi".to_string())));
         assert!(!p.summary_th.contains(&stop_th) && !p.summary_en.contains(&stop_en));
@@ -894,7 +985,7 @@ mod tests {
             .summary_en
             .contains(&"Turn off the cmd add-on that was set up before (can be undone)"));
         // Our entry goes.
-        m.autorun_hkcu = Some(format!("{} & echo hi", entry()));
+        m.autorun_hkcu = RegText::Text(format!("{} & echo hi", entry()));
         let p = plan(&terracotta(), &r, &m, &paths()).unwrap();
         assert_eq!(autorun(&p), Some(Some("echo hi".to_string())));
         assert!(p.summary_th.contains(&stop_th) && p.summary_en.contains(&stop_en));
@@ -909,7 +1000,7 @@ mod tests {
         m.program_data_dir = Some(PathBuf::from(PROGRAM_DATA));
         m.fonts.clear();
         // An older entry of ours and another Clink: every AutoRun line, for both targets.
-        m.autorun_hkcu = Some(format!(r#"{} & "C:\clink\clink.bat" inject"#, entry()));
+        m.autorun_hkcu = RegText::Text(format!(r#"{} & "C:\clink\clink.bat" inject"#, entry()));
         let mut lines = std::collections::BTreeSet::new();
         for target in [Target::All, Target::Wt] {
             let mut r = req(target);

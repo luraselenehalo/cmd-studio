@@ -1,0 +1,14 @@
+{
+    "defaultProfile": "{0caa0dad-35be-5f56-a8ff-afceeeaa6101}",
+    // Old form: "profiles" is the list itself.
+    "profiles": [
+        {
+            "guid": "{0caa0dad-35be-5f56-a8ff-afceeeaa6101}",
+            "name": "cmd",
+            "commandline": "cmd.exe"
+        }
+    ],
+    "schemes": [
+        { "name": "Campbell", "background": "#0C0C0C" }
+    ]
+}

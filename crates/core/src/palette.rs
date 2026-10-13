@@ -244,6 +244,42 @@ mod tests {
     }
 
     #[test]
+    fn the_cursor_follows_the_accent_when_the_fix_moves_it() {
+        // The readability fix may move the accent; the cursor is set to the accent after it, so
+        // the cursor never keeps the color the fix took away.
+        let p = generate(Tone::Light, c("#e3b341"), 0.0);
+        assert_ne!(p.accent, c("#e3b341"), "the fix moved this accent");
+        assert_eq!(p.cursor, p.accent);
+    }
+
+    #[test]
+    fn a_coloured_accent_tints_the_neutrals_with_its_hue() {
+        // Only an accent without chroma leaves the neutrals grey (ruling P23). A real one gives
+        // them a little of its hue, the background as much as the tint asks for.
+        let accent = c("#d97757");
+        let hue = Oklch::from_rgb(accent).h;
+        let p = generate(Tone::Dark, accent, 0.30);
+        for (name, color) in [
+            ("background", p.background),
+            ("muted", p.muted),
+            ("selection", p.selection),
+        ] {
+            let o = Oklch::from_rgb(color);
+            assert!(o.c > 0.01, "{name} {color}: chroma {}", o.c);
+            assert!(
+                (o.h - hue).abs() < 15.0,
+                "{name} {color}: hue {} for {hue}",
+                o.h
+            );
+        }
+        let untinted = generate(Tone::Dark, accent, 0.0);
+        assert!(
+            Oklch::from_rgb(untinted.background).c < 0.005,
+            "no tint, no chroma in the background"
+        );
+    }
+
+    #[test]
     fn achromatic_accents_still_give_valid_palettes() {
         // Review Focus 2
         for s in ["#000000", "#ffffff", "#808080"] {
