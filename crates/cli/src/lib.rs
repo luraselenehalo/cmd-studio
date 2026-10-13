@@ -1,7 +1,12 @@
 //! The `cmdstudio` command line (spec §5.7): `apply`, `doctor`, `undo`, `--cleanup` and
-//! `set-aside`. A thin layer over the core: it reads the command line, picks Thai or English,
-//! says what the core found and did, and turns it into an exit code. The Phase 2 app links this
-//! library and calls `run` when it is started with arguments, so the app and the CLI are one exe.
+//! `set-aside`. A thin layer over the core: it reads the command line, says what the core found
+//! and did, and turns it into an exit code. The Phase 2 app links this library and calls `run`
+//! when it is started with arguments, so the app and the CLI are one exe.
+//!
+//! Everything it says is English, whatever the language of Windows: nothing CMD Studio writes
+//! into a cmd window is Thai (the founder's rule of 2026-10-13). Where the core has a text in
+//! both languages, the CLI says the English one; the Thai ones are for the app's own UI. Names
+//! and paths of the user's are shown as they are written.
 //!
 //! Only the commands that change the machine (apply, undo, `--cleanup`, set-aside) start the
 //! way the core's commands do (`recover_at_start`): under CMD Studio's lock, a transaction a
@@ -9,19 +14,18 @@
 //! run no recovery, so another run never blocks them.
 pub mod args;
 
-use args::{parse, Args, Command, Lang, UsageError, USAGE, USAGE_TH};
+use args::{parse, Args, Command, USAGE};
 use cmdstudio_core::actions::{
-    pending_incomplete, prepare_apply, record_not_saved, recover_at_start, run_apply, undo,
-    ActionError, Ctx, Handled, StartReport, UndoReport, UndoResult, UnreadablePoint, BUSY_TH,
-    RECORD_NOT_SAVED_TH,
+    pending_incomplete, prepare_apply, recover_at_start, run_apply, undo, ActionError, Ctx,
+    Handled, StartReport, UndoReport, UndoResult, UnreadablePoint,
 };
-use cmdstudio_core::adapters::{DirEntry, Host, System};
+use cmdstudio_core::adapters::{DirEntry, System};
 use cmdstudio_core::cleanup::{cleanup, Report};
-use cmdstudio_core::doctor::{doctor, Status};
+use cmdstudio_core::doctor::{doctor, Check, Status};
 use cmdstudio_core::exec::{op_label, CLEANUP_FIX_EN, CLEANUP_FIX_TH, COMMAND_PROCESSOR_KEY};
 use cmdstudio_core::model::{parse_theme, Target};
 use cmdstudio_core::plan::{
-    Op, Paths, PlanError, Request, Warning, AUTORUN_NOT_TEXT, AUTORUN_NOT_TEXT_TH, NERD_FONT_FAMILY,
+    Op, Paths, PlanError, Request, Warning, AUTORUN_NOT_TEXT, NERD_FONT_FAMILY,
 };
 use cmdstudio_core::resources::Resources;
 use cmdstudio_core::snapshot::{Incomplete, SetAside, SnapshotStore, Unrestored};
@@ -56,39 +60,17 @@ pub struct Defaults {
     pub now_ms: u64,
 }
 
-/// `GetUserDefaultUILanguage` of Thai Windows.
-const LANG_THAI: u16 = 0x041E;
-
-/// What comes before a core's English text when it is shown in Thai.
-const DETAILS_TH: &str = "รายละเอียด";
-
-/// The language of everything said: `apply --lang`, else Windows' display language.
-fn chosen_lang(parsed: &Result<Args, UsageError>, host: &dyn Host) -> Lang {
-    match parsed {
-        Ok(Args {
-            command: Command::Apply {
-                lang: Some(lang), ..
-            },
-            ..
-        }) => *lang,
-        _ if host.system_info().ui_language == LANG_THAI => Lang::Th,
-        _ => Lang::En,
-    }
-}
-
 /// Runs one command on the machine `sys` and returns the exit code.
 pub fn run_with(args: &[OsString], io: &mut Io<'_>, sys: System<'_>, defaults: &Defaults) -> i32 {
-    let parsed = parse(args);
-    let mut say = Say::new(io, chosen_lang(&parsed, sys.host));
+    let mut say = Say::new(io);
     let Args {
         command,
         data_dir,
         resources,
-    } = match parsed {
+    } = match parse(args) {
         Ok(args) => args,
         Err(e) => {
-            let (message, usage) = say.pick((&e.en, USAGE), (&e.th, USAGE_TH));
-            let _ = write!(say.io.err, "cmdstudio: {message}\n\n{usage}");
+            let _ = write!(say.io.err, "cmdstudio: {e}\n\n{USAGE}");
             return EXIT_INVALID;
         }
     };
@@ -104,8 +86,7 @@ pub fn run_with(args: &[OsString], io: &mut Io<'_>, sys: System<'_>, defaults: &
     };
     match command {
         Command::Help => {
-            let usage = say.pick(USAGE, USAGE_TH);
-            let _ = write!(say.io.out, "{usage}");
+            let _ = write!(say.io.out, "{USAGE}");
             EXIT_OK
         }
         Command::Doctor { json } => say.doctor(sys, &ctx, json),
@@ -113,7 +94,6 @@ pub fn run_with(args: &[OsString], io: &mut Io<'_>, sys: System<'_>, defaults: &
             theme,
             target,
             replace_other_clink,
-            lang: _,
         } => {
             let req = Request {
                 target,
@@ -129,76 +109,27 @@ pub fn run_with(args: &[OsString], io: &mut Io<'_>, sys: System<'_>, defaults: &
     }
 }
 
-/// What a code means in Thai (spec §5.9), for a text the core gives in English only.
-fn meaning_th(code: &str) -> Option<&'static str> {
-    Some(match code {
-        "E_WT_NOT_FOUND" => "ไม่พบ Windows Terminal หรือพบแต่ยังไม่เคยเปิด จึงยังไม่มี settings.json",
-        "E_WT_PARSE" => {
-            "อ่าน settings.json ของ Windows Terminal ไม่ได้ หรือไฟล์เขียนคีย์ที่ CMD Studio ดูแลซ้ำ \
-             หรือซ้อนลึกเกิน 64 ชั้น ต้องแก้ไฟล์ด้วยมือ"
-        }
-        "E_WT_WRITE" => "เขียน settings.json ของ Windows Terminal ไม่ได้",
-        "E_AUTORUN_FOREIGN_CLINK" => "เจอ Clink ตัวอื่นใน AutoRun",
-        "E_AUTORUN_WRITE" => "เขียน AutoRun ไม่ได้ หรือแก้อย่างปลอดภัยไม่ได้จึงต้องแก้ด้วยมือ",
-        "E_CLINK_PATH" => "ไม่มี path ที่ cmd ใช้เรียก Clink ได้อย่างปลอดภัย",
-        "E_FONT_INSTALL" => "ติดตั้งหรือถอนฟอนต์ไม่สำเร็จ",
-        "E_RUNTIME_MISSING" => "ไฟล์ส่วนเสริมหาย ถูกแก้ หรือรันไม่ได้",
-        "E_VERIFY_OMP" => "ขั้นตรวจผล: Oh My Posh สร้าง prompt จาก config ไม่ได้",
-        "E_VERIFY_CLINK" => "ขั้นตรวจผล: Clink โหลดสคริปต์ไม่ได้",
-        "E_VERIFY_READBACK" => "ขั้นตรวจผล: ค่าที่อ่านกลับมาไม่ตรงกับที่เขียน",
-        "E_SNAPSHOT_WRITE" => "บันทึกจุดย้อนกลับไม่สำเร็จ",
-        "E_SNAPSHOT_READ" => "อ่านจุดย้อนกลับไม่ได้ (ไฟล์หาย เสีย หรือเปิดไม่ได้ในตอนนี้)",
-        "E_THEME_INVALID" => "ไฟล์ธีมผิดรูปแบบ",
-        "E_THEME_NEWER_SCHEMA" => "ไฟล์ธีมมาจาก CMD Studio รุ่นที่ใหม่กว่า",
-        "E_ROLLBACK_INCOMPLETE" => "ย้อนกลับได้ไม่ครบ บางส่วนต้องแก้ด้วยมือ",
-        "E_TXN_INTERRUPTED" => "การเปลี่ยนแปลงครั้งก่อนถูกตัดกลางทาง (โปรแกรมหยุดทำงานก่อนเสร็จ)",
-        "E_UNSUPPORTED_PLATFORM" => "เครื่องนี้ไม่ใช่ Windows แบบ x64 ส่วนเสริมที่แนบมามีแต่รุ่น x64",
-        "E_DATA_WRITE" => "เขียนลงโฟลเดอร์ข้อมูลของ CMD Studio ไม่ได้",
-        "E_STATE_INVALID" => {
-            "ใช้ state.json ไม่ได้ เพราะไฟล์เสีย ถูกแก้ เปิดไม่ได้ หรือเขียนโดย CMD Studio รุ่นที่ใหม่กว่า"
-        }
-        "E_GENERATED_EDITED" => "มีคนแก้ไฟล์ใน generated\\ ด้วยมือ",
-        "E_APP_PACKAGED" => "แอปรันอยู่ในแพ็กเกจ MSIX สิ่งที่แอปเขียนจึงไม่มีผลกับโปรแกรมอื่น",
-        "E_THEME_NOT_LOADED" => "ใช้ธีมแล้ว แต่ยังไม่มีหน้าต่าง cmd ไหนโหลดธีม",
-        "E_MACHINE_READ" => "อ่านการตั้งค่าของเครื่องนี้ไม่ได้ (registry ไฟล์ หรือรายชื่อฟอนต์)",
-        "E_BUSY" => BUSY_TH,
-        _ => return None,
-    })
-}
-
 /// What `--cleanup` says when steps failed. The uninstaller shows the exit code; a font file
 /// still in use or the record of a rollback that did not finish is often done by a second run.
 const CLEANUP_AGAIN_EN: &str = "Not everything could be done: see each FAILED step above. Some \
      finish when you run `cmdstudio --cleanup` again, for example once every cmd window and \
      Windows Terminal are closed; the others say how to fix them by hand.";
-const CLEANUP_AGAIN_TH: &str = "ยังทำไม่ครบทุกอย่าง ดูแต่ละขั้นที่ไม่สำเร็จด้านบน บางขั้นจะเสร็จเมื่อรัน \
-     `cmdstudio --cleanup` อีกครั้ง เช่น หลังปิดหน้าต่าง cmd และ Windows Terminal ทุกหน้าต่าง \
-     ส่วนขั้นอื่นบอกวิธีแก้ด้วยมือไว้";
 
-/// What the user reads, in one language, and what this run said already: the starts of the CLI
-/// and of the core's command both report what they found, and each thing is said once.
+/// What the user reads, and what this run said already: the starts of the CLI and of the core's
+/// command both report what they found, and each thing is said once.
 struct Say<'s, 'a> {
     io: &'s mut Io<'a>,
-    lang: Lang,
     said: Vec<String>,
     /// The restore points whose record of a rollback that did not finish was listed.
     records: Vec<String>,
 }
 
 impl<'s, 'a> Say<'s, 'a> {
-    fn new(io: &'s mut Io<'a>, lang: Lang) -> Self {
+    fn new(io: &'s mut Io<'a>) -> Self {
         Say {
             io,
-            lang,
             said: Vec::new(),
             records: Vec::new(),
-        }
-    }
-
-    fn pick<T>(&self, en: T, th: T) -> T {
-        match self.lang {
-            Lang::Th => th,
-            Lang::En => en,
         }
     }
 
@@ -218,35 +149,18 @@ impl<'s, 'a> Say<'s, 'a> {
         }
     }
 
-    /// `code: text`, where `en` is the core's English text. In Thai the code's meaning (spec
-    /// §5.9) comes first, and the English text follows as details.
+    /// `code: text`, where `en` is the core's English text.
     fn coded(&self, code: &str, en: &str) -> String {
-        match (self.lang, meaning_th(code)) {
-            (Lang::Th, Some(th)) => format!("{code}: {th}\n  {DETAILS_TH}: {en}"),
-            _ => format!("{code}: {en}"),
-        }
+        format!("{code}: {en}")
     }
 
     fn note(&self, text: &str) -> String {
-        format!("{}{text}", self.pick("Note: ", "หมายเหตุ: "))
+        format!("Note: {text}")
     }
 
-    /// The core's words for `e`: its Thai text where it has one.
+    /// The core's words for `e`, in English.
     fn error_text(&self, e: &ActionError) -> String {
-        match (self.lang, e.message_th()) {
-            (Lang::Th, Some(th)) => format!("{}: {th}", e.code()),
-            _ => self.coded(e.code(), &e.to_string()),
-        }
-    }
-
-    /// How to fix one step by hand, in the chosen language. A record written before the Thai
-    /// text existed has only the English one.
-    fn step_fix<'r>(&self, step: &'r Unrestored) -> &'r str {
-        if self.lang == Lang::Th && !step.fix_th.is_empty() {
-            &step.fix_th
-        } else {
-            &step.fix
-        }
+        self.coded(e.code(), &e.to_string())
     }
 
     /// What every command that changes the machine does first (`recover_at_start`), told.
@@ -275,14 +189,9 @@ impl<'s, 'a> Say<'s, 'a> {
         let mut not_back = false;
         match &start.recovered {
             Some(Outcome::RolledBack { code, reason }) => {
-                let text = self.pick(
-                    format!("{code}: {reason}; the machine is as it was before it."),
-                    format!(
-                        "{code}: การเปลี่ยนแปลงครั้งก่อนถูกตัดกลางทาง จึงย้อนกลับให้แล้ว \
-                         เครื่องกลับเป็นเหมือนก่อนการเปลี่ยนแปลงนั้น\n  {DETAILS_TH}: {reason}"
-                    ),
-                );
-                self.once(text);
+                self.once(format!(
+                    "{code}: {reason}; the machine is as it was before it."
+                ));
             }
             // Its journal cannot be read now, so nothing was rolled back: the command that
             // changes the machine refuses, and says what to do (`refused`).
@@ -309,14 +218,10 @@ impl<'s, 'a> Say<'s, 'a> {
         }
         if let Some(record) = &start.incomplete {
             if !self.records.contains(&record.id) {
-                let text = self.pick(
-                    format!(
-                        "Note: the rollback of restore point {} did not finish.",
-                        record.id
-                    ),
-                    format!("หมายเหตุ: การย้อนกลับของจุดย้อนกลับ {} ทำได้ไม่ครบ", record.id),
-                );
-                self.err(text);
+                self.err(format!(
+                    "Note: the rollback of restore point {} did not finish.",
+                    record.id
+                ));
                 self.unrestored(Some(record), &[], &[]);
             }
         }
@@ -326,37 +231,18 @@ impl<'s, 'a> Say<'s, 'a> {
     fn unreadable(&self, u: &UnreadablePoint) -> String {
         let (id, code, why) = (&u.point.id, u.point.failure.code, &u.point.failure.message);
         match &u.handled {
-            Handled::SetAside => self.pick(
-                format!(
-                    "Note: {code}: restore point {id} could not be used ({why}). It was set \
-                     aside, its files kept for a look, and an undo no longer goes back to it."
-                ),
-                format!(
-                    "หมายเหตุ: {code}: ใช้จุดย้อนกลับ {id} ไม่ได้ ({why}) จึงกันไว้ต่างหากแล้ว \
-                     ไฟล์ของมันยังเก็บไว้ให้ดู และการย้อนกลับจะไม่ย้อนไปถึงจุดนี้อีก"
-                ),
+            Handled::SetAside => format!(
+                "Note: {code}: restore point {id} could not be used ({why}). It was set \
+                 aside, its files kept for a look, and an undo no longer goes back to it."
             ),
-            Handled::LeftForLater => self.pick(
-                format!(
-                    "Note: {code}: restore point {id} can't be read right now ({why}). It was \
-                     left as it is, and an undo does not go past it until it can be read."
-                ),
-                format!(
-                    "หมายเหตุ: {code}: ตอนนี้อ่านจุดย้อนกลับ {id} ไม่ได้ ({why}) จึงปล่อยไว้ตามเดิม \
-                     และการย้อนกลับจะไม่ย้อนข้ามจุดนี้จนกว่าจะอ่านได้"
-                ),
+            Handled::LeftForLater => format!(
+                "Note: {code}: restore point {id} can't be read right now ({why}). It was \
+                 left as it is, and an undo does not go past it until it can be read."
             ),
-            Handled::SetAsideFailed(f) => self.pick(
-                format!(
-                    "Note: {code}: restore point {id} could not be used ({why}), and setting it \
-                     aside failed ({}: {}). An undo does not go past it.",
-                    f.code, f.message
-                ),
-                format!(
-                    "หมายเหตุ: {code}: ใช้จุดย้อนกลับ {id} ไม่ได้ ({why}) และกันไว้ต่างหากไม่สำเร็จ \
-                     ({}: {}) การย้อนกลับจะไม่ย้อนข้ามจุดนี้",
-                    f.code, f.message
-                ),
+            Handled::SetAsideFailed(f) => format!(
+                "Note: {code}: restore point {id} could not be used ({why}), and setting it \
+                 aside failed ({}: {}). An undo does not go past it.",
+                f.code, f.message
             ),
         }
     }
@@ -365,12 +251,7 @@ impl<'s, 'a> Say<'s, 'a> {
     /// core's record; without one, the targets come from `failed` and `ops`, and the fix is a
     /// clean-up.
     fn unrestored(&mut self, record: Option<&Incomplete>, failed: &[(usize, Failure)], ops: &[Op]) {
-        let head = self.pick(
-            "E_ROLLBACK_INCOMPLETE: not everything could be put back. Fix these by hand:",
-            "E_ROLLBACK_INCOMPLETE: ย้อนกลับได้ไม่ครบ ให้แก้รายการเหล่านี้ด้วยมือ:",
-        );
-        self.err(head);
-        let (cannot, fix) = self.pick(("could not put back", "fix"), ("ย้อนกลับไม่ได้", "วิธีแก้"));
+        self.err("E_ROLLBACK_INCOMPLETE: not everything could be put back. Fix these by hand:");
         if let Some(r) = record {
             self.records.push(r.id.clone());
         }
@@ -378,27 +259,27 @@ impl<'s, 'a> Say<'s, 'a> {
             Some(r) if !r.steps.is_empty() => {
                 for s in &r.steps {
                     self.err(format!(
-                        "  {cannot}: {} ({}: {})",
+                        "  could not put back: {} ({}: {})",
                         s.target, s.code, s.message
                     ));
-                    let how = self.step_fix(s);
-                    self.err(format!("    {fix}: {how}"));
+                    self.err(format!("    fix: {}", s.fix));
                 }
             }
             _ => {
                 if failed.is_empty() {
-                    let what = self.pick(
-                        "what that change did (its journal could not be read)",
-                        "สิ่งที่การเปลี่ยนแปลงนั้นทำไว้ (อ่านบันทึกของมันไม่ได้)",
+                    self.err(
+                        "  could not put back: what that change did (its journal could not be \
+                         read)",
                     );
-                    self.err(format!("  {cannot}: {what}"));
                 }
                 for (i, f) in failed {
                     let what = ops.get(*i).map_or_else(|| format!("step {i}"), op_label);
-                    self.err(format!("  {cannot}: {what} ({}: {})", f.code, f.message));
+                    self.err(format!(
+                        "  could not put back: {what} ({}: {})",
+                        f.code, f.message
+                    ));
                 }
-                let how = self.pick(CLEANUP_FIX_EN, CLEANUP_FIX_TH);
-                self.err(format!("    {fix}: {how}"));
+                self.err(format!("    fix: {CLEANUP_FIX_EN}"));
             }
         }
     }
@@ -411,84 +292,58 @@ impl<'s, 'a> Say<'s, 'a> {
         let code = e.code();
         match e {
             ActionError::Plan(PlanError::ForeignClink { existing }) => {
-                let head = self.pick(
-                    "another Clink starts with cmd, from AutoRun. Turning it off takes out \
-                     these commands:",
-                    "มี Clink ตัวอื่นเริ่มพร้อม cmd จาก AutoRun ถ้าปิดมัน จะต้องเอาคำสั่งเหล่านี้ออก:",
-                );
-                self.err(format!("{code}: {head}"));
+                self.err(format!(
+                    "{code}: another Clink starts with cmd, from AutoRun. Turning it off takes out \
+                     these commands:"
+                ));
                 for command in existing {
                     self.err(format!("  {command}"));
                 }
-                self.err(self.pick(
+                self.err(
                     "Your settings were not changed. To turn it off and use CMD Studio's Clink \
                      instead, run the same command again with --replace-other-clink (undo turns \
                      it back on).",
-                    "ยังไม่ได้เปลี่ยนการตั้งค่าของคุณ ถ้าจะปิด Clink ตัวนั้นแล้วใช้ของ CMD Studio แทน \
-                     ให้รันคำสั่งเดิมอีกครั้งโดยเพิ่ม --replace-other-clink (undo จะเปิดกลับให้)",
-                ));
+                );
                 EXIT_INVALID
             }
             // The value is not text, so there is no command to show: what is wrong is said
-            // instead, in the chosen language.
+            // instead.
             ActionError::Plan(PlanError::AutoRunNeedsHandEdit { part })
                 if part == AUTORUN_NOT_TEXT =>
             {
                 let key = COMMAND_PROCESSOR_KEY;
-                self.err(self.pick(
-                    format!("{code}: CMD Studio can't safely change AutoRun: {AUTORUN_NOT_TEXT}."),
-                    format!(
-                        "{code}: CMD Studio แก้ AutoRun อย่างปลอดภัยไม่ได้ เพราะ{AUTORUN_NOT_TEXT_TH}"
-                    ),
+                self.err(format!(
+                    "{code}: CMD Studio can't safely change AutoRun: {AUTORUN_NOT_TEXT}."
                 ));
-                self.err(self.pick(
-                    format!(
-                        "Your settings were not changed. Fix it by hand: in Registry Editor, \
-                         open {key} and make AutoRun a String Value (REG_SZ) that holds the \
-                         commands you want, or delete it if you do not need it. Then run this \
-                         again."
-                    ),
-                    format!(
-                        "ยังไม่ได้เปลี่ยนการตั้งค่าของคุณ ให้แก้ด้วยมือ: เปิด Registry Editor (regedit) ไปที่ {key} \
-                         แล้วทำให้ AutoRun เป็นชนิด String Value (REG_SZ) ที่มีคำสั่งที่ต้องการ \
-                         หรือลบค่านี้ถ้าไม่ได้ใช้ จากนั้นรันคำสั่งนี้อีกครั้ง"
-                    ),
+                self.err(format!(
+                    "Your settings were not changed. Fix it by hand: in Registry Editor, \
+                     open {key} and make AutoRun a String Value (REG_SZ) that holds the \
+                     commands you want, or delete it if you do not need it. Then run this \
+                     again."
                 ));
                 EXIT_FAILED
             }
             ActionError::Plan(PlanError::AutoRunNeedsHandEdit { part }) => {
-                let head = self.pick(
-                    "CMD Studio can't safely change AutoRun because of this command:",
-                    "CMD Studio แก้ AutoRun อย่างปลอดภัยไม่ได้ เพราะคำสั่งนี้:",
-                );
-                self.err(format!("{code}: {head}"));
+                self.err(format!(
+                    "{code}: CMD Studio can't safely change AutoRun because of this command:"
+                ));
                 self.err(format!("  {part}"));
                 let key = COMMAND_PROCESSOR_KEY;
-                self.err(self.pick(
-                    format!(
-                        "Your settings were not changed. Fix it by hand: in Registry Editor, \
-                         open {key} and correct or take out that command in the AutoRun value. \
-                         Then run this again."
-                    ),
-                    format!(
-                        "ยังไม่ได้เปลี่ยนการตั้งค่าของคุณ ให้แก้ด้วยมือ: เปิด Registry Editor (regedit) ไปที่ {key} \
-                         แล้วแก้หรือเอาคำสั่งนั้นออกจากค่า AutoRun จากนั้นรันคำสั่งนี้อีกครั้ง"
-                    ),
+                self.err(format!(
+                    "Your settings were not changed. Fix it by hand: in Registry Editor, \
+                     open {key} and correct or take out that command in the AutoRun value. \
+                     Then run this again."
                 ));
                 EXIT_FAILED
             }
             // What the user can do is reinstall; what exactly is missing is for whoever looks
             // closer (the core's text names a developer script).
             ActionError::Resources(why) => {
-                self.err(self.pick(
-                    format!(
-                        "{code}: The files that come with CMD Studio are missing or damaged. \
-                         Reinstall CMD Studio."
-                    ),
-                    format!("{code}: ไฟล์ที่แนบมากับ CMD Studio หายหรือเสีย ให้ติดตั้ง CMD Studio ใหม่"),
+                self.err(format!(
+                    "{code}: The files that come with CMD Studio are missing or damaged. \
+                     Reinstall CMD Studio."
                 ));
-                let details = self.pick("details", DETAILS_TH);
-                self.err(format!("  {details}: {why}"));
+                self.err(format!("  details: {why}"));
                 EXIT_FAILED
             }
             ActionError::RecoveryPending { .. } => {
@@ -503,45 +358,29 @@ impl<'s, 'a> Say<'s, 'a> {
                 }
                 EXIT_FAILED
             }
-            // A Thai user name is where these two happen, so they are worded here in both
-            // languages, with the path shown as it is.
+            // A Thai user name is where these two happen, so they are worded here, with the
+            // path shown as it is written.
             ActionError::Plan(PlanError::UnsupportedPath(path)) => {
                 let shown = path.display();
-                self.err(self.pick(
-                    format!(
-                        "{code}: cmd or Clink can't take this path: it holds %, a double quote or \
-                         ;, or text that is not Unicode: \"{shown}\""
-                    ),
-                    format!(
-                        "{code}: cmd หรือ Clink ใช้ path นี้ไม่ได้ เพราะมี % เครื่องหมายคำพูด หรือ ; \
-                         หรือมีตัวอักษรที่ไม่ใช่ Unicode: \"{shown}\""
-                    ),
+                self.err(format!(
+                    "{code}: cmd or Clink can't take this path: it holds %, a double quote or \
+                     ;, or text that is not Unicode: \"{shown}\""
                 ));
                 // Every path the planner checks is in the data folder, which by default is
                 // under the Windows user folder: the user name is what holds the character.
-                self.err(self.pick(
+                self.err(
                     "Your settings were not changed. This path is in CMD Studio's data folder, \
                      which is under your Windows user folder unless --data-dir names another. \
                      Use a Windows account whose user folder has none of them, or give \
                      --data-dir a folder whose full path has none.",
-                    "ยังไม่ได้เปลี่ยนการตั้งค่าของคุณ path นี้อยู่ในโฟลเดอร์ข้อมูลของ CMD Studio \
-                     ซึ่งอยู่ในโฟลเดอร์ผู้ใช้ของ Windows ถ้าไม่ได้ใส่ --data-dir \
-                     ให้ใช้บัญชี Windows ที่โฟลเดอร์ผู้ใช้ไม่มีตัวอักษรเหล่านี้ \
-                     หรือใส่ --data-dir เป็นโฟลเดอร์ที่ path เต็มไม่มีตัวอักษรเหล่านี้",
-                ));
+                );
                 EXIT_FAILED
             }
             ActionError::Plan(PlanError::NoClinkPath(path)) => {
                 let shown = path.display();
-                self.err(self.pick(
-                    format!(
-                        "{code}: Clink can't start from \"{shown}\", and no 8.3 or ProgramData \
-                         path is available instead"
-                    ),
-                    format!(
-                        "{code}: เรียก Clink จาก \"{shown}\" ไม่ได้ และไม่มี path แบบ 8.3 \
-                         หรือใน ProgramData ให้ใช้แทน"
-                    ),
+                self.err(format!(
+                    "{code}: Clink can't start from \"{shown}\", and no 8.3 or ProgramData \
+                     path is available instead"
                 ));
                 self.next_step(code);
                 EXIT_FAILED
@@ -560,46 +399,34 @@ impl<'s, 'a> Say<'s, 'a> {
     }
 
     /// What to do after a refusal whose text the core words: what the code means is in that
-    /// text (or, in Thai, its meaning from spec §5.9); this says that the user's settings were
-    /// not changed, and what to do next.
+    /// text; this says that the user's settings were not changed, and what to do next.
     fn next_step(&mut self, code: &str) {
-        let (en, th) = match code {
-            "E_WT_PARSE" => (
+        self.err(match code {
+            "E_WT_PARSE" => {
                 "Your settings were not changed. Fix that settings.json by hand (Windows \
-                 Terminal says where it is wrong when it starts), then try again.",
-                "ยังไม่ได้เปลี่ยนการตั้งค่าของคุณ ให้แก้ settings.json นั้นด้วยมือ (Windows Terminal \
-                 จะบอกจุดที่ผิดตอนเปิด) แล้วลองใหม่",
-            ),
-            "E_MACHINE_READ" | "E_SNAPSHOT_READ" => (
+                 Terminal says where it is wrong when it starts), then try again."
+            }
+            "E_MACHINE_READ" | "E_SNAPSHOT_READ" => {
                 "Your settings were not changed. Try again in a moment; `cmdstudio doctor` shows \
-                 what can't be read.",
-                "ยังไม่ได้เปลี่ยนการตั้งค่าของคุณ ลองใหม่อีกครั้งในอีกสักครู่ `cmdstudio doctor` \
-                 จะบอกว่าอ่านอะไรไม่ได้",
-            ),
-            "E_STATE_INVALID" => (
-                "Your settings were not changed. Run `cmdstudio doctor`: its D9 says what to do.",
-                "ยังไม่ได้เปลี่ยนการตั้งค่าของคุณ ให้รัน `cmdstudio doctor` แล้วทำตามข้อ D9",
-            ),
-            "E_DATA_WRITE" | "E_SNAPSHOT_WRITE" => (
+                 what can't be read."
+            }
+            "E_STATE_INVALID" => {
+                "Your settings were not changed. Run `cmdstudio doctor`: its D9 says what to do."
+            }
+            "E_DATA_WRITE" | "E_SNAPSHOT_WRITE" => {
                 "Your settings were not changed. Check that CMD Studio's data folder can be \
-                 written (free disk space, permissions), then try again.",
-                "ยังไม่ได้เปลี่ยนการตั้งค่าของคุณ ให้ตรวจว่าเขียนลงโฟลเดอร์ข้อมูลของ CMD Studio ได้ \
-                 (พื้นที่ดิสก์ สิทธิ์) แล้วลองใหม่",
-            ),
+                 written (free disk space, permissions), then try again."
+            }
             // `NoClinkPath`; `UnsupportedPath` has its own (`refused`).
-            "E_CLINK_PATH" => (
+            "E_CLINK_PATH" => {
                 "Your settings were not changed. CMD Studio found no path on this computer that \
-                 cmd can start Clink from safely, so it can't set up the prompt here.",
-                "ยังไม่ได้เปลี่ยนการตั้งค่าของคุณ เครื่องนี้ไม่มี path ที่ cmd \
-                 ใช้เรียก Clink ได้อย่างปลอดภัย CMD Studio จึงตั้ง prompt ที่นี่ไม่ได้",
-            ),
-            "E_THEME_INVALID" => (
-                "Your settings were not changed. Fix the theme file, then try again.",
-                "ยังไม่ได้เปลี่ยนการตั้งค่าของคุณ ให้แก้ไฟล์ธีมแล้วลองใหม่",
-            ),
-            _ => ("Your settings were not changed.", "ยังไม่ได้เปลี่ยนการตั้งค่าของคุณ"),
-        };
-        self.err(self.pick(en, th));
+                 cmd can start Clink from safely, so it can't set up the prompt here."
+            }
+            "E_THEME_INVALID" => {
+                "Your settings were not changed. Fix the theme file, then try again."
+            }
+            _ => "Your settings were not changed.",
+        });
     }
 
     /// While the journal of a transaction a crash may have cut off can't be read, every change
@@ -614,21 +441,12 @@ impl<'s, 'a> Say<'s, 'a> {
             .and_then(|mut ids| ids.pop());
         let command = match &newest {
             Some(id) => format!("`cmdstudio set-aside {id}`"),
-            None => self.pick(
-                "`cmdstudio set-aside <id>` (`cmdstudio doctor` names the id)".to_string(),
-                "`cmdstudio set-aside <id>` (`cmdstudio doctor` บอกรหัสให้)".to_string(),
-            ),
+            None => "`cmdstudio set-aside <id>` (`cmdstudio doctor` names the id)".to_string(),
         };
-        self.err(self.pick(
-            format!(
-                "If it never becomes readable, run {command} to set that restore point aside. \
-                 What that change did is then not rolled back by itself, and must be checked by \
-                 hand: {CLEANUP_FIX_EN}"
-            ),
-            format!(
-                "ถ้าจุดย้อนกลับนั้นอ่านไม่ได้ตลอด ให้รันคำสั่ง {command} เพื่อกันไว้ต่างหาก \
-                 แต่สิ่งที่การเปลี่ยนแปลงนั้นทำไว้จะไม่ถูกย้อนเอง ต้องตรวจด้วยมือ: {CLEANUP_FIX_TH}"
-            ),
+        self.err(format!(
+            "If it never becomes readable, run {command} to set that restore point aside. \
+             What that change did is then not rolled back by itself, and must be checked by \
+             hand: {CLEANUP_FIX_EN}"
         ));
     }
 
@@ -649,10 +467,7 @@ impl<'s, 'a> Say<'s, 'a> {
             }
             Outcome::RolledBack { code, reason } => {
                 self.err(self.coded(code, reason));
-                self.err(self.pick(
-                    "Everything was rolled back; your settings are as they were.",
-                    "ย้อนกลับทุกอย่างแล้ว การตั้งค่าของคุณกลับเป็นเหมือนเดิม",
-                ));
+                self.err("Everything was rolled back; your settings are as they were.");
                 EXIT_FAILED
             }
             Outcome::RollbackIncomplete {
@@ -660,12 +475,8 @@ impl<'s, 'a> Say<'s, 'a> {
                 reason,
                 failed,
             } => {
+                // When the list of what to fix could not be saved, the core's reason says so.
                 self.err(self.coded(code, reason));
-                // The core's reason says it in English; in Thai it is said as well.
-                if self.lang == Lang::Th && record_not_saved(outcome) {
-                    let text = self.note(RECORD_NOT_SAVED_TH);
-                    self.err(text);
-                }
                 // The record the core just wrote for this transaction (or, when it could not be
                 // saved, rebuilt from its journal): the newest one.
                 let record = match pending_incomplete(sys, ctx) {
@@ -684,25 +495,20 @@ impl<'s, 'a> Say<'s, 'a> {
 
     fn warning(&self, w: &Warning) -> String {
         let text = match w {
-            Warning::NoWindowsTerminal => self.pick(
+            Warning::NoWindowsTerminal => {
                 "Windows Terminal is not installed: only the prompt and the welcome box change."
-                    .to_string(),
-                "ไม่พบ Windows Terminal จึงเปลี่ยนแค่ prompt และกล่องต้อนรับ".to_string(),
-            ),
-            Warning::MachineWideClink => self.pick(
+                    .to_string()
+            }
+            Warning::MachineWideClink => {
                 "Clink is also set up for the whole machine; the theme's prompt may not work."
-                    .to_string(),
-                "มี Clink ตั้งไว้สำหรับทั้งเครื่องด้วย prompt ของธีมอาจไม่ทำงาน".to_string(),
-            ),
-            Warning::FontFallback { wanted } => self.pick(
-                format!(
-                    "The font \"{wanted}\" is not installed; Windows Terminal gets \
-                     {NERD_FONT_FAMILY} instead."
-                ),
-                format!("ไม่ได้ติดตั้งฟอนต์ \"{wanted}\" Windows Terminal จึงใช้ {NERD_FONT_FAMILY} แทน"),
+                    .to_string()
+            }
+            Warning::FontFallback { wanted } => format!(
+                "The font \"{wanted}\" is not installed; Windows Terminal gets \
+                 {NERD_FONT_FAMILY} instead."
             ),
         };
-        format!("{}{text}", self.pick("Warning: ", "คำเตือน: "))
+        format!("Warning: {text}")
     }
 
     fn apply(&mut self, sys: System<'_>, ctx: &Ctx, path: &Path, req: &Request) -> i32 {
@@ -713,17 +519,11 @@ impl<'s, 'a> Say<'s, 'a> {
         let bytes = match sys.fs.read(path) {
             Ok(Some(bytes)) => bytes,
             Ok(None) => {
-                self.err(self.pick(
-                    format!("E_THEME_INVALID: {shown} does not exist"),
-                    format!("E_THEME_INVALID: ไม่มีไฟล์ {shown}"),
-                ));
+                self.err(format!("E_THEME_INVALID: {shown} does not exist"));
                 return EXIT_INVALID;
             }
             Err(e) => {
-                self.err(self.pick(
-                    format!("E_THEME_INVALID: {shown} could not be read: {e}"),
-                    format!("E_THEME_INVALID: อ่านไฟล์ {shown} ไม่ได้: {e}"),
-                ));
+                self.err(format!("E_THEME_INVALID: {shown} could not be read: {e}"));
                 return EXIT_INVALID;
             }
         };
@@ -745,12 +545,8 @@ impl<'s, 'a> Say<'s, 'a> {
         }
         // Names are shown as they are, in quotes: `{:?}` would escape Thai vowels and tone marks.
         let name = &theme.name;
-        self.out(self.pick(
-            format!("Plan for \"{name}\":"),
-            format!("แผนของธีม \"{name}\":"),
-        ));
-        let summary = self.pick(&prepared.plan.summary_en, &prepared.plan.summary_th);
-        for line in summary {
+        self.out(format!("Plan for \"{name}\":"));
+        for line in &prepared.plan.summary_en {
             self.out(format!("  - {line}"));
         }
         for w in &prepared.plan.warnings {
@@ -759,22 +555,13 @@ impl<'s, 'a> Say<'s, 'a> {
         let ops = prepared.ops.clone();
         let outcome = run_apply(sys, ctx, prepared);
         let done = match req.target {
-            Target::All => self.pick(
-                format!(
-                    "Applied \"{name}\". Open a new cmd window to see the prompt and the welcome \
-                     box."
-                ),
-                format!("ใช้ธีม \"{name}\" แล้ว เปิดหน้าต่าง cmd ใหม่เพื่อดู prompt และกล่องต้อนรับ"),
+            Target::All => format!(
+                "Applied \"{name}\". Open a new cmd window to see the prompt and the welcome \
+                 box."
             ),
-            Target::Wt => self.pick(
-                format!(
-                    "Applied \"{name}\". Open a new cmd tab in Windows Terminal to see the prompt \
-                     and the welcome box."
-                ),
-                format!(
-                    "ใช้ธีม \"{name}\" แล้ว เปิดแท็บ cmd ใหม่ใน Windows Terminal เพื่อดู prompt \
-                     และกล่องต้อนรับ"
-                ),
+            Target::Wt => format!(
+                "Applied \"{name}\". Open a new cmd tab in Windows Terminal to see the prompt \
+                 and the welcome box."
             ),
         };
         self.finish(sys, ctx, &outcome, &ops, done)
@@ -798,19 +585,13 @@ impl<'s, 'a> Say<'s, 'a> {
         }
         let code = match result {
             UndoResult::NothingToUndo => {
-                self.out(self.pick("Nothing to undo.", "ไม่มีอะไรให้ย้อนกลับ"));
+                self.out("Nothing to undo.");
                 EXIT_OK
             }
             UndoResult::Done { undid, outcome } => {
-                let done = self.pick(
-                    format!(
-                        "Undid the theme applied in restore point {undid}: what it changed is \
-                         back as it was. Open a new cmd window to see it."
-                    ),
-                    format!(
-                        "ย้อนการใช้ธีมของจุดย้อนกลับ {undid} แล้ว สิ่งที่มันเปลี่ยนกลับเป็นเหมือนเดิม \
-                         เปิดหน้าต่าง cmd ใหม่เพื่อดู"
-                    ),
+                let done = format!(
+                    "Undid the theme applied in restore point {undid}: what it changed is \
+                     back as it was. Open a new cmd window to see it."
                 );
                 self.finish(sys, ctx, &outcome, &[], done)
             }
@@ -819,10 +600,9 @@ impl<'s, 'a> Say<'s, 'a> {
         for problem in &problems {
             self.err(self.coded(problem.code, &problem.message));
         }
-        // A font the user installed since stays installed: said in the chosen language.
+        // A font the user installed since stays installed.
         for left in &fonts_left {
-            let text = self.pick(left.en(), left.th());
-            self.err(format!("E_FONT_INSTALL: {text}"));
+            self.err(format!("E_FONT_INSTALL: {}", left.en()));
         }
         code
     }
@@ -889,39 +669,21 @@ impl<'s, 'a> Say<'s, 'a> {
                 return Ok(());
             }
             if !only_themes {
-                self.err(self.pick(
-                    format!(
-                        "cmdstudio: {} holds none of CMD Studio's own files (cmdstudio.lock, \
-                         state.json or state.json.damaged-<number>), so it may not be CMD \
-                         Studio's data folder, and --cleanup would delete what is in it. Nothing \
-                         was deleted; check the path after --data-dir.",
-                        data.display()
-                    ),
-                    format!(
-                        "cmdstudio: {} ไม่มีไฟล์ของ CMD Studio เอง (cmdstudio.lock, state.json \
-                         หรือ state.json.damaged-<ตัวเลข>) จึงอาจไม่ใช่โฟลเดอร์ข้อมูลของ CMD Studio \
-                         และ --cleanup จะลบสิ่งที่อยู่ในนั้น จึงยังไม่ได้ลบอะไร \
-                         ให้ตรวจ path ที่ใส่หลัง --data-dir",
-                        data.display()
-                    ),
+                self.err(format!(
+                    "cmdstudio: {} holds none of CMD Studio's own files (cmdstudio.lock, \
+                     state.json or state.json.damaged-<number>), so it may not be CMD \
+                     Studio's data folder, and --cleanup would delete what is in it. Nothing \
+                     was deleted; check the path after --data-dir.",
+                    data.display()
                 ));
                 return Err(EXIT_INVALID);
             }
-            self.err(self.pick(
-                format!(
-                    "cmdstudio: {} holds only a themes folder and nothing else of CMD Studio's, \
-                     so it may not be CMD Studio's data folder, and --remove-themes would delete \
-                     that folder. Nothing was deleted. Check the path after --data-dir; without \
-                     --remove-themes, --cleanup keeps the themes folder.",
-                    data.display()
-                ),
-                format!(
-                    "cmdstudio: {} มีแต่โฟลเดอร์ themes และไม่มีอย่างอื่นของ CMD Studio \
-                     จึงอาจไม่ใช่โฟลเดอร์ข้อมูลของ CMD Studio และ --remove-themes จะลบโฟลเดอร์นั้น \
-                     จึงยังไม่ได้ลบอะไร ให้ตรวจ path ที่ใส่หลัง --data-dir ถ้าไม่ใส่ --remove-themes \
-                     --cleanup จะเก็บโฟลเดอร์ themes ไว้",
-                    data.display()
-                ),
+            self.err(format!(
+                "cmdstudio: {} holds only a themes folder and nothing else of CMD Studio's, \
+                 so it may not be CMD Studio's data folder, and --remove-themes would delete \
+                 that folder. Nothing was deleted. Check the path after --data-dir; without \
+                 --remove-themes, --cleanup keeps the themes folder.",
+                data.display()
             ));
             return Err(EXIT_INVALID);
         }
@@ -929,24 +691,16 @@ impl<'s, 'a> Say<'s, 'a> {
         let named: Vec<&str> = foreign.iter().take(SHOWN).map(String::as_str).collect();
         let more = foreign.len().saturating_sub(SHOWN);
         let (named, data) = (named.join(", "), data.display());
-        let (more_en, more_th) = if more > 0 {
-            (format!(" and {more} more"), format!(" และอีก {more} รายการ"))
+        let more = if more > 0 {
+            format!(" and {more} more")
         } else {
-            (String::new(), String::new())
+            String::new()
         };
-        self.err(self.pick(
-            format!(
-                "cmdstudio: {data} holds what CMD Studio does not put in its data folder: \
-                 {named}{more_en}. --cleanup deletes everything in that folder but themes\\, so \
-                 nothing was deleted. Move them out of the folder, or check the path after \
-                 --data-dir."
-            ),
-            format!(
-                "cmdstudio: {data} มีสิ่งที่ CMD Studio ไม่ได้ใส่ไว้ในโฟลเดอร์ข้อมูล: \
-                 {named}{more_th} --cleanup จะลบทุกอย่างในโฟลเดอร์นั้นยกเว้น themes\\ \
-                 จึงยังไม่ได้ลบอะไร ให้ย้ายสิ่งเหล่านั้นออกจากโฟลเดอร์ หรือตรวจ path ที่ใส่หลัง \
-                 --data-dir"
-            ),
+        self.err(format!(
+            "cmdstudio: {data} holds what CMD Studio does not put in its data folder: \
+             {named}{more}. --cleanup deletes everything in that folder but themes\\, so \
+             nothing was deleted. Move them out of the folder, or check the path after \
+             --data-dir."
         ));
         Err(EXIT_INVALID)
     }
@@ -975,48 +729,36 @@ impl<'s, 'a> Say<'s, 'a> {
         // The AutoRun and settings.json transaction has no step of its own; it committed only
         // after reading back what it wrote.
         if report.outcome == Some(Outcome::Committed) {
-            self.out(self.pick(
+            self.out(
                 "done   AutoRun and Windows Terminal's settings: CMD Studio's part is taken out, \
                  and read back to check",
-                "เสร็จ AutoRun และการตั้งค่าของ Windows Terminal: เอาส่วนของ CMD Studio ออกแล้ว \
-                 และอ่านค่ากลับมาตรวจแล้ว",
-            ));
+            );
         }
         self.steps(&report);
         match &report.outcome {
             Some(Outcome::RolledBack { code, reason }) => {
                 self.err(self.coded(code, reason));
-                self.err(self.pick(
-                    "The revert was rolled back, so CMD Studio's data was not deleted.",
-                    "การย้อนทุกอย่างถูกย้อนกลับ จึงยังไม่ได้ลบข้อมูลของ CMD Studio",
-                ));
+                self.err("The revert was rolled back, so CMD Studio's data was not deleted.");
                 EXIT_FAILED
             }
             Some(outcome @ Outcome::RollbackIncomplete { .. }) => {
                 self.finish(sys, ctx, outcome, &[], String::new())
             }
             _ if !report.ok() => {
-                self.err(self.pick(CLEANUP_AGAIN_EN, CLEANUP_AGAIN_TH));
+                self.err(CLEANUP_AGAIN_EN);
                 EXIT_INCOMPLETE
             }
             _ => {
                 let themes = ctx.paths.themes();
                 let kept = !remove_themes && sys.fs.is_dir(&themes);
                 let shown = themes.display();
-                self.out(match (kept, self.lang) {
-                    (false, Lang::En) => {
-                        "CMD Studio's changes are taken out, and its data is deleted.".to_string()
-                    }
-                    (false, Lang::Th) => {
-                        "เอาสิ่งที่ CMD Studio เปลี่ยนออกแล้ว และลบข้อมูลของมันแล้ว".to_string()
-                    }
-                    (true, Lang::En) => format!(
+                self.out(if kept {
+                    format!(
                         "CMD Studio's changes are taken out, and its data is deleted; your \
                          themes are kept in {shown}."
-                    ),
-                    (true, Lang::Th) => format!(
-                        "เอาสิ่งที่ CMD Studio เปลี่ยนออกแล้ว และลบข้อมูลของมันแล้ว ส่วนธีมของคุณยังเก็บไว้ที่ {shown}"
-                    ),
+                    )
+                } else {
+                    "CMD Studio's changes are taken out, and its data is deleted.".to_string()
                 });
                 EXIT_OK
             }
@@ -1025,16 +767,14 @@ impl<'s, 'a> Say<'s, 'a> {
 
     /// One line per step of a clean-up: what went well on stdout, what failed on stderr with
     /// its code (the step's detail starts with it) and how to finish it by hand. Step texts are
-    /// the core's English; in Thai a failed step's code gets its meaning from spec §5.9 first.
+    /// the core's English.
     fn steps(&mut self, report: &Report) {
-        let (done, failed, fix) =
-            self.pick(("done  ", "FAILED", "fix"), ("เสร็จ", "ไม่สำเร็จ", "วิธีแก้"));
         for step in &report.steps {
             if step.ok {
-                self.out(format!("{done} {}: {}", step.what, step.detail));
+                self.out(format!("done   {}: {}", step.what, step.detail));
                 continue;
             }
-            // The detail starts with the code; in Thai the code's meaning comes first (`coded`).
+            // The detail starts with the code.
             let detail = match step.code {
                 Some(code) => {
                     let message = step
@@ -1046,14 +786,9 @@ impl<'s, 'a> Say<'s, 'a> {
                 }
                 None => step.detail.clone(),
             };
-            self.err(format!("{failed} {}: {detail}", step.what));
+            self.err(format!("FAILED {}: {detail}", step.what));
             if let Some(how) = &step.fix {
-                let how = if self.lang == Lang::Th && !how.th.is_empty() {
-                    &how.th
-                } else {
-                    &how.en
-                };
-                self.err(format!("    {fix}: {how}"));
+                self.err(format!("    fix: {}", how.en));
             }
         }
     }
@@ -1082,37 +817,22 @@ impl<'s, 'a> Say<'s, 'a> {
         };
         // Only a name the listing gives: the id typed is never made into a path of its own.
         if !ids.iter().any(|known| known == id) {
-            self.err(self.pick(
-                format!(
-                    "cmdstudio: there is no restore point {id} in {}. `cmdstudio doctor` names \
-                     the one to set aside.",
-                    root.display()
-                ),
-                format!(
-                    "cmdstudio: ไม่มีจุดย้อนกลับ {id} ใน {} ให้ดูรหัสที่ต้องกันไว้จาก `cmdstudio doctor`",
-                    root.display()
-                ),
+            self.err(format!(
+                "cmdstudio: there is no restore point {id} in {}. `cmdstudio doctor` names \
+                 the one to set aside.",
+                root.display()
             ));
             return EXIT_INVALID;
         }
         if store.is_set_aside(id) {
-            self.out(self.pick(
-                format!("Restore point {id} is already set aside."),
-                format!("จุดย้อนกลับ {id} ถูกกันไว้ต่างหากอยู่แล้ว"),
-            ));
+            self.out(format!("Restore point {id} is already set aside."));
             return EXIT_OK;
         }
         let why = match store.manifest(id).and_then(|_| store.journal(id)) {
             Ok(_) => {
-                self.err(self.pick(
-                    format!(
-                        "Restore point {id} can be read, so it is not set aside: CMD Studio can \
-                         still roll back or undo what it changed. It was left as it is."
-                    ),
-                    format!(
-                        "จุดย้อนกลับ {id} ยังอ่านได้ จึงไม่กันไว้ต่างหาก เพราะ CMD Studio \
-                         ยังย้อนสิ่งที่มันเปลี่ยนได้ จุดนี้จึงยังอยู่ตามเดิม"
-                    ),
+                self.err(format!(
+                    "Restore point {id} can be read, so it is not set aside: CMD Studio can \
+                     still roll back or undo what it changed. It was left as it is."
                 ));
                 return EXIT_FAILED;
             }
@@ -1132,16 +852,10 @@ impl<'s, 'a> Say<'s, 'a> {
                 self.err(text);
             }
         }
-        self.out(self.pick(
-            format!(
-                "Restore point {id} is set aside; its files stay for a look. What that change did \
-                 is not rolled back by itself any more, and an undo does not go back to it. Check \
-                 by hand: {CLEANUP_FIX_EN}"
-            ),
-            format!(
-                "กันจุดย้อนกลับ {id} ไว้ต่างหากแล้ว ไฟล์ของมันยังเก็บไว้ให้ดู สิ่งที่การเปลี่ยนแปลงนั้นทำไว้ \
-                 จะไม่ถูกย้อนเองอีก และการย้อนกลับจะไม่ย้อนไปถึงจุดนี้ ให้ตรวจด้วยมือ: {CLEANUP_FIX_TH}"
-            ),
+        self.out(format!(
+            "Restore point {id} is set aside; its files stay for a look. What that change did \
+             is not rolled back by itself any more, and an undo does not go back to it. Check \
+             by hand: {CLEANUP_FIX_EN}"
         ));
         EXIT_OK
     }
@@ -1149,7 +863,7 @@ impl<'s, 'a> Say<'s, 'a> {
     fn doctor(&mut self, sys: System<'_>, ctx: &Ctx, json: bool) -> i32 {
         let checks = doctor(sys, ctx);
         if json {
-            match serde_json::to_string_pretty(&serde_json::json!({ "checks": checks })) {
+            match checks_json(&checks).and_then(|v| serde_json::to_string_pretty(&v)) {
                 Ok(text) => self.out(text),
                 Err(e) => {
                     self.err(format!("cmdstudio: {e}"));
@@ -1159,12 +873,12 @@ impl<'s, 'a> Say<'s, 'a> {
         } else {
             for c in &checks {
                 let status = match c.status {
-                    Status::Ok => self.pick("ok", "ผ่าน"),
-                    Status::Warn => self.pick("warn", "เตือน"),
-                    Status::Fail => self.pick("FAIL", "ไม่ผ่าน"),
-                    Status::Skipped => self.pick("skip", "ข้าม"),
+                    Status::Ok => "ok",
+                    Status::Warn => "warn",
+                    Status::Fail => "FAIL",
+                    Status::Skipped => "skip",
                 };
-                let message = self.pick(&c.message_en, &c.message_th);
+                let message = &c.message_en;
                 let code = c.code.map(|c| format!(" [{c}]")).unwrap_or_default();
                 self.out(format!("{:<4} {status:<5} {message}{code}", c.id));
                 for line in c.details.lines() {
@@ -1179,6 +893,28 @@ impl<'s, 'a> Say<'s, 'a> {
             EXIT_OK
         }
     }
+}
+
+/// What `doctor --json` prints: `{"checks": [...]}`, each check with its `id`, `status`, `code`,
+/// `messageEn` and `details`. The core's [`Check`] also holds its Thai texts (`message_th`,
+/// `details_th`), which are for the app's own UI: nothing CMD Studio prints in cmd is Thai.
+fn checks_json(checks: &[Check]) -> Result<serde_json::Value, serde_json::Error> {
+    use serde_json::{Map, Value};
+    let list = checks
+        .iter()
+        .map(|c| {
+            let mut check = Map::new();
+            check.insert("id".to_string(), Value::from(c.id));
+            check.insert("status".to_string(), serde_json::to_value(c.status)?);
+            check.insert("code".to_string(), c.code.map_or(Value::Null, Value::from));
+            check.insert("messageEn".to_string(), Value::from(c.message_en.as_str()));
+            check.insert("details".to_string(), Value::from(c.details.as_str()));
+            Ok(Value::Object(check))
+        })
+        .collect::<Result<Vec<Value>, serde_json::Error>>()?;
+    let mut all = Map::new();
+    all.insert("checks".to_string(), Value::Array(list));
+    Ok(Value::Object(all))
 }
 
 /// Whether two paths end in the same name, without regard to ASCII letter case, as Windows
@@ -1298,16 +1034,16 @@ pub fn now_ms() -> u64 {
 /// Runs one command on this machine (spec §5.7).
 #[cfg(windows)]
 pub fn run(args: &[OsString], io: &mut Io<'_>) -> i32 {
-    use cmdstudio_core::adapters::program_data_dir;
     use cmdstudio_core::adapters::windows::{
         fonts::WinFonts, fs::WinFs, host::WinHost, process::WinProcess, registry::WinAutoRun,
         wt::WinWt,
     };
+    use cmdstudio_core::adapters::{program_data_dir, Host};
     let host = WinHost;
     let local = match host.local_app_data() {
         Ok(path) => path,
         Err(e) => {
-            let mut say = Say::new(io, chosen_lang(&parse(args), &host));
+            let mut say = Say::new(io);
             let text = say.coded(
                 "E_MACHINE_READ",
                 &format!("the user's local app data folder could not be found: {e}"),
@@ -1417,6 +1153,29 @@ mod tests {
         }
     }
 
+    /// `GetUserDefaultUILanguage` of Thai Windows.
+    const THAI_WINDOWS: u16 = 0x041E;
+
+    /// The Thai characters in `text`, in order.
+    fn thai(text: &str) -> String {
+        text.chars()
+            .filter(|c| ('\u{0E00}'..='\u{0E7F}').contains(c))
+            .collect()
+    }
+
+    /// `machine()` with Windows in Thai. Its user name and every path are ASCII, so a Thai
+    /// character in what the CLI says could only be text of CMD Studio's own.
+    fn thai_windows() -> (FakeMachine, Defaults) {
+        let (mut m, d) = machine();
+        m.host.info.ui_language = THAI_WINDOWS;
+        (m, d)
+    }
+
+    /// `machine()` on English Windows, then on Thai Windows: the CLI says the same on both.
+    fn english_and_thai_windows() -> [(FakeMachine, Defaults); 2] {
+        [machine(), thai_windows()]
+    }
+
     #[test]
     fn apply_doctor_undo_round_trip() {
         let (m, d) = machine();
@@ -1427,7 +1186,9 @@ mod tests {
         let (code, out, _) = cli(&m, &later(&d, 1), &["doctor", "--json"]);
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["checks"].as_array().unwrap().len(), 11);
-        assert!(v["checks"][0].get("messageTh").is_some());
+        // English only: the Thai text of a check is for the app's own UI.
+        assert!(v["checks"][0]["messageEn"].is_string(), "{out}");
+        assert!(v["checks"][0].get("messageTh").is_none(), "{out}");
         assert_eq!(code, EXIT_OK, "{out}");
         let (code, out, err) = cli(&m, &later(&d, 2), &["undo"]);
         assert_eq!(code, EXIT_OK, "{out}{err}");
@@ -1491,28 +1252,16 @@ mod tests {
             kind: 4,
             bytes: vec![1, 0, 0, 0],
         };
-        for lang in [Lang::En, Lang::Th] {
-            let (mut m, d) = machine();
-            if lang == Lang::Th {
-                m.host.info.ui_language = LANG_THAI;
-            }
+        for (m, d) in english_and_thai_windows() {
             m.autorun.write_user(&dword).unwrap();
             let before = (m.fs.file(WT), m.autorun.snapshot());
             let (code, out, err) = cli(&m, &d, &["apply", THEME]);
             assert_eq!(code, EXIT_FAILED, "{out}{err}");
             assert!(err.starts_with("E_AUTORUN_WRITE: "), "{err}");
             assert!(err.contains(COMMAND_PROCESSOR_KEY), "{err}");
-            match lang {
-                Lang::En => {
-                    assert!(err.contains("not plain text"), "{err}");
-                    assert!(err.contains("Your settings were not changed."), "{err}");
-                }
-                Lang::Th => {
-                    assert!(err.contains("ไม่ใช่ข้อความธรรมดา"), "{err}");
-                    assert!(err.contains("ยังไม่ได้เปลี่ยนการตั้งค่าของคุณ"), "{err}");
-                    assert!(!err.contains("not plain text"), "{err}");
-                }
-            }
+            assert!(err.contains("not plain text"), "{err}");
+            assert!(err.contains("Your settings were not changed."), "{err}");
+            assert_eq!(thai(&err), "", "{err}");
             assert_eq!((m.fs.file(WT), m.autorun.snapshot()), before);
         }
     }
@@ -1587,12 +1336,8 @@ mod tests {
     }
 
     #[test]
-    fn a_fix_list_that_could_not_be_saved_is_said_in_the_chosen_language() {
-        for lang in [Lang::En, Lang::Th] {
-            let (mut m, d) = machine();
-            if lang == Lang::Th {
-                m.host.info.ui_language = LANG_THAI;
-            }
+    fn a_fix_list_that_could_not_be_saved_is_said_in_english_on_every_windows() {
+        for (m, d) in english_and_thai_windows() {
             let init = d.data_dir.join(r"generated\init.lua");
             m.fs.put(&init, b"old");
             m.fs.fail_writes_to(&init);
@@ -1614,11 +1359,8 @@ mod tests {
             );
             let err = String::from_utf8_lossy(&err).into_owned();
             assert_eq!(code, EXIT_INCOMPLETE, "{err}");
-            let said = match lang {
-                Lang::En => RECORD_NOT_SAVED_EN,
-                Lang::Th => RECORD_NOT_SAVED_TH,
-            };
-            assert!(err.contains(said), "{err}");
+            assert!(err.contains(RECORD_NOT_SAVED_EN), "{err}");
+            assert_eq!(thai(&err), "", "{err}");
             // What to fix is said all the same, from the journal.
             assert!(err.contains(&format!("file {}", init.display())), "{err}");
         }
@@ -1629,15 +1371,11 @@ mod tests {
         use cmdstudio_core::adapters::fake::FakeFonts;
         use cmdstudio_core::plan::NERD_FONT_FAMILY;
         use cmdstudio_core::resources::NERD_FONT_FILE;
-        for lang in [Lang::En, Lang::Th] {
-            let (mut m, d) = machine();
+        for (mut m, d) in english_and_thai_windows() {
             let fonts = r"C:\Users\tester\AppData\Local\Microsoft\Windows\Fonts";
             // No Cascadia Mono, so the apply installs the bundled font.
             m.fonts = FakeFonts::new(fonts, &["Arial"]);
             m.fonts.knows_file(NERD_FONT_FILE, NERD_FONT_FAMILY);
-            if lang == Lang::Th {
-                m.host.info.ui_language = LANG_THAI;
-            }
             assert_eq!(cli(&m, &d, &["apply", THEME]).0, EXIT_OK);
             let file = Path::new(fonts).join(NERD_FONT_FILE);
             assert!(m.fs.exists(&file));
@@ -1650,10 +1388,8 @@ mod tests {
                 .find(|l| l.starts_with("E_FONT_INSTALL: "))
                 .unwrap_or_else(|| panic!("{err}"));
             assert!(line.contains(&shown), "{line}");
-            match lang {
-                Lang::En => assert!(line.contains("was left installed"), "{line}"),
-                Lang::Th => assert!(line.contains("ไม่ได้ถอนฟอนต์"), "{line}"),
-            }
+            assert!(line.contains("was left installed"), "{line}");
+            assert_eq!(thai(&err), "", "{err}");
             assert_eq!(m.fs.file(&file), Some(b"the user's own build".to_vec()));
         }
     }
@@ -1787,51 +1523,32 @@ mod tests {
     }
 
     #[test]
-    fn thai_windows_gets_thai_and_lang_chooses_for_apply() {
-        let (mut m, d) = machine();
-        m.host.info.ui_language = 0x041E;
-        let (code, out, _) = cli(&m, &d, &["--help"]);
-        assert_eq!(code, EXIT_OK);
-        assert!(out.starts_with("วิธีใช้:\n"), "{out}");
-        let (code, _, err) = cli(&m, &d, &["frobnicate"]);
-        assert_eq!(code, EXIT_INVALID);
-        assert!(
-            err.starts_with("cmdstudio: ไม่รู้จักคำสั่ง \"frobnicate\"\n\nวิธีใช้:"),
-            "{err}"
-        );
-        let (code, out, err) = cli(&m, &d, &["apply", THEME]);
-        assert_eq!(code, EXIT_OK, "{out}{err}");
-        assert!(out.starts_with("แผนของธีม \"Terracotta\":\n  - "), "{out}");
-        assert!(out.contains("\nใช้ธีม \"Terracotta\" แล้ว"), "{out}");
-        let (code, out, _) = cli(&m, &later(&d, 1), &["doctor"]);
-        assert_eq!(code, EXIT_OK, "{out}");
-        assert!(out.contains("\nD10  ผ่าน  โปรแกรมทำงานแบบปกติ"), "{out}");
-        // --lang picks the language of apply's messages too.
-        let (code, out, _) = cli(&m, &later(&d, 2), &["apply", THEME, "--lang", "en"]);
-        assert_eq!(code, EXIT_OK);
-        assert!(out.starts_with("Plan for \"Terracotta\":\n"), "{out}");
-    }
-
-    #[test]
-    fn what_to_fix_by_hand_comes_in_the_chosen_language() {
-        let (m, d) = machine();
+    fn what_to_fix_by_hand_is_said_in_english_on_thai_windows() {
+        let (m, d) = thai_windows();
         let init = d.data_dir.join(r"generated\init.lua");
         m.fs.put(&init, b"old");
         m.fs.fail_writes_to(&init);
-        let (code, _, err) = cli(&m, &d, &["apply", THEME, "--lang", "th"]);
+        let (code, _, err) = cli(&m, &d, &["apply", THEME]);
         assert_eq!(code, EXIT_INCOMPLETE, "{err}");
         assert!(
-            err.contains("\nE_ROLLBACK_INCOMPLETE: ย้อนกลับได้ไม่ครบ"),
+            err.contains(
+                "\nE_ROLLBACK_INCOMPLETE: not everything could be put back. Fix these by hand:\n"
+            ),
             "{err}"
         );
-        let fix = format!("    วิธีแก้: คัดลอก {}\\snapshots\\", d.data_dir.display());
+        let fix = format!(r"    fix: Copy {}\snapshots\", d.data_dir.display());
         assert!(err.contains(&fix), "{err}");
-        assert!(!err.contains("fix: Copy"), "{err}");
-        // A code whose text comes from the core in English gets its Thai meaning first.
-        assert!(
-            err.starts_with("E_DATA_WRITE: เขียนลงโฟลเดอร์ข้อมูลของ CMD Studio ไม่ได้\n  รายละเอียด: "),
-            "{err}"
-        );
+        // The code, then the core's English text: no meaning of the code in another language.
+        assert!(err.starts_with("E_DATA_WRITE: "), "{err}");
+        assert_eq!(thai(&err), "", "{err}");
+        // doctor's R3 says how to fix each step in English too, and only in English.
+        let (code, out, err) = cli(&m, &later(&d, 1), &["doctor"]);
+        assert_eq!((code, err.as_str()), (EXIT_FAILED, ""), "{out}");
+        assert!(out.contains("\nR3   FAIL  The last rollback"), "{out}");
+        assert!(out.contains(&format!("\n{:11}  fix: Copy ", "")), "{out}");
+        assert_eq!(thai(&out), "", "{out}");
+        let (_, out, _) = cli(&m, &later(&d, 1), &["doctor", "--json"]);
+        assert_eq!(thai(&out), "", "{out}");
     }
 
     #[test]
@@ -1974,20 +1691,25 @@ mod tests {
             );
             assert_eq!(m.fs.snapshot(), before, "{args:?}");
         }
-        // In Thai, with the names as they were written.
+        // On Thai Windows, in English, with the user's names as they were written: a Thai file
+        // name is the user's, not text of CMD Studio's.
         m.fs.put(format!(r"{project}\บันทึก.txt"), b"mine");
         let before = m.fs.snapshot();
         let mut m = m;
-        m.host.info.ui_language = LANG_THAI;
+        m.host.info.ui_language = THAI_WINDOWS;
         let (code, _, err) = cli(&m, &later(&d, 1), &["--cleanup", "--data-dir", project]);
         assert_eq!(code, EXIT_INVALID, "{err}");
         assert!(
-            err.contains(
-                "มีสิ่งที่ CMD Studio ไม่ได้ใส่ไว้ในโฟลเดอร์ข้อมูล: \"notes.txt\", \"src\\\", \"บันทึก.txt\""
-            ),
+            err.contains(&format!(
+                "{project} {NOT_OURS}: \"notes.txt\", \"src\\\", \"บันทึก.txt\". --cleanup deletes"
+            )),
             "{err}"
         );
-        assert!(err.contains("ให้ย้ายสิ่งเหล่านั้นออกจากโฟลเดอร์"), "{err}");
+        assert!(
+            err.contains("Move them out of the folder, or check the path after --data-dir."),
+            "{err}"
+        );
+        assert_eq!(thai(&err), thai("บันทึก.txt"), "{err}");
         assert_eq!(m.fs.snapshot(), before);
     }
 
@@ -2020,11 +1742,7 @@ mod tests {
     fn a_folder_with_only_cmd_studio_named_folders_but_none_of_its_files_is_refused() {
         // Folders named like CMD Studio's are not enough: one of its own files must be there
         // (cmdstudio.lock, state.json or a damaged state.json it set aside).
-        for lang in [Lang::En, Lang::Th] {
-            let (mut m, d) = machine();
-            if lang == Lang::Th {
-                m.host.info.ui_language = LANG_THAI;
-            }
+        for (m, d) in english_and_thai_windows() {
             let folder = r"D:\work";
             m.fs.put(format!(r"{folder}\runtime\tool.exe"), b"mine");
             m.fs.put(format!(r"{folder}\snapshots\2026\notes.txt"), b"mine");
@@ -2038,16 +1756,9 @@ mod tests {
                 for name in ["cmdstudio.lock", "state.json", "state.json.damaged-"] {
                     assert!(err.contains(name), "{name}: {err}");
                 }
-                match lang {
-                    Lang::En => {
-                        assert!(err.contains("none of CMD Studio's own files"), "{err}");
-                        assert!(err.contains("check the path after --data-dir"), "{err}");
-                    }
-                    Lang::Th => {
-                        assert!(err.contains("ไม่มีไฟล์ของ CMD Studio เอง"), "{err}");
-                        assert!(err.contains("ให้ตรวจ path ที่ใส่หลัง --data-dir"), "{err}");
-                    }
-                }
+                assert!(err.contains("none of CMD Studio's own files"), "{err}");
+                assert!(err.contains("check the path after --data-dir"), "{err}");
+                assert_eq!(thai(&err), "", "{err}");
                 assert_eq!((m.fs.snapshot(), m.autorun.snapshot()), before, "{args:?}");
             }
         }
@@ -2165,11 +1876,7 @@ mod tests {
 
     #[test]
     fn cleanup_waits_while_the_record_of_an_unfinished_rollback_cannot_be_read() {
-        for lang in [Lang::En, Lang::Th] {
-            let (mut m, d) = machine();
-            if lang == Lang::Th {
-                m.host.info.ui_language = LANG_THAI;
-            }
+        for (m, d) in english_and_thai_windows() {
             let init = d.data_dir.join(r"generated\init.lua");
             m.fs.put(&init, b"old");
             m.fs.fail_writes_to(&init);
@@ -2183,11 +1890,11 @@ mod tests {
             let (code, out, err) = cli(&m, &later(&d, 1), &["--cleanup"]);
             assert_eq!(code, EXIT_FAILED, "{out}{err}");
             assert!(err.contains("E_SNAPSHOT_READ: "), "{err}");
-            let next = match lang {
-                Lang::En => "Your settings were not changed. Try again in a moment",
-                Lang::Th => "ยังไม่ได้เปลี่ยนการตั้งค่าของคุณ ลองใหม่อีกครั้งในอีกสักครู่",
-            };
-            assert!(err.contains(next), "{err}");
+            assert!(
+                err.contains("Your settings were not changed. Try again in a moment"),
+                "{err}"
+            );
+            assert_eq!(thai(&err), "", "{err}");
             assert_eq!(
                 (m.fs.snapshot().0.len(), m.autorun.snapshot(), m.fs.file(WT)),
                 before
@@ -2235,7 +1942,7 @@ mod tests {
         assert_eq!((code, checks.len()), (EXIT_FAILED, 12), "{out}");
         assert_eq!(checks[11]["id"], "R1");
         assert_eq!(checks[11]["code"], "E_SNAPSHOT_READ");
-        assert!(checks[11]["messageTh"].as_str().unwrap().contains(&way_out));
+        assert!(checks[11]["messageEn"].as_str().unwrap().contains(&way_out));
         // Every command that changes the machine refuses, changes nothing and names the way out.
         for args in [vec!["apply", THEME], vec!["undo"], vec!["--cleanup"]] {
             let (code, out, err) = cli(&m, &later(&d, 1), &args);
@@ -2287,33 +1994,23 @@ mod tests {
     }
 
     #[test]
-    fn thai_names_are_shown_as_they_are_in_both_languages() {
-        // Thai vowels and tone marks are characters Rust's `{:?}` would escape.
-        for (lang, plan, done, font) in [
-            (
-                "en",
-                "Plan for \"Terracotta ของฉัน\":\n",
-                "\nApplied \"Terracotta ของฉัน\". ",
-                "\nWarning: The font \"ฟอนต์ไทย\" is not installed",
-            ),
-            (
-                "th",
-                "แผนของธีม \"Terracotta ของฉัน\":\n",
-                "\nใช้ธีม \"Terracotta ของฉัน\" แล้ว ",
-                "\nคำเตือน: ไม่ได้ติดตั้งฟอนต์ \"ฟอนต์ไทย\" ",
-            ),
-        ] {
-            let (m, d) = machine();
+    fn thai_names_are_shown_as_they_are_on_every_windows() {
+        // Thai vowels and tone marks are characters Rust's `{:?}` would escape. The theme's name
+        // and font are the user's, so they are shown as written, in the English text.
+        for (m, d) in english_and_thai_windows() {
             let theme = String::from_utf8(m.fs.file(THEME).unwrap())
                 .unwrap()
                 .replace("\"name\": \"Terracotta\"", "\"name\": \"Terracotta ของฉัน\"")
                 .replace("\"font\": \"Cascadia Mono\"", "\"font\": \"ฟอนต์ไทย\"");
             m.fs.put(THEME, theme);
-            let (code, out, err) = cli(&m, &d, &["apply", THEME, "--lang", lang]);
+            let (code, out, err) = cli(&m, &d, &["apply", THEME]);
             assert_eq!(code, EXIT_OK, "{out}{err}");
-            assert!(out.starts_with(plan), "{out}");
-            assert!(out.contains(done), "{out}");
-            assert!(out.contains(font), "{out}");
+            assert!(out.starts_with("Plan for \"Terracotta ของฉัน\":\n"), "{out}");
+            assert!(out.contains("\nApplied \"Terracotta ของฉัน\". "), "{out}");
+            assert!(
+                out.contains("\nWarning: The font \"ฟอนต์ไทย\" is not installed"),
+                "{out}"
+            );
             assert!(!out.contains("\\u{"), "{out}");
         }
     }
@@ -2339,16 +2036,12 @@ mod tests {
             err.contains("Use a Windows account whose user folder has none of them"),
             "{err}"
         );
-        let (code, _, err) = cli(
-            &m,
-            &d,
-            &["apply", THEME, "--data-dir", data, "--lang", "th"],
-        );
-        assert_eq!(code, EXIT_FAILED, "{err}");
-        assert!(
-            err.contains("\nยังไม่ได้เปลี่ยนการตั้งค่าของคุณ path นี้อยู่ในโฟลเดอร์ข้อมูลของ CMD Studio"),
-            "{err}"
-        );
+        // Thai Windows gets the same English text, the path as it is written.
+        let (mut m, d) = (m, d);
+        m.host.info.ui_language = THAI_WINDOWS;
+        let (code, _, thai_err) = cli(&m, &d, &["apply", THEME, "--data-dir", data]);
+        assert_eq!(code, EXIT_FAILED, "{thai_err}");
+        assert_eq!(thai_err, err);
         assert!(!err.contains("Nothing was changed"), "{err}");
     }
 
@@ -2376,49 +2069,43 @@ mod tests {
 
     #[test]
     fn a_refusal_worded_by_the_core_says_what_to_do_next() {
-        for (lang, head, next) in [
-            (
-                "en",
-                "E_WT_PARSE: ",
-                "\nYour settings were not changed. Fix that settings.json by hand",
-            ),
-            (
-                "th",
-                "E_WT_PARSE: อ่าน settings.json ของ Windows Terminal ไม่ได้",
-                "\nยังไม่ได้เปลี่ยนการตั้งค่าของคุณ ให้แก้ settings.json นั้นด้วยมือ",
-            ),
-        ] {
-            let (m, d) = machine();
+        for (m, d) in english_and_thai_windows() {
             m.fs.put(WT, "{ not json");
             let before = (m.fs.file(WT), m.autorun.snapshot());
-            let (code, _, err) = cli(&m, &d, &["apply", THEME, "--lang", lang]);
+            let (code, _, err) = cli(&m, &d, &["apply", THEME]);
             assert_eq!(code, EXIT_FAILED, "{err}");
-            assert!(err.starts_with(head), "{err}");
-            assert!(err.contains(next), "{err}");
+            assert!(err.starts_with("E_WT_PARSE: "), "{err}");
+            assert!(
+                err.contains("\nYour settings were not changed. Fix that settings.json by hand"),
+                "{err}"
+            );
+            assert_eq!(thai(&err), "", "{err}");
             assert_eq!((m.fs.file(WT), m.autorun.snapshot()), before);
         }
     }
 
     #[test]
-    fn a_failed_cleanup_step_gets_its_codes_thai_meaning() {
-        let (mut m, d) = machine();
-        m.host.info.ui_language = LANG_THAI;
+    fn a_failed_cleanup_step_is_said_in_english_on_thai_windows() {
+        let (m, d) = thai_windows();
         assert_eq!(cli(&m, &d, &["apply", THEME]).0, EXIT_OK);
         let generated = d.data_dir.join("generated");
         m.fs.fail_removes_of(&generated);
         let (code, out, err) = cli(&m, &later(&d, 1), &["--cleanup"]);
         assert_eq!(code, EXIT_INCOMPLETE, "{out}{err}");
-        let step = format!(
-            "ไม่สำเร็จ Delete {}: E_DATA_WRITE: เขียนลงโฟลเดอร์ข้อมูลของ CMD Studio ไม่ได้\n  \
-             รายละเอียด: ",
+        // The code, then the core's English detail and its English way to fix it by hand.
+        let step = format!("FAILED Delete {}: E_DATA_WRITE: ", generated.display());
+        assert!(err.contains(&step), "{err}");
+        let fix = format!(
+            "\n    fix: Close every cmd window and Windows Terminal, then delete {}.",
             generated.display()
         );
-        assert!(err.contains(&step), "{err}");
-        assert!(err.contains("\n    วิธีแก้: ปิดหน้าต่าง cmd"), "{err}");
+        assert!(err.contains(&fix), "{err}");
+        assert_eq!(thai(&format!("{out}{err}")), "", "{out}{err}");
     }
 
     #[test]
-    fn an_older_record_without_thai_fixes_shows_the_english_one() {
+    fn an_older_record_without_thai_fixes_still_shows_its_fix() {
+        // A record written before `fixTh` existed still reads, on Thai Windows as well.
         let (mut m, d) = machine();
         let init = d.data_dir.join(r"generated\init.lua");
         m.fs.put(&init, b"old");
@@ -2434,10 +2121,11 @@ mod tests {
             step.as_object_mut().unwrap().remove("fixTh");
         }
         m.fs.put(&file, serde_json::to_vec(&record).unwrap());
-        m.host.info.ui_language = LANG_THAI;
+        m.host.info.ui_language = THAI_WINDOWS;
         let (code, _, err) = cli(&m, &later(&d, 1), &["undo"]);
         assert_eq!(code, EXIT_FAILED, "{err}");
-        assert!(err.contains("\n    วิธีแก้: Copy "), "{err}");
+        assert!(err.contains("\n    fix: Copy "), "{err}");
+        assert_eq!(thai(&err), "", "{err}");
     }
 
     #[test]
@@ -2513,17 +2201,142 @@ mod tests {
     }
 
     #[test]
-    fn every_code_of_the_spec_has_a_thai_meaning() {
-        let spec = include_str!("../../../docs/superpowers/specs/2026-10-10-cmd-studio-design.md");
-        let codes: Vec<String> = spec
-            .lines()
-            .filter_map(|l| l.strip_prefix("| `E_"))
-            .filter_map(|rest| rest.split('`').next())
-            .map(|name| format!("E_{name}"))
-            .collect();
-        assert_eq!(codes.len(), 25, "{codes:?}");
-        for code in codes {
-            assert!(meaning_th(&code).is_some(), "{code}");
+    fn nothing_the_cli_says_on_thai_windows_is_thai() {
+        // The founder's rule (2026-10-13): English is CMD Studio's main language, and nothing it
+        // writes into a cmd window is Thai, whatever the language of Windows.
+        let (m, d) = thai_windows();
+        let mut runs: Vec<(String, i32, (i32, String, String))> = Vec::new();
+        let mut run = |m: &FakeMachine, d: &Defaults, args: &[&str], want: i32| {
+            runs.push((args.join(" "), want, cli(m, d, args)));
+        };
+        run(&m, &d, &["--help"], EXIT_OK);
+        run(&m, &d, &["frobnicate"], EXIT_INVALID);
+        run(&m, &d, &["apply", THEME], EXIT_OK);
+        run(&m, &later(&d, 1), &["doctor"], EXIT_OK);
+        run(&m, &later(&d, 1), &["doctor", "--json"], EXIT_OK);
+        run(&m, &later(&d, 2), &["undo"], EXIT_OK);
+        run(&m, &later(&d, 3), &["--cleanup"], EXIT_OK);
+        // A restore point whose journal can't be read, set aside by hand.
+        let id = crashed_and_unreadable(&m, &d);
+        run(&m, &later(&d, 4), &["set-aside", &id], EXIT_OK);
+        // An apply refused: another Clink starts from AutoRun.
+        let (other, od) = thai_windows();
+        other
+            .autorun
+            .write_user(&RegValue::from_text(
+                REG_SZ,
+                r#""C:\clink\clink.bat" inject --autorun"#,
+            ))
+            .unwrap();
+        run(&other, &od, &["apply", THEME], EXIT_INVALID);
+
+        let mut wrong = Vec::new();
+        for (args, want, (code, out, err)) in &runs {
+            if code != want {
+                wrong.push(format!("{args}: exit {code}, not {want}"));
+            }
+            for (stream, text) in [("stdout", out), ("stderr", err)] {
+                let letters = thai(text);
+                if !letters.is_empty() {
+                    wrong.push(format!("{args}: {stream} holds \"{letters}\""));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+        // What is said is the English text, as on English Windows.
+        let said = |i: usize| &runs[i].2;
+        assert!(said(0).1.starts_with("Usage:\n"), "{}", said(0).1);
+        assert!(
+            said(1)
+                .2
+                .starts_with("cmdstudio: unknown command \"frobnicate\"\n\nUsage:\n"),
+            "{}",
+            said(1).2
+        );
+        assert!(
+            said(2).1.starts_with("Plan for \"Terracotta\":\n  - ")
+                && said(2)
+                    .1
+                    .contains("\nApplied \"Terracotta\". Open a new cmd window"),
+            "{}",
+            said(2).1
+        );
+        assert!(
+            said(3)
+                .1
+                .contains("\nD10  ok    The app runs as a normal program"),
+            "{}",
+            said(3).1
+        );
+        let json: serde_json::Value = serde_json::from_str(&said(4).1).unwrap();
+        for check in json["checks"].as_array().unwrap() {
+            assert!(check["messageEn"].is_string(), "{check}");
+        }
+        assert!(
+            said(5)
+                .1
+                .starts_with("Undid the theme applied in restore point "),
+            "{}",
+            said(5).1
+        );
+        assert_eq!(
+            said(6).1.lines().last(),
+            Some("CMD Studio's changes are taken out, and its data is deleted."),
+            "{}",
+            said(6).1
+        );
+        assert!(
+            said(7)
+                .1
+                .starts_with(&format!("Restore point {id} is set aside; its files stay")),
+            "{}",
+            said(7).1
+        );
+        assert!(
+            said(8)
+                .2
+                .starts_with("E_AUTORUN_FOREIGN_CLINK: another Clink starts with cmd"),
+            "{}",
+            said(8).2
+        );
+    }
+
+    #[test]
+    fn the_lang_option_is_gone_so_it_is_a_usage_error() {
+        let (m, d) = thai_windows();
+        let before = (m.fs.snapshot(), m.autorun.snapshot());
+        for (args, says) in [
+            (
+                vec!["apply", THEME, "--lang", "th"],
+                "apply needs exactly one theme file",
+            ),
+            (
+                vec!["apply", THEME, "--lang", "en"],
+                "apply needs exactly one theme file",
+            ),
+            (vec!["apply", THEME, "--lang"], "unknown option --lang"),
+        ] {
+            let (code, out, err) = cli(&m, &d, &args);
+            assert_eq!((code, out.as_str()), (EXIT_INVALID, ""), "{args:?}: {err}");
+            assert_eq!(err, format!("cmdstudio: {says}\n\n{USAGE}"), "{args:?}");
+        }
+        assert_eq!((m.fs.snapshot(), m.autorun.snapshot()), before);
+        assert!(!USAGE.contains("--lang"), "{USAGE}");
+    }
+
+    #[test]
+    fn the_clis_own_code_holds_no_thai_text() {
+        // Every message the CLI says is written in its code, so the code outside the tests may
+        // hold no Thai character: that covers the refusals no test here reaches. The tests do
+        // hold Thai, as a user's names, paths and typed words.
+        for (file, source) in [
+            ("lib.rs", include_str!("lib.rs")),
+            ("args.rs", include_str!("args.rs")),
+            ("main.rs", include_str!("main.rs")),
+        ] {
+            let source = source.replace("\r\n", "\n");
+            let code = source.split("\n#[cfg(test)]\nmod tests {").next().unwrap();
+            assert_eq!(thai(code), "", "{file}");
         }
     }
 

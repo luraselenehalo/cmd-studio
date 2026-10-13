@@ -15,6 +15,6 @@ fn main() {
 
 #[cfg(not(windows))]
 fn main() {
-    eprintln!("CMD Studio runs on Windows only. / CMD Studio ใช้ได้กับ Windows เท่านั้น");
+    eprintln!("CMD Studio runs on Windows only.");
     std::process::exit(cmdstudio_cli::EXIT_INVALID);
 }

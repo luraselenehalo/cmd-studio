@@ -33,6 +33,13 @@ pub enum Status {
 }
 
 /// One check's result (spec §5.9: a stable code, Thai and English text, details).
+///
+/// `details` is English, or text that is not in a language: paths, values, error messages. The
+/// CLI prints it in cmd, where nothing CMD Studio writes is Thai. Where the details tell the user
+/// what to do, `details_th` holds them in Thai for the app's own UI (R3's way to fix each step);
+/// it is `None`, and left out of JSON, for every other check. It is boxed, a pointer wide, so
+/// that a `Check`, which many checks' helpers return as their error, stays under clippy's size
+/// for an error (`result_large_err`, 128 bytes).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Check {
@@ -42,6 +49,8 @@ pub struct Check {
     pub message_th: String,
     pub message_en: String,
     pub details: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details_th: Option<Box<String>>,
 }
 
 fn check(
@@ -59,6 +68,7 @@ fn check(
         message_th: th.into(),
         message_en: en.into(),
         details: details.into(),
+        details_th: None,
     }
 }
 
@@ -1177,19 +1187,22 @@ fn records(sys: System<'_>, ctx: &Ctx) -> Vec<Check> {
         Ok(None) => {}
         Ok(Some((record, _))) => {
             let n = record.steps.len();
-            let mut lines = vec![format!("{}: {}", record.code, record.reason)];
+            // Each step with how to fix it: in English for `details`, which the CLI prints, and
+            // in Thai for `details_th` (a record written before the Thai text existed has only
+            // the English one).
+            let head = format!("{}: {}", record.code, record.reason);
+            let (mut lines, mut lines_th) = (vec![head.clone()], vec![head]);
             for s in &record.steps {
                 let th = if s.fix_th.is_empty() {
                     &s.fix
                 } else {
                     &s.fix_th
                 };
-                lines.push(format!(
-                    "{}: {}: {}\n  fix: {}\n  แก้: {th}",
-                    s.target, s.code, s.message, s.fix
-                ));
+                let step = format!("{}: {}: {}", s.target, s.code, s.message);
+                lines.push(format!("{step}\n  fix: {}", s.fix));
+                lines_th.push(format!("{step}\n  แก้: {th}"));
             }
-            found.push(check(
+            let mut r3 = check(
                 "R3",
                 Status::Fail,
                 Some("E_ROLLBACK_INCOMPLETE"),
@@ -1205,7 +1218,9 @@ fn records(sys: System<'_>, ctx: &Ctx) -> Vec<Check> {
                     record.id
                 ),
                 lines.join("\n"),
-            ));
+            );
+            r3.details_th = Some(Box::new(lines_th.join("\n")));
+            found.push(r3);
         }
         Err(f) => found.push(check(
             "R3",
@@ -1869,7 +1884,8 @@ mod tests {
 
     #[test]
     fn a_rollback_that_did_not_finish_is_reported_with_how_to_fix_it() {
-        // Spec §5.5: said after a restart too, with the fix by hand in both languages.
+        // Spec §5.5: said after a restart too, with the fix by hand in both languages: English
+        // in `details`, which the CLI prints in cmd, and Thai in `details_th`, for the app.
         let (m, ctx) = machine();
         let init = ctx.paths.generated().join("init.lua");
         m.fs.put(&init, b"old");
@@ -1883,15 +1899,27 @@ mod tests {
             .unwrap()
             .unwrap();
         let step = &record.steps[0];
-        let r3 = by_id(&run(&m, &ctx), "R3");
+        let checks = run(&m, &ctx);
+        let r3 = by_id(&checks, "R3");
         assert_eq!(
             (r3.status, r3.code),
             (Status::Fail, Some("E_ROLLBACK_INCOMPLETE")),
             "{r3:?}"
         );
         assert!(r3.details.contains(&step.fix), "{r3:?}");
-        assert!(r3.details.contains(&step.fix_th), "{r3:?}");
+        let details_th = r3.details_th.as_deref().map_or("", String::as_str);
+        assert!(
+            !step.fix_th.is_empty() && details_th.contains(&step.fix_th),
+            "{r3:?}"
+        );
+        // The paths are ASCII here, so a Thai character in `details` would be CMD Studio's own.
+        let thai = |c: char| ('\u{0E00}'..='\u{0E7F}').contains(&c);
+        assert!(!r3.details.chars().any(thai), "{}", r3.details);
         assert!(r3.message_en.contains("cmdstudio --cleanup"), "{r3:?}");
+        // No other check has details in Thai: their details are not words for the user.
+        for c in checks.iter().filter(|c| c.id != "R3") {
+            assert_eq!(c.details_th, None, "{c:?}");
+        }
 
         m.fs.fail_reads_of(point(&ctx, &record.id, "incomplete.json"));
         let r3 = by_id(&run(&m, &ctx), "R3");
