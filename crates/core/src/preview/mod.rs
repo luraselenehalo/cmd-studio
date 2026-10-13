@@ -215,6 +215,30 @@ mod tests {
         );
         line.push("f", Style { bold: true, ..b });
         assert_eq!(line.spans.len(), 4);
+        // bold alone makes a style: "g" has the colors of "f" but is not bold, and "h" has
+        // them and is bold, so each starts a span, while "i" joins "h"
+        let bold = Style { bold: true, ..b };
+        line.push("g", b);
+        line.push("h", bold);
+        assert_eq!(line.spans.len(), 6);
+        line.push("i", bold);
+        assert_eq!(line.spans.len(), 6);
+        let bolds: Vec<(&str, bool)> = line
+            .spans
+            .iter()
+            .map(|span| (span.text.as_str(), span.bold))
+            .collect();
+        assert_eq!(
+            bolds,
+            [
+                ("abc", false),
+                ("d", false),
+                ("e", false),
+                ("f", true),
+                ("g", false),
+                ("hi", true)
+            ]
+        );
     }
 
     #[test]
@@ -243,10 +267,17 @@ mod tests {
                 ..Style::fg(rgb("#faf9f5"))
             },
         );
+        line.push(
+            "!",
+            Style {
+                bold: true,
+                ..Style::fg(rgb("#d97757"))
+            },
+        );
         let json = serde_json::to_string(&line).unwrap();
         assert_eq!(
             json,
-            r##"[{"text":"~ ","fg":"#8a8780","bg":null,"bold":false},{"text":"x","fg":"#faf9f5","bg":"#5f5d58","bold":false}]"##
+            r##"[{"text":"~ ","fg":"#8a8780","bg":null,"bold":false},{"text":"x","fg":"#faf9f5","bg":"#5f5d58","bold":false},{"text":"!","fg":"#d97757","bg":null,"bold":true}]"##
         );
         assert_eq!(serde_json::from_str::<Line>(&json).unwrap(), line);
     }
@@ -264,5 +295,29 @@ mod tests {
         let mut extra = serde_json::to_value(&ctx).unwrap();
         extra["shell"] = serde_json::json!("pwsh");
         assert!(serde_json::from_value::<PreviewContext>(extra).is_err());
+    }
+
+    /// `value` is read as a `T`, and the same object with one field more is refused.
+    fn refuses_a_field_it_does_not_know<T: serde::de::DeserializeOwned>(value: serde_json::Value) {
+        assert!(
+            serde_json::from_value::<T>(value.clone()).is_ok(),
+            "{value}"
+        );
+        let mut extra = value;
+        extra["extra"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<T>(extra).is_err());
+    }
+
+    #[test]
+    fn spans_clocks_and_git_states_refuse_a_field_the_format_does_not_know() {
+        // a span is read on its own: a line is a bare array, so it has no object to extend
+        let mut line = Line::default();
+        line.push("x", Style::fg(rgb("#123456")));
+        refuses_a_field_it_does_not_know::<Span>(serde_json::to_value(&line.spans[0]).unwrap());
+        let sample = PreviewContext::sample();
+        refuses_a_field_it_does_not_know::<Clock>(serde_json::to_value(sample.clock).unwrap());
+        refuses_a_field_it_does_not_know::<GitState>(
+            serde_json::to_value(sample.git.unwrap()).unwrap(),
+        );
     }
 }
