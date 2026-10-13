@@ -145,6 +145,20 @@ pub(crate) enum Look {
     Powerline { bg: Swatch, fg: Swatch },
 }
 
+impl Look {
+    /// The look git switches to once something has changed: the color its color template
+    /// gives (`foreground_templates` in box and line, `background_templates` in powerline).
+    pub(crate) fn changed(self) -> Look {
+        match self {
+            Look::Plain { .. } => Look::Plain { fg: Swatch::Dirty },
+            Look::Powerline { fg, .. } => Look::Powerline {
+                bg: Swatch::Dirty,
+                fg,
+            },
+        }
+    }
+}
+
 /// A segment as a layout draws it: its colors, and the text on either side of its data.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Drawn {
@@ -1342,5 +1356,29 @@ mod tests {
         );
         assert!(has_time(&themed(Layout::Box, &list)));
         assert!(left_parts(&themed(Layout::Powerline, &[])).is_empty());
+    }
+
+    #[test]
+    fn look_changed_is_the_color_the_git_template_switches() {
+        // the preview colors a changed repository with `Look::changed`; Oh My Posh with the
+        // color template the config gives git
+        for layout in LAYOUTS {
+            let c = config(&themed(layout, &[Segment::Git]));
+            let git = segment_of(&c, "git");
+            let look = drawn(layout, Part::Git).look;
+            match (look, look.changed()) {
+                (Look::Plain { .. }, Look::Plain { fg }) => {
+                    assert_eq!(fg, Swatch::Dirty);
+                    let t = git["foreground_templates"][0].as_str().unwrap();
+                    assert!(t.ends_with("p:dirty{{ end }}"), "{t}");
+                }
+                (Look::Powerline { fg: before, .. }, Look::Powerline { bg, fg }) => {
+                    assert_eq!((bg, fg), (Swatch::Dirty, before));
+                    let t = git["background_templates"][0].as_str().unwrap();
+                    assert!(t.ends_with("p:dirty{{ end }}"), "{t}");
+                }
+                other => panic!("{layout:?}: {other:?}"),
+            }
+        }
     }
 }

@@ -10,8 +10,11 @@
 //! `generate::omp` writes, and `tests/banner_parity.rs` compares the welcome box with what
 //! the generated `banner.lua` prints.
 mod cells;
+mod prompt;
+mod values;
 
 pub use cells::{banner_cells, prompt_cells};
+pub use prompt::{prompt, Prompt};
 
 use crate::color::Rgb;
 use serde::{Deserialize, Serialize};
