@@ -190,6 +190,16 @@ mod tests {
     /// apart) and well inside the 20 x 50 ms the adapter waits.
     const HOLD: Duration = Duration::from_millis(200);
 
+    #[test]
+    fn a_failure_says_windows_text_in_english() {
+        // Reading a folder as a file is refused by Windows (ERROR_ACCESS_DENIED). Its text
+        // reaches the user, so it is English whatever the display language (spec, 2026-10-13).
+        let dir = tempfile::tempdir().unwrap();
+        let e = WinFs.read(dir.path()).unwrap_err();
+        assert_eq!(e.context, format!("read {}", dir.path().display()));
+        assert_eq!(e.message, "Access is denied. (os error 5)");
+    }
+
     fn names_in(dir: &Path) -> Vec<String> {
         std::fs::read_dir(dir)
             .unwrap()

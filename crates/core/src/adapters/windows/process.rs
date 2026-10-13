@@ -3,6 +3,7 @@
 //! time limit. The caller never waits longer than that limit plus a short grace for the
 //! output, even when the program started another program that keeps its output open; a
 //! program that cannot be killed is given up on after the same grace and reported.
+use super::english_io_error;
 use crate::adapters::{AdapterError, Output, Process};
 use std::ffi::OsStr;
 use std::io::Read;
@@ -105,7 +106,12 @@ fn collect(
         match results.recv_timeout(within.saturating_sub(since.elapsed())) {
             Ok((Stream::Stdout, Ok(bytes))) => stdout = bytes,
             Ok((Stream::Stderr, Ok(bytes))) => stderr = bytes,
-            Ok((_, Err(e))) => return Err(format!("its output could not be read: {e}")),
+            Ok((_, Err(e))) => {
+                return Err(format!(
+                    "its output could not be read: {}",
+                    english_io_error(&e)
+                ))
+            }
             Err(RecvTimeoutError::Timeout) => {
                 return Err(
                     "its output did not end (a program it started may still hold its output open)"
@@ -146,12 +152,12 @@ fn stop(child: &mut impl Running, wait: Duration) -> Result<(), String> {
             Ok(Some(_)) => return Ok(()),
             Ok(None) if since.elapsed() >= wait => {
                 return Err(match killed {
-                    Err(e) => format!("could not be stopped: {e}"),
+                    Err(e) => format!("could not be stopped: {}", english_io_error(&e)),
                     Ok(()) => format!("did not stop within {} after it was killed", seconds(wait)),
                 })
             }
             Ok(None) => std::thread::sleep(POLL),
-            Err(e) => return Err(format!("could not be stopped: {e}")),
+            Err(e) => return Err(format!("could not be stopped: {}", english_io_error(&e))),
         }
     }
 }
@@ -183,7 +189,7 @@ impl Process for WinProcess {
             .stderr(Stdio::piped())
             .creation_flags(CREATE_NO_WINDOW)
             .spawn()
-            .map_err(|e| fail(e.to_string()))?;
+            .map_err(|e| fail(english_io_error(&e)))?;
         let started = Instant::now();
         let (done, results) = mpsc::channel();
         let readers = (|| -> std::io::Result<usize> {
@@ -204,7 +210,10 @@ impl Process for WinProcess {
             Ok(count) => count,
             Err(e) => {
                 let note = unstopped(stop(&mut child, OUTPUT_GRACE));
-                return Err(fail(format!("could not read its output: {e}{note}")));
+                return Err(fail(format!(
+                    "could not read its output: {}{note}",
+                    english_io_error(&e)
+                )));
             }
         };
         let status = loop {
@@ -220,7 +229,7 @@ impl Process for WinProcess {
                 Ok(None) => std::thread::sleep(POLL),
                 Err(e) => {
                     let note = unstopped(stop(&mut child, OUTPUT_GRACE));
-                    return Err(fail(format!("{e}{note}")));
+                    return Err(fail(format!("{}{note}", english_io_error(&e))));
                 }
             }
         };
@@ -566,6 +575,23 @@ mod tests {
             let gone = self.exited_before || (self.exits_after_kill && self.kills > 0);
             Ok(gone.then(|| std::process::ExitStatus::from_raw(1)))
         }
+    }
+
+    #[test]
+    fn a_kill_windows_refuses_is_said_in_english() {
+        struct Denied;
+        impl Running for Denied {
+            fn kill(&mut self) -> std::io::Result<()> {
+                Err(std::io::Error::from_raw_os_error(5))
+            }
+            fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+                Ok(None)
+            }
+        }
+        assert_eq!(
+            stop(&mut Denied, Duration::from_millis(50)),
+            Err("could not be stopped: Access is denied. (os error 5)".to_string())
+        );
     }
 
     #[test]

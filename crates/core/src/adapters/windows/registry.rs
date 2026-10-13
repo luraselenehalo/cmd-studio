@@ -1,6 +1,7 @@
 //! cmd's AutoRun value (spec §5.4 AutoRun). Values are read and written raw,
 //! so the type (`REG_SZ` or `REG_EXPAND_SZ`) and every byte survive a
 //! restore. Keys are opened, never recreated (spec §2.2 lesson 9).
+use super::english_io_error;
 use crate::adapters::{AdapterError, AutoRun, RegValue};
 use std::borrow::Cow;
 use std::io::ErrorKind;
@@ -65,8 +66,9 @@ impl RegLocation {
         })
     }
 
+    /// winreg reports Windows' error code in a `std::io::Error`; its text is said in English.
     fn err(&self, what: &str, e: &std::io::Error) -> AdapterError {
-        AdapterError::new(format!("{what} {self}"), e.to_string())
+        AdapterError::new(format!("{what} {self}"), english_io_error(e))
     }
 
     /// The existing key, or `None` when it does not exist.

@@ -33,7 +33,7 @@
     clippy::indexing_slicing
 )]
 
-use cmdstudio_core::generate::lua::{banner_lua, Lang};
+use cmdstudio_core::generate::lua::banner_lua;
 use cmdstudio_core::generate::{clink, omp, wt};
 use cmdstudio_core::model::{parse_theme, Layout, Segment, Target, Theme, ThemeError};
 use mlua::{Function, Lua, Table, Value as LuaValue};
@@ -282,12 +282,10 @@ const STAND_IN_USER: &str = "ทดสอบ";
 
 /// Loads the banner script of `theme`, lets the session start, and returns the Lua state and
 /// what the script printed with `clink.print`.
-fn run_banner(theme: &Theme, lang: Lang) -> mlua::Result<(Lua, Vec<String>)> {
+fn run_banner(theme: &Theme) -> mlua::Result<(Lua, Vec<String>)> {
     let lua = Lua::new();
     lua.load(PRELUDE).exec()?;
-    lua.load(banner_lua(theme, lang))
-        .set_name("banner.lua")
-        .exec()?;
+    lua.load(banner_lua(theme)).set_name("banner.lua").exec()?;
     let on_inject: Function = lua.globals().get("__oninject")?;
     on_inject.call::<()>(())?;
     let out: Table = lua.globals().get("__out")?;
@@ -298,8 +296,8 @@ fn run_banner(theme: &Theme, lang: Lang) -> mlua::Result<(Lua, Vec<String>)> {
 }
 
 /// The box that the banner of `theme` prints, as its rows without our colors.
-fn banner_rows(theme: &Theme, lang: Lang) -> mlua::Result<Vec<String>> {
-    let (_, printed) = run_banner(theme, lang)?;
+fn banner_rows(theme: &Theme) -> mlua::Result<Vec<String>> {
+    let (_, printed) = run_banner(theme)?;
     assert_eq!(printed.len(), 1, "one print, and no clearing of the screen");
     Ok(plain_rows(&printed[0]))
 }
@@ -320,9 +318,7 @@ fn generated_files(theme: &Theme) -> Vec<(String, String)> {
             omp::config_text(&every).unwrap(),
         ));
     }
-    for lang in [Lang::Th, Lang::En] {
-        files.push((format!("banner.lua ({lang:?})"), banner_lua(theme, lang)));
-    }
+    files.push(("banner.lua".to_string(), banner_lua(theme)));
     files.push((
         "clink_settings".to_string(),
         clink::settings(theme.prompt.transient, Path::new(r"C:\data\generated")),
@@ -391,13 +387,11 @@ fn assert_a_clean_theme(name: &str, theme: &Theme) -> mlua::Result<()> {
         }
     }
     // and what the banner prints is the box, with nothing in it for the terminal to act on
-    for lang in [Lang::Th, Lang::En] {
-        for row in banner_rows(theme, lang)? {
-            assert!(
-                !row.chars().any(is_unsafe),
-                "{name}: the {lang:?} banner prints an unsafe character in {row:?}"
-            );
-        }
+    for row in banner_rows(theme)? {
+        assert!(
+            !row.chars().any(is_unsafe),
+            "{name}: the banner prints an unsafe character in {row:?}"
+        );
     }
     Ok(())
 }
@@ -447,13 +441,8 @@ fn an_escape_sequence_in_the_name_is_cut_out_and_never_reaches_a_generated_file(
     // title sequence; the `0;pwned` that was its text is only text now
     assert_eq!(theme.name, "Red 0;pwnedTheme");
     assert!(!theme.name.chars().any(is_unsafe));
-    for lang in [Lang::Th, Lang::En] {
-        let lua = banner_lua(&theme, lang);
-        assert!(
-            !lua.contains('\u{1b}') && !lua.contains('\u{7}'),
-            "{lang:?}"
-        );
-    }
+    let lua = banner_lua(&theme);
+    assert!(!lua.contains('\u{1b}') && !lua.contains('\u{7}'));
     let config = omp::config_text(&theme).unwrap();
     assert!(!config.contains('\u{1b}') && !config.contains('\u{7}'));
     assert!(
@@ -478,20 +467,14 @@ fn every_text_field_is_cleaned_and_the_font_reaches_windows_terminal_clean() -> 
     );
     assert_eq!(keys["font"]["face"], "Cascadia Mono");
     // and the banner prints the cleaned title with the variable in it still working
-    for lang in [Lang::Th, Lang::En] {
-        let rows = banner_rows(&theme, lang)?;
-        assert!(
-            rows[1].contains(&format!("0;pwnedHi {STAND_IN_USER}")),
-            "{lang:?}: {}",
-            rows[1]
-        );
-        assert!(rows[3].contains("red"), "{lang:?}: {}", rows[3]);
-        assert!(
-            rows[4].contains("bell and tab and CR."),
-            "{lang:?}: {}",
-            rows[4]
-        );
-    }
+    let rows = banner_rows(&theme)?;
+    assert!(
+        rows[1].contains(&format!("0;pwnedHi {STAND_IN_USER}")),
+        "{}",
+        rows[1]
+    );
+    assert!(rows[3].contains("red"), "{}", rows[3]);
+    assert!(rows[4].contains("bell and tab and CR."), "{}", rows[4]);
     Ok(())
 }
 
@@ -509,19 +492,17 @@ fn line_breaks_in_the_banner_are_cut_out_and_the_box_keeps_its_rows() -> mlua::R
             "{text:?}"
         );
     }
-    for lang in [Lang::Th, Lang::En] {
-        let rows = banner_rows(&theme, lang)?;
-        // top, title, blank, the four lines, bottom, tips and the closing space: a line break
-        // that got through would be one row more
-        assert_eq!(rows.len(), 10, "{lang:?}: {rows:?}");
-        assert!(
-            rows[1].contains(&format!("Welcomeback, {STAND_IN_USER}!")),
-            "{lang:?}: {}",
-            rows[1]
-        );
-        for (row, line) in rows[3..7].iter().zip(&theme.banner.lines) {
-            assert!(row.contains(line.as_str()), "{lang:?}: {row:?} / {line:?}");
-        }
+    let rows = banner_rows(&theme)?;
+    // top, title, blank, the four lines, bottom, tips and the closing space: a line break
+    // that got through would be one row more
+    assert_eq!(rows.len(), 10, "{rows:?}");
+    assert!(
+        rows[1].contains(&format!("Welcomeback, {STAND_IN_USER}!")),
+        "{}",
+        rows[1]
+    );
+    for (row, line) in rows[3..7].iter().zip(&theme.banner.lines) {
+        assert!(row.contains(line.as_str()), "{row:?} / {line:?}");
     }
     Ok(())
 }
@@ -543,14 +524,12 @@ fn nul_del_and_c1_controls_are_cut_out_of_every_text_field() -> mlua::Result<()>
     assert_eq!(theme.terminal.font, "Cascadia Mono");
     assert_eq!(theme.banner.title, "0;pwnedHi {user}");
     assert_eq!(theme.banner.lines, ["31mred", "nul and DEL."]);
-    for lang in [Lang::Th, Lang::En] {
-        let rows = banner_rows(&theme, lang)?;
-        assert!(
-            rows[1].contains(&format!("0;pwnedHi {STAND_IN_USER}")),
-            "{lang:?}: {}",
-            rows[1]
-        );
-    }
+    let rows = banner_rows(&theme)?;
+    assert!(
+        rows[1].contains(&format!("0;pwnedHi {STAND_IN_USER}")),
+        "{}",
+        rows[1]
+    );
     Ok(())
 }
 
@@ -599,22 +578,17 @@ fn text_that_breaks_a_lua_string_is_printed_as_it_is_and_never_runs() -> mlua::R
         "the sample line no longer gets out of a plain string: {pwned:?}"
     );
 
-    for lang in [Lang::Th, Lang::En] {
-        let (lua, printed) = run_banner(&theme, lang)?;
-        // nothing of the texts ran: the lines that try to would have set this global
-        let pwned: LuaValue = lua.globals().get("__pwned")?;
-        assert!(pwned.is_nil(), "{lang:?}: text from the theme ran as code");
-        let rows = plain_rows(&printed[0]);
-        // the title row has the icon and then the title, and each line has its row after the
-        // blank one; the variable is the only part that is not as written
-        assert!(rows[1].contains(title), "{lang:?}: {}", rows[1]);
-        for (row, line) in rows[3..].iter().zip(lines) {
-            let want = line.replace("{user}", STAND_IN_USER);
-            assert!(
-                row.contains(&want),
-                "{lang:?}: {row:?} should hold {want:?}"
-            );
-        }
+    let (lua, printed) = run_banner(&theme)?;
+    // nothing of the texts ran: the lines that try to would have set this global
+    let pwned: LuaValue = lua.globals().get("__pwned")?;
+    assert!(pwned.is_nil(), "text from the theme ran as code");
+    let rows = plain_rows(&printed[0]);
+    // the title row has the icon and then the title, and each line has its row after the
+    // blank one; the variable is the only part that is not as written
+    assert!(rows[1].contains(title), "{}", rows[1]);
+    for (row, line) in rows[3..].iter().zip(lines) {
+        let want = line.replace("{user}", STAND_IN_USER);
+        assert!(row.contains(&want), "{row:?} should hold {want:?}");
     }
     Ok(())
 }

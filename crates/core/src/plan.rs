@@ -116,7 +116,6 @@ impl ClinkLaunch {
 pub struct Request {
     pub target: Target,
     pub set_wt_default_profile: bool,
-    pub lang: lua::Lang,
     /// The user agreed to turn off another Clink found in AutoRun (spec §5.4).
     pub replace_foreign_clink: bool,
 }
@@ -364,7 +363,7 @@ pub fn plan(
         },
         Op::WriteFile {
             path: paths.generated().join("banner.lua"),
-            contents: lua::banner_lua(theme, req.lang),
+            contents: lua::banner_lua(theme),
         },
         Op::WriteFile {
             path: paths.clink_profile().join("clink_settings"),
@@ -484,7 +483,6 @@ pub fn plan(
 mod tests {
     use super::autorun::scan;
     use super::*;
-    use crate::generate::lua::Lang;
     use crate::model::Target;
     use crate::presets::terracotta;
     use std::path::PathBuf;
@@ -507,7 +505,6 @@ mod tests {
         Request {
             target,
             set_wt_default_profile: true,
-            lang: Lang::Th,
             replace_foreign_clink: false,
         }
     }
