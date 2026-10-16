@@ -47,6 +47,11 @@ pub const EXIT_INVALID: i32 = 2;
 /// A rollback could not restore everything: the user must fix what it lists by hand.
 pub const EXIT_INCOMPLETE: i32 = 3;
 
+/// The data folder's name under `%LOCALAPPDATA%` (spec §5.3, G10): what Tauri's
+/// `app_local_data_dir()` gives for the identifier `ai.resincore.cmdstudio`, spelled out so the
+/// CLI and the app agree without Tauri.
+pub const DATA_DIR_NAME: &str = "ai.resincore.cmdstudio";
+
 pub struct Io<'a> {
     pub out: &'a mut dyn Write,
     pub err: &'a mut dyn Write,
@@ -671,7 +676,7 @@ impl<'s, 'a> Say<'s, 'a> {
             if !only_themes {
                 self.err(format!(
                     "cmdstudio: {} holds none of CMD Studio's own files (cmdstudio.lock, \
-                     state.json or state.json.damaged-<number>), so it may not be CMD \
+                     state.json, settings.json or a .damaged-<number> copy of them), so it may not be CMD \
                      Studio's data folder, and --cleanup would delete what is in it. Nothing \
                      was deleted; check the path after --data-dir.",
                     data.display()
@@ -931,14 +936,18 @@ fn same_name(a: &Path, b: &Path) -> bool {
 
 /// Whether an entry directly in the data folder is one CMD Studio itself puts there, of the
 /// kind it writes, as the core's `Paths` and its writers make them:
-/// - the folders `generated\`, `clink-profile\`, `runtime\`, `snapshots\` and `themes\`;
-/// - the files `state.json` and `cmdstudio.lock` (made by `Fs::try_lock`);
-/// - `state.json.damaged-<ms>`: a damaged state.json that Revert everything or `--cleanup` set
-///   aside (`cleanup::load_state`);
-/// - `.state.json.<32 hex digits>.cmdstudio-tmp`: the temp file `WinFs::write_atomic` writes
-///   beside state.json, left behind when a run is cut off in that write. state.json is the only
-///   file CMD Studio writes directly in the data folder: the generated files, Clink's profile,
-///   the runtimes and the restore points, with their own temp files, are in the folders above.
+/// - the folders `generated\`, `clink-profile\`, `runtime\`, `snapshots\`, `themes\`, and the
+///   app's `drafts\` (autosaved drafts), `logs\` (its log) and `webview\` (WebView2's own data,
+///   put there by the app on purpose; spec §5.3);
+/// - the files `state.json`, `settings.json` (the app's settings) and `cmdstudio.lock` (made by
+///   `Fs::try_lock`);
+/// - `state.json.damaged-<ms>` and `settings.json.damaged-<ms>`: a damaged file that Revert
+///   everything, `--cleanup` or the app set aside (`cleanup::load_state`, the app's settings);
+/// - `.state.json.<32 hex digits>.cmdstudio-tmp`, and the same for `settings.json`: the temp
+///   file `WinFs::write_atomic` writes beside the file, left behind when a run is cut off in
+///   that write. state.json and settings.json are the only files CMD Studio writes directly in
+///   the data folder: the generated files, Clink's profile, the runtimes, the restore points, the
+///   drafts and the log, with their own temp files, are in the folders above.
 ///
 /// Names compare without regard to ASCII letter case, as Windows does.
 fn put_there_by_cmd_studio(paths: &Paths, entry: &DirEntry) -> bool {
@@ -953,6 +962,9 @@ fn put_there_by_cmd_studio(paths: &Paths, entry: &DirEntry) -> bool {
             paths.runtime_root(),
             paths.snapshots(),
             paths.themes(),
+            paths.drafts(),
+            paths.logs(),
+            paths.webview(),
         ]
         .into_iter()
         .any(named);
@@ -960,40 +972,39 @@ fn put_there_by_cmd_studio(paths: &Paths, entry: &DirEntry) -> bool {
     if cmd_studios_own_file(paths, entry) {
         return true;
     }
-    let state_file = paths.state_file();
-    let Some(state) = state_file.file_name().and_then(|n| n.to_str()) else {
-        return false;
-    };
-    let (name, state) = (name.to_ascii_lowercase(), state.to_ascii_lowercase());
-    name.strip_prefix(&format!(".{state}."))
-        .and_then(|rest| rest.strip_suffix(".cmdstudio-tmp"))
-        .is_some_and(|hex| hex.len() == 32 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
+    let name = name.to_ascii_lowercase();
+    [paths.state_file(), paths.settings_file()]
+        .iter()
+        .filter_map(|file| file.file_name().and_then(|n| n.to_str()))
+        .any(|file| {
+            name.strip_prefix(&format!(".{}.", file.to_ascii_lowercase()))
+                .and_then(|rest| rest.strip_suffix(".cmdstudio-tmp"))
+                .is_some_and(|hex| hex.len() == 32 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
+        })
 }
 
 /// Whether an entry directly in the data folder is one of the files that only CMD Studio
 /// itself writes there, and that every data folder it used holds until a `--cleanup` empties
 /// it: `cmdstudio.lock` (made by the first command that takes the lock, before any other write,
-/// and left when the lock is let go), `state.json`, or `state.json.damaged-<ms>` (a damaged
-/// state.json that Revert everything or `--cleanup` set aside). Names compare without regard
-/// to ASCII letter case. The kind is the caller's to check.
+/// and left when the lock is let go), `state.json`, `settings.json` (the app writes it the first
+/// time a setting changes), or a damaged copy of the last two set aside as `<name>.damaged-<ms>`.
+/// Names compare without regard to ASCII letter case. The kind is the caller's to check.
 fn cmd_studios_own_file(paths: &Paths, entry: &DirEntry) -> bool {
-    if [paths.state_file(), paths.lock_file()]
-        .into_iter()
-        .any(|ours| same_name(&ours, &entry.path))
-    {
+    let own = [paths.state_file(), paths.settings_file(), paths.lock_file()];
+    if own.iter().any(|ours| same_name(ours, &entry.path)) {
         return true;
     }
-    let state_file = paths.state_file();
-    match (
-        entry.path.file_name().and_then(|n| n.to_str()),
-        state_file.file_name().and_then(|n| n.to_str()),
-    ) {
-        (Some(name), Some(state)) => name
-            .to_ascii_lowercase()
-            .strip_prefix(&format!("{}.damaged-", state.to_ascii_lowercase()))
-            .is_some_and(|ms| !ms.is_empty() && ms.bytes().all(|b| b.is_ascii_digit())),
-        _ => false,
-    }
+    let Some(name) = entry.path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let name = name.to_ascii_lowercase();
+    [paths.state_file(), paths.settings_file()]
+        .iter()
+        .filter_map(|file| file.file_name().and_then(|n| n.to_str()))
+        .any(|file| {
+            name.strip_prefix(&format!("{}.damaged-", file.to_ascii_lowercase()))
+                .is_some_and(|ms| !ms.is_empty() && ms.bytes().all(|b| b.is_ascii_digit()))
+        })
 }
 
 /// The record of a restore point set aside by hand while its journal could not be read: one
@@ -1057,7 +1068,7 @@ pub fn run(args: &[OsString], io: &mut Io<'_>) -> i32 {
         .and_then(|p| p.parent().map(PathBuf::from))
         .unwrap_or_default();
     let defaults = Defaults {
-        data_dir: local.join("ai.resincore.cmdstudio"),
+        data_dir: local.join(DATA_DIR_NAME),
         resources: exe_dir.join("resources"),
         now_ms: now_ms(),
     };
@@ -1741,7 +1752,7 @@ mod tests {
     #[test]
     fn a_folder_with_only_cmd_studio_named_folders_but_none_of_its_files_is_refused() {
         // Folders named like CMD Studio's are not enough: one of its own files must be there
-        // (cmdstudio.lock, state.json or a damaged state.json it set aside).
+        // (cmdstudio.lock, state.json, settings.json or a .damaged-<number> copy of them).
         for (m, d) in english_and_thai_windows() {
             let folder = r"D:\work";
             m.fs.put(format!(r"{folder}\runtime\tool.exe"), b"mine");
@@ -1753,7 +1764,12 @@ mod tests {
             ] {
                 let (code, out, err) = cli(&m, &d, &args);
                 assert_eq!(code, EXIT_INVALID, "{args:?}: {out}{err}");
-                for name in ["cmdstudio.lock", "state.json", "state.json.damaged-"] {
+                for name in [
+                    "cmdstudio.lock",
+                    "state.json",
+                    "settings.json",
+                    ".damaged-<number>",
+                ] {
                     assert!(err.contains(name), "{name}: {err}");
                 }
                 assert!(err.contains("none of CMD Studio's own files"), "{err}");
@@ -2332,7 +2348,6 @@ mod tests {
         for (file, source) in [
             ("lib.rs", include_str!("lib.rs")),
             ("args.rs", include_str!("args.rs")),
-            ("main.rs", include_str!("main.rs")),
         ] {
             let source = source.replace("\r\n", "\n");
             let code = source.split("\n#[cfg(test)]\nmod tests {").next().unwrap();
@@ -2351,5 +2366,54 @@ mod tests {
         assert_eq!(code, EXIT_OK);
         assert!(out.starts_with("Usage:"));
         assert_eq!(cli(&m, &d, &["frobnicate"]).0, EXIT_INVALID);
+    }
+
+    #[test]
+    fn cleanup_with_a_data_dir_takes_the_apps_own_entries_for_cmd_studios() {
+        // The app writes drafts\, logs\, webview\ (WebView2's data) and settings.json into the
+        // data folder (spec §5.3). --cleanup --data-dir must know them, or a real data folder of
+        // the app is refused as not CMD Studio's.
+        let (m, d) = machine();
+        let other = r"C:\Users\tester\other";
+        m.fs.put(format!(r"{other}\themes\mine.cmdtheme"), b"{}");
+        assert_eq!(
+            cli(&m, &d, &["apply", THEME, "--data-dir", other]).0,
+            EXIT_OK
+        );
+        for file in [
+            r"drafts\1e9c0c7e-0e0b-4c71-9a4b-6a0c5d7f1a22.cmdtheme",
+            r"logs\cmdstudio.log",
+            r"logs\cmdstudio.log.1",
+            r"webview\EBWebView\Default\Cache\data_0",
+            "settings.json",
+            "settings.json.damaged-1791694709000",
+            ".settings.json.0123456789abcdef0123456789abcdef.cmdstudio-tmp",
+            ".state.json.0123456789abcdef0123456789abcdef.cmdstudio-tmp",
+        ] {
+            m.fs.put(format!(r"{other}\{file}"), b"x");
+        }
+        let (code, out, err) = cli(&m, &later(&d, 1), &["--cleanup", "--data-dir", other]);
+        assert_eq!(code, EXIT_OK, "{out}{err}");
+        assert_eq!(
+            m.fs.list_dir(Path::new(other)).unwrap().len(),
+            1,
+            "only the themes folder stays"
+        );
+        // A folder with only settings.json and the app's folders is CMD Studio's too: the app
+        // writes them before any theme is applied.
+        let fresh = r"C:\Users\tester\fresh";
+        m.fs.put(format!(r"{fresh}\settings.json"), b"{}");
+        m.fs.put(format!(r"{fresh}\logs\cmdstudio.log"), b"");
+        let (code, out, err) = cli(&m, &later(&d, 2), &["--cleanup", "--data-dir", fresh]);
+        assert_eq!(code, EXIT_OK, "{out}{err}");
+        assert!(!m.fs.exists(Path::new(fresh)));
+        // A file CMD Studio never writes there is still refused, nothing deleted.
+        m.fs.put(format!(r"{fresh}\settings.json"), b"{}");
+        m.fs.put(format!(r"{fresh}\webview.txt"), b"x");
+        let before = m.fs.snapshot();
+        let (code, _, err) = cli(&m, &later(&d, 3), &["--cleanup", "--data-dir", fresh]);
+        assert_eq!(code, EXIT_INVALID, "{err}");
+        assert!(err.contains("\"webview.txt\""), "{err}");
+        assert_eq!(m.fs.snapshot(), before);
     }
 }
