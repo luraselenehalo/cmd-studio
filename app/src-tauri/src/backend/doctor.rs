@@ -19,9 +19,12 @@
 //! - nothing for a check that could not read (check again), for what the doctor says to fix by
 //!   hand (a settings.json CMD Studio can't work with, an AutoRun value that is not text), for D2
 //!   and for D3 when Clink does not run (both say to do what D1 says first);
-//! - and no apply at all, from any check, while an add-on folder holds other files or the
-//!   bundled files are damaged (the apply would roll back, or not start), or while another
-//!   finding stops every apply before it starts (`blocks_every_apply`).
+//! - the theme's font gone (D8) when the reapply would install the Nerd Font from a bundled file
+//!   that is damaged: reinstall CMD Studio (words);
+//! - and no apply at all, from any check, while an add-on folder holds other files or bundled
+//!   files the apply needs are damaged (the apply would roll back, or not start), while another
+//!   finding stops every apply before it starts (`blocks_every_apply`), or when the applied theme
+//!   is no longer in the library (an apply of it can't be planned, and no copy of it is kept).
 use super::apply::{ApplyRequest, PlanOutcome};
 use super::system::WT_MIN_BUILD;
 use super::{Backend, Machine};
@@ -29,10 +32,14 @@ use crate::error::AppError;
 use cmdstudio_core::actions::Ctx;
 use cmdstudio_core::adapters::{AdapterError, RegText, System, WtLocation};
 use cmdstudio_core::doctor::{doctor, Check, Status};
-use cmdstudio_core::plan::{autorun_summary, AutoRunSummary, Component, Machine as PlanMachine};
+use cmdstudio_core::model::Theme;
+use cmdstudio_core::plan::{
+    autorun_summary, AutoRunSummary, Component, Machine as PlanMachine, NERD_FONT_FAMILY,
+};
 use cmdstudio_core::resources::{check_bundle, ResourceError};
 use cmdstudio_core::state::{Applied, State};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use ts_rs::TS;
 
 /// What the app offers for a finding. `reapply`, `replaceOtherClink`, `installWindowsTerminal`
@@ -44,8 +51,8 @@ use ts_rs::TS;
 pub enum FixKind {
     /// Apply the applied theme again, shown as a plan first: D3, D4, D7, D8, D9, and D1 when an
     /// add-on folder is gone (the apply installs it again). Offered only while each add-on folder
-    /// is intact or gone (an apply never overwrites one that holds other files, spec §5.4) and
-    /// nothing stops every apply before it starts.
+    /// is intact or gone (an apply never overwrites one that holds other files, spec §5.4), the
+    /// applied theme is still in the library, and nothing stops every apply before it starts.
     Reapply,
     /// Apply again with the other Clink in the user's AutoRun turned off (D5); the plan names the
     /// commands that go, for the user's yes (spec §5.4).
@@ -57,9 +64,9 @@ pub enum FixKind {
     OpenWindowsTerminalOnce,
     /// No cmd window has loaded the theme yet (D3): open a new one.
     OpenNewCmdWindow,
-    /// The files that come with CMD Studio fail their manifest, or a gone add-on folder's files
-    /// are missing or changed among them (D1): only a new install of CMD Studio brings them
-    /// back. Words, not a button.
+    /// The files that come with CMD Studio fail their manifest, or files an apply would install
+    /// from are missing or changed among them (D1; D8 for the Nerd Font): only a new install of
+    /// CMD Studio brings them back. Words, not a button.
     Reinstall,
 }
 
@@ -106,8 +113,9 @@ pub enum RuntimeFiles {
     /// The manifest is good, and every runtime folder is there with its files unchanged.
     Intact,
     /// The bundled files fail their manifest, so no apply starts (`prepare_apply` reads the
-    /// manifest first); or a runtime folder is gone and the bundled files it is installed from
-    /// are missing or changed, so the apply would roll back.
+    /// manifest first); or bundled files the apply would install from are missing or changed,
+    /// so it would roll back: a gone runtime folder's, or the Nerd Font's when the apply would
+    /// install it.
     BundleDamaged,
     /// A runtime folder is gone, its bundled files are whole, and each runtime folder that is
     /// there is intact: an apply installs the gone one.
@@ -122,8 +130,9 @@ pub enum RuntimeFiles {
 
 /// [`RuntimeFiles`] for the applied theme `a`: the same reads as D1, in the same order. A gone
 /// folder's bundled files are read too, as the apply's install reads them (every file against
-/// its pinned hash).
-fn runtime_files(sys: System<'_>, ctx: &Ctx, a: &Applied) -> RuntimeFiles {
+/// its pinned hash), and so is the bundled Nerd Font when `installs_font` (see
+/// [`installs_font`]).
+fn runtime_files(sys: System<'_>, ctx: &Ctx, a: &Applied, installs_font: bool) -> RuntimeFiles {
     let m = match ctx.resources.manifest(sys.fs) {
         Ok(m) => m,
         Err(ResourceError::Io(_)) => return RuntimeFiles::Unreadable,
@@ -149,11 +158,44 @@ fn runtime_files(sys: System<'_>, ctx: &Ctx, a: &Applied) -> RuntimeFiles {
             Err(_) => return RuntimeFiles::FilesChanged,
         }
     }
+    // The font's install checks the bundled file against its pin first (`install_font`).
+    let font_dir = ctx
+        .resources
+        .font_file(NERD_FONT_FAMILY)
+        .and_then(|f| f.parent().map(Path::to_path_buf));
+    if let (true, Some(dir)) = (installs_font, font_dir) {
+        match check_bundle(sys.fs, &dir, &m.fonts) {
+            Ok(()) => {}
+            Err(ResourceError::Io(_)) => return RuntimeFiles::Unreadable,
+            Err(_) => return RuntimeFiles::BundleDamaged,
+        }
+    }
     if gone {
         RuntimeFiles::FolderGone
     } else {
         RuntimeFiles::Intact
     }
+}
+
+/// Whether an apply of `theme` installs the bundled Nerd Font, as the planner decides it: when
+/// Windows Terminal has a settings file and neither the theme's font nor the Nerd Font is
+/// installed (the theme's font falls back to the Nerd Font, which is installed). A font list
+/// that can't be read counts as yes, so the font file is checked rather than taken as unused.
+fn installs_font(sys: System<'_>, theme: &Theme) -> bool {
+    let wt = sys
+        .wt
+        .locations()
+        .iter()
+        .any(|l| sys.fs.exists(&l.settings));
+    let Ok(families) = sys.fonts.families() else {
+        return wt;
+    };
+    let installed = |family: &str| {
+        families
+            .iter()
+            .any(|f| f.trim().eq_ignore_ascii_case(family.trim()))
+    };
+    wt && !installed(NERD_FONT_FAMILY) && !installed(&theme.terminal.font)
 }
 
 /// A finding that makes every apply fail before it starts, so that while it stands no check
@@ -164,20 +206,24 @@ fn runtime_files(sys: System<'_>, ctx: &Ctx, a: &Applied) -> RuntimeFiles {
 ///   it for every cmd window;
 /// - a newest restore point that can't be read now (R1 `E_SNAPSHOT_READ`, `fail`): every change
 ///   is refused until it can be (the core's `begin`). The `warn` of R1 is a damaged point, which
-///   the next change sets aside and goes on, so it blocks nothing.
+///   the next change sets aside and goes on, so it blocks nothing;
+/// - restore points that can't be listed (R2 `fail`): `begin` lists them first and refuses
+///   with `E_SNAPSHOT_READ`. The `warn` of R2 (points that can't be read among those listed)
+///   blocks nothing.
 fn blocks_every_apply(checks: &[Check], autorun: Option<&AutoRunSummary>) -> bool {
     checks.iter().any(|c| match (c.id, c.code) {
         ("D6" | "D7", Some("E_WT_PARSE")) => true,
         ("D4", Some("E_AUTORUN_WRITE")) => autorun.is_none_or(|a| a.not_text),
-        ("R1", Some("E_SNAPSHOT_READ")) => c.status == Status::Fail,
+        ("R1", Some("E_SNAPSHOT_READ")) | ("R2", _) => c.status == Status::Fail,
         _ => false,
     })
 }
 
 /// The fix for `check`, from what it found and from the machine as `doctor_run` read it.
 /// `runtime` is [`RuntimeFiles`] of the applied theme, `None` when no theme is applied or
-/// state.json can't be read (there is nothing to apply again then); `apply_blocked` says that
-/// another finding stops every apply before it starts (see `blocks_every_apply`); `autorun` is
+/// state.json can't be read (there is nothing to apply again then); `apply_blocked` says that no
+/// apply of the applied theme can start: another finding stops every apply (see
+/// `blocks_every_apply`), or the theme is no longer in the library; `autorun` is
 /// the user's AutoRun as the planner reads it, `None` when it could not be read; `wt` the
 /// Windows Terminal locations and `build` the Windows build. A fix is offered only where it
 /// works (see the module's list).
@@ -214,6 +260,10 @@ pub fn fix_for(
         // A bundled program does not run: both say to do what D1 says first.
         ("D2", _) | ("D3", "E_RUNTIME_MISSING") => None,
         ("D3", "E_THEME_NOT_LOADED") => Some(FixKind::OpenNewCmdWindow),
+        // The reapply would install the font from bundled files that are damaged.
+        ("D8", "E_FONT_INSTALL") if runtime == Some(RuntimeFiles::BundleDamaged) => {
+            Some(FixKind::Reinstall)
+        }
         ("D3" | "D4" | "D7" | "D8" | "D9", _) => can_apply.then_some(FixKind::Reapply),
         ("D5", _) => (can_apply && autorun.is_some_and(|a| !a.foreign_clink.is_empty()))
             .then_some(FixKind::ReplaceOtherClink),
@@ -239,14 +289,20 @@ impl<M: Machine> Backend<M> {
         let sys = self.sys();
         let ctx = self.ctx();
         let checks = doctor(sys, &ctx);
-        let runtime = match State::load(sys.fs, &ctx.paths.state_file()) {
+        // An apply of the applied theme needs the theme: one deleted from the library can't be
+        // planned, and nothing keeps a copy of it to apply from.
+        let (runtime, theme_found) = match State::load(sys.fs, &ctx.paths.state_file()) {
             Ok(State {
                 applied: Some(a), ..
-            }) => Some(runtime_files(sys, &ctx, &a)),
-            _ => None,
+            }) => {
+                let theme = self.find_theme(a.theme_id).ok().map(|(t, _, _)| t);
+                let font = theme.as_ref().is_some_and(|t| installs_font(sys, t));
+                (Some(runtime_files(sys, &ctx, &a, font)), theme.is_some())
+            }
+            _ => (None, false),
         };
         let autorun = self.autorun_now().ok();
-        let apply_blocked = blocks_every_apply(&checks, autorun.as_ref());
+        let apply_blocked = !theme_found || blocks_every_apply(&checks, autorun.as_ref());
         let wt = sys.wt.locations();
         let build = sys.host.system_info().build;
         let checks = checks
@@ -328,12 +384,16 @@ mod tests {
     use super::*;
     use crate::backend::apply::ApplyStatus;
     use crate::backend::testing::{
-        apply_terracotta, backend, fake_fs, terracotta_id, terracotta_request, WT,
+        apply_terracotta, backend, fake_fs, plan_and_apply, terracotta_id, terracotta_request, WT,
     };
-    use cmdstudio_core::adapters::fake::FakeMachine;
+    use cmdstudio_core::adapters::fake::{FakeFonts, FakeMachine};
     use cmdstudio_core::adapters::{AutoRun, RegValue, WtVariant, REG_SZ};
-    use cmdstudio_core::resources::MANIFEST;
+    use cmdstudio_core::plan::NERD_FONT_FAMILY;
+    use cmdstudio_core::resources::{MANIFEST, NERD_FONT_FILE};
     use std::path::{Path, PathBuf};
+
+    /// The user fonts folder of the test machine (`testing::backend`).
+    const FONTS: &str = r"C:\Users\tester\AppData\Local\Microsoft\Windows\Fonts";
 
     /// Terracotta, applied as the wizard applies it, and committed.
     fn applied(b: &Backend<FakeMachine>) {
@@ -686,6 +746,109 @@ mod tests {
         assert!(b.plan_apply(terracotta_request()).is_err());
         fake_fs(&b).stop_failing(&journal);
         assert_eq!(d9(&b), Some(FixKind::Reapply));
+    }
+
+    /// Restore points that can't be listed (R2 `fail`) stop every change before it starts (the
+    /// core's `begin` lists them first), so they block every apply; R2's `warn`, points that
+    /// can't be read among those listed, does not. The fake's folder listing never fails, so
+    /// the rule is put to `blocks_every_apply` directly.
+    #[test]
+    fn restore_points_that_cannot_be_listed_block_every_apply() {
+        let check = |id: &'static str, status: Status, code: &'static str| Check {
+            id,
+            status,
+            code: Some(code),
+            message_th: String::new(),
+            message_en: String::new(),
+            details: String::new(),
+            details_th: None,
+        };
+        assert!(blocks_every_apply(
+            &[check("R2", Status::Fail, "E_SNAPSHOT_READ")],
+            None
+        ));
+        assert!(!blocks_every_apply(
+            &[check("R2", Status::Warn, "E_SNAPSHOT_READ")],
+            None
+        ));
+    }
+
+    /// The applied theme was deleted from the library (allowed: the machine keeps its files
+    /// until the next apply). An apply of it can't be planned, and there is no saved copy to
+    /// apply from, so no check offers one; the checks' own words still stand.
+    #[test]
+    fn a_deleted_applied_theme_offers_no_apply() {
+        let b = backend();
+        let mine = b
+            .theme_duplicate(terracotta_id(), "Mine".to_string())
+            .unwrap();
+        let req = ApplyRequest {
+            theme_id: mine.id,
+            ..terracotta_request()
+        };
+        assert_eq!(
+            plan_and_apply(&b, req.clone()).0.status,
+            ApplyStatus::Committed
+        );
+        edit_by_hand(&b);
+        assert_eq!(
+            by_id(&b.doctor_run().unwrap(), "D9").fix,
+            Some(FixKind::Reapply)
+        );
+        b.theme_delete(mine.id, false).unwrap();
+        let report = b.doctor_run().unwrap();
+        let d9 = by_id(&report, "D9");
+        assert_eq!(
+            (d9.code.as_deref(), d9.fix),
+            (Some("E_GENERATED_EDITED"), None)
+        );
+        assert!(offers_no_apply(&report), "{:?}", report.checks);
+        assert_eq!(b.doctor_fix("D9").unwrap(), nothing());
+        assert_eq!(b.plan_apply(req).unwrap_err().code, "E_THEME_INVALID");
+    }
+
+    /// When the apply would install the bundled Nerd Font (the theme's font and the Nerd Font
+    /// are not installed), the font file must be whole: the install checks it against its pin
+    /// and the apply rolls back. Then the fix is a new install, and no check offers an apply.
+    /// While the Nerd Font is installed, the apply does not read the file, and it stops nothing.
+    #[test]
+    fn a_damaged_bundled_font_says_reinstall_when_the_apply_would_install_it() {
+        let without_the_fonts = || {
+            let fonts = FakeFonts::new(FONTS, &["Arial", "Consolas"]);
+            fonts.knows_file(NERD_FONT_FILE, NERD_FONT_FAMILY);
+            fonts
+        };
+        let mut b = backend();
+        // Terracotta's Cascadia Mono is not installed: the apply installs the Nerd Font.
+        b.machine.fonts = without_the_fonts();
+        applied(&b);
+        edit_by_hand(&b);
+        let font = b.resources.font_file(NERD_FONT_FAMILY).unwrap();
+        b.sys().fs.write_atomic(&font, b"not the font").unwrap();
+        assert_eq!(
+            by_id(&b.doctor_run().unwrap(), "D9").fix,
+            Some(FixKind::Reapply)
+        );
+        // The Nerd Font is gone again: a reapply would install it from the damaged file.
+        b.machine.fonts = without_the_fonts();
+        let report = b.doctor_run().unwrap();
+        let d8 = by_id(&report, "D8");
+        assert_eq!(
+            (d8.code.as_deref(), d8.fix),
+            (Some("E_FONT_INSTALL"), Some(FixKind::Reinstall))
+        );
+        assert_eq!(by_id(&report, "D9").fix, None);
+        assert!(offers_no_apply(&report), "{:?}", report.checks);
+        assert_eq!(
+            b.doctor_fix("D8").unwrap(),
+            FixProposal {
+                kind: Some(FixKind::Reinstall),
+                request: None,
+                plan: None,
+            }
+        );
+        let (done, _) = apply_terracotta(&b);
+        assert_eq!(done.status, ApplyStatus::RolledBack);
     }
 
     /// A gone runtime folder is installed again from the files that come with CMD Studio: when

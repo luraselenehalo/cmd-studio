@@ -340,11 +340,13 @@ pub fn user_name_of(local_app_data: &Path) -> String {
 }
 
 /// Replaces the user name `user` by `%USERNAME%` wherever it is a whole folder name: right
-/// after `\` or `/`, and up to a character that is not a letter or a digit, or the end of the
-/// text. So with user `tester`, `\testers\` and `\tester2\` stay: they are other folders (a
-/// profile folder named `testers` is its own name, and is redacted as that). The name is
-/// matched letter by letter on the text as it is, without regard to case, so a letter that is
-/// longer or shorter in another case (İ, the Kelvin sign) never moves or hides a match.
+/// after `\` or `/`, and up to a character that is neither a letter or digit nor a combining
+/// mark (a mark belongs to the letter before it), or the end of the text. So with user
+/// `tester`, `\testers\` and `\tester2\` stay: they are other folders (a profile folder named
+/// `testers` is its own name, and is redacted as that); and with user `สม`, `\สม่ำเสมอ` stays.
+/// The name is matched letter by letter on the text as it is, without regard to case, so a
+/// letter that is longer or shorter in another case (İ, the Kelvin sign) never moves or hides a
+/// match.
 pub fn redact(text: &str, user: &str) -> String {
     if user.is_empty() {
         return text.to_string();
@@ -379,7 +381,7 @@ fn name_at(text: &str, user: &str) -> Option<usize> {
     }
     match chars.next() {
         None => Some(text.len()),
-        Some((end, next)) => (!next.is_alphanumeric()).then_some(end),
+        Some((end, next)) => (!continues_word(next)).then_some(end),
     }
 }
 
@@ -387,6 +389,71 @@ fn name_at(text: &str, user: &str) -> Option<usize> {
 fn same_letter(a: char, b: char) -> bool {
     a == b || a.to_lowercase().eq(b.to_lowercase()) || a.to_uppercase().eq(b.to_uppercase())
 }
+
+/// A character that carries a word on: a letter or a digit, or a combining mark, which belongs
+/// to the letter before it.
+fn continues_word(c: char) -> bool {
+    c.is_alphanumeric()
+        || COMBINING_MARKS
+            .iter()
+            .any(|(from, to)| (*from..=*to).contains(&c))
+}
+
+/// Combining marks (Unicode category M) that `char::is_alphanumeric` does not count as letters.
+/// The standard library has no table of categories, so these are the marks of the scripts a
+/// Windows user name is likely written in; most other marks, such as the Indic vowel signs, are
+/// letters to `is_alphanumeric` already.
+const COMBINING_MARKS: &[(char, char)] = &[
+    // The general combining blocks: diacritics, their extensions, marks for symbols, half marks.
+    ('\u{0300}', '\u{036F}'),
+    ('\u{1AB0}', '\u{1AFF}'),
+    ('\u{1DC0}', '\u{1DFF}'),
+    ('\u{20D0}', '\u{20FF}'),
+    ('\u{FE20}', '\u{FE2F}'),
+    // Cyrillic.
+    ('\u{0483}', '\u{0489}'),
+    // Hebrew points.
+    ('\u{0591}', '\u{05BD}'),
+    ('\u{05BF}', '\u{05BF}'),
+    ('\u{05C1}', '\u{05C2}'),
+    ('\u{05C4}', '\u{05C5}'),
+    ('\u{05C7}', '\u{05C7}'),
+    // Arabic marks.
+    ('\u{0610}', '\u{061A}'),
+    ('\u{064B}', '\u{065F}'),
+    ('\u{0670}', '\u{0670}'),
+    ('\u{06D6}', '\u{06DC}'),
+    ('\u{06DF}', '\u{06E4}'),
+    ('\u{06E7}', '\u{06E8}'),
+    ('\u{06EA}', '\u{06ED}'),
+    // Indic nukta, virama and stress signs: Devanagari to Sinhala.
+    ('\u{093C}', '\u{093C}'),
+    ('\u{094D}', '\u{094D}'),
+    ('\u{0951}', '\u{0954}'),
+    ('\u{09BC}', '\u{09BC}'),
+    ('\u{09CD}', '\u{09CD}'),
+    ('\u{0A3C}', '\u{0A3C}'),
+    ('\u{0A4D}', '\u{0A4D}'),
+    ('\u{0ABC}', '\u{0ABC}'),
+    ('\u{0ACD}', '\u{0ACD}'),
+    ('\u{0B3C}', '\u{0B3C}'),
+    ('\u{0B4D}', '\u{0B4D}'),
+    ('\u{0BCD}', '\u{0BCD}'),
+    ('\u{0C4D}', '\u{0C4D}'),
+    ('\u{0CBC}', '\u{0CBC}'),
+    ('\u{0CCD}', '\u{0CCD}'),
+    ('\u{0D3B}', '\u{0D3C}'),
+    ('\u{0D4D}', '\u{0D4D}'),
+    ('\u{0DCA}', '\u{0DCA}'),
+    // Thai vowel and tone marks.
+    ('\u{0E31}', '\u{0E31}'),
+    ('\u{0E34}', '\u{0E3A}'),
+    ('\u{0E47}', '\u{0E4E}'),
+    // Lao vowel and tone marks.
+    ('\u{0EB1}', '\u{0EB1}'),
+    ('\u{0EB4}', '\u{0EBC}'),
+    ('\u{0EC8}', '\u{0ECE}'),
+];
 
 /// Replaces every account SID by `<SID>`: `sid`, this account's as the host reads it, wherever
 /// it is, and any other in the form Windows gives a user account's (`S-1-5-21-` or `S-1-12-1-`,
@@ -520,6 +587,27 @@ mod tests {
         assert_eq!(
             redact(r"C:\Users\ผู้ทดสอบระบบ\x", name),
             r"C:\Users\ผู้ทดสอบระบบ\x"
+        );
+    }
+
+    /// A combining mark after the name belongs to the letter before it, so the name goes on:
+    /// with user `สม`, `\สม่ำเสมอ` is another word, and with user `jose`, `\jose` + U+0301 is
+    /// `josé`. A mark never ends a name, and none is left behind.
+    #[test]
+    fn combining_marks_belong_to_the_name() {
+        for other in [r"C:\Users\สม่ำเสมอ\x", r"C:\Users\สมิง\x", r"C:\Users\สม์\x"]
+        {
+            assert_eq!(redact(other, "สม"), other);
+        }
+        assert_eq!(
+            redact(r"C:\Users\สม\x C:/Users/สม", "สม"),
+            r"C:\Users\%USERNAME%\x C:/Users/%USERNAME%"
+        );
+        let jose_accent = "C:\\Users\\jose\u{0301}\\x";
+        assert_eq!(redact(jose_accent, "jose"), jose_accent);
+        assert_eq!(
+            redact(jose_accent, "jose\u{0301}"),
+            r"C:\Users\%USERNAME%\x"
         );
     }
 
