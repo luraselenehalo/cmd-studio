@@ -365,9 +365,11 @@ pub enum Progress {
     Verifying,
     /// Putting one op's target back after a failure. `step` counts the puts back so far, from 1,
     /// in the order they are done: newest op first, so step 1 is the last op that may have
-    /// changed the machine, not the plan's first. `total` is the number of ops of the transaction,
-    /// as in the other steps; fewer than `total` steps are told when the failure came before every
-    /// op had ended, because only the ops that may have changed the machine are put back.
+    /// changed the machine, not the plan's first. It runs up to the number of ops that may have
+    /// changed the machine: the ops up to and including the one that failed, or all of them after
+    /// a failed check, so at most `total` (the number of ops of the transaction, as in the other
+    /// steps). When the journal could not be saved before the first op ran, or a capture failed,
+    /// nothing is put back and none is told.
     RollingBack { step: usize, total: usize },
 }
 
@@ -454,7 +456,8 @@ pub fn run_apply(sys: System<'_>, ctx: &Ctx, prepared: Prepared) -> Outcome {
 
 /// [`run_apply`], telling `progress` about each step as it starts (see [`Progress`]): the app's
 /// progress bar reads it (spec §4.2 page 5). The listener runs on the thread of the apply,
-/// before each step, and never after this returns.
+/// before each step, and never after this returns. It must not panic: a panic would unwind out of
+/// the apply between two steps, and only the next start's recovery would roll the machine back.
 pub fn run_apply_with(
     sys: System<'_>,
     ctx: &Ctx,
@@ -2968,5 +2971,57 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn run_apply_with_tells_only_the_ops_up_to_the_failed_one_and_never_the_check() {
+        // The AutoRun value turns into something not text after the plan was made: every
+        // capture succeeds, the SetAutoRun op refuses, and only the ops up to it are put back.
+        for value in crate::adapters::fake::not_text_values() {
+            let (m, ctx) = machine();
+            m.autorun
+                .write_user(&RegValue::from_text(REG_SZ, "echo hi"))
+                .unwrap();
+            let theme = crate::presets::terracotta();
+            let prepared = prepare_apply(m.system(), &ctx, &theme, &request(Target::All)).unwrap();
+            let ops = prepared.ops.clone();
+            let total = ops.len();
+            let reached = ops
+                .iter()
+                .position(|op| matches!(op, Op::SetAutoRun { .. }))
+                .unwrap()
+                + 1;
+            assert!(reached < total, "ops after the failing one: {ops:?}");
+            m.autorun.write_user(&value).unwrap();
+            let mut seen = Vec::new();
+            let outcome = run_apply_with(m.system(), &ctx, prepared, &mut |p| seen.push(p));
+            assert!(
+                matches!(
+                    &outcome,
+                    Outcome::RolledBack {
+                        code: "E_AUTORUN_WRITE",
+                        ..
+                    }
+                ),
+                "{value:?}: {outcome:?}"
+            );
+            let mut want: Vec<Progress> = (1..=total)
+                .map(|step| Progress::BackingUp { step, total })
+                .collect();
+            want.extend(
+                ops.iter()
+                    .take(reached)
+                    .enumerate()
+                    .map(|(i, op)| Progress::Applying {
+                        step: i + 1,
+                        total,
+                        op: op.clone(),
+                    }),
+            );
+            want.extend((1..=reached).map(|step| Progress::RollingBack { step, total }));
+            assert_eq!(seen, want, "{value:?}");
+            assert!(!seen.contains(&Progress::Verifying), "{value:?}");
+            assert_eq!(m.autorun.read_user().unwrap(), Some(value));
+        }
     }
 }
