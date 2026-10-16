@@ -689,6 +689,30 @@ fn all_cases(stage: &Stage) -> Vec<Case> {
             );
         }
     }
+    // 7b. user names Oh My Posh draws as nothing, in every layout: empty (USER and USERNAME are
+    //     both empty, as the sample's user is), and only spaces, so the session segment holds
+    //     only spaces and is hidden; and a no-break space, which is not a space to Oh My Posh.
+    //     The host name cannot be emptied here: Oh My Posh reads it from Windows itself.
+    for user in ["", " ", "\u{a0}"] {
+        for layout in LAYOUTS {
+            for list in [
+                &[Segment::User][..],
+                &[Segment::Path, Segment::User, Segment::Time][..],
+                &[Segment::User, Segment::Host][..],
+            ] {
+                let ctx = PreviewContext {
+                    user: user.to_string(),
+                    ..with(&stage.plain, None, 0, 0)
+                };
+                cases.add(
+                    format!("{layout:?} {list:?} user {user:?}"),
+                    terracotta(layout, list),
+                    ctx,
+                    false,
+                );
+            }
+        }
+    }
     // 8. every built-in preset in every layout, with every segment showing
     for (key, preset) in presets::builtin().unwrap() {
         for layout in LAYOUTS {

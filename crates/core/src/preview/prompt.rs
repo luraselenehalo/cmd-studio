@@ -2,7 +2,9 @@
 //! (spec §3.5), and the rows of the window around it. Measured on the pinned binary, and
 //! checked again by `tests/parity.rs`:
 //! - A segment the sample hides (git outside a repository, status 0, a duration under 2 s)
-//!   leaves nothing behind, not even its spaces.
+//!   leaves nothing behind, not even its spaces. So does a segment whose text is only spaces
+//!   (U+0020), such as the user's when the user name is empty; any other character shows, a
+//!   no-break space too.
 //! - A powerline segment starts with the arrow U+E0B0 in the color of the segment before it,
 //!   on its own color. When no powerline segment comes before it (it starts the line), Oh My
 //!   Posh draws that arrow with a transparent foreground, which it writes as reverse video:
@@ -173,7 +175,8 @@ fn filler_cells(width: usize, current: usize, length: usize) -> usize {
     }
 }
 
-/// The data of `part` for the sample, or `None` when Oh My Posh hides the segment.
+/// The data of `part` for the sample, or `None` when the sample turns the segment off (Oh My
+/// Posh also hides one whose text is only spaces; [`Block::part`] sees to that).
 fn data(layout: Layout, part: Part, ctx: &PreviewContext) -> Option<String> {
     match part {
         Part::Path => Some(prompt_path(&ctx.home, &ctx.cwd)),
@@ -227,12 +230,21 @@ impl<'a> Block<'a> {
         self.line.push(text, Style::fg(swatch.color(self.colors)));
     }
 
-    /// The segment of `part`, unless the sample hides it.
+    /// The segment of `part`, unless the sample hides it or its text is only spaces.
     fn part(&mut self, layout: Layout, part: Part, ctx: &PreviewContext) {
         let Some(data) = data(layout, part, ctx) else {
             return;
         };
         let drawn = omp::drawn(layout, part);
+        // Oh My Posh hides a segment whose text holds nothing but spaces (U+0020), arrow and
+        // all; an empty user name gives one
+        let lead = drawn.lead.map_or("", |(_, lead)| lead);
+        if [lead, drawn.before, data.as_str(), drawn.after]
+            .iter()
+            .all(|piece| piece.chars().all(|c| c == ' '))
+        {
+            return;
+        }
         let changed = part == Part::Git && ctx.git.as_ref().is_some_and(|git| git.dirty);
         let look = if changed {
             drawn.look.changed()
@@ -462,6 +474,62 @@ mod tests {
             prompt(&theme, &ctx).primary[0].text(),
             "\u{2717} -1 2s \u{276f} "
         );
+    }
+
+    #[test]
+    fn a_segment_of_nothing_but_spaces_is_hidden_with_its_spaces_and_arrow() {
+        // Oh My Posh 31.5.0 hides a segment whose text is only spaces: an empty user name (USER
+        // and USERNAME empty or unset; it takes no other name instead) or a name of spaces, as
+        // measured, and by the same rule an empty host (which the parity test cannot set: Oh
+        // My Posh reads it from Windows). The prompt is then the one with no session segment.
+        for layout in [Layout::Box, Layout::Line, Layout::Powerline] {
+            let without = prompt(
+                &themed(layout, &[Segment::Path, Segment::Time]),
+                &sample(80),
+            );
+            for ctx in [
+                PreviewContext {
+                    user: String::new(),
+                    ..sample(80)
+                },
+                PreviewContext {
+                    user: "   ".to_string(),
+                    ..sample(80)
+                },
+            ] {
+                let list = [Segment::Path, Segment::User, Segment::Time];
+                assert_eq!(
+                    prompt(&themed(layout, &list), &ctx),
+                    without,
+                    "{layout:?} user {:?}",
+                    ctx.user
+                );
+            }
+            let ctx = PreviewContext {
+                host: String::new(),
+                ..sample(80)
+            };
+            let list = [Segment::Path, Segment::Host, Segment::Time];
+            assert_eq!(
+                prompt(&themed(layout, &list), &ctx),
+                without,
+                "{layout:?} host"
+            );
+            // with both names the `@` is left, and any character but a space shows, a no-break
+            // space too (measured)
+            let no_user = PreviewContext {
+                user: String::new(),
+                ..sample(80)
+            };
+            let both = prompt(&themed(layout, &[Segment::User, Segment::Host]), &no_user);
+            assert!(both.primary[0].text().contains("@PC "), "{layout:?}");
+            let nbsp = PreviewContext {
+                user: "\u{a0}".to_string(),
+                ..sample(80)
+            };
+            let shown = prompt(&themed(layout, &[Segment::User]), &nbsp);
+            assert!(shown.primary[0].text().contains("\u{a0} "), "{layout:?}");
+        }
     }
 
     #[test]
