@@ -149,7 +149,7 @@ impl<M: Machine> Backend<M> {
                     out.push('\n');
                 }
                 for n in &list.problems {
-                    out.push_str(&format!("problem [{}]: {}\n", n.code, n.message_en));
+                    out.push_str(&format!("problem [{}]: {}\n", n.code, n.details));
                 }
                 if list.points.is_empty() && list.problems.is_empty() {
                     out.push_str("none\n");
@@ -761,6 +761,21 @@ mod tests {
         assert!(text.contains("== restore points ==\n1791694709"), "{text}");
         assert!(text.contains(r"\%USERNAME%\"), "{text}");
         assert!(!text.contains(r"\tester\"), "{text}");
+    }
+
+    /// A restore point that cannot be read is named with its reason: the problem's details, in
+    /// the core's English, not the words of its code's row alone.
+    #[test]
+    fn an_unreadable_restore_point_is_named_with_its_reason() {
+        let b = backend();
+        let id = apply_terracotta(&b).0.snapshot_id.unwrap();
+        let manifest = b.paths().snapshots().join(&id).join("manifest.json");
+        b.sys().fs.write_atomic(&manifest, b"not json").unwrap();
+        let text = b.diagnostics_copy().unwrap();
+        assert!(
+            text.contains(&format!("problem [E_SNAPSHOT_READ]: restore point {id}: ")),
+            "{text}"
+        );
     }
 
     /// Settings that could not be loaded are said, never shown as the user's own: the defaults

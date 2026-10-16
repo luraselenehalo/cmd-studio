@@ -626,7 +626,7 @@ impl<M: Machine> Backend<M> {
                         })
                         .collect(),
                     Err(e) => {
-                        notes.push(note(e.code(), e.to_string()));
+                        notes.push(AppError::from(e).into());
                         Vec::new()
                     }
                 };
@@ -767,15 +767,12 @@ impl<M: Machine> Backend<M> {
             RestoreResult::NotRestorable => RestoreStatus::NotRestorable,
             RestoreResult::Stopped { refused } => {
                 if let Some(e) = refused {
-                    let e = AppError::from(e);
-                    notes.push(Note {
-                        code: e.code,
-                        message_th: e.message_th,
-                        message_en: format!(
-                            "the next undo was refused, so the restore stopped there: {}",
-                            e.details
-                        ),
-                    });
+                    let mut e = AppError::from(e);
+                    e.details = format!(
+                        "the next undo was refused, so the restore stopped there: {}",
+                        e.details
+                    );
+                    notes.push(e.into());
                 }
                 RestoreStatus::Stopped
             }
@@ -1121,11 +1118,12 @@ mod tests {
         assert_eq!(last.notes.len(), 1, "{:?}", last.notes);
         let why = &last.notes[0];
         assert_eq!(why.code, "E_SNAPSHOT_WRITE");
-        assert_eq!(why.message_th, meaning("E_SNAPSHOT_WRITE").unwrap().0);
+        let (th, en) = meaning("E_SNAPSHOT_WRITE").unwrap();
+        assert_eq!((why.message_th.as_str(), why.message_en.as_str()), (th, en));
         assert!(
-            why.message_en.contains(&second) && why.message_en.contains("marked undone"),
+            why.details.contains(&second) && why.details.contains("marked undone"),
             "{}",
-            why.message_en
+            why.details
         );
         assert!(restored.notes.is_empty(), "{:?}", restored.notes);
         // Once the restore point can be written, a restore goes the whole way.
@@ -1133,6 +1131,60 @@ mod tests {
         let again = b.snapshot_restore(&first).unwrap();
         assert_eq!(again.status, RestoreStatus::Done);
         assert_eq!(again.undone, [second, first]);
+    }
+
+    /// A restore point that cannot be read is told in the words of its code's row of spec §5.9,
+    /// in Thai and in English alike, with which point it is and why in the details: by the list
+    /// of restore points, and by the next start, which sets it aside.
+    #[test]
+    fn an_unreadable_restore_point_is_told_in_both_languages_with_its_details() {
+        let b = backend();
+        let id = apply_terracotta(&b).0.snapshot_id.unwrap();
+        let manifest = b.paths().snapshots().join(&id).join("manifest.json");
+        b.sys().fs.write_atomic(&manifest, b"not json").unwrap();
+        let (th, en) = meaning("E_SNAPSHOT_READ").unwrap();
+        let list = b.snapshots_list().unwrap();
+        let [problem] = &list.problems[..] else {
+            panic!("one problem expected: {:?}", list.problems);
+        };
+        assert_eq!(
+            (
+                problem.code.as_str(),
+                problem.message_th.as_str(),
+                problem.message_en.as_str()
+            ),
+            ("E_SNAPSHOT_READ", th, en)
+        );
+        assert!(
+            problem
+                .details
+                .starts_with(&format!("restore point {id}: ")),
+            "{}",
+            problem.details
+        );
+        let plan = ready(b.plan_apply(terracotta_request()).unwrap());
+        let [note] = &plan.notes[..] else {
+            panic!("one note expected: {:?}", plan.notes);
+        };
+        assert_eq!(
+            (
+                note.code.as_str(),
+                note.message_th.as_str(),
+                note.message_en.as_str()
+            ),
+            ("E_SNAPSHOT_READ", th, en)
+        );
+        assert!(
+            note.details
+                .starts_with(&format!("restore point {id} could not be used (")),
+            "{}",
+            note.details
+        );
+        assert!(
+            note.details.contains("It was set aside"),
+            "{}",
+            note.details
+        );
     }
 
     /// Every undo adds a restore point, and only the first-ever and the 20 newest are kept: a

@@ -3,6 +3,13 @@
 /**
  * A line the UI shows about what a command found when it started (spec §5.5): a crash rolled
  * back, a restore point that cannot be read, a record of a rollback that did not finish, a
- * problem the start met. Thai from the code's row of spec §5.9, English from the core.
+ * problem the start met. Made as an [`AppError`] is: the Thai and English of the code's row of
+ * spec §5.9, and the specific reason (which restore point, what failed) in the core's English
+ * as `details`, so a Thai UI shows as much as an English one. Its own type, not an error: what
+ * it tells did not stop the command.
  */
-export type Note = { code: string, messageTh: string, messageEn: string, };
+export type Note = { code: string, messageTh: string, messageEn: string, 
+/**
+ * The specific reason, in the core's English words.
+ */
+details: string, };

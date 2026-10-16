@@ -245,7 +245,10 @@ impl<M: Machine> Backend<M> {
 
 /// A line the UI shows about what a command found when it started (spec §5.5): a crash rolled
 /// back, a restore point that cannot be read, a record of a rollback that did not finish, a
-/// problem the start met. Thai from the code's row of spec §5.9, English from the core.
+/// problem the start met. Made as an [`AppError`] is: the Thai and English of the code's row of
+/// spec §5.9, and the specific reason (which restore point, what failed) in the core's English
+/// as `details`, so a Thai UI shows as much as an English one. Its own type, not an error: what
+/// it tells did not stop the command.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
@@ -253,23 +256,30 @@ pub struct Note {
     pub code: String,
     pub message_th: String,
     pub message_en: String,
+    /// The specific reason, in the core's English words.
+    pub details: String,
 }
 
-/// A note for `code` with the core's English text.
-pub fn note(code: &str, en: impl Into<String>) -> Note {
-    let th = crate::error::meaning(code)
-        .map(|(th, _)| th.to_string())
-        .unwrap_or_default();
-    let en = en.into();
-    Note {
-        code: code.to_string(),
-        message_th: if th.is_empty() { en.clone() } else { th },
-        message_en: en,
+impl From<AppError> for Note {
+    fn from(e: AppError) -> Self {
+        Note {
+            code: e.code,
+            message_th: e.message_th,
+            message_en: e.message_en,
+            details: e.details,
+        }
     }
 }
 
-/// What a start found and did, as notes: the CLI's `Say::start` and `Say::unreadable`, in the
-/// same words.
+/// A note for `code` with the core's English words as its details, as [`AppError::coded`] makes
+/// an error: a code that is not a row of spec §5.9 becomes `E_INTERNAL`, with the code it was
+/// given in front of the details.
+pub fn note(code: &str, details: impl Into<String>) -> Note {
+    AppError::coded(code, details).into()
+}
+
+/// What a start found and did, as notes whose details say it in the words of the CLI's
+/// `Say::start` and `Say::unreadable`.
 pub fn start_notes(start: &StartReport) -> Vec<Note> {
     let mut notes = Vec::new();
     match &start.recovered {
@@ -630,6 +640,83 @@ mod tests {
         let loaded = b.settings_get().unwrap();
         assert_eq!(loaded.settings, saved);
         assert_eq!(loaded.reset_from, None);
+    }
+
+    /// A note says what happened in the words of its code's row of spec §5.9, in Thai and in
+    /// English alike, and the specific reason (which restore point, what went wrong) in its
+    /// details, as an error does: a Thai UI shows as much as an English one.
+    #[test]
+    fn a_note_has_both_row_texts_and_the_specific_details() {
+        use cmdstudio_core::actions::UnreadablePoint;
+        use cmdstudio_core::snapshot::{Unreadable, UnreadableKind};
+        use cmdstudio_core::txn::Failure;
+
+        let id = "1791694709000-0123abcd";
+        let start = StartReport {
+            recovered: Some(Outcome::RolledBack {
+                code: "E_TXN_INTERRUPTED",
+                reason: "an earlier change was cut off at step 3".to_string(),
+            }),
+            unreadable: vec![UnreadablePoint {
+                point: Unreadable {
+                    id: id.to_string(),
+                    kind: UnreadableKind::Damaged,
+                    failure: Failure {
+                        code: "E_SNAPSHOT_READ",
+                        message: "manifest.json is not JSON".to_string(),
+                    },
+                },
+                handled: Handled::SetAside,
+            }],
+            ..StartReport::default()
+        };
+        let notes = start_notes(&start);
+        let [crash, point] = &notes[..] else {
+            panic!("two notes expected: {notes:?}");
+        };
+        let row = |code: &str| crate::error::meaning(code).unwrap();
+        // The crash recovery: the row's texts, and the reason with what was done about it.
+        let (th, en) = row("E_TXN_INTERRUPTED");
+        assert_eq!(
+            (
+                crash.code.as_str(),
+                crash.message_th.as_str(),
+                crash.message_en.as_str()
+            ),
+            ("E_TXN_INTERRUPTED", th, en)
+        );
+        assert_eq!(
+            crash.details,
+            "an earlier change was cut off at step 3; the machine is as it was before it."
+        );
+        // The restore point that could not be used: which one, why, and what was done.
+        let (th, en) = row("E_SNAPSHOT_READ");
+        assert_eq!(
+            (
+                point.code.as_str(),
+                point.message_th.as_str(),
+                point.message_en.as_str()
+            ),
+            ("E_SNAPSHOT_READ", th, en)
+        );
+        assert!(
+            point.details.starts_with(&format!(
+                "restore point {id} could not be used (manifest.json is not JSON). It was set aside"
+            )),
+            "{}",
+            point.details
+        );
+        // The codes are the rows of spec §5.9 and no other, as for an error.
+        assert_eq!(
+            note("E_NOT_A_ROW", "what happened"),
+            Note::from(AppError::coded("E_NOT_A_ROW", "what happened"))
+        );
+        assert_eq!(note("E_NOT_A_ROW", "x").code, crate::error::INTERNAL);
+        // Over the IPC, a note has the fields of an error.
+        let v = serde_json::to_value(crash).unwrap();
+        let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["code", "details", "messageEn", "messageTh"]);
     }
 
     /// The backend is shared by the IPC commands' threads (Tauri state): the real machine must
