@@ -26,6 +26,10 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("../../../presets/one-dark.cmdtheme"),
     ),
     (
+        "retro-green",
+        include_str!("../../../presets/retro-green.cmdtheme"),
+    ),
+    (
         "catppuccin-latte",
         include_str!("../../../presets/catppuccin-latte.cmdtheme"),
     ),
@@ -33,11 +37,16 @@ const SOURCES: &[(&str, &str)] = &[
         "solarized-light",
         include_str!("../../../presets/solarized-light.cmdtheme"),
     ),
+    (
+        "daylight",
+        include_str!("../../../presets/daylight.cmdtheme"),
+    ),
+    ("paper", include_str!("../../../presets/paper.cmdtheme")),
 ];
 
 /// Keys of presets whose colors are our own; they must pass the
 /// readability check (spec §3.2).
-pub const OWN: &[&str] = &["terracotta"];
+pub const OWN: &[&str] = &["terracotta", "retro-green", "daylight", "paper"];
 
 pub fn builtin() -> Result<Vec<(&'static str, Theme)>, ThemeError> {
     SOURCES
@@ -62,7 +71,7 @@ pub(crate) fn terracotta() -> Theme {
 mod tests {
     use super::*;
     use crate::model::Layout;
-    use crate::palette::{contrast_issues, Slot};
+    use crate::palette::{contrast_issues, Slot, Tone};
     use std::collections::{BTreeSet, HashSet};
 
     /// The 23 colors of a theme in one line: background, foreground, cursor, selection,
@@ -104,6 +113,32 @@ mod tests {
         assert_eq!(ids.len(), all.len());
         assert_eq!(names.len(), all.len());
         assert_eq!(keys.len(), all.len());
+    }
+
+    #[test]
+    fn the_presets_are_the_twelve_of_the_spec_in_its_order() {
+        // spec §3.2, typed again here
+        let want = [
+            ("Terracotta", Tone::Dark),
+            ("Tokyo Night", Tone::Dark),
+            ("Catppuccin Mocha", Tone::Dark),
+            ("Dracula", Tone::Dark),
+            ("Nord", Tone::Dark),
+            ("Gruvbox", Tone::Dark),
+            ("One Dark", Tone::Dark),
+            ("Retro green", Tone::Dark),
+            ("Catppuccin Latte", Tone::Light),
+            ("Solarized Light", Tone::Light),
+            ("Daylight", Tone::Light),
+            ("Paper", Tone::Light),
+        ];
+        let got: Vec<(String, Tone)> = builtin()
+            .unwrap()
+            .into_iter()
+            .map(|(_, t)| (t.name, t.tone))
+            .collect();
+        let want: Vec<(String, Tone)> = want.iter().map(|(n, t)| (n.to_string(), *t)).collect();
+        assert_eq!(got, want);
     }
 
     #[test]

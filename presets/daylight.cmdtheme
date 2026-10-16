@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "id": "3611b4e8-1793-42ed-8162-7195aa0e21a9",
+  "name": "Daylight",
+  "author": "CMD Studio",
+  "tone": "light",
+  "simple": null,
+  "colors": {
+    "background": "#ffffff",
+    "foreground": "#1f2226",
+    "cursor": "#0969da",
+    "selection": "#cfe3fa",
+    "accent": "#0969da",
+    "muted": "#5c646f",
+    "frame": "#b8bec8",
+    "ansi": [
+      "#1f2226", "#a34945", "#357a3a", "#816500", "#346aac", "#8f4d89", "#00787d", "#caced4",
+      "#52565b", "#8c3432", "#1e6626", "#695200", "#1f5596", "#793974", "#006266", "#f4f9ff"
+    ]
+  },
+  "terminal": {
+    "font": "Cascadia Mono",
+    "fontSize": 12,
+    "cursorShape": "filledBox",
+    "opacity": 100,
+    "acrylic": false,
+    "padding": [14, 10]
+  },
+  "prompt": {
+    "layout": "box",
+    "segments": ["path", "git", "time"],
+    "transient": true
+  },
+  "banner": {
+    "enabled": true,
+    "title": "Welcome back, {user}!",
+    "lines": ["cwd: {cwd}", "{date} · {time} · {host}"],
+    "tips": true,
+    "clearLogo": true
+  }
+}
