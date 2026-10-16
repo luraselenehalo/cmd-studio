@@ -17,14 +17,15 @@ use crate::state::{Applied, State, StateError};
 use crate::txn::{Failure, JournalStore};
 use crate::verify::lua_error_line;
 use crate::wt_edit::{check_parses, read_value, WtError, WtKey};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::ffi::OsStr;
 use std::fmt::Display;
 use std::path::Path;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum Status {
     Ok,
     Warn,
@@ -42,6 +43,7 @@ pub enum Status {
 /// for an error (`result_large_err`, 128 bytes).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct Check {
     pub id: &'static str,
     pub status: Status,
@@ -50,6 +52,7 @@ pub struct Check {
     pub message_en: String,
     pub details: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub details_th: Option<Box<String>>,
 }
 

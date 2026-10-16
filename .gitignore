@@ -2,3 +2,16 @@
 spikes/**/target/
 spikes/**/tmp/
 /resources/
+# ts-rs writes here when TS_RS_EXPORT_DIR is unset; scripts/export-bindings.ps1 sets it to
+# app/ui/src/bindings, which is committed.
+/crates/core/bindings/
+/app/src-tauri/bindings/
+# The UI's packages, build output and caches.
+/app/node_modules/
+/app/ui/node_modules/
+/app/ui/dist/
+# Tauri's generated schemas and the Tauri CLI's own build output.
+/app/src-tauri/gen/
+/app/src-tauri/target/
+# A local check crate for a machine where the Tauri build is blocked (appendix B); never committed.
+/p2b-check/

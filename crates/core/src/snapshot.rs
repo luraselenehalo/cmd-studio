@@ -37,6 +37,7 @@ const NO_JOURNAL_NOTE: &[u8] =
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum SnapshotKind {
     Apply,
     Undo,
@@ -45,6 +46,7 @@ pub enum SnapshotKind {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct ThemeRef {
     pub id: uuid::Uuid,
     pub name: String,
@@ -52,9 +54,11 @@ pub struct ThemeRef {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct Manifest {
     pub id: String,
     pub kind: SnapshotKind,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub created_ms: u64,
     pub theme: Option<ThemeRef>,
     pub target: Option<Target>,
@@ -581,6 +585,7 @@ impl<'a> SnapshotStore<'a> {
 /// One op a rollback could not put back, as `incomplete.json` keeps it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct Unrestored {
     pub op_index: usize,
     /// What the op touched, in plain English (`exec::op_label`).
@@ -608,6 +613,7 @@ pub struct Unrestored {
 /// targets a rollback may have left as it was.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct Incomplete {
     /// The restore point of the transaction.
     pub id: String,

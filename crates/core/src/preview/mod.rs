@@ -44,9 +44,12 @@ impl Style {
 /// A run of text in one style.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct Span {
     pub text: String,
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
     pub fg: Rgb,
+    #[cfg_attr(feature = "ts", ts(type = "string | null"))]
     pub bg: Option<Rgb>,
     pub bold: bool,
 }
@@ -66,6 +69,7 @@ impl Span {
 /// same are equal.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, as = "Vec<Span>"))]
 pub struct Line {
     pub spans: Vec<Span>,
 }
@@ -108,6 +112,7 @@ impl Line {
 /// The app chooses them; the welcome box and the prompt read the same ones.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct PreviewContext {
     /// The Windows user name: `{user}` in the welcome box, and the prompt's `user`.
     pub user: String,
@@ -129,6 +134,7 @@ pub struct PreviewContext {
     /// The exit code of the command before; the prompt's `status` shows when it is not 0.
     pub exit_code: i32,
     /// How long the command before ran; the prompt's `duration` shows from 2 seconds on.
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub duration_ms: u64,
     /// The width of the window in cells. The box's top line is filled to it, and the right
     /// prompt sits at its right edge. 0 is taken as 1.
@@ -144,6 +150,7 @@ pub struct PreviewContext {
 /// A local date and time, as `os.date("*t")` gives it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct Clock {
     pub year: u16,
     /// 1 to 12.
@@ -159,6 +166,7 @@ pub struct Clock {
 /// A git repository as the prompt shows it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct GitState {
     pub branch: String,
     /// Whether anything changed: an edited, staged or untracked file (`*`, else `✓`).

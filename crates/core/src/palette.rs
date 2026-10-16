@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum Tone {
     Dark,
     Light,
@@ -16,14 +17,23 @@ pub enum Tone {
 /// green, yellow, blue, magenta, cyan, white, then the 8 bright variants.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct Colors {
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
     pub background: Rgb,
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
     pub foreground: Rgb,
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
     pub cursor: Rgb,
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
     pub selection: Rgb,
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
     pub accent: Rgb,
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
     pub muted: Rgb,
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
     pub frame: Rgb,
+    #[cfg_attr(feature = "ts", ts(type = "string[]"))]
     pub ansi: [Rgb; 16],
 }
 
