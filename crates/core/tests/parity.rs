@@ -579,6 +579,22 @@ fn all_cases(stage: &Stage) -> Vec<Case> {
         ),
         // a network folder
         same(r"\\server\share\dir".to_string()),
+        // a drive alone as the home, with or without separators after it (a bare `C:` too),
+        // holds every folder on that drive, in any case; a folder on another drive shows in
+        // full
+        (r"C:\".to_string(), r"C:\x\y".to_string()),
+        (r"C:\".to_string(), r"C:\".to_string()),
+        (r"C:\".to_string(), "C:".to_string()),
+        (r"C:\".to_string(), "c:/x".to_string()),
+        (r"C:\".to_string(), r"D:\x".to_string()),
+        (r"C:\\".to_string(), r"C:\x\y".to_string()),
+        ("d:/".to_string(), r"D:\x\y".to_string()),
+        ("d:/".to_string(), r"d:\x\".to_string()),
+        ("C:".to_string(), r"C:\x\y".to_string()),
+        ("C:".to_string(), r"C:\".to_string()),
+        ("C:".to_string(), "C:".to_string()),
+        ("C:".to_string(), r"C:\Users".to_string()),
+        ("C:".to_string(), r"D:\x\y".to_string()),
     ];
     let path_layouts = [
         (Layout::Box, &[Segment::Path, Segment::Time][..]),

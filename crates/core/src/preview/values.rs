@@ -6,15 +6,28 @@ use super::Clock;
 /// (a drive's root keeps it: `C:\`, and `D:` becomes `D:\`), and `home` or a folder under it
 /// starts with `~`. `.` and `..` stay as they are.
 ///
-/// `home` is matched as Oh My Posh 31.5.0 matches it, quirk included (measured on the pinned
-/// binary by `tests/parity.rs`): both paths are lowered as Go's `strings.ToLower` lowers them,
-/// so `home` matches in any case and the rest keeps its own, and the folder is then cut at the
-/// lowered home's length in bytes ([`strip_lowered_prefix`]). Where lowering changes a letter's
-/// length (`İ` 2 bytes to `i` 1, the Kelvin sign U+212A 3 bytes to `k` 1), the cut misses the
-/// end of the home, and the folder is then mostly shown in full, even the home folder itself.
+/// A `home` that is a drive and nothing more, with or without separators after it (`C:`,
+/// `C:\`, `d:/`, `C:\\`), holds every folder on that drive, as Oh My Posh 31.5.0 has it
+/// (measured on the pinned binary by `tests/parity.rs`): a folder on that drive, in any case,
+/// is `~` and what follows the drive (`C:\x\y` is `~\x\y`, the root itself `~`), and a folder
+/// on another drive is shown in full.
+///
+/// Any other `home` is matched as Oh My Posh 31.5.0 matches it, quirk included (measured the
+/// same way): both paths are lowered as Go's `strings.ToLower` lowers them, so `home` matches
+/// in any case and the rest keeps its own, and the folder is then cut at the lowered home's
+/// length in bytes ([`strip_lowered_prefix`]). Where lowering changes a letter's length (`İ`
+/// 2 bytes to `i` 1, the Kelvin sign U+212A 3 bytes to `k` 1), the cut misses the end of the
+/// home, and the folder is then mostly shown in full, even the home folder itself.
 pub(crate) fn prompt_path(home: &str, cwd: &str) -> String {
-    let home = normalize(home);
     let cwd = normalize(cwd);
+    if let Some(letter) = drive_alone(home) {
+        return match after_drive(&cwd, letter) {
+            Some("\\") => "~".to_string(),
+            Some(rest) if rest.starts_with('\\') => format!("~{rest}"),
+            _ => cwd,
+        };
+    }
+    let home = normalize(home);
     if home.is_empty() {
         return cwd;
     }
@@ -22,6 +35,32 @@ pub(crate) fn prompt_path(home: &str, cwd: &str) -> String {
         Some("") => "~".to_string(),
         Some(rest) if rest.starts_with('\\') => format!("~{rest}"),
         _ => cwd,
+    }
+}
+
+/// The drive letter of `home` when it is a drive and nothing more, separators aside: `C:`,
+/// `C:\`, `d:/`, `C:\\`.
+fn drive_alone(home: &str) -> Option<char> {
+    let mut chars = home.chars();
+    match (chars.next(), chars.next()) {
+        (Some(letter), Some(':'))
+            if letter.is_ascii_alphabetic() && chars.all(|c| c == '\\' || c == '/') =>
+        {
+            Some(letter)
+        }
+        _ => None,
+    }
+}
+
+/// What follows the drive of `cwd` when that drive is `letter`, in any case (lowered as
+/// [`go_lower`] lowers it).
+fn after_drive(cwd: &str, letter: char) -> Option<&str> {
+    let mut chars = cwd.chars();
+    match (chars.next(), chars.next()) {
+        (Some(drive), Some(':')) if go_lower_char(drive) == go_lower_char(letter) => {
+            Some(chars.as_str())
+        }
+        _ => None,
     }
 }
 
@@ -41,18 +80,19 @@ fn strip_lowered_prefix<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
 /// mapping, so `İ` (U+0130) becomes `i`, and a character whose lower case is more than one
 /// character stays as it is.
 fn go_lower(text: &str) -> String {
-    text.chars()
-        .map(|c| {
-            if c == '\u{130}' {
-                return 'i';
-            }
-            let mut lower = c.to_lowercase();
-            match (lower.next(), lower.next()) {
-                (Some(one), None) => one,
-                _ => c,
-            }
-        })
-        .collect()
+    text.chars().map(go_lower_char).collect()
+}
+
+/// One character lowered as [`go_lower`] lowers it.
+fn go_lower_char(c: char) -> char {
+    if c == '\u{130}' {
+        return 'i';
+    }
+    let mut lower = c.to_lowercase();
+    match (lower.next(), lower.next()) {
+        (Some(one), None) => one,
+        _ => c,
+    }
 }
 
 /// A Windows path the way the path segment starts from it: `\` only, an upper case drive
@@ -219,6 +259,40 @@ mod tests {
                 "C:\\users\\\u{212a}\\x",
             ),
             (r"C:\Users\Ünal", r"c:\users\ünal\x", r"~\x"),
+        ];
+        let wrong: Vec<String> = rows
+            .iter()
+            .filter_map(|(home, cwd, shown)| {
+                let got = prompt_path(home, cwd);
+                (got != *shown).then(|| format!("{home} | {cwd}: {got}, not {shown}"))
+            })
+            .collect();
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    #[test]
+    fn a_home_at_a_drives_root_holds_every_folder_on_that_drive() {
+        // (the home, --pwd, what Oh My Posh 31.5.0 printed), measured on the pinned binary by
+        // tests/parity.rs (the `D:\` row by the final review's probe). A home that is a drive
+        // and nothing more holds every folder on that drive, in any case, a bare `C:` as much
+        // as `C:\`; a folder on another drive is shown in full.
+        let rows = [
+            (r"C:\", r"C:\x\y", r"~\x\y"),
+            (r"D:\", r"D:\x\y", r"~\x\y"),
+            ("d:/", r"D:\x\y", r"~\x\y"),
+            (r"C:\\", r"C:\x\y", r"~\x\y"),
+            (r"C:\", r"C:\", "~"),
+            (r"C:\", "C:", "~"),
+            (r"C:\", "c:/x", r"~\x"),
+            ("C:", r"C:\x\y", r"~\x\y"),
+            ("C:", r"C:\Users", r"~\Users"),
+            ("C:", r"C:\", "~"),
+            ("C:", "C:", "~"),
+            // a trailing separator after the folder
+            ("d:/", r"d:\x\", r"~\x"),
+            // another drive
+            (r"C:\", r"D:\x", r"D:\x"),
+            ("C:", r"D:\x\y", r"D:\x\y"),
         ];
         let wrong: Vec<String> = rows
             .iter()
