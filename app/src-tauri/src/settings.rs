@@ -13,6 +13,9 @@ use ts_rs::TS;
 
 pub const SETTINGS_VERSION: u32 = 1;
 
+/// The UTF-8 byte order mark (U+FEFF as UTF-8) that some editors put in front of a text file.
+const UTF8_BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
 #[ts(export)]
@@ -94,7 +97,10 @@ pub fn load(fs: &dyn Fs, path: &Path, now_ms: u64) -> Result<SettingsLoad, AppEr
             reset_from: None,
         });
     };
-    let parsed: Result<SettingsFile, _> = serde_json::from_slice(&bytes);
+    // Notepad, and PowerShell 5.1 with `-Encoding UTF8`, write a byte order mark first; the
+    // parser takes it for text that is not JSON. One mark is part of the encoding, not the file.
+    let json = bytes.strip_prefix(UTF8_BOM).unwrap_or(&bytes);
+    let parsed: Result<SettingsFile, _> = serde_json::from_slice(json);
     let why = match parsed {
         Ok(file) if file.version == SETTINGS_VERSION => {
             return Ok(SettingsLoad {
@@ -243,6 +249,42 @@ mod tests {
         let e = load(&fs, &file(), 5).unwrap_err();
         assert_eq!(e.code, "E_DATA_WRITE");
         assert!(fs.exists(&file()));
+    }
+
+    #[test]
+    fn a_file_written_with_a_utf8_byte_order_mark_loads_as_itself() {
+        // Notepad, and PowerShell 5.1 with `-Encoding UTF8`, put EF BB BF in front.
+        let fs = FakeFs::new();
+        let mine = AppSettings {
+            language: Language::Th,
+            target: Target::Wt,
+            set_wt_default_profile: false,
+            updates: UpdateMode::Notify,
+            wizard_done: true,
+        };
+        save(&fs, &file(), &mine).unwrap();
+        let mut with_mark = vec![0xEF, 0xBB, 0xBF];
+        with_mark.extend(fs.file(file()).unwrap());
+        fs.put(file(), &with_mark);
+        let loaded = load(&fs, &file(), 1).unwrap();
+        assert_eq!(loaded.settings, mine);
+        assert_eq!(loaded.reset_from, None);
+        // Left where it is: not set aside, and nothing else made.
+        assert_eq!(fs.file(file()).unwrap(), with_mark);
+        assert_eq!(
+            fs.list_dir(file().parent().unwrap()).unwrap().len(),
+            1,
+            "only settings.json"
+        );
+        // One mark is stripped, not any number of them.
+        let mut twice = vec![0xEF, 0xBB, 0xBF];
+        twice.extend(&with_mark);
+        fs.put(file(), &twice);
+        let loaded = load(&fs, &file(), 2).unwrap();
+        assert_eq!(
+            loaded.reset_from.as_deref(),
+            Some("settings.json.damaged-2")
+        );
     }
 
     #[test]

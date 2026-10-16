@@ -4,6 +4,7 @@
 //! contents and no user text go into it: the diagnostics (spec §5.10) quote it after redaction.
 use cmdstudio_core::adapters::{AdapterError, Fs};
 use std::path::PathBuf;
+use std::sync::{Mutex, PoisonError};
 
 pub const LOG_FILE: &str = "cmdstudio.log";
 /// The log and its rotated copies, together.
@@ -12,11 +13,21 @@ pub const MAX_BYTES: usize = 1024 * 1024;
 
 pub struct Logger {
     dir: PathBuf,
+    /// Held for the whole of a `write` (the read, the rotation and the replacing write) and of a
+    /// `tail`. The IPC commands run on several threads and each logs a line: with no lock two
+    /// of them read the same file and the later write drops the other's line, and two that both
+    /// see a full file rotate twice, the second rename onto a file that is there. The lock
+    /// guards the files, not data in memory, so a thread that panicked while holding it left
+    /// nothing broken and a poisoned lock is used as it is.
+    files: Mutex<()>,
 }
 
 impl Logger {
     pub fn new(dir: PathBuf) -> Self {
-        Logger { dir }
+        Logger {
+            dir,
+            files: Mutex::new(()),
+        }
     }
 
     pub fn file(&self) -> PathBuf {
@@ -32,6 +43,7 @@ impl Logger {
     /// log never stops a command.
     pub fn write(&self, fs: &dyn Fs, now_ms: u64, line: &str) -> Result<(), AdapterError> {
         let entry = format!("{} {}\n", iso_utc(now_ms), line.replace(['\r', '\n'], " "));
+        let _one_at_a_time = self.files.lock().unwrap_or_else(PoisonError::into_inner);
         let file = self.file();
         let mut current = fs.read(&file)?.unwrap_or_default();
         if !current.is_empty() && current.len() + entry.len() > MAX_BYTES {
@@ -62,6 +74,8 @@ impl Logger {
 
     /// The last `lines` lines of the current file; empty when there is none or it cannot be read.
     pub fn tail(&self, fs: &dyn Fs, lines: usize) -> String {
+        // Not between the two renames of a rotation, where the current file is not there yet.
+        let _one_at_a_time = self.files.lock().unwrap_or_else(PoisonError::into_inner);
         let Ok(Some(bytes)) = fs.read(&self.file()) else {
             return String::new();
         };
@@ -163,6 +177,105 @@ mod tests {
                 "{}",
                 e.path.display()
             );
+        }
+    }
+
+    #[test]
+    fn the_logger_can_be_shared_between_threads() {
+        fn is_send_and_sync<T: Send + Sync>() {}
+        is_send_and_sync::<Logger>();
+    }
+
+    /// The same `Logger` on the real disk from several threads, as the IPC commands are
+    /// (`spawn_blocking` on one shared backend). `FakeFs` cannot be shared between threads.
+    #[cfg(windows)]
+    mod on_disk {
+        use super::*;
+        use cmdstudio_core::adapters::windows::fs::WinFs;
+
+        const THREADS: u32 = 8;
+
+        /// A folder of its own under the system temp folder, removed when the test ends, also
+        /// when it fails. The tests touch nothing else on this computer.
+        struct Scratch(PathBuf);
+
+        impl Scratch {
+            fn new() -> Self {
+                let name = format!("cmdstudio-logs-test-{}", uuid::Uuid::new_v4().simple());
+                Scratch(std::env::temp_dir().join(name))
+            }
+        }
+
+        impl Drop for Scratch {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        /// `THREADS` threads, each writing `lines` lines of `cmd=t<thread>_<n> <filler>` through
+        /// the one `log`. Every write must succeed.
+        fn write_from_threads(log: &Logger, lines: u32, filler: &str) {
+            std::thread::scope(|scope| {
+                for t in 0..THREADS {
+                    scope.spawn(move || {
+                        for n in 0..lines {
+                            let line = format!("cmd=t{t}_{n} {filler}");
+                            log.write(&WinFs, u64::from(t * lines + n), &line).unwrap();
+                        }
+                    });
+                }
+            });
+        }
+
+        /// The command of each line of the log and its copies, sorted; and the files found.
+        fn commands_and_files(log: &Logger) -> (Vec<String>, usize) {
+            let mut paths = vec![log.file()];
+            paths.extend((1..KEEP).map(|n| log.rotated(n)));
+            let (mut commands, mut files) = (Vec::new(), 0);
+            for path in paths {
+                let Ok(text) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                files += 1;
+                assert!(text.len() <= MAX_BYTES, "{}", path.display());
+                commands.extend(
+                    text.lines()
+                        .map(|l| l.split(' ').nth(1).unwrap().to_string()),
+                );
+            }
+            commands.sort();
+            (commands, files)
+        }
+
+        fn expected(lines: u32) -> Vec<String> {
+            let mut all: Vec<String> = (0..THREADS)
+                .flat_map(|t| (0..lines).map(move |n| format!("cmd=t{t}_{n}")))
+                .collect();
+            all.sort();
+            all
+        }
+
+        #[test]
+        fn lines_written_at_the_same_time_are_all_kept_once() {
+            let scratch = Scratch::new();
+            let log = Logger::new(scratch.0.join("logs"));
+            write_from_threads(&log, 25, "ok");
+            let (found, files) = commands_and_files(&log);
+            assert_eq!(files, 1);
+            assert_eq!(found.len(), expected(25).len(), "lost or doubled lines");
+            assert_eq!(found, expected(25));
+        }
+
+        #[test]
+        fn rotation_at_the_same_time_loses_no_line_and_fails_no_write() {
+            let scratch = Scratch::new();
+            let log = Logger::new(scratch.0.join("logs"));
+            // 24 lines of 150 KB: about six to a file, four files, below the five that are kept.
+            write_from_threads(&log, 3, &"x".repeat(150_000));
+            let (found, files) = commands_and_files(&log);
+            assert!((2..=KEEP).contains(&files), "{files} files");
+            assert_eq!(found.len(), expected(3).len(), "lost or doubled lines");
+            assert_eq!(found, expected(3));
         }
     }
 }
