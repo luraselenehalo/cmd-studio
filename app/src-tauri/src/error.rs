@@ -173,10 +173,19 @@ pub fn meaning(code: &str) -> Option<(&'static str, &'static str)> {
 }
 
 impl AppError {
-    /// An error whose texts are the §5.9 meaning of `code`, with `details` behind them. For a
-    /// code the table does not know, the details stand in for both texts, so nothing is lost.
+    /// An error whose texts are the §5.9 meaning of `code`, with `details` behind them. The
+    /// codes are the rows of §5.9 and no other: a code that is not a row becomes [`INTERNAL`],
+    /// with that row's texts and the code it was given in front of the details, so nothing is
+    /// lost.
     pub fn coded(code: &str, details: impl Into<String>) -> Self {
         let details = details.into();
+        let (code, details) = if meaning(code).is_some() {
+            (code, details)
+        } else {
+            (INTERNAL, format!("{code}: {details}"))
+        };
+        // E_INTERNAL is a row (a test compares the table with the spec); the details stand in
+        // for the texts only if that ever failed.
         let (th, en) = meaning(code)
             .map(|(th, en)| (th.to_string(), en.to_string()))
             .unwrap_or_else(|| (details.clone(), details.clone()));
@@ -335,20 +344,73 @@ mod tests {
         assert_eq!(e.message_th, "ไฟล์ธีมมาจากโปรแกรมรุ่นใหม่กว่า");
         assert_eq!(e.message_en, "The theme file comes from a newer version");
         assert!(e.details.contains("schemaVersion 7"), "{}", e.details);
-        // An unknown code shows its details rather than nothing.
+        // The codes are the rows of spec §5.9 and no other: a code that is not a row becomes
+        // E_INTERNAL, with the E_INTERNAL row's texts and the code it was given in the details.
         let e = AppError::coded("E_NOT_A_ROW", "what happened");
-        assert_eq!(
-            (e.message_th.as_str(), e.message_en.as_str()),
-            ("what happened", "what happened")
+        assert_eq!(e.code, INTERNAL);
+        assert_eq!(e.details, "E_NOT_A_ROW: what happened");
+        let (th, en) = meaning(INTERNAL).unwrap();
+        assert_eq!((e.message_th.as_str(), e.message_en.as_str()), (th, en));
+        // E_INTERNAL itself is a row: its details stay as given.
+        let e = AppError::internal("x");
+        assert_eq!((e.code.as_str(), e.details.as_str()), (INTERNAL, "x"));
+        assert_eq!((e.message_th.as_str(), e.message_en.as_str()), (th, en));
+    }
+
+    #[test]
+    fn each_core_error_passes_on_its_own_code() {
+        use cmdstudio_core::adapters::AdapterError;
+
+        /// The error converted keeps the code the core error itself gives, and with it the
+        /// texts of that row of §5.9.
+        macro_rules! keeps_its_code {
+            ($($core:expr),+ $(,)?) => {$({
+                let core = $core;
+                let code = core.code();
+                let e = AppError::from(core);
+                assert_eq!(e.code, code);
+                assert_eq!(Some((e.message_th.as_str(), e.message_en.as_str())), meaning(code));
+            })+};
+        }
+        let io = || AdapterError::new("registry", "access denied");
+        keeps_its_code!(
+            DetectError::Read(io()),
+            DetectError::Write(io()),
+            StateError::Invalid("not JSON".to_string()),
+            StateError::Newer { found: 9 },
+            StateError::Io("disk full".to_string()),
+            PlanError::ForeignClink {
+                existing: vec!["clink inject".to_string()]
+            },
+            PlanError::Generate("bad".to_string()),
+            ResourceError::Missing("omp".to_string()),
         );
-        assert_eq!(AppError::internal("x").code, INTERNAL);
+
+        // A `Failure` carries its code as a field, and its text is the details.
+        let f = Failure {
+            code: "E_SNAPSHOT_WRITE",
+            message: "disk full".to_string(),
+        };
+        let e = AppError::from(f.clone());
+        assert_eq!((e.code.as_str(), e.details.as_str()), (f.code, "disk full"));
+        // The same failure inside an ActionError keeps its code.
+        let e = AppError::from(ActionError::Snapshot(Failure {
+            code: "E_SNAPSHOT_READ",
+            message: "gone".to_string(),
+        }));
+        assert_eq!(
+            (e.code.as_str(), e.details.as_str()),
+            ("E_SNAPSHOT_READ", "gone")
+        );
     }
 
     #[test]
     fn the_error_is_camel_case_json() {
         let e = AppError::coded("E_BUSY", "d");
         let v: serde_json::Value = serde_json::to_value(&e).unwrap();
-        let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        // Sorted, so the test does not depend on the map order of serde_json (`preserve_order`).
+        let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
         assert_eq!(keys, ["code", "details", "messageEn", "messageTh"]);
     }
 }
