@@ -7,6 +7,8 @@
 pub mod command_names;
 pub mod console;
 pub mod error;
+pub mod logs;
+pub mod settings;
 
 #[cfg(test)]
 mod config_guard;
