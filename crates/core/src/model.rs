@@ -55,6 +55,7 @@ pub mod limits {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct Theme {
     /// The version of the file format.
     #[schemars(range(min = SCHEMA_VERSION, max = SCHEMA_VERSION))]
@@ -89,6 +90,7 @@ pub struct Theme {
     )]
     #[schemars(with = "String")]
     #[doc(hidden)]
+    #[cfg_attr(feature = "ts", ts(skip))]
     pub schema: (),
 }
 
@@ -127,7 +129,9 @@ fn canonical_id<'de, D: serde::Deserializer<'de>>(d: D) -> Result<uuid::Uuid, D:
 /// Inputs of simple mode, kept so the theme can be edited there again.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct SimpleRecipe {
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
     pub accent: Rgb,
     #[schemars(range(min = limits::TINT_MIN, max = limits::TINT_MAX))]
     pub tint: f64,
@@ -135,6 +139,7 @@ pub struct SimpleRecipe {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct TerminalSettings {
     /// Font family name. When it is not installed, Windows Terminal gets the bundled fallback font.
     #[schemars(length(min = limits::FONT_MIN_CHARS, max = limits::FONT_MAX_CHARS))]
@@ -153,6 +158,7 @@ pub struct TerminalSettings {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum CursorShape {
     FilledBox,
     Bar,
@@ -161,6 +167,7 @@ pub enum CursorShape {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct PromptSettings {
     pub layout: Layout,
     /// Shown in list order; each segment may appear once.
@@ -172,6 +179,7 @@ pub struct PromptSettings {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum Layout {
     Box,
     Line,
@@ -181,6 +189,7 @@ pub enum Layout {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum Segment {
     Path,
     Git,
@@ -195,6 +204,7 @@ pub enum Segment {
 /// `{user}`, `{host}`, `{cwd}`, `{date}` and `{time}`; any other `{word}` stays as written.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct BannerSettings {
     pub enabled: bool,
     #[schemars(length(max = limits::TITLE_MAX_CHARS))]
@@ -208,6 +218,7 @@ pub struct BannerSettings {
 /// Where a theme is applied (spec §4.2 page 4; CLI `--target`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum Target {
     All,
     Wt,

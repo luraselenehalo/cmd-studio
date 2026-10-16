@@ -1,11 +1,16 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/cli"]
+members = ["crates/core", "crates/cli", "app/src-tauri"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
+
+# Never set `panic = "abort"` in any profile. The app catches a panic of the apply's progress
+# listener (`catch_unwind` in app/src-tauri/src/backend/apply.rs, `Backend::apply`) so that a
+# transaction always runs to its end; with abort there is no unwinding to catch, and a panic
+# would leave the machine half changed until the next start's recovery.
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

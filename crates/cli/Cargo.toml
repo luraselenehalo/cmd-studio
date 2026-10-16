@@ -11,10 +11,6 @@ workspace = true
 [lib]
 name = "cmdstudio_cli"
 
-[[bin]]
-name = "cmdstudio"
-path = "src/main.rs"
-
 [dependencies]
 cmdstudio-core = { path = "../core" }
 serde_json = "1"

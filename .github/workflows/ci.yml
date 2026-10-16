@@ -1,5 +1,6 @@
-# CI on a throwaway Windows runner: format, three clippy runs, the pinned runtimes,
+# CI on a throwaway Windows runner: format, four clippy runs, the pinned runtimes,
 # the normal tests, then the system tests that change this runner's real AutoRun and fonts.
+# The `app` job checks the desktop app crate and its TypeScript bindings on a runner of its own.
 name: ci
 on:
   push:
@@ -35,13 +36,17 @@ jobs:
       # dev-dependency turns on. So the first run below lints the core WITH the fakes (a
       # workspace build unifies the feature), the second WITHOUT them, as a release build
       # sees the core, and the third names the feature itself, so it does not depend on
-      # the CLI's dev-dependency.
+      # the CLI's dev-dependency. The fourth lints the core with its `ts` feature (the ts-rs
+      # derives the app's TypeScript bindings come from) and without the fakes: the workspace
+      # run has `ts` too, through the app crate, but only together with `fake`.
       - name: Clippy of the workspace (the core with the fake adapters, through the CLI's dev-dependency)
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Clippy of the core alone, as a release build sees it (no fake adapters)
         run: cargo clippy -p cmdstudio-core --all-targets -- -D warnings
       - name: Clippy of the core alone, with --features fake
         run: cargo clippy -p cmdstudio-core --all-targets --features fake -- -D warnings
+      - name: Clippy of the core alone, with --features ts
+        run: cargo clippy -p cmdstudio-core --all-targets --features ts -- -D warnings
       # The pins (URLs and SHA-256) live in scripts/fetch-resources.ps1, which also writes
       # resources/manifest.json. A new pin changes the script, so the key changes and the
       # next run downloads again.
@@ -101,3 +106,53 @@ jobs:
           name: system-tests-log
           path: system-tests.txt
           if-no-files-found: ignore
+  # The app (Phase 2b): the app crate, its tests over the in-memory machine, and the bindings'
+  # freshness. Separate from the Rust job so a UI failure and a Rust failure read apart. (The
+  # `windows` job's workspace runs cover the app crate too: its clippy and its tests.)
+  app:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the toolchain pinned in rust-toolchain.toml
+        shell: bash
+        run: |
+          rustup --version
+          rustup toolchain install
+          cargo --version
+      - name: Cache the pinned runtimes and font
+        uses: actions/cache@v4
+        with:
+          path: resources
+          key: resources-${{ runner.os }}-${{ hashFiles('scripts/fetch-resources.ps1') }}
+      - name: Fetch the pinned runtimes and font
+        shell: powershell
+        run: ./scripts/fetch-resources.ps1
+      # The committed bindings must be what the Rust types export now (G11). The script runs the
+      # core's and the app's export tests into app/ui/src/bindings, after removing the .ts files
+      # there; then any line of `git status --porcelain` is a difference: a changed file, a
+      # deleted one (a type that is gone), or a new one never committed, which `git diff` alone
+      # would not show.
+      - name: Bindings are fresh
+        shell: bash
+        run: |
+          pwsh -NoProfile -File ./scripts/export-bindings.ps1
+          stale="$(git status --porcelain -- app/ui/src/bindings)"
+          if [ -n "$stale" ]; then
+            echo "$stale"
+            echo "::error::app/ui/src/bindings is stale: run scripts/export-bindings.ps1 and commit"
+            exit 1
+          fi
+      - name: Clippy of the app crate
+        run: cargo clippy -p cmdstudio-app --all-targets -- -D warnings
+      - name: Tests of the app crate (backend over the in-memory machine)
+        run: cargo test -p cmdstudio-app
+      # A compile check only: this exe is never shipped and never run, here or in a VM. No cargo
+      # build enables `tauri/custom-protocol`, so to Tauri it is a "dev build"; with no `devUrl`
+      # in tauri.conf.json (pinned by config_guard.rs) it embeds the UI rather than loading a dev
+      # server, but it is still not the app. The real exe is made by `npx tauri build` (the 2c
+      # plan's Task 7).
+      - name: Release build of the exe (a compile check, not run)
+        run: cargo build -p cmdstudio-app --release

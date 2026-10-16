@@ -334,7 +334,7 @@ impl AutoRunEdit {
 }
 
 /// Whether `text` holds our profile path, in any case: every form of our entry holds it.
-fn holds_ours(text: &str, profile: &str) -> bool {
+pub(crate) fn holds_ours(text: &str, profile: &str) -> bool {
     text.to_lowercase().contains(&profile.to_lowercase())
 }
 

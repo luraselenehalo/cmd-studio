@@ -37,6 +37,7 @@ const NO_JOURNAL_NOTE: &[u8] =
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum SnapshotKind {
     Apply,
     Undo,
@@ -45,6 +46,7 @@ pub enum SnapshotKind {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct ThemeRef {
     pub id: uuid::Uuid,
     pub name: String,
@@ -52,9 +54,11 @@ pub struct ThemeRef {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct Manifest {
     pub id: String,
     pub kind: SnapshotKind,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub created_ms: u64,
     pub theme: Option<ThemeRef>,
     pub target: Option<Target>,
@@ -414,15 +418,25 @@ impl<'a> SnapshotStore<'a> {
                 continue;
             }
             let m = self.manifest(&id).map_err(|f| in_the_way(&id, f))?;
-            if m.kind != SnapshotKind::Apply || m.undone_by.is_some() {
-                continue;
-            }
-            let j = self.journal(&id).map_err(|f| in_the_way(&id, f))?;
-            if j.stage == Stage::Committed {
+            if let Some(j) = self.undoable(&id, &m).map_err(|f| in_the_way(&id, f))? {
                 return Ok(Some((m, j)));
             }
         }
         Ok(None)
+    }
+
+    /// The journal of restore point `id`, whose manifest is `m`, when it is an apply an undo
+    /// goes back to: an apply, not reversed, not set aside, whose transaction committed. `None`
+    /// when it is not one; `Err` when its journal, which says whether it committed, cannot be
+    /// read (an undo, a revert-all and a reversed apply are told from the manifest alone). The
+    /// one test of [`SnapshotStore::latest_undoable`], of `actions::restore_to`, and of the
+    /// app's list of the points a restore can go back to.
+    pub fn undoable(&self, id: &str, m: &Manifest) -> Result<Option<Journal>, Failure> {
+        if m.kind != SnapshotKind::Apply || m.undone_by.is_some() || self.is_set_aside(id) {
+            return Ok(None);
+        }
+        let j = self.journal(id)?;
+        Ok((j.stage == Stage::Committed).then_some(j))
     }
 
     /// Marks every committed apply that is not reversed yet as reversed by `by`. Every manifest
@@ -581,6 +595,7 @@ impl<'a> SnapshotStore<'a> {
 /// One op a rollback could not put back, as `incomplete.json` keeps it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct Unrestored {
     pub op_index: usize,
     /// What the op touched, in plain English (`exec::op_label`).
@@ -608,6 +623,7 @@ pub struct Unrestored {
 /// targets a rollback may have left as it was.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct Incomplete {
     /// The restore point of the transaction.
     pub id: String,

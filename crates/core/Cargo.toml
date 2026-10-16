@@ -13,6 +13,8 @@ workspace = true
 [features]
 # In-memory adapters for tests in other crates (crates/cli). Never enabled in a release build.
 fake = []
+# ts-rs exports of the public types the app's UI consumes (app/ui/src/bindings).
+ts = ["dep:ts-rs"]
 
 [dependencies]
 # wt_edit: Windows Terminal's settings.json through the CST (G9). `serde_json` adds `to_serde_value()`.
@@ -25,6 +27,7 @@ thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 schemars = { version = "1", features = ["uuid1"] }
 unicode-width = "0.2"
+ts-rs = { version = "=12.0.1", optional = true, features = ["uuid-impl", "serde-json-impl", "no-serde-warnings"] }
 
 # The registry adapter (`adapters::windows::registry`); `adapters::windows` is cfg(windows) too.
 [target.'cfg(windows)'.dependencies]
