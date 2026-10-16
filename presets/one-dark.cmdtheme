@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "id": "ad58c741-ac44-4c13-bb77-7738ce29c0ef",
+  "name": "One Dark",
+  "author": "CMD Studio",
+  "tone": "dark",
+  "simple": null,
+  "colors": {
+    "background": "#282c34",
+    "foreground": "#abb2bf",
+    "cursor": "#528bff",
+    "selection": "#3e4451",
+    "accent": "#528bff",
+    "muted": "#828997",
+    "frame": "#3e4451",
+    "ansi": [
+      "#282c34", "#e06c75", "#98c379", "#e5c07b", "#61afef", "#c678dd", "#56b6c2", "#abb2bf",
+      "#5c6370", "#e06c75", "#98c379", "#e5c07b", "#61afef", "#c678dd", "#56b6c2", "#ffffff"
+    ]
+  },
+  "terminal": {
+    "font": "CaskaydiaCove NF",
+    "fontSize": 12,
+    "cursorShape": "filledBox",
+    "opacity": 96,
+    "acrylic": true,
+    "padding": [14, 10]
+  },
+  "prompt": {
+    "layout": "powerline",
+    "segments": ["path", "git", "duration", "status"],
+    "transient": true
+  },
+  "banner": {
+    "enabled": true,
+    "title": "Welcome back, {user}!",
+    "lines": ["cwd: {cwd}", "{date} · {time} · {host}"],
+    "tips": true,
+    "clearLogo": true
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "id": "df271d95-c80a-4635-be46-efb1710ad12e",
+  "name": "Catppuccin Latte",
+  "author": "CMD Studio",
+  "tone": "light",
+  "simple": null,
+  "colors": {
+    "background": "#eff1f5",
+    "foreground": "#4c4f69",
+    "cursor": "#dc8a78",
+    "selection": "#acb0be",
+    "accent": "#8839ef",
+    "muted": "#7c7f93",
+    "frame": "#9ca0b0",
+    "ansi": [
+      "#5c5f77", "#d20f39", "#40a02b", "#df8e1d", "#1e66f5", "#ea76cb", "#179299", "#acb0be",
+      "#acb0be", "#d20f39", "#40a02b", "#df8e1d", "#1e66f5", "#ea76cb", "#179299", "#bcc0cc"
+    ]
+  },
+  "terminal": {
+    "font": "Cascadia Mono",
+    "fontSize": 12,
+    "cursorShape": "filledBox",
+    "opacity": 100,
+    "acrylic": false,
+    "padding": [14, 10]
+  },
+  "prompt": {
+    "layout": "box",
+    "segments": ["path", "git", "time"],
+    "transient": true
+  },
+  "banner": {
+    "enabled": true,
+    "title": "Welcome back, {user}!",
+    "lines": ["cwd: {cwd}", "{date} · {time} · {host}"],
+    "tips": true,
+    "clearLogo": true
+  }
+}

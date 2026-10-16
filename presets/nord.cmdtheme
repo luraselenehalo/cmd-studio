@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "id": "1daf005c-9f7e-41ec-8b3e-e45127ce6808",
+  "name": "Nord",
+  "author": "CMD Studio",
+  "tone": "dark",
+  "simple": null,
+  "colors": {
+    "background": "#2e3440",
+    "foreground": "#d8dee9",
+    "cursor": "#d8dee9",
+    "selection": "#4c566a",
+    "accent": "#88c0d0",
+    "muted": "#a5abb6",
+    "frame": "#3b4252",
+    "ansi": [
+      "#3b4252", "#bf616a", "#a3be8c", "#ebcb8b", "#81a1c1", "#b48ead", "#88c0d0", "#e5e9f0",
+      "#4c566a", "#bf616a", "#a3be8c", "#ebcb8b", "#81a1c1", "#b48ead", "#8fbcbb", "#eceff4"
+    ]
+  },
+  "terminal": {
+    "font": "Cascadia Mono",
+    "fontSize": 12,
+    "cursorShape": "filledBox",
+    "opacity": 96,
+    "acrylic": true,
+    "padding": [14, 10]
+  },
+  "prompt": {
+    "layout": "line",
+    "segments": ["path", "git"],
+    "transient": true
+  },
+  "banner": {
+    "enabled": true,
+    "title": "Welcome back, {user}!",
+    "lines": ["cwd: {cwd}", "{date} · {time} · {host}"],
+    "tips": true,
+    "clearLogo": true
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "id": "6f1b7a9a-30fa-4e3a-945f-59ea95616054",
+  "name": "Tokyo Night",
+  "author": "CMD Studio",
+  "tone": "dark",
+  "simple": null,
+  "colors": {
+    "background": "#1a1b26",
+    "foreground": "#a9b1d6",
+    "cursor": "#c0caf5",
+    "selection": "#2b2f41",
+    "accent": "#7aa2f7",
+    "muted": "#787c99",
+    "frame": "#414868",
+    "ansi": [
+      "#363b54", "#f7768e", "#73daca", "#e0af68", "#7aa2f7", "#bb9af7", "#7dcfff", "#787c99",
+      "#363b54", "#f7768e", "#73daca", "#e0af68", "#7aa2f7", "#bb9af7", "#7dcfff", "#acb0d0"
+    ]
+  },
+  "terminal": {
+    "font": "CaskaydiaCove NF",
+    "fontSize": 12,
+    "cursorShape": "filledBox",
+    "opacity": 96,
+    "acrylic": true,
+    "padding": [14, 10]
+  },
+  "prompt": {
+    "layout": "powerline",
+    "segments": ["path", "git", "time"],
+    "transient": true
+  },
+  "banner": {
+    "enabled": true,
+    "title": "Welcome back, {user}!",
+    "lines": ["cwd: {cwd}", "{date} · {time} · {host}"],
+    "tips": true,
+    "clearLogo": true
+  }
+}

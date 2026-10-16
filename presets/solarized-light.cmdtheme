@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "id": "c3ac47c7-d75e-4d88-be32-6eb01f5bfd71",
+  "name": "Solarized Light",
+  "author": "CMD Studio",
+  "tone": "light",
+  "simple": null,
+  "colors": {
+    "background": "#fdf6e3",
+    "foreground": "#657b83",
+    "cursor": "#657b83",
+    "selection": "#eee8d5",
+    "accent": "#268bd2",
+    "muted": "#93a1a1",
+    "frame": "#839496",
+    "ansi": [
+      "#073642", "#dc322f", "#859900", "#b58900", "#268bd2", "#d33682", "#2aa198", "#eee8d5",
+      "#002b36", "#cb4b16", "#586e75", "#657b83", "#839496", "#6c71c4", "#93a1a1", "#fdf6e3"
+    ]
+  },
+  "terminal": {
+    "font": "Cascadia Mono",
+    "fontSize": 12,
+    "cursorShape": "filledBox",
+    "opacity": 100,
+    "acrylic": false,
+    "padding": [14, 10]
+  },
+  "prompt": {
+    "layout": "line",
+    "segments": ["path", "git", "time"],
+    "transient": true
+  },
+  "banner": {
+    "enabled": true,
+    "title": "Welcome back, {user}!",
+    "lines": ["cwd: {cwd}", "{date} · {time} · {host}"],
+    "tips": true,
+    "clearLogo": true
+  }
+}
