@@ -17,7 +17,8 @@
 //! a file nor the settings, and the log is there to diagnose what does. They run on each
 //! settled edit or slider move, and each log line rewrites the log file (up to 1 MB), which
 //! would be on the window's thread: they are sync, so Tauri runs them there one at a time and
-//! their answers come back in the order they were asked.
+//! their answers come back in the order they were asked. Each runs inside `caught`, so a
+//! panic in one is an `E_INTERNAL` answer, not the end of the app.
 use crate::backend::apply::{
     ApplyOutcome, ApplyProgress, ApplyRequest, PlanOutcome, RestoreOutcome, RestorePoints,
     RevertOutcome, UndoOutcome,
@@ -55,6 +56,27 @@ async fn blocking<T: Send + 'static>(
         Err(e) => Err(AppError::internal(format!(
             "the worker that ran the command did not answer: {e}"
         ))),
+    }
+}
+
+/// Runs a pure command's computation and turns a panic in it into [`AppError::internal`].
+/// The four pure commands are sync, so they run on the window's thread, inside Tauri's event
+/// loop: a panic unwinding out of them would take the whole app down. The commands that run on
+/// a worker ([`blocking`]) need no such guard: a panic there ends the worker, and the command
+/// answers `E_INTERNAL`.
+fn caught<T>(compute: impl FnOnce() -> T) -> Result<T, AppError> {
+    // UNWIND SAFETY: `compute` reaches only the command's own arguments, which it owns or
+    // borrows from this call and which are dropped with it; it shares no state with another
+    // command and writes nothing, so nothing is left half changed when it unwinds.
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(compute)) {
+        Ok(value) => Ok(value),
+        Err(payload) => {
+            // Dropping the payload of a panic runs its code, which could panic too.
+            std::mem::forget(payload);
+            Err(AppError::internal(
+                "the computation stopped on an internal error (a panic)",
+            ))
+        }
     }
 }
 
@@ -193,22 +215,22 @@ pub async fn theme_export(
 
 #[tauri::command]
 pub fn palette_generate(tone: Tone, accent: String, tint: f64) -> Result<Colors, AppError> {
-    preview::palette_generate(tone, &accent, tint)
+    caught(|| preview::palette_generate(tone, &accent, tint))?
 }
 
 #[tauri::command]
-pub fn contrast_check(colors: Colors) -> Vec<ContrastIssue> {
-    preview::contrast_check(&colors)
+pub fn contrast_check(colors: Colors) -> Result<Vec<ContrastIssue>, AppError> {
+    caught(|| preview::contrast_check(&colors))
 }
 
 #[tauri::command]
-pub fn contrast_fix(colors: Colors) -> Colors {
-    preview::contrast_fix(colors)
+pub fn contrast_fix(colors: Colors) -> Result<Colors, AppError> {
+    caught(|| preview::contrast_fix(colors))
 }
 
 #[tauri::command]
-pub fn preview_render(theme: Theme, context: PreviewContext) -> PreviewResult {
-    preview::preview_render(&theme, &context)
+pub fn preview_render(theme: Theme, context: PreviewContext) -> Result<PreviewResult, AppError> {
+    caught(|| preview::preview_render(&theme, &context))
 }
 
 #[tauri::command]
@@ -465,6 +487,7 @@ mod tests {
             let body = own[0];
             if PURE.contains(name) {
                 assert!(body.contains(&format!("pub fn {name}(")), "{name} is sync");
+                assert!(body.contains("caught(|| "), "{name} catches a panic");
                 assert!(!body.contains("logged("), "{name} writes no log line");
                 assert!(!body.contains("names::"), "{name} names no command");
                 continue;
@@ -483,5 +506,15 @@ mod tests {
             );
         }
         assert_eq!(logging, 23);
+    }
+
+    /// A pure command runs on the window's thread: a panic in it must come back as an error,
+    /// never unwind into Tauri's event loop.
+    #[test]
+    fn a_panic_in_a_pure_command_is_an_internal_error() {
+        assert_eq!(super::caught(|| 7), Ok(7));
+        let err = super::caught(|| -> u8 { panic!("a bug in the core") }).unwrap_err();
+        assert_eq!(err.code, crate::error::INTERNAL);
+        assert!(err.details.contains("panic"), "{}", err.details);
     }
 }
