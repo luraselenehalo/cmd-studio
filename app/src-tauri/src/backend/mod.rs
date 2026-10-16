@@ -157,7 +157,9 @@ impl<M: Machine> Backend<M> {
 
     /// The settings, and, once, the name of the damaged file that was set aside to get them
     /// (spec §2.1: no silent change). Whichever command reached the file first read it; this
-    /// is the one that hands the notice to the UI, and only after it has been returned.
+    /// is the one that hands the notice to the UI: the notice is taken out of the cache inside
+    /// the closure, under the lock, and is in the value this call returns. A second call finds
+    /// none, so the UI is told once.
     pub fn settings_get(&self) -> Result<SettingsLoad, AppError> {
         self.with_settings(|cache| {
             Ok(SettingsLoad {
@@ -476,5 +478,87 @@ mod tests {
         let again = b.settings_get().unwrap();
         assert_eq!(again.settings, AppSettings::default());
         assert_eq!(again.reset_from, None);
+    }
+
+    #[test]
+    fn saving_first_over_a_damaged_file_sets_it_aside_and_still_tells_the_page() {
+        let b = backend();
+        let file = b.paths().settings_file();
+        b.sys().fs.write_atomic(&file, b"{ not json").unwrap();
+        let mine = AppSettings {
+            language: crate::settings::Language::Th,
+            wizard_done: true,
+            ..AppSettings::default()
+        };
+        // The first access is a save: the damaged file must not be written over unseen.
+        assert_eq!(b.settings_set(mine.clone()).unwrap(), mine);
+        let dir = file.parent().unwrap().to_path_buf();
+        let asides: Vec<_> = b
+            .sys()
+            .fs
+            .list_dir(&dir)
+            .unwrap()
+            .into_iter()
+            .filter(|e| {
+                e.path
+                    .file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with("settings.json.damaged-"))
+            })
+            .collect();
+        assert_eq!(asides.len(), 1, "{asides:?}");
+        let aside = asides[0].path.clone();
+        assert_eq!(
+            b.sys().fs.read(&aside).unwrap().as_deref(),
+            Some(&b"{ not json"[..])
+        );
+        // The file holds what was saved, and the page is told of the reset, once.
+        let told = b.settings_get().unwrap();
+        assert_eq!(told.settings, mine);
+        assert_eq!(
+            told.reset_from.as_deref(),
+            aside.file_name().and_then(|n| n.to_str())
+        );
+        let again = b.settings_get().unwrap();
+        assert_eq!(again.settings, mine);
+        assert_eq!(again.reset_from, None);
+        let on_disk = crate::settings::load(b.sys().fs, &file, 0).unwrap();
+        assert_eq!(on_disk.settings, mine);
+    }
+
+    #[test]
+    fn a_first_read_that_failed_is_tried_again_not_kept() {
+        let b = backend();
+        let file = b.paths().settings_file();
+        let saved = AppSettings {
+            language: crate::settings::Language::Th,
+            ..AppSettings::default()
+        };
+        crate::settings::save(b.sys().fs, &file, &saved).unwrap();
+        let before = b.machine.fs.file(&file).unwrap();
+        b.machine.fs.fail_reads_of(&file);
+        // Nothing could be read: the page is told, a save writes nothing, a command that only
+        // needs settings to work from gets the defaults, and none of it is remembered.
+        assert_eq!(b.settings_get().unwrap_err().code, "E_MACHINE_READ");
+        let other = AppSettings {
+            wizard_done: true,
+            ..AppSettings::default()
+        };
+        assert_eq!(b.settings_set(other).unwrap_err().code, "E_MACHINE_READ");
+        assert_eq!(b.settings_or_default(), AppSettings::default());
+        assert_eq!(b.machine.fs.file(&file).unwrap(), before);
+        // The file can be read again: the next command reads it, as it really is.
+        b.machine.fs.stop_failing(&file);
+        let loaded = b.settings_get().unwrap();
+        assert_eq!(loaded.settings, saved);
+        assert_eq!(loaded.reset_from, None);
+    }
+
+    /// The backend is shared by the IPC commands' threads (Tauri state): the real machine must
+    /// allow it. Nothing is built; the compiler checks the types.
+    #[cfg(windows)]
+    #[test]
+    fn the_real_backend_can_be_shared_between_threads() {
+        fn is_send_and_sync<T: Send + Sync>() {}
+        is_send_and_sync::<Backend<crate::machine::RealMachine>>();
     }
 }
