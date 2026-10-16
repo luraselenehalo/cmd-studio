@@ -12,6 +12,7 @@ pub mod library;
 pub mod logs;
 #[cfg(windows)]
 pub mod machine;
+pub mod open;
 pub mod settings;
 
 #[cfg(test)]

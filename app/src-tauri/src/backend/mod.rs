@@ -2,8 +2,8 @@
 //! (`ipc.rs`) only moves arguments and results across, so every command is tested here against
 //! the core's in-memory adapters, never against this computer. One `pub` method per command,
 //! spread over the modules by subject: `system`, the theme library (`crate::library`), `preview`,
-//! `apply` (plan, apply, undo, restore points, revert), `doctor`, `diagnostics`, and the settings
-//! and the Advanced page here.
+//! `apply` (plan, apply, undo, restore points, revert), `doctor`, `diagnostics`, `launch` (which
+//! window "Open cmd" opens), and the settings and the Advanced page here.
 
 use crate::backend::preview::SampleIdentity;
 use crate::error::AppError;
@@ -25,6 +25,7 @@ use ts_rs::TS;
 pub mod apply;
 pub mod diagnostics;
 pub mod doctor;
+pub mod launch;
 pub mod preview;
 pub mod system;
 
