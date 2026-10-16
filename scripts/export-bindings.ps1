@@ -15,6 +15,17 @@ param(
   [switch] $NoTauri
 )
 $ErrorActionPreference = 'Stop'
+
+# Runs one export with cargo; its exit code alone says whether it failed. Windows PowerShell 5.1
+# turns each line a program writes to stderr (cargo's progress) into an error record when the
+# script's output is redirected, and with 'Stop' the first one would end the script halfway, so
+# the preference is 'Continue' in here (PowerShell 7 does not do this).
+function Export-From([string] $what, [string[]] $cargoArgs) {
+  $ErrorActionPreference = 'Continue'
+  & cargo @cargoArgs
+  if ($LASTEXITCODE -ne 0) { throw "$what bindings export failed ($LASTEXITCODE)" }
+}
+
 $root = Split-Path $PSScriptRoot -Parent
 $out = Join-Path $root 'app\ui\src\bindings'
 New-Item -ItemType Directory -Force $out | Out-Null
@@ -22,13 +33,11 @@ Get-ChildItem -LiteralPath $out -Filter '*.ts' -File | Remove-Item
 $env:TS_RS_EXPORT_DIR = $out
 Push-Location $root
 try {
-  cargo test -p cmdstudio-core --features ts --lib -- export_bindings
-  if ($LASTEXITCODE -ne 0) { throw "core bindings export failed ($LASTEXITCODE)" }
+  Export-From 'core' @('test', '-p', 'cmdstudio-core', '--features', 'ts', '--lib', '--', 'export_bindings')
   if ($NoTauri) {
     Write-Host 'skipping the app crate (-NoTauri): run this on CI for the app bindings'
   } else {
-    cargo test -p cmdstudio-app --lib -- export_bindings
-    if ($LASTEXITCODE -ne 0) { throw "app bindings export failed ($LASTEXITCODE)" }
+    Export-From 'app' @('test', '-p', 'cmdstudio-app', '--lib', '--', 'export_bindings')
   }
 } finally {
   Pop-Location
