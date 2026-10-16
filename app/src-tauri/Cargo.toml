@@ -43,12 +43,14 @@ uuid = { version = "1", features = ["v4", "serde"] }
 ts-rs = { version = "=12.0.1", features = ["uuid-impl", "serde-json-impl", "no-serde-warnings"] }
 
 [target.'cfg(windows)'.dependencies]
-# console.rs: AttachConsole for the CLI mode of a windows-subsystem exe, MessageBoxW for a start
+# console.rs: AttachConsole for the CLI mode of a windows-subsystem exe, only when GetStdHandle
+# and GetFileType (Storage_FileSystem) say the output goes nowhere yet; MessageBoxW for a start
 # that fails before the window exists. open.rs: CREATE_NEW_CONSOLE for the cmd window it opens,
 # ShellExecuteW for the Store, GitHub and folders (with COM initialized on the calling thread
 # first, as its documentation asks).
 windows-sys = { version = "=0.61.2", features = [
     "Win32_Foundation",
+    "Win32_Storage_FileSystem",
     "Win32_System_Com",
     "Win32_System_Console",
     "Win32_System_Threading",

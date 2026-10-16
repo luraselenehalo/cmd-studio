@@ -3,7 +3,8 @@
 //! uninstaller's `--cleanup`, `cmdstudio doctor` and the rest are the same program.
 //!
 //! A release build is a Windows-subsystem exe (no console window flashes when the app starts),
-//! so in CLI mode it attaches to the console it was started from first (`console::attach_parent`).
+//! so in CLI mode it first attaches to the console it was started from, unless its output was
+//! redirected (`console::attach_parent`: `> out.txt` and `| more` keep their redirection).
 //! cmd does not wait for a Windows-subsystem program, so `cmdstudio doctor` typed in cmd prints
 //! after the prompt came back; `cmdstudio doctor | more`, or `start /wait cmdstudio doctor`,
 //! waits. The uninstaller runs it with `ExecWait`, and tests call the library: both wait.
