@@ -402,6 +402,12 @@ pub(crate) mod testing {
         Backend::new(m, PathBuf::from(DATA), resources.root, now)
     }
 
+    /// Makes every later read of `path` fail, as when another program holds the file. The
+    /// machine is private to this module, so a test of another module goes through here.
+    pub(crate) fn fail_reads_of(b: &Backend<FakeMachine>, path: &Path) {
+        b.machine.fs.fail_reads_of(path);
+    }
+
     /// The id of the Terracotta preset.
     pub(crate) fn terracotta_id() -> uuid::Uuid {
         cmdstudio_core::presets::builtin()

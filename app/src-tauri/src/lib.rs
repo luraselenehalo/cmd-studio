@@ -8,6 +8,7 @@ pub mod backend;
 pub mod command_names;
 pub mod console;
 pub mod error;
+pub mod library;
 pub mod logs;
 #[cfg(windows)]
 pub mod machine;
