@@ -624,6 +624,7 @@ exit code: `0` สำเร็จ · `1` ล้มเหลวและย้อ
 | `E_MACHINE_READ` | อ่านการตั้งค่าของเครื่องนี้ไม่ได้ (registry, ไฟล์ หรือรายชื่อฟอนต์) จึงยังไม่ได้เปลี่ยนการตั้งค่าของคุณ หรือ doctor ตรวจข้อนั้นไม่ได้ | Could not read this computer's settings (the registry, a file, the font list), so your settings were not changed, or doctor could not check that item |
 | `E_SNAPSHOT_READ` | อ่านจุดย้อนกลับไม่ได้ (ไฟล์หาย เสีย หรือเปิดไม่ได้ในตอนนี้) · ถ้าเป็นจุดของการเปลี่ยนแปลงที่ถูกตัดกลางทาง แปลว่ายังตรวจการเปลี่ยนแปลงครั้งก่อนไม่ได้ จึงยังไม่ได้เปลี่ยนการตั้งค่าของคุณ ให้ลองใหม่ (§5.5) | A restore point can't be read (missing, damaged, or not readable right now). When it is the one of a change that was cut off, an earlier change could not be checked yet: your settings were not changed; try again (§5.5) |
 | `E_BUSY` | มี CMD Studio อีกตัว หรือโปรแกรมอื่น เปิดไฟล์ `cmdstudio.lock` อยู่ คือกำลังเปลี่ยนการตั้งค่าของเครื่องนี้ ให้ลองใหม่เมื่อทำเสร็จ (§5.5) | Another CMD Studio, or another program, has cmdstudio.lock open: it is changing this computer right now. Try again when it is done (§5.5) |
+| `E_INTERNAL` | CMD Studio เองมีปัญหา รายละเอียดบอกว่าตรงไหน ลองใหม่อีกครั้ง ถ้ายังเป็นอยู่ให้แจ้งปัญหาพร้อมข้อมูลวินิจฉัย | CMD Studio itself ran into a problem; the details say where. Try again, and if it stays, report it with the diagnostics |
 
 ### 5.10 Log ความเป็นส่วนตัว และความปลอดภัยของแอป
 - ไม่มี telemetry ใดๆ

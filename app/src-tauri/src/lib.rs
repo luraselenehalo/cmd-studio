@@ -6,6 +6,7 @@
 //! prompt logic lives in TypeScript (spec §5.6).
 pub mod command_names;
 pub mod console;
+pub mod error;
 
 #[cfg(test)]
 mod config_guard;
