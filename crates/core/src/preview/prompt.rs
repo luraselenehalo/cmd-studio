@@ -1,5 +1,6 @@
 //! The prompt as Oh My Posh 31.5.0 prints the config `generate::omp` writes, for cmd
-//! (spec §3.5). Measured on the pinned binary, and checked again by `tests/parity.rs`:
+//! (spec §3.5), and the rows of the window around it. Measured on the pinned binary, and
+//! checked again by `tests/parity.rs`:
 //! - A segment the sample hides (git outside a repository, status 0, a duration under 2 s)
 //!   leaves nothing behind, not even its spaces.
 //! - A powerline segment starts with the arrow U+E0B0 in the color of the segment before it,
@@ -11,7 +12,7 @@
 //! - `final_space` puts one space in the terminal's colors at the end of the last line. The
 //!   window title Oh My Posh prints just before that space is not drawn.
 //! - The right prompt and the transient prompt are printed alone, with no final space.
-use super::cells::prompt_cells;
+use super::cells::{prompt_cells, wrap};
 use super::values::{austin, hh_mm, prompt_path};
 use super::{Line, PreviewContext, Style};
 use crate::color::Rgb;
@@ -102,6 +103,55 @@ pub fn prompt(theme: &Theme, ctx: &PreviewContext) -> Prompt {
         right,
         transient,
     }
+}
+
+/// The rows of the window the editor shows under the welcome box (spec §5.6), wrapped at its
+/// width:
+/// 1. the command typed at the prompt before this one ([`PreviewContext::command`]). With the
+///    transient prompt on, Clink has shrunk that prompt to `> ` (spec §3.5); with it off, the
+///    prompt stays whole, as it was when the window had just opened: exit code 0, no duration;
+/// 2. the empty line cmd prints before every prompt after a command;
+/// 3. the prompt now, with the right prompt at the right edge where Clink draws it.
+pub fn render_prompt(theme: &Theme, ctx: &PreviewContext) -> Vec<Line> {
+    let width = usize::from(ctx.width.max(1));
+    let plain = Style::fg(theme.colors.foreground);
+    let earlier = if theme.prompt.transient {
+        let mut line = prompt(theme, ctx).transient;
+        line.push(&ctx.command, plain);
+        vec![line]
+    } else {
+        let first = PreviewContext {
+            exit_code: 0,
+            duration_ms: 0,
+            ..ctx.clone()
+        };
+        typed(prompt(theme, &first), &ctx.command, width, plain)
+    };
+    let now = typed(prompt(theme, ctx), "", width, plain);
+    earlier
+        .iter()
+        .chain(std::iter::once(&Line::default()))
+        .chain(&now)
+        .flat_map(|line| wrap(line, width))
+        .collect()
+}
+
+/// `p`'s lines with `command` typed after the last one, and the right prompt on that line so
+/// that it ends in the window's last cell, when Clink 1.9.34 shows it: only while the typed
+/// line, one free cell and the right prompt leave at least one more cell
+/// (display_readline.cpp: `can_show_rprompt`, `print_rprompt`).
+fn typed(p: Prompt, command: &str, width: usize, plain: Style) -> Vec<Line> {
+    let mut lines = p.primary;
+    if let Some(last) = lines.last_mut() {
+        last.push(command, plain);
+        let used = prompt_cells(&last.text());
+        let right = prompt_cells(&p.right.text());
+        if right > 0 && used + 1 + right < width {
+            last.push(&" ".repeat(width - used - right), plain);
+            last.append(&p.right);
+        }
+    }
+    lines
 }
 
 /// How many cells Oh My Posh 31.5.0 fills before a right-aligned block of `length` cells,
@@ -538,6 +588,108 @@ mod tests {
                     "{layout:?}: {text}"
                 ),
             }
+        }
+    }
+
+    // ---- the rows of the window ----
+
+    #[test]
+    fn with_the_transient_prompt_the_command_before_shrinks_to_the_arrow() {
+        let rows = render_prompt(&terracotta(), &sample(60));
+        assert_eq!(
+            rows.len(),
+            4,
+            "the command, an empty line, the box's two lines"
+        );
+        assert_eq!(spans(&rows[0]), vec![s("> ", ACCENT), s("npm test", FG)]);
+        assert!(rows[1].spans.is_empty());
+        assert_eq!(prompt_cells(&rows[2].text()), 60);
+        // the right prompt ends in the last cell
+        assert_eq!(
+            rows[3].text(),
+            format!("\u{2502} > {}\u{2502}", " ".repeat(55))
+        );
+        assert_eq!(spans(&rows[3]).last().unwrap(), &s("\u{2502}", FRAME));
+    }
+
+    #[test]
+    fn without_it_the_prompt_before_stays_whole_with_no_status_or_duration() {
+        let mut theme = themed(Layout::Line, &ALL);
+        theme.prompt.transient = false;
+        let rows = render_prompt(&theme, &sample(120));
+        assert_eq!(rows.len(), 3);
+        let before = rows[0].text();
+        assert!(before.ends_with("\u{276f} npm test"), "{before}");
+        assert!(
+            !before.contains('\u{2717}') && !before.contains("3.5s"),
+            "{before}"
+        );
+        let now = rows[2].text();
+        assert!(
+            now.contains("\u{2717} 1 ") && now.contains("3.5s "),
+            "{now}"
+        );
+    }
+
+    #[test]
+    fn the_right_prompt_shows_only_while_two_cells_stay_free_before_it() {
+        // `│ > ` is 4 cells and the right prompt 1: Clink draws it while 4 + 1 + 1 < width
+        let p = prompt(&terracotta(), &sample(80));
+        let plain = Style::fg(terracotta().colors.foreground);
+        for (width, shown) in [(7, true), (6, false), (5, false)] {
+            let lines = typed(p.clone(), "", width, plain);
+            let last = lines.last().unwrap().text();
+            assert_eq!(last.ends_with('\u{2502}'), shown, "{width}: {last:?}");
+            if shown {
+                assert_eq!(prompt_cells(&last), width);
+            }
+        }
+        // a long command leaves no room for it
+        let lines = typed(p, &"x".repeat(80), 80, plain);
+        assert!(!lines.last().unwrap().text().ends_with('\u{2502}'));
+    }
+
+    #[test]
+    fn rows_wrap_at_the_width_of_the_window() {
+        let rows = render_prompt(&terracotta(), &sample(20));
+        assert!(rows.len() > 4, "{rows:?}");
+        for row in &rows {
+            assert!(prompt_cells(&row.text()) <= 20, "{:?}", row.text());
+        }
+    }
+
+    #[test]
+    fn a_window_of_no_width_is_taken_as_one_cell_wide() {
+        for layout in [Layout::Box, Layout::Line, Layout::Powerline] {
+            for transient in [true, false] {
+                let mut theme = themed(layout, &ALL);
+                theme.prompt.transient = transient;
+                let rows = render_prompt(&theme, &sample(0));
+                assert_eq!(rows, render_prompt(&theme, &sample(1)), "{layout:?}");
+                for row in &rows {
+                    assert!(prompt_cells(&row.text()) <= 1, "{layout:?}: {row:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_typed_command_of_user_data_wraps_by_cells_and_loses_nothing() {
+        // Thai letters with marks above them: a row is cut between letters, never before a mark
+        let command = "ผู้ทดสอบ".repeat(3);
+        let ctx = PreviewContext {
+            command: command.clone(),
+            ..sample(10)
+        };
+        let rows = render_prompt(&terracotta(), &ctx);
+        let earlier: Vec<&Line> = rows.iter().take_while(|r| !r.spans.is_empty()).collect();
+        assert_eq!(earlier.len(), 2, "{rows:?}");
+        let text: String = earlier.iter().map(|row| row.text()).collect();
+        assert_eq!(text, format!("> {command}"));
+        for row in earlier {
+            assert!(prompt_cells(&row.text()) <= 10, "{:?}", row.text());
+            let first = row.text().chars().next().unwrap();
+            assert!(prompt_cells(&first.to_string()) > 0, "{:?}", row.text());
         }
     }
 }

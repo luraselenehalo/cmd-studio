@@ -14,7 +14,7 @@ mod prompt;
 mod values;
 
 pub use cells::{banner_cells, prompt_cells};
-pub use prompt::{prompt, Prompt};
+pub use prompt::{prompt, render_prompt, Prompt};
 
 use crate::color::Rgb;
 use serde::{Deserialize, Serialize};
