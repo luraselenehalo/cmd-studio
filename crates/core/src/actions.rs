@@ -17,7 +17,7 @@ use crate::snapshot::{
     UnreadableKind, Unrestored, KEEP,
 };
 use crate::state::{Applied, AutoRunRecord, FontRecord, RegValueRecord, State, StateError};
-use crate::txn::{self, Failure, Outcome, Stage};
+use crate::txn::{self, Executor, Failure, Outcome, Stage, Verifier};
 use crate::verify::SystemVerifier;
 use crate::wt_edit::{apply_edit, WtEdit, WtError};
 use std::collections::BTreeMap;
@@ -353,6 +353,94 @@ pub fn prepare_apply(
     })
 }
 
+/// What an apply is doing, step by step, for the app's progress bar (spec §4.2 page 5). The
+/// steps are the transaction's ops in order: the plan's, then the write of state.json.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Progress {
+    /// Reading what the target of op `step` of `total` holds, before anything changes.
+    BackingUp { step: usize, total: usize },
+    /// Applying op `step` of `total`.
+    Applying { step: usize, total: usize, op: Op },
+    /// Every op has ended; the result is being checked (spec §5.5).
+    Verifying,
+    /// Putting one op's target back after a failure. `step` counts the puts back so far, from 1,
+    /// in the order they are done: newest op first, so step 1 is the last op that may have
+    /// changed the machine, not the plan's first. `total` is the number of ops of the transaction,
+    /// as in the other steps; fewer than `total` steps are told when the failure came before every
+    /// op had ended, because only the ops that may have changed the machine are put back.
+    RollingBack { step: usize, total: usize },
+}
+
+/// The one listener of an apply's steps, shared by its executor and its verifier.
+type Listener<'p> = std::cell::RefCell<&'p mut dyn FnMut(Progress)>;
+
+fn tell(on: &Listener<'_>, progress: Progress) {
+    let mut listener = on.borrow_mut();
+    (*listener)(progress);
+}
+
+/// The executor of an apply, telling each step before it runs it.
+struct Watched<'a, 'p, 'q> {
+    inner: SystemExecutor<'a>,
+    total: usize,
+    captured: usize,
+    applied: usize,
+    restored: usize,
+    on: &'q Listener<'p>,
+}
+
+impl Executor for Watched<'_, '_, '_> {
+    fn capture(&mut self, op: &Op) -> Result<Option<Vec<u8>>, Failure> {
+        self.captured += 1;
+        tell(
+            self.on,
+            Progress::BackingUp {
+                step: self.captured,
+                total: self.total,
+            },
+        );
+        self.inner.capture(op)
+    }
+
+    fn apply(&mut self, op: &Op) -> Result<(), Failure> {
+        self.applied += 1;
+        tell(
+            self.on,
+            Progress::Applying {
+                step: self.applied,
+                total: self.total,
+                op: op.clone(),
+            },
+        );
+        self.inner.apply(op)
+    }
+
+    fn restore(&mut self, op: &Op, prior: &Option<Vec<u8>>) -> Result<(), Failure> {
+        self.restored += 1;
+        tell(
+            self.on,
+            Progress::RollingBack {
+                step: self.restored,
+                total: self.total,
+            },
+        );
+        self.inner.restore(op, prior)
+    }
+}
+
+/// The verifier of an apply, telling that the check starts.
+struct WatchedVerifier<'a, 'p, 'q> {
+    inner: SystemVerifier<'a>,
+    on: &'q Listener<'p>,
+}
+
+impl Verifier for WatchedVerifier<'_, '_, '_> {
+    fn verify(&mut self, ops: &[Op]) -> Result<(), Failure> {
+        tell(self.on, Progress::Verifying);
+        self.inner.verify(ops)
+    }
+}
+
 /// Runs a prepared apply as one transaction, its new state.json the last op. After it ends, the
 /// font files its rollback uninstalled but could not delete are noted in state.json for a later
 /// delete; a rollback that could neither delete nor note one ends `RollbackIncomplete` with that
@@ -361,6 +449,18 @@ pub fn prepare_apply(
 /// `prepare_apply` took is let go when this returns. Given a data folder or bundled files other
 /// than those it was prepared with, it changes nothing and ends `RolledBack` (`E_DATA_WRITE`).
 pub fn run_apply(sys: System<'_>, ctx: &Ctx, prepared: Prepared) -> Outcome {
+    run_apply_with(sys, ctx, prepared, &mut |_| {})
+}
+
+/// [`run_apply`], telling `progress` about each step as it starts (see [`Progress`]): the app's
+/// progress bar reads it (spec §4.2 page 5). The listener runs on the thread of the apply,
+/// before each step, and never after this returns.
+pub fn run_apply_with(
+    sys: System<'_>,
+    ctx: &Ctx,
+    prepared: Prepared,
+    progress: &mut dyn FnMut(Progress),
+) -> Outcome {
     let Prepared {
         plan,
         ops,
@@ -391,12 +491,23 @@ pub fn run_apply(sys: System<'_>, ctx: &Ctx, prepared: Prepared) -> Outcome {
     let store = SnapshotStore::new(sys.fs, &root);
     let id = manifest.id.clone();
     let mut journal = store.begin(manifest);
-    let mut exec = SystemExecutor::new(sys, &ctx.resources);
-    let mut verifier = SystemVerifier::new(sys, &ctx.paths, &ctx.resources, Some(plan.launch));
+    let on: Listener<'_> = std::cell::RefCell::new(progress);
+    let mut exec = Watched {
+        inner: SystemExecutor::new(sys, &ctx.resources),
+        total: ops.len(),
+        captured: 0,
+        applied: 0,
+        restored: 0,
+        on: &on,
+    };
+    let mut verifier = WatchedVerifier {
+        inner: SystemVerifier::new(sys, &ctx.paths, &ctx.resources, Some(plan.launch)),
+        on: &on,
+    };
     let outcome = txn::run(&id, ops.clone(), &mut exec, &mut verifier, &mut journal);
     // Only a rollback uninstalls a font (`SystemExecutor::apply` never does), so a committed
     // apply holds no file and `after_held` has nothing to give back for one.
-    let (outcome, _) = after_held(sys, ctx, &ops, &exec.held_files(), outcome);
+    let (outcome, _) = after_held(sys, ctx, &ops, &exec.inner.held_files(), outcome);
     // A list that could not be saved is said, and rebuilt from the journal at the next start.
     let outcome = match record_incomplete(&store, &id, &outcome) {
         Ok(()) => outcome,
@@ -2793,5 +2904,69 @@ mod tests {
             );
             assert_eq!(m.autorun.read_user().unwrap(), Some(value));
         }
+    }
+
+    #[test]
+    fn run_apply_with_tells_each_step_in_order() {
+        let (m, ctx) = machine();
+        let theme = crate::presets::terracotta();
+        let prepared = prepare_apply(m.system(), &ctx, &theme, &request(Target::All)).unwrap();
+        let ops = prepared.ops.clone();
+        let total = ops.len();
+        let mut seen = Vec::new();
+        let outcome = run_apply_with(m.system(), &ctx, prepared, &mut |p| seen.push(p));
+        assert_eq!(outcome, Outcome::Committed);
+        let mut want: Vec<Progress> = (1..=total)
+            .map(|step| Progress::BackingUp { step, total })
+            .collect();
+        want.extend(ops.iter().enumerate().map(|(i, op)| Progress::Applying {
+            step: i + 1,
+            total,
+            op: op.clone(),
+        }));
+        want.push(Progress::Verifying);
+        assert_eq!(seen, want);
+        // The last op is the write of state.json.
+        assert!(matches!(
+            ops.last(),
+            Some(Op::WriteFile { path, .. }) if *path == ctx.paths.state_file()
+        ));
+    }
+
+    #[test]
+    fn run_apply_with_tells_the_rollback_after_a_failed_check() {
+        let (m, ctx) = machine();
+        // Oh My Posh does not render the config: verify fails and everything is put back.
+        m.process.answer("oh-my-posh.exe", "print", 1, "");
+        let theme = crate::presets::terracotta();
+        let prepared = prepare_apply(m.system(), &ctx, &theme, &request(Target::All)).unwrap();
+        let total = prepared.ops.len();
+        let mut seen = Vec::new();
+        let outcome = run_apply_with(m.system(), &ctx, prepared, &mut |p| seen.push(p));
+        assert!(
+            matches!(
+                outcome,
+                Outcome::RolledBack {
+                    code: "E_VERIFY_OMP",
+                    ..
+                }
+            ),
+            "{outcome:?}"
+        );
+        let verifying = seen.iter().position(|p| *p == Progress::Verifying).unwrap();
+        let after: Vec<&Progress> = seen.iter().skip(verifying + 1).collect();
+        let want: Vec<Progress> = (1..=total)
+            .map(|step| Progress::RollingBack { step, total })
+            .collect();
+        assert_eq!(after, want.iter().collect::<Vec<_>>());
+        // The plain `run_apply` is the same apply without a listener.
+        let prepared = prepare_apply(m.system(), &ctx, &theme, &request(Target::All)).unwrap();
+        assert!(matches!(
+            run_apply(m.system(), &ctx, prepared),
+            Outcome::RolledBack {
+                code: "E_VERIFY_OMP",
+                ..
+            }
+        ));
     }
 }
