@@ -73,7 +73,8 @@ pub struct Backend<M> {
     pub(crate) library_lock: Mutex<()>,
     /// The user, computer and home the preview's sample starts from, read from the environment
     /// once by `machine::real_backend` and handed to the UI by `system_detect`. The user name
-    /// in it is the user's own: it goes to the UI and nowhere else, and is never logged.
+    /// in it is the user's own: it goes to the UI and nowhere else, and is never logged; the
+    /// diagnostics read it only to redact it.
     sample: SampleIdentity,
 }
 

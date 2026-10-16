@@ -1,6 +1,7 @@
 //! `diagnostics_copy` (spec §4.3 "แจ้งปัญหา", §5.10): the text the user copies into a GitHub
 //! issue. English only. Every path that holds the Windows user name, as the profile folder's
-//! name or its 8.3 alias, has it redacted to `%USERNAME%`, and every account SID to `<SID>`.
+//! name, its 8.3 alias or the name Windows gives (`USERNAME`), has it redacted to `%USERNAME%`,
+//! and every account SID to `<SID>`.
 //! Of AutoRun it holds counts and flags, never the user's commands, and of the user's own
 //! settings in checks' details nothing; of the preview's sample (the user, the computer, the
 //! home folder), nothing. The text is the answer and is written nowhere: it leaves the machine
@@ -11,6 +12,7 @@ use crate::settings::{AppSettings, Language, UpdateMode};
 use cmdstudio_core::adapters::{Arch, DefaultTerminal, WtVariant};
 use cmdstudio_core::doctor::{doctor, Check, Status};
 use cmdstudio_core::model::Target;
+use cmdstudio_core::preview::PreviewContext;
 use cmdstudio_core::snapshot::SnapshotKind;
 use std::path::{Path, PathBuf};
 
@@ -174,33 +176,53 @@ impl<M: Machine> Backend<M> {
     }
 
     /// The forms of the user name that a path in the text can hold, longest first: the profile
-    /// folder's name (the folder before `AppData` in the data folder's own path) and its 8.3
-    /// alias (for a profile path that cmd can't take, the planner starts Clink from the alias,
-    /// and the checks print that path). Taken from the data folder, the name is never empty:
-    /// when its path has no `AppData` folder, or the alias can't be read, this is the error,
-    /// and nothing is copied.
+    /// folder's name (the folder before `AppData` in the data folder's own path), its 8.3 alias
+    /// (for a profile path that cmd can't take, the planner starts Clink from the alias, and the
+    /// checks print that path), and the user name Windows gives (`USERNAME`, see
+    /// [`Backend::windows_user_name`]), which a redirected or roaming profile's path, with no
+    /// `AppData` folder, still holds. None is empty. When no name is known at all (no `AppData`
+    /// folder and no `USERNAME`), or the alias can't be read, this is the error, and nothing is
+    /// copied.
     fn user_names(&self) -> Result<Vec<String>, AppError> {
-        let Some(profile) = profile_of(&self.paths().data) else {
-            return Err(AppError::internal(
-                "the data folder's path holds no AppData folder, so the user name in the \
-                 diagnostics could not be told; they are not copied with it in them",
-            ));
-        };
-        let short = self.sys().host.short_path(&profile).map_err(|_| {
-            AppError::coded(
-                "E_MACHINE_READ",
-                "the 8.3 name of the profile folder could not be read, so the diagnostics are \
-                 not copied: it could be in them",
-            )
-        })?;
-        let mut names: Vec<String> = [profile.as_path(), short.as_path()]
-            .iter()
-            .filter_map(|p| p.file_name())
-            .map(|n| n.to_string_lossy().into_owned())
+        let mut names: Vec<String> = self
+            .windows_user_name()
+            .map(str::to_string)
+            .into_iter()
             .collect();
+        if let Some(profile) = profile_of(&self.paths().data) {
+            let short = self.sys().host.short_path(&profile).map_err(|_| {
+                AppError::coded(
+                    "E_MACHINE_READ",
+                    "the 8.3 name of the profile folder could not be read, so the diagnostics \
+                     are not copied: it could be in them",
+                )
+            })?;
+            names.extend(
+                [profile.as_path(), short.as_path()]
+                    .iter()
+                    .filter_map(|p| p.file_name())
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .filter(|n| !n.is_empty()),
+            );
+        }
+        if names.is_empty() {
+            return Err(AppError::internal(
+                "the data folder's path holds no AppData folder and USERNAME is not set, so the \
+                 user name in the diagnostics could not be told; they are not copied with it in \
+                 them",
+            ));
+        }
         names.sort_by_key(|n| std::cmp::Reverse(n.chars().count()));
         names.dedup();
         Ok(names)
+    }
+
+    /// The user name Windows gives (`USERNAME`), as the backend holds it for the preview's
+    /// sample; `None` when it was not set. `SampleIdentity::from_env` puts the core's own sample
+    /// name in its place then, which is no user's name, so that one counts as not set too.
+    fn windows_user_name(&self) -> Option<&str> {
+        let user = self.sample.user.as_str();
+        (!user.is_empty() && user != PreviewContext::sample().user).then_some(user)
     }
 
     /// The settings line. Settings that could not be loaded are said to be so, and are never
@@ -496,7 +518,8 @@ pub fn redact_sids(text: &str, sid: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::testing::{apply_terracotta, backend, fake_fs, WT};
+    use crate::backend::preview::SampleIdentity;
+    use crate::backend::testing::{apply_terracotta, backend, fake_fs, sample_identity, WT};
     use crate::settings::Language;
     use cmdstudio_core::adapters::{AutoRun, RegValue, REG_SZ};
     use cmdstudio_core::plan::Paths;
@@ -648,14 +671,90 @@ mod tests {
         );
     }
 
+    /// A redirected or roaming profile: the data folder's path has no `AppData` folder, so the
+    /// profile folder can't be told from it. The user name Windows gives (`USERNAME`, which the
+    /// backend holds for the preview) is redacted instead, as a whole folder name, and the
+    /// diagnostics are copied.
+    #[test]
+    fn a_redirected_profile_redacts_the_user_name_windows_gives() {
+        let mut b = backend();
+        assert_eq!(b.sample.user, "tester");
+        b.paths = Paths {
+            data: PathBuf::from(r"D:\Profiles\tester\Local\ai.resincore.cmdstudio"),
+        };
+        b.sys()
+            .fs
+            .write_atomic(
+                &b.log.file(),
+                b"2026-10-17T00:00:00Z cmd=x D:\\Profiles\\Tester\\Desktop and \
+                  C:/Users/tester/y and D:\\Profiles\\testers\\z\n",
+            )
+            .unwrap();
+        let text = b.diagnostics_copy().unwrap();
+        assert!(
+            text.contains(r"data folder: D:\Profiles\%USERNAME%\Local\ai.resincore.cmdstudio"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                r"cmd=x D:\Profiles\%USERNAME%\Desktop and C:/Users/%USERNAME%/y and D:\Profiles\testers\z"
+            ),
+            "{text}"
+        );
+        assert!(
+            !text
+                .to_lowercase()
+                .replace("testers", "")
+                .contains("tester"),
+            "{text}"
+        );
+    }
+
+    /// The user name Windows gives is redacted beside the profile folder's name when the two
+    /// differ (an account renamed after its profile folder was made).
+    #[test]
+    fn a_user_name_unlike_the_profile_folders_is_redacted_too() {
+        let mut b = backend();
+        b.paths = Paths {
+            data: PathBuf::from(r"C:\Users\oldname\AppData\Local\ai.resincore.cmdstudio"),
+        };
+        b.sys()
+            .fs
+            .write_atomic(
+                &b.log.file(),
+                b"2026-10-17T00:00:00Z cmd=x C:\\Users\\oldname\\x and \\\\server\\home\\tester\\y\n",
+            )
+            .unwrap();
+        let text = b.diagnostics_copy().unwrap();
+        assert!(
+            text.contains(r"cmd=x C:\Users\%USERNAME%\x and \\server\home\%USERNAME%\y"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("oldname") && !text.contains("tester"),
+            "{text}"
+        );
+    }
+
     /// Without a user name to redact, nothing is copied: never a report with the name in it.
+    /// No name is known when the data folder's path has no `AppData` folder and `USERNAME` is
+    /// not set: the backend then holds the core's stand-in sample name, which is no user's.
     #[test]
     fn with_no_user_name_to_redact_nothing_is_copied() {
         let mut b = backend();
         b.paths = Paths {
             data: PathBuf::from(r"D:\CMD Studio data"),
         };
-        assert_eq!(b.diagnostics_copy().unwrap_err().code, "E_INTERNAL");
+        for sample in [
+            SampleIdentity::from_env(|_| None),
+            SampleIdentity {
+                user: String::new(),
+                ..sample_identity()
+            },
+        ] {
+            b.sample = sample;
+            assert_eq!(b.diagnostics_copy().unwrap_err().code, "E_INTERNAL");
+        }
     }
 
     /// D7's details quote the user's own cmd command line in Windows Terminal: left out, as
