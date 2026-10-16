@@ -1,0 +1,54 @@
+[package]
+name = "cmdstudio-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+# The app and the CLI in one exe (spec §5.7): `cmdstudio.exe` opens the window when started
+# without arguments and runs `cmdstudio_cli::run` when started with any.
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+name = "cmdstudio_app"
+
+[build-dependencies]
+# Tauri's build step: the ACL permissions of the app's commands (`allow-<command>`), the icon
+# resource, the config check. Pinned like every version here (spec §6.4).
+tauri-build = { version = "=2.7.3", features = [] }
+
+[dependencies]
+# `ts`: the core's public types carry ts-rs derives, exported to app/ui/src/bindings.
+cmdstudio-core = { path = "../../crates/core", features = ["ts"] }
+cmdstudio-cli = { path = "../../crates/cli" }
+# Tauri 2 (G10: 2.12.x). Default features: wry, compression, common-controls-v6, dynamic-acl.
+tauri = { version = "=2.12.4", features = [] }
+# One window: a second start focuses the first (spec §5.7 "single instance"). No JS commands.
+tauri-plugin-single-instance = "=2.5.4"
+# The native Open and Save dialogs for .cmdtheme files, shown from the main thread with the
+# window as parent. Its default features are Linux portals; on Windows it needs none.
+rfd = { version = "=0.17.2", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+# TypeScript bindings (G11). `no-serde-warnings`: ts-rs prints a note at compile time for each
+# serde attribute it does not know (deny_unknown_fields, deserialize_with); none of them changes
+# a generated type, and `Line` overrides its `transparent` with `ts(as)`.
+ts-rs = { version = "=12.0.1", features = ["uuid-impl", "serde-json-impl", "no-serde-warnings"] }
+
+[target.'cfg(windows)'.dependencies]
+# console.rs: AttachConsole for the CLI mode of a windows-subsystem exe, MessageBoxW for a start
+# that fails before the window exists. open.rs: CREATE_NEW_CONSOLE for the cmd window it opens,
+# ShellExecuteW for the Store, GitHub and folders.
+windows-sys = { version = "=0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[dev-dependencies]
+# The in-memory machine: the app's tests never touch this computer.
+cmdstudio-core = { path = "../../crates/core", features = ["fake", "ts"] }
