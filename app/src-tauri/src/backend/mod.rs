@@ -21,6 +21,7 @@ use std::sync::{Mutex, PoisonError};
 use std::time::Instant;
 use ts_rs::TS;
 
+pub mod preview;
 pub mod system;
 
 /// What the backend runs on: the real adapters (`crate::machine::RealMachine`) or the core's
