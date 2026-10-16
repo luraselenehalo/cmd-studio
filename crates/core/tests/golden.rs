@@ -2,11 +2,14 @@
 //! generators write).
 //!
 //! Each test makes one generated file from fixed inputs and compares it, character for
-//! character, with the file of the same name under `tests/golden/`. The inputs are the
-//! Terracotta preset and the paths of the Thai test user of spec §7 (VM-C), so the paths have
-//! Thai letters and a space in them; only `<clink-launch>` is all ASCII, as it always is
-//! (spec §5.4). Nothing here reads the machine or the clock, and a test that fails names the
-//! file and the first line that differs.
+//! character, with the file of the same name under `tests/golden/`. The inputs of the
+//! generators are the Terracotta preset and the paths of the Thai test user of spec §7 (VM-C),
+//! so the paths have Thai letters and a space in them; only `<clink-launch>` is all ASCII, as
+//! it always is (spec §5.4). The preview (spec §5.6) is not a generator's file but what the
+//! editor draws: its inputs are four presets (Terracotta, Tokyo Night, Catppuccin Latte and
+//! Paper) in `PreviewContext::sample()`, which is all English (the user is "you", the
+//! computer "PC"). Nothing here reads the machine or the clock, and a test that fails names
+//! the file and the first line that differs.
 //!
 //! A plain run only reads the golden files. With `UPDATE_GOLDEN=1` each test writes its file
 //! first and compares after, so a file that could not be written still fails:
@@ -283,6 +286,7 @@ golden_tests! {
     terracotta_preview: "terracotta.preview.txt" = preview_text(&terracotta());
     tokyo_night_preview: "tokyo-night.preview.txt" = preview_text(&preset("tokyo-night"));
     catppuccin_latte_preview: "catppuccin-latte.preview.txt" = preview_text(&preset("catppuccin-latte"));
+    paper_preview: "paper.preview.txt" = preview_text(&preset("paper"));
 }
 
 #[test]
