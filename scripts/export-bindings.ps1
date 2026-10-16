@@ -6,10 +6,16 @@
   one or a deleted one): the committed bindings must be what the Rust types export now.
 .DESCRIPTION
   ts-rs exports through tests named export_bindings_*; TS_RS_EXPORT_DIR tells them where. The
-  folder holds generated files only, and its .ts files are removed first, so a type that was
-  renamed or removed leaves no stale file behind: git shows it as deleted. The app crate's
-  export runs through the check crate when given -NoTauri, for a machine where the Tauri build
-  is blocked (Windows Application Control, os error 4551); CI runs the app crate.
+  folder holds generated files only. A full run (no switch, as CI runs it) removes its .ts
+  files first, so a type that was renamed or removed leaves no stale file behind: git shows it
+  as deleted.
+.PARAMETER NoTauri
+  Exports the core's types only, for a machine where the app crate cannot be built (Windows
+  Application Control, os error 4551). Nothing is removed in this mode. The core's files are
+  written over, and the app crate's are left as they are, because nothing here exports them
+  again (appendix B's check crate can, with TS_RS_EXPORT_DIR set to this folder). The app's
+  export writes core types too, so a core type that was renamed or removed cannot be told from
+  an app type here: its old file stays until a full run, which CI makes.
 #>
 param(
   [switch] $NoTauri
@@ -29,13 +35,15 @@ function Export-From([string] $what, [string[]] $cargoArgs) {
 $root = Split-Path $PSScriptRoot -Parent
 $out = Join-Path $root 'app\ui\src\bindings'
 New-Item -ItemType Directory -Force $out | Out-Null
-Get-ChildItem -LiteralPath $out -Filter '*.ts' -File | Remove-Item
+if (-not $NoTauri) {
+  Get-ChildItem -LiteralPath $out -Filter '*.ts' -File | Remove-Item
+}
 $env:TS_RS_EXPORT_DIR = $out
 Push-Location $root
 try {
   Export-From 'core' @('test', '-p', 'cmdstudio-core', '--features', 'ts', '--lib', '--', 'export_bindings')
   if ($NoTauri) {
-    Write-Host 'skipping the app crate (-NoTauri): run this on CI for the app bindings'
+    Write-Host 'core only (-NoTauri): the app crate''s bindings were left as they are; a full run (CI) checks them'
   } else {
     Export-From 'app' @('test', '-p', 'cmdstudio-app', '--lib', '--', 'export_bindings')
   }
