@@ -110,10 +110,12 @@ pub struct SystemReport {
     pub fonts: FontInfo,
     pub data_dir: String,
     pub versions: Versions,
-    /// The user, computer and home folder the preview's sample starts from (spec §5.6): the UI
+    /// The user, computer and home folder the preview's sample starts from (spec §5.6). The UI
     /// cannot read the environment, so it sends these back as the `PreviewContext`'s `user`,
-    /// `host` and `home`. The user name is the user's own and stays between the backend and the
-    /// UI: it is never logged, and the diagnostics redact it.
+    /// `host` and `home`.
+    // The user name is the user's own and stays between the backend and the UI: it is never
+    // logged, and the diagnostics redact it. A plain comment, so that it stays out of the
+    // TypeScript binding.
     pub preview_sample: SampleIdentity,
 }
 

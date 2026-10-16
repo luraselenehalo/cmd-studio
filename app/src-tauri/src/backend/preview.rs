@@ -20,7 +20,7 @@ pub struct PreviewResult {
 }
 
 /// One color below its minimum contrast against the background (spec §3.4). `slot` is
-/// `foreground`, `muted`, `accent` or `ansi<n>` (n = 0–15), the names the editor's panel uses.
+/// `foreground`, `muted`, `accent` or `ansi<n>` with n = 1–6 or 9–14, the slots the core checks.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
@@ -30,17 +30,16 @@ pub struct ContrastIssue {
     pub required: f64,
 }
 
-/// Who and where the preview's sample is, as this computer says it: the Windows user name, the
-/// computer name, and the folder Oh My Posh takes as home. The UI cannot read the environment,
-/// so it gets these from `system_detect` (`SystemReport.preview_sample`) and sends them back
-/// as `user`, `host` and `home` of the `PreviewContext` it chooses.
-///
-/// The user name is the user's own, and it goes to the UI, which is the user's own app. It is
-/// never logged (`Backend::logged` writes no value of a command) and the diagnostics redact it.
+/// The Windows user name, the computer name and the folder Oh My Posh takes as home: this
+/// computer's own, which the preview's sample starts from. Send them back as `user`, `host` and
+/// `home` of the `PreviewContext`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct SampleIdentity {
+    // The user name is the user's own: it goes to the UI, which is the user's own app, and
+    // nowhere else. It is never logged (`Backend::logged` writes no value of a command) and the
+    // diagnostics redact it. A plain comment, so that it stays out of the TypeScript binding.
     pub user: String,
     pub host: String,
     pub home: String,
@@ -136,7 +135,9 @@ pub fn contrast_fix(mut colors: Colors) -> Colors {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cmdstudio_core::model::Segment;
     use cmdstudio_core::presets;
+    use cmdstudio_core::preview::GitState;
 
     fn terracotta() -> Theme {
         presets::builtin()
@@ -168,6 +169,64 @@ mod tests {
             .collect();
         assert!(!text.contains('\u{1b}') && !text.contains('\n') && !text.contains('\u{202e}'));
         assert!(text.contains("dir red"), "{text}");
+    }
+
+    #[test]
+    fn a_hostile_sample_reaches_no_span_whichever_text_field_carries_it() {
+        // The core's prompt draws `cwd`, `home` and the branch as given, so the cleaning here is
+        // all that stands between a typed escape sequence and a span. The first test types into
+        // `command` and `user`; this one types into `cwd`, `home`, `host` and the branch, and
+        // into `user` again, with a prompt that shows the user and the host.
+        let mut theme = terracotta();
+        theme.prompt.segments = vec![Segment::User, Segment::Host, Segment::Path, Segment::Git];
+        let dirt = "\u{1b}[31m\n\u{202e}";
+        let hostile = PreviewContext {
+            user: format!("you{dirt}"),
+            host: format!("pc{dirt}HOST"),
+            home: format!(r"C:\Users\you{dirt}"),
+            cwd: format!(r"C:\Users\you\pro{dirt}jects"),
+            git: Some(GitState {
+                branch: format!("ma{dirt}in"),
+                dirty: true,
+            }),
+            ..PreviewContext::sample()
+        };
+        let drawn = preview_render(&theme, &hostile);
+        for line in drawn.prompt.iter().chain(&drawn.banner) {
+            for span in &line.spans {
+                for bad in ['\u{1b}', '\n', '\u{202e}'] {
+                    assert!(
+                        !span.text.contains(bad),
+                        "{:?} reached a span: {:?}",
+                        bad,
+                        span.text
+                    );
+                }
+            }
+        }
+        // What is drawn is what the cleaned texts draw: the dirt went, the rest stayed, so the
+        // home is still the home of the cwd (`~`) and the branch is still the branch.
+        let cleaned = PreviewContext {
+            user: "you".to_string(),
+            host: "pcHOST".to_string(),
+            home: r"C:\Users\you".to_string(),
+            cwd: r"C:\Users\you\projects".to_string(),
+            git: Some(GitState {
+                branch: "main".to_string(),
+                dirty: true,
+            }),
+            ..PreviewContext::sample()
+        };
+        assert_eq!(drawn, preview_render(&theme, &cleaned));
+        let text: String = drawn
+            .prompt
+            .iter()
+            .chain(&drawn.banner)
+            .map(Line::text)
+            .collect();
+        assert!(text.contains(r"~\projects"), "{text}");
+        assert!(text.contains("main"), "{text}");
+        assert!(text.contains("you@pcHOST"), "{text}");
     }
 
     #[test]
