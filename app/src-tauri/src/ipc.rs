@@ -1,18 +1,23 @@
 //! The IPC commands (spec §5.7), one Tauri command each, as thin wrappers over the
-//! [`Backend`]: they move arguments and results across, run the work off the window's thread,
-//! and log it. Nothing is decided here, so the tests of what a command does are the backend's;
-//! the tests here hold the list of commands to `command_names::COMMANDS`, to what Tauri
-//! registers and to what `capabilities/default.json` allows (spec §5.10), and check that each
-//! command logs.
+//! [`Backend`] and the core: they move arguments and results across, run the work that touches
+//! the machine off the window's thread, and log it. Nothing is decided here, so the tests of
+//! what a command does are the backend's; the tests here hold the list of commands to
+//! `command_names::COMMANDS`, to what Tauri registers and to what `capabilities/default.json`
+//! allows (spec §5.10), and check which commands log.
 //!
-//! Every command calls the backend, and every one writes exactly one log line through
-//! [`Backend::logged`]: its name (a constant of `command_names`, never text built at run time),
-//! how long it took, and `ok` or the error's code. No command bypasses it. The four that compute
-//! without touching the machine (`palette_generate`, `contrast_check`, `contrast_fix`,
-//! `preview_render`) log too. They are sync, so Tauri runs them on the window's thread, one at
-//! a time and in the order they were asked, and their log line is written there. The two
-//! commands that ask the user for a file (`theme_import_preview`, `theme_export`) log once for
-//! the whole command: the time includes the user's time in the dialog, and a cancel is `ok`.
+//! Every command that reads or changes the machine, the data folder or the settings (23 of
+//! the 27) writes exactly one log line through [`Backend::logged`]: its name (a constant of
+//! `command_names`, never text built at run time), how long it took, and `ok` or the error's
+//! code. The two that ask the user for a file (`theme_import_preview`, `theme_export`) log once
+//! for the whole command: the time includes the user's time in the dialog, and a cancel is
+//! `ok`.
+//!
+//! The four pure commands, `palette_generate`, `contrast_check`, `contrast_fix` and
+//! `preview_render`, do not log. They compute over the core and touch neither the machine nor
+//! a file nor the settings, and the log is there to diagnose what does. They run on each
+//! settled edit or slider move, and each log line rewrites the log file (up to 1 MB), which
+//! would be on the window's thread: they are sync, so Tauri runs them there one at a time and
+//! their answers come back in the order they were asked.
 use crate::backend::apply::{
     ApplyOutcome, ApplyProgress, ApplyRequest, PlanOutcome, RestoreOutcome, RestorePoints,
     RevertOutcome, UndoOutcome,
@@ -187,41 +192,23 @@ pub async fn theme_export(
 }
 
 #[tauri::command]
-pub fn palette_generate(
-    state: TauriState<'_, Shared>,
-    tone: Tone,
-    accent: String,
-    tint: f64,
-) -> Result<Colors, AppError> {
-    state.logged(names::PALETTE_GENERATE, |_| {
-        preview::palette_generate(tone, &accent, tint)
-    })
+pub fn palette_generate(tone: Tone, accent: String, tint: f64) -> Result<Colors, AppError> {
+    preview::palette_generate(tone, &accent, tint)
 }
 
 #[tauri::command]
-pub fn contrast_check(
-    state: TauriState<'_, Shared>,
-    colors: Colors,
-) -> Result<Vec<ContrastIssue>, AppError> {
-    state.logged(names::CONTRAST_CHECK, |_| {
-        Ok(preview::contrast_check(&colors))
-    })
+pub fn contrast_check(colors: Colors) -> Vec<ContrastIssue> {
+    preview::contrast_check(&colors)
 }
 
 #[tauri::command]
-pub fn contrast_fix(state: TauriState<'_, Shared>, colors: Colors) -> Result<Colors, AppError> {
-    state.logged(names::CONTRAST_FIX, |_| Ok(preview::contrast_fix(colors)))
+pub fn contrast_fix(colors: Colors) -> Colors {
+    preview::contrast_fix(colors)
 }
 
 #[tauri::command]
-pub fn preview_render(
-    state: TauriState<'_, Shared>,
-    theme: Theme,
-    context: PreviewContext,
-) -> Result<PreviewResult, AppError> {
-    state.logged(names::PREVIEW_RENDER, |_| {
-        Ok(preview::preview_render(&theme, &context))
-    })
+pub fn preview_render(theme: Theme, context: PreviewContext) -> PreviewResult {
+    preview::preview_render(&theme, &context)
 }
 
 #[tauri::command]
@@ -438,11 +425,21 @@ mod tests {
         assert_eq!(capability["windows"], serde_json::json!(["main"]));
     }
 
-    /// Ruling F11 of the pre-flight review: every command reaches the backend and writes one
-    /// log line through `Backend::logged`, the four that compute without the machine included,
-    /// under its own name from `command_names` (a constant, never text built at run time).
+    /// The four pure commands: they compute over the core and touch neither the machine nor a
+    /// file nor the settings.
+    const PURE: [&str; 4] = [
+        "palette_generate",
+        "contrast_check",
+        "contrast_fix",
+        "preview_render",
+    ];
+
+    /// Ruling F11 of the pre-flight review, as revised: each of the 23 commands that read or
+    /// change the machine, the data folder or the settings writes one log line through
+    /// `Backend::logged`, under its own name from `command_names` (a constant, never text built
+    /// at run time). The four pure commands write none, and stay sync.
     #[test]
-    fn every_command_logs_one_line_under_its_own_name() {
+    fn each_command_logs_once_under_its_own_name_and_the_pure_four_do_not_log() {
         // Each command is the text from its attribute, at the start of a line, to the next one;
         // the last ends where `handler()` starts.
         let attribute = "\n#[tauri::command]\n";
@@ -455,6 +452,10 @@ mod tests {
             .filter(|c| !c.trim().is_empty())
             .collect();
         assert_eq!(commands.len(), COMMANDS.len());
+        for name in PURE {
+            assert!(COMMANDS.contains(&name), "{name} is not a command");
+        }
+        let mut logging = 0;
         for name in COMMANDS {
             let own: Vec<&&str> = commands
                 .iter()
@@ -462,6 +463,13 @@ mod tests {
                 .collect();
             assert_eq!(own.len(), 1, "{name} is one command");
             let body = own[0];
+            if PURE.contains(name) {
+                assert!(body.contains(&format!("pub fn {name}(")), "{name} is sync");
+                assert!(!body.contains("logged("), "{name} writes no log line");
+                assert!(!body.contains("names::"), "{name} names no command");
+                continue;
+            }
+            logging += 1;
             assert_eq!(body.matches(".logged(").count(), 1, "{name} logs once");
             assert_eq!(
                 body.matches("names::").count(),
@@ -474,5 +482,6 @@ mod tests {
                 "{name} logs under {constant}"
             );
         }
+        assert_eq!(logging, 23);
     }
 }
