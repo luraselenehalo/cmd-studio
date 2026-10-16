@@ -90,17 +90,40 @@ fn the_preview_of_every_preset_holds_no_thai_character() {
     assert!(ctx.git.as_ref().is_some_and(|git| git.branch.is_ascii()));
     let presets = presets::builtin().unwrap();
     assert!(!presets.is_empty());
-    let mut found = Vec::new();
-    for (key, preset) in presets {
+    let (mut found, mut too_few) = (Vec::new(), Vec::new());
+    let (mut cases, mut box_rows_seen, mut prompt_rows_seen) = (0, 0, 0);
+    for (key, preset) in &presets {
         for layout in [Layout::Box, Layout::Line, Layout::Powerline] {
             for transient in [true, false] {
                 let mut theme = preset.clone();
                 theme.prompt.layout = layout;
                 theme.prompt.transient = transient;
-                let rows = render_banner(&theme, &ctx)
-                    .into_iter()
-                    .chain(render_prompt(&theme, &ctx));
-                for (i, row) in rows.enumerate() {
+                let banner = render_banner(&theme, &ctx);
+                let prompt = render_prompt(&theme, &ctx);
+                // An empty render would pass the check below without checking a row, so the
+                // rows are counted: the box the theme describes has its top and bottom, its
+                // title, an empty line and its lines when it has any, its tips and the closing
+                // space; the prompt has the earlier command, the empty line and the prompt now.
+                let b = &theme.banner;
+                let box_rows = if b.enabled {
+                    4 + if b.lines.is_empty() {
+                        0
+                    } else {
+                        1 + b.lines.len()
+                    } + usize::from(b.tips)
+                } else {
+                    0
+                };
+                if banner.len() < box_rows || prompt.len() < 3 {
+                    too_few.push(format!(
+                        "{key}, {layout:?}, transient {transient}: {} rows of the box (at least {box_rows}) and {} of the prompt (at least 3)",
+                        banner.len(),
+                        prompt.len()
+                    ));
+                }
+                box_rows_seen += banner.len();
+                prompt_rows_seen += prompt.len();
+                for (i, row) in banner.iter().chain(&prompt).enumerate() {
                     let letters = thai(&row.text());
                     if !letters.is_empty() {
                         found.push(format!(
@@ -109,12 +132,21 @@ fn the_preview_of_every_preset_holds_no_thai_character() {
                         ));
                     }
                 }
+                cases += 1;
             }
         }
     }
+    assert!(
+        too_few.is_empty(),
+        "the preview drew too few rows to check:\n{}",
+        too_few.join("\n")
+    );
     assert!(
         found.is_empty(),
         "Thai in what the preview shows for cmd:\n{}",
         found.join("\n")
     );
+    // every preset in every layout with the transient prompt on and off, and rows in them
+    assert_eq!(cases, presets.len() * 3 * 2);
+    assert!(box_rows_seen > 0 && prompt_rows_seen > 0);
 }
