@@ -42,24 +42,60 @@ log.info("cmdstudio: prompt loaded")
 /// The `{date}` format (spec §3.6): the names of the days and the months, how the day of the
 /// month is written, and the year. The generator embeds these itself and never takes a name
 /// from `os.date`: on Windows that follows the language of the machine (Thai Windows gives
-/// Thai names), and what CMD Studio writes into cmd is English.
-struct DateStyle {
+/// Thai names), and what CMD Studio writes into cmd is English. The preview emulator writes
+/// the date from the same tables ([`DateStyle::format`]), and `tests/banner_parity.rs` holds
+/// the two to each other for every day of a year.
+pub(crate) struct DateStyle {
     /// Sunday first, the way Lua's `os.date("*t").wday` counts.
     days: [&'static str; 7],
     months: [&'static str; 12],
-    /// A `string.format` pattern for the day name, the day, the month name and the year.
-    pattern: &'static str,
+    /// Whether the day of the month always has two digits (`09`). The Lua pattern and the
+    /// Rust text are both made from this, so they cannot say different things.
+    pad_day: bool,
     /// Added to the year of `os.date("*t")`: 0, so the year is the Gregorian one.
     year_offset: u32,
 }
 
-/// `Fri 09 Oct 2026`
-const DATE_EN: DateStyle = DateStyle {
+impl DateStyle {
+    /// The `string.format` pattern banner.lua uses: the day name, the day, the month name
+    /// and the year.
+    fn pattern(&self) -> &'static str {
+        if self.pad_day {
+            "%s %02d %s %d"
+        } else {
+            "%s %d %s %d"
+        }
+    }
+
+    /// The date as banner.lua's `today()` writes it. `wday` counts from 1 for Sunday, as
+    /// `os.date("*t")` does; `month` from 1 for January. A day of the week or a month out of
+    /// range (which `os.date` never gives, but the preview's clock comes from the app) is
+    /// named `?`; the day of the month and the year are written as the numbers they are.
+    pub(crate) fn format(&self, wday: u8, day: u8, month: u8, year: u16) -> String {
+        let name = |list: &[&'static str], number: u8| {
+            usize::from(number)
+                .checked_sub(1)
+                .and_then(|i| list.get(i))
+                .copied()
+                .unwrap_or("?")
+        };
+        let year = u32::from(year).saturating_add(self.year_offset);
+        let (day_name, month_name) = (name(&self.days, wday), name(&self.months, month));
+        if self.pad_day {
+            format!("{day_name} {day:02} {month_name} {year}")
+        } else {
+            format!("{day_name} {day} {month_name} {year}")
+        }
+    }
+}
+
+/// `Fri 09 Oct 2026`: the one style, on every Windows.
+pub(crate) const DATE_EN: DateStyle = DateStyle {
     days: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
     months: [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ],
-    pattern: "%s %02d %s %d",
+    pad_day: true,
     year_offset: 0,
 };
 
@@ -98,16 +134,18 @@ local V = {
 }
 "#;
 
-const TIPS_EN: &str = " Tips: help for commands \u{b7} cls to clear \u{b7} \u{2191} for history";
+/// The tips line under the box, English on every Windows (spec §3.6).
+pub(crate) const TIPS_EN: &str =
+    " Tips: help for commands \u{b7} cls to clear \u{b7} \u{2191} for history";
 
 /// The icon of the box where the terminal can draw it. Windows Terminal sets `WT_SESSION` in
 /// every tab and falls back to another font for a glyph its font lacks. conhost has no
 /// fallback: on Windows 10 with its default font it draws U+273B as an empty box (spec §3.6).
 /// The check is the variable and nothing more, so a conhost window started from a Windows
 /// Terminal tab inherits it and gets the glyph too.
-const ICON: &str = "\u{273b}";
+pub(crate) const ICON: &str = "\u{273b}";
 /// The icon everywhere else: an asterisk, which every font has, one cell wide like the star.
-const ICON_FALLBACK: &str = "*";
+pub(crate) const ICON_FALLBACK: &str = "*";
 
 const PRINT_FN: &str = r#"local function print_banner()
   local lines = build()
@@ -169,7 +207,7 @@ fn vars_lua() -> String {
         "local DAYS = {}\nlocal MONTHS = {}\nlocal DATE_FORMAT = {}\nlocal YEAR_OFFSET = {}\n{VARS_BODY}",
         lua_list(&style.days),
         lua_list(&style.months),
-        lua_str(style.pattern),
+        lua_str(style.pattern()),
         style.year_offset,
     )
 }
@@ -184,40 +222,84 @@ fn icon_lua() -> String {
     )
 }
 
-/// The banner variables and the Lua call that stands for each (spec §3.3). They are lower
-/// case and keep their braces; any other `{word}` is text.
-const VARS: [(&str, &str); 5] = [
-    ("{user}", "V.user()"),
-    ("{host}", "V.host()"),
-    ("{cwd}", "V.cwd()"),
-    ("{date}", "V.date()"),
-    ("{time}", "V.time()"),
+/// A banner variable (spec §3.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Var {
+    User,
+    Host,
+    Cwd,
+    Date,
+    Time,
+}
+
+impl Var {
+    /// The Lua call that stands for the variable in banner.lua.
+    fn call(self) -> &'static str {
+        match self {
+            Var::User => "V.user()",
+            Var::Host => "V.host()",
+            Var::Cwd => "V.cwd()",
+            Var::Date => "V.date()",
+            Var::Time => "V.time()",
+        }
+    }
+}
+
+/// The banner variables as a template writes them. They are lower case and keep their
+/// braces; any other `{word}` is text.
+const VARS: [(&str, Var); 5] = [
+    ("{user}", Var::User),
+    ("{host}", Var::Host),
+    ("{cwd}", Var::Cwd),
+    ("{date}", Var::Date),
+    ("{time}", Var::Time),
 ];
 
-/// The first variable in `text`: the text before it, its Lua call and the text after it.
-fn next_variable(text: &str) -> Option<(&str, &'static str, &str)> {
+/// A piece of a banner template: text, or a variable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Piece<'a> {
+    Text(&'a str),
+    Var(Var),
+}
+
+/// The first variable in `text`: the text before it, the variable and the text after it.
+fn next_variable(text: &str) -> Option<(&str, Var, &str)> {
     text.match_indices('{').find_map(|(at, _)| {
         let (before, from) = text.split_at_checked(at)?;
         VARS.iter()
-            .find_map(|(name, call)| from.strip_prefix(*name).map(|after| (before, *call, after)))
+            .find_map(|(name, var)| from.strip_prefix(*name).map(|after| (before, *var, after)))
     })
+}
+
+/// A banner template cut into text and variables, from left to right. The text a variable
+/// stands for is never read again, so a user named `{host}` stays `{host}`. banner.lua and
+/// the preview both cut templates here.
+pub(crate) fn template_pieces(template: &str) -> Vec<Piece<'_>> {
+    let mut pieces = Vec::new();
+    let mut rest = template;
+    while let Some((before, var, after)) = next_variable(rest) {
+        if !before.is_empty() {
+            pieces.push(Piece::Text(before));
+        }
+        pieces.push(Piece::Var(var));
+        rest = after;
+    }
+    if !rest.is_empty() {
+        pieces.push(Piece::Text(rest));
+    }
+    pieces
 }
 
 /// A banner template as a Lua expression. Known `{variables}` become calls;
 /// everything else stays literal (spec §3.3), written by `lua_str`.
 pub(crate) fn template_expr(template: &str) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    let mut rest = template;
-    while let Some((before, call, after)) = next_variable(rest) {
-        if !before.is_empty() {
-            parts.push(lua_str(before));
-        }
-        parts.push(call.to_string());
-        rest = after;
-    }
-    if !rest.is_empty() {
-        parts.push(lua_str(rest));
-    }
+    let parts: Vec<String> = template_pieces(template)
+        .into_iter()
+        .map(|piece| match piece {
+            Piece::Text(text) => lua_str(text),
+            Piece::Var(var) => var.call().to_string(),
+        })
+        .collect();
     if parts.is_empty() {
         lua_str("")
     } else {
@@ -415,5 +497,76 @@ mod tests {
         let mut t = terracotta();
         t.banner.enabled = false;
         assert!(!banner_lua(&t).contains("oninject"));
+    }
+
+    #[test]
+    fn templates_are_cut_into_text_and_variables() {
+        assert_eq!(
+            template_pieces("Hi {user}!"),
+            [Piece::Text("Hi "), Piece::Var(Var::User), Piece::Text("!")]
+        );
+        assert_eq!(
+            template_pieces("{{date}}{time}"),
+            [
+                Piece::Text("{"),
+                Piece::Var(Var::Date),
+                Piece::Text("}"),
+                Piece::Var(Var::Time)
+            ]
+        );
+        assert_eq!(
+            template_pieces("{foo} {USER}"),
+            [Piece::Text("{foo} {USER}")]
+        );
+        assert!(template_pieces("").is_empty());
+    }
+
+    #[test]
+    fn the_date_is_written_the_same_in_rust_and_in_lua() {
+        // spec §3.6: Friday 9 October 2026 is `Fri 09 Oct 2026` on every Windows, and the Lua
+        // pattern says the same (the day padded to two digits, the Gregorian year)
+        assert_eq!(DATE_EN.format(6, 9, 10, 2026), "Fri 09 Oct 2026");
+        assert_eq!(DATE_EN.pattern(), "%s %02d %s %d");
+        assert_eq!(
+            DATE_EN.year_offset, 0,
+            "no Buddhist era: the year is the calendar's"
+        );
+        // every name is English: ASCII, with no Thai character anywhere in the tables
+        for name in DATE_EN.days.iter().chain(DATE_EN.months.iter()) {
+            assert!(name.is_ascii(), "{name:?}");
+        }
+        assert!(!TIPS_EN
+            .chars()
+            .any(|c| ('\u{e00}'..='\u{e7f}').contains(&c)));
+        // a day or month out of range is a question mark, not a panic
+        assert_eq!(DATE_EN.format(0, 1, 13, 2026), "? 01 ? 2026");
+    }
+
+    #[test]
+    fn a_date_out_of_range_is_written_and_never_panics() {
+        // The preview's clock comes from the app and nothing checks it (Task 2's review). A
+        // day of the week or a month out of range is named `?`; the day of the month and the
+        // year are written as the numbers they are, as `string.format` would write them.
+        assert_eq!(DATE_EN.format(0, 0, 0, 0), "? 00 ? 0");
+        assert_eq!(DATE_EN.format(8, 32, 13, 2026), "? 32 ? 2026");
+        assert_eq!(
+            DATE_EN.format(u8::MAX, u8::MAX, u8::MAX, u16::MAX),
+            "? 255 ? 65535"
+        );
+        assert_eq!(DATE_EN.format(7, 31, 12, u16::MAX), "Sat 31 Dec 65535");
+        assert_eq!(DATE_EN.format(1, 1, 1, 0), "Sun 01 Jan 0");
+        // every day of the week and every month a `u8` holds: a name from the tables exactly
+        // when it is in range
+        for wday in 0..=u8::MAX {
+            for month in 0..=u8::MAX {
+                let text = DATE_EN.format(wday, 9, month, 2026);
+                let words: Vec<&str> = text.split(' ').collect();
+                assert_eq!(words.len(), 4, "{text}");
+                assert_eq!(words[0] == "?", !(1..=7).contains(&wday), "{text}");
+                assert_eq!(words[1], "09", "{text}");
+                assert_eq!(words[2] == "?", !(1..=12).contains(&month), "{text}");
+                assert_eq!(words[3], "2026", "{text}");
+            }
+        }
     }
 }

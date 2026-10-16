@@ -9,10 +9,12 @@
 //! by cell and color by color, with what the pinned Oh My Posh prints for the config
 //! `generate::omp` writes, and `tests/banner_parity.rs` compares the welcome box with what
 //! the generated `banner.lua` prints.
+mod banner;
 mod cells;
 mod prompt;
 mod values;
 
+pub use banner::render_banner;
 pub use cells::{banner_cells, prompt_cells};
 pub use prompt::{prompt, render_prompt, Prompt};
 

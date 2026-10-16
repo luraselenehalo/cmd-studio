@@ -119,6 +119,39 @@ pub(crate) fn hh_mm(clock: &Clock) -> String {
     format!("{:02}:{:02}", clock.hour, clock.minute)
 }
 
+/// The day of the week, 1 for Sunday as `os.date("*t").wday` counts, by Tomohiko Sakamoto's
+/// method for the Gregorian calendar. It is total, because the app sends the clock and nothing
+/// checks it: a month out of range takes January's offset (month 0 counts in the year before,
+/// as January does, and 13 and up in the year itself), any day is added as it is, year 0 is
+/// not moved back to a year before it, and the answer is always 1 to 7.
+pub(crate) fn weekday(clock: &Clock) -> u8 {
+    const OFFSETS: [u32; 12] = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
+    let month = usize::from(clock.month);
+    let offset = month
+        .checked_sub(1)
+        .and_then(|i| OFFSETS.get(i))
+        .copied()
+        .unwrap_or(0);
+    let year = u32::from(clock.year) - u32::from(clock.month < 3 && clock.year > 0);
+    let day = (year + year / 4 - year / 100 + year / 400 + offset + u32::from(clock.day)) % 7;
+    // `day` is 0 to 6, 0 for Sunday
+    u8::try_from(day).map_or(1, |d| d + 1)
+}
+
+/// What banner.lua's `clean` leaves of a user name, a computer name or a folder: it drops the
+/// C0 controls and DEL, the C1 controls (U+0080 to U+009F), U+2028 to U+202E and U+2066 to
+/// U+2069, each on its own (the rest of an escape sequence stays as text).
+pub(crate) fn lua_clean(text: &str) -> String {
+    text.chars()
+        .filter(|c| {
+            !matches!(
+                u32::from(*c),
+                0x00..=0x1F | 0x7F..=0x9F | 0x2028..=0x202E | 0x2066..=0x2069
+            )
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,5 +280,84 @@ mod tests {
         assert_eq!(hh_mm(&clock(7, 5)), "07:05");
         assert_eq!(hh_mm(&clock(16, 47)), "16:47");
         assert_eq!(hh_mm(&clock(0, 0)), "00:00");
+    }
+
+    #[test]
+    fn weekdays_follow_the_calendar() {
+        let on = |year, month, day| {
+            weekday(&Clock {
+                year,
+                month,
+                day,
+                hour: 0,
+                minute: 0,
+            })
+        };
+        assert_eq!(on(2026, 10, 9), 6, "spec §3.6: Friday 9 October 2026");
+        assert_eq!(on(2026, 10, 11), 1, "a Sunday");
+        assert_eq!(on(2000, 1, 1), 7, "a Saturday in January");
+        assert_eq!(on(2000, 2, 29), 3, "a leap day, Tuesday");
+        assert_eq!(on(1900, 3, 1), 5, "1900 was no leap year: Thursday");
+        assert_eq!(on(2024, 12, 31), 3, "a Tuesday");
+        // out of range never panics
+        assert!((1..=7).contains(&on(2026, 0, 0)));
+        assert!((1..=7).contains(&on(2026, 13, 40)));
+        assert!((1..=7).contains(&on(0, 1, 1)));
+    }
+
+    #[test]
+    fn the_weekday_is_one_to_seven_for_every_clock_the_app_can_send() {
+        // The app sends the clock and nothing checks its fields (Task 2's review), so every
+        // month and day a `u8` holds, and the years at the edges of a `u16`, give a day of the
+        // week and never a panic or an overflow. Out of range, the day is what the formula
+        // gives (see `weekday`), pinned below.
+        for year in [0, 1, 2, 3, 4, 99, 100, 400, 2026, u16::MAX - 1, u16::MAX] {
+            for month in 0..=u8::MAX {
+                for day in 0..=u8::MAX {
+                    let clock = Clock {
+                        year,
+                        month,
+                        day,
+                        hour: u8::MAX,
+                        minute: u8::MAX,
+                    };
+                    assert!((1..=7).contains(&weekday(&clock)), "{clock:?}");
+                }
+            }
+        }
+        // the fallbacks, pinned
+        let at = |year, month, day| {
+            weekday(&Clock {
+                year,
+                month,
+                day,
+                hour: 0,
+                minute: 0,
+            })
+        };
+        assert_eq!(at(0, 0, 0), 1);
+        assert_eq!(at(2026, 13, 32), 2);
+        assert_eq!(at(u16::MAX, u8::MAX, u8::MAX), 6);
+    }
+
+    #[test]
+    fn lua_clean_drops_exactly_what_banner_lua_drops() {
+        let dropped: Vec<char> = (0x00..=0x1F)
+            .chain(0x7F..=0x9F)
+            .chain(0x2028..=0x202E)
+            .chain(0x2066..=0x2069)
+            .filter_map(char::from_u32)
+            .collect();
+        for c in dropped {
+            assert_eq!(lua_clean(&format!("a{c}b")), "ab", "U+{:04X}", u32::from(c));
+        }
+        for c in [
+            ' ', '~', '\u{a0}', '\u{2027}', '\u{202f}', '\u{2065}', '\u{206a}', 'ก', '👋',
+        ] {
+            let s = format!("a{c}b");
+            assert_eq!(lua_clean(&s), s, "U+{:04X}", u32::from(c));
+        }
+        // the escape character goes, the rest of its sequence stays
+        assert_eq!(lua_clean("x\u{1b}[31my"), "x[31my");
     }
 }

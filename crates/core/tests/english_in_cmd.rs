@@ -18,6 +18,7 @@ use cmdstudio_core::generate::lua::{banner_lua, init_lua};
 use cmdstudio_core::generate::{clink, omp};
 use cmdstudio_core::model::Layout;
 use cmdstudio_core::presets;
+use cmdstudio_core::preview::{render_banner, render_prompt, PreviewContext};
 use std::path::PathBuf;
 
 /// `<data>` of a user whose name is ASCII.
@@ -73,6 +74,47 @@ fn no_file_that_cmd_shows_holds_a_thai_character() {
     assert!(
         found.is_empty(),
         "Thai in what CMD Studio writes for cmd:\n{}",
+        found.join("\n")
+    );
+}
+
+#[test]
+fn the_preview_of_every_preset_holds_no_thai_character() {
+    // The preview shows what cmd shows (spec §5.6), so the same rule holds for it. The sample's
+    // names, paths, branch and command are ASCII, so a Thai character in a row could only be
+    // CMD Studio's own: the date, the tips, the frame, the prompt.
+    let ctx = PreviewContext::sample();
+    for text in [&ctx.user, &ctx.host, &ctx.home, &ctx.cwd, &ctx.command] {
+        assert!(text.is_ascii(), "the sample is not ASCII: {text:?}");
+    }
+    assert!(ctx.git.as_ref().is_some_and(|git| git.branch.is_ascii()));
+    let presets = presets::builtin().unwrap();
+    assert!(!presets.is_empty());
+    let mut found = Vec::new();
+    for (key, preset) in presets {
+        for layout in [Layout::Box, Layout::Line, Layout::Powerline] {
+            for transient in [true, false] {
+                let mut theme = preset.clone();
+                theme.prompt.layout = layout;
+                theme.prompt.transient = transient;
+                let rows = render_banner(&theme, &ctx)
+                    .into_iter()
+                    .chain(render_prompt(&theme, &ctx));
+                for (i, row) in rows.enumerate() {
+                    let letters = thai(&row.text());
+                    if !letters.is_empty() {
+                        found.push(format!(
+                            "{key}, {layout:?}, transient {transient}: row {} holds \"{letters}\"",
+                            i + 1
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "Thai in what the preview shows for cmd:\n{}",
         found.join("\n")
     );
 }
