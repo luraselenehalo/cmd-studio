@@ -22,7 +22,8 @@ tauri-build = { version = "=2.7.3", features = [] }
 # `ts`: the core's public types carry ts-rs derives, exported to app/ui/src/bindings.
 cmdstudio-core = { path = "../../crates/core", features = ["ts"] }
 cmdstudio-cli = { path = "../../crates/cli" }
-# Tauri 2 (G10: 2.12.x). Default features: wry, compression, common-controls-v6, dynamic-acl.
+# Tauri 2 (G10: 2.12.x). Default features: wry, compression, common-controls-v6, dynamic-acl,
+# and the Linux-only x11 and dbus (nothing on Windows).
 tauri = { version = "=2.12.4", features = [] }
 # One window: a second start focuses the first (spec §5.7 "single instance"). No JS commands.
 tauri-plugin-single-instance = "=2.5.4"

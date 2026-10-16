@@ -1,5 +1,5 @@
 //! The console of the CLI mode, and the one message box the app shows when it cannot start.
-//! Windows only; elsewhere these do nothing.
+//! Windows only; elsewhere `attach_parent` does nothing and `fatal` prints to stderr.
 
 /// Attaches to the console of the parent process (the cmd or PowerShell window the exe was
 /// started from), so that a Windows-subsystem build prints its CLI output there. Does nothing

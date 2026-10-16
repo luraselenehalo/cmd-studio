@@ -2,12 +2,9 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "CMD Studio",
   "mainBinaryName": "cmdstudio",
-  "version": "0.1.0",
   "identifier": "ai.resincore.cmdstudio",
   "build": {
-    "devUrl": "http://localhost:1420",
     "frontendDist": "../ui/dist",
-    "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build"
   },
   "app": {
