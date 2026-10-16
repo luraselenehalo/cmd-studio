@@ -28,6 +28,7 @@ use cmdstudio_core::generate::lua;
 use cmdstudio_core::generate::{clink, omp, wt};
 use cmdstudio_core::model::{Layout, Segment, Target, Theme};
 use cmdstudio_core::presets;
+use cmdstudio_core::preview::{render_banner, render_prompt, PreviewContext};
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -48,12 +49,42 @@ fn clink_launch() -> PathBuf {
 
 /// The Terracotta preset, picked by its key.
 fn terracotta() -> Theme {
+    preset("terracotta")
+}
+
+/// A built-in preset, picked by its key.
+fn preset(key: &str) -> Theme {
     presets::builtin()
         .unwrap()
         .into_iter()
-        .find(|(key, _)| *key == "terracotta")
+        .find(|(k, _)| *k == key)
         .unwrap()
         .1
+}
+
+/// What the editor's preview shows for `theme` in the sample (spec §5.6): the welcome box,
+/// then the rows of the prompt, one row to a line as the JSON the app gets. Nerd Font glyphs
+/// are written as JSON escapes (a backslash, `u` and four hex digits), so the file shows them.
+fn preview_text(theme: &Theme) -> String {
+    let ctx = PreviewContext::sample();
+    let mut text = String::new();
+    for (part, rows) in [
+        ("banner", render_banner(theme, &ctx)),
+        ("prompt", render_prompt(theme, &ctx)),
+    ] {
+        for (i, row) in rows.iter().enumerate() {
+            let json: String = serde_json::to_string(row)
+                .unwrap()
+                .chars()
+                .map(|c| match u32::from(c) {
+                    code @ 0xE000..=0xF8FF => format!("\\u{code:04x}"),
+                    _ => c.to_string(),
+                })
+                .collect();
+            text.push_str(&format!("{part} {:>2} {json}\n", i + 1));
+        }
+    }
+    text
 }
 
 /// Terracotta with this layout; its segments stay as the preset lists them.
@@ -247,6 +278,11 @@ golden_tests! {
     // the theme file itself, spec §3.3: what saving and exporting write
     saved_theme_file: "terracotta.cmdtheme" =
         String::from_utf8(terracotta().to_file_bytes().unwrap()).unwrap();
+
+    // what the editor's preview shows in the sample (English, as cmd shows it)
+    terracotta_preview: "terracotta.preview.txt" = preview_text(&terracotta());
+    tokyo_night_preview: "tokyo-night.preview.txt" = preview_text(&preset("tokyo-night"));
+    catppuccin_latte_preview: "catppuccin-latte.preview.txt" = preview_text(&preset("catppuccin-latte"));
 }
 
 #[test]
