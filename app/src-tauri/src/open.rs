@@ -27,15 +27,26 @@ pub const ISSUES_URL: &str = "https://github.com/luraselenehalo/cmd-studio/issue
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CmdLaunch {
     /// `wt.exe -p <cmd profile guid>`: a Windows Terminal tab with the cmd profile CMD Studio
-    /// themed, which shows the whole theme (colors, font, prompt and welcome box).
+    /// themed. This is the window "Open cmd" prefers whenever a theme is applied and that
+    /// profile is there, for both targets (ruled in the review of Task 14): it is the one
+    /// window that shows the whole theme, the colors and font as well as the prompt and the
+    /// welcome box. A plain console window shows no background color on Windows 10 (spec §1,
+    /// the Windows 10 bullet), and a user who ticked "open Windows Terminal as cmd" in the
+    /// wizard lives in Windows Terminal anyway.
     WindowsTerminalProfile,
-    /// `cmd.exe` in a new console window, as the user would start it: their AutoRun runs, which
-    /// is what loads the theme. Windows 11 shows it in Windows Terminal itself when that is the
-    /// default terminal.
+    /// The fallback: `cmd.exe` in a new console window, as the user would start it, so their
+    /// AutoRun runs and loads the theme. It opens when no theme is applied, when there is no
+    /// usable Windows Terminal (none installed, or one never opened, which has no cmd
+    /// profile), or when `wt.exe` fails to start. Windows 11 shows it in Windows Terminal
+    /// itself when that is the default terminal.
     PlainCmd,
 }
 
 /// The program and arguments of a launch. Both are fixed: nothing in them comes from outside.
+///
+/// The plain `cmd.exe` is the fallback window of [`CmdLaunch::PlainCmd`]; the Windows Terminal
+/// profile is preferred whenever a theme is applied and that profile is there, for both targets
+/// (see [`CmdLaunch::WindowsTerminalProfile`]).
 ///
 /// `cmd.exe` is started without `/d` on purpose: this window exists to show what AutoRun loads
 /// (spec §4.2 page 6, doctor D3), and `/d` would switch AutoRun off.
@@ -72,6 +83,14 @@ pub fn external_places(target: ExternalTarget, data: &Path, logs: &Path) -> Vec<
     }
 }
 
+/// Starts the window `launch` names, in a new console, in `%USERPROFILE%`.
+///
+/// When the Windows Terminal profile cannot be started (`wt.exe` is missing or not on the
+/// path: the Preview build's alias is `wtd.exe`, an unpackaged Terminal may not be on the
+/// path), this falls back to the plain cmd window, and the fallback is silent: nothing is
+/// reported and the first error is not kept. The user asked for a cmd window and gets one, which
+/// is the point of the button; an error dialog would be worse than a window without the profile.
+/// Only when the plain window cannot start either is there an error.
 #[cfg(windows)]
 pub fn open_cmd(launch: &CmdLaunch) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
@@ -84,22 +103,86 @@ pub fn open_cmd(launch: &CmdLaunch) -> Result<(), String> {
     }
     match command.spawn() {
         Ok(_) => Ok(()),
-        // wt.exe missing after all: a plain window is better than nothing.
+        // wt.exe missing after all: a plain window is better than nothing (silent, see above).
         Err(_) if *launch == CmdLaunch::WindowsTerminalProfile => open_cmd(&CmdLaunch::PlainCmd),
         Err(e) => Err(format!("{program} could not be started: {e}")),
     }
 }
 
+/// Opens what `target` names (see [`external_places`]). When nothing opens, the error is the
+/// first failure's, with each later one's text after it (the Store's, then the web page's), so
+/// none is lost: the caller puts the whole text in the error's details.
 #[cfg(windows)]
 pub fn open_external(target: ExternalTarget, data: &Path, logs: &Path) -> Result<(), String> {
-    let mut failure = None;
-    for place in external_places(target, data, logs) {
-        match shell_open(&place) {
+    open_first(&external_places(target, data, logs), shell_open)
+}
+
+/// Tries `places` in order with `open`; the first that opens ends it. When none does, the error
+/// is the first failure's text followed by each later one's, so neither the Store's reason nor
+/// the web page's is lost. Not tied to Windows so that the order and the error can be tested
+/// with an `open` of the test's own.
+pub fn open_first(
+    places: &[Place],
+    mut open: impl FnMut(&Place) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut failures = Vec::new();
+    for place in places {
+        match open(place) {
             Ok(()) => return Ok(()),
-            Err(e) => failure = Some(e),
+            Err(e) => failures.push(e),
         }
     }
-    Err(failure.unwrap_or_else(|| "there is nothing to open".to_string()))
+    let mut failures = failures.into_iter();
+    match failures.next() {
+        Some(first) => Err(failures.fold(first, |all, next| format!("{all}; then {next}"))),
+        None => Err("there is nothing to open".to_string()),
+    }
+}
+
+/// COM on the calling thread, as the documentation of `ShellExecuteW` asks (apartment
+/// threaded, without OLE 1 DDE): the IPC commands run on pool threads that never started it.
+/// Balanced when dropped, and only if it started. Not `Send`: `CoUninitialize` must run on the
+/// thread that initialized.
+#[cfg(windows)]
+struct ComScope {
+    started: bool,
+    _same_thread: std::marker::PhantomData<*const ()>,
+}
+
+#[cfg(windows)]
+impl ComScope {
+    fn enter() -> Self {
+        use windows_sys::Win32::System::Com::{
+            CoInitializeEx, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
+        };
+        // SAFETY: the reserved pointer is null as required; the flags are documented constants;
+        // the call reads and writes none of our memory, and the result is read as a number only.
+        let result = unsafe {
+            CoInitializeEx(
+                std::ptr::null(),
+                (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) as u32,
+            )
+        };
+        // S_OK (0) and S_FALSE (1, already initialized in this mode) both count one more
+        // initialization to balance; a failure (e.g. the thread is in another mode) counts none.
+        ComScope {
+            started: result >= 0,
+            _same_thread: std::marker::PhantomData,
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ComScope {
+    fn drop(&mut self) {
+        if self.started {
+            use windows_sys::Win32::System::Com::CoUninitialize;
+            // SAFETY: `started` is true only when `CoInitializeEx` succeeded (S_OK or S_FALSE) in
+            // `enter` on this same thread (the type is not `Send`), and this is its one balancing
+            // call; it takes no arguments and touches no memory of ours.
+            unsafe { CoUninitialize() };
+        }
+    }
 }
 
 /// `ShellExecuteW("open", place)`: a link in the browser or the Store, a folder in Explorer.
@@ -116,8 +199,11 @@ fn shell_open(place: &Place) -> Result<(), String> {
         Place::Folder(path) => (path.display().to_string(), wide(path.as_os_str())),
     };
     let verb = wide(OsStr::new("open"));
+    let _com = ComScope::enter();
     // SAFETY: both strings are NUL-terminated UTF-16 buffers that outlive the call; the other
-    // pointers are null as the documentation allows; the result is read as a number only.
+    // pointers are null as the documentation allows; the call comes after the attempt to start
+    // COM on this thread, which `_com` ends only when it drops, after the call; the result is
+    // read as a number only.
     let result = unsafe {
         ShellExecuteW(
             std::ptr::null_mut(),
@@ -200,6 +286,69 @@ mod tests {
             [Place::Folder(logs.clone())]
         );
         assert_ne!(data, logs, "the two folders must be told apart");
+    }
+
+    fn failing(text: &str) -> Result<(), String> {
+        Err(text.to_string())
+    }
+
+    /// The places are tried in order and the first that opens ends it: the Store page opening
+    /// means the web page is never asked.
+    #[test]
+    fn the_first_place_that_opens_ends_it() {
+        let places = external_places(
+            ExternalTarget::WindowsTerminalStore,
+            Path::new("data"),
+            Path::new("logs"),
+        );
+        let mut asked = Vec::new();
+        let result = open_first(&places, |p| {
+            asked.push(p.clone());
+            Ok(())
+        });
+        assert_eq!(result, Ok(()));
+        assert_eq!(asked, [Place::Url(STORE_URL)]);
+
+        // The Store cannot open it: the web page is the way out, and its success is the result.
+        let mut asked = Vec::new();
+        let result = open_first(&places, |p| {
+            asked.push(p.clone());
+            match p {
+                Place::Url(url) if *url == STORE_URL => failing("the Store said no"),
+                _ => Ok(()),
+            }
+        });
+        assert_eq!(result, Ok(()));
+        assert_eq!(asked, [Place::Url(STORE_URL), Place::Url(TERMINAL_URL)]);
+    }
+
+    /// When nothing opens, the error is the first failure's, with the later ones after it: the
+    /// reason the Store gave is not lost behind the web page's.
+    #[test]
+    fn when_nothing_opens_every_reason_is_kept_first_one_first() {
+        let places = external_places(
+            ExternalTarget::WindowsTerminalStore,
+            Path::new("data"),
+            Path::new("logs"),
+        );
+        let result = open_first(&places, |p| match p {
+            Place::Url(url) if *url == STORE_URL => failing("store: no handler"),
+            _ => failing("web: no browser"),
+        });
+        assert_eq!(
+            result,
+            Err("store: no handler; then web: no browser".to_string())
+        );
+        // One place: its own error, as it was.
+        let one = [Place::Url(ISSUES_URL)];
+        assert_eq!(
+            open_first(&one, |_| failing("no browser")),
+            Err("no browser".to_string())
+        );
+        assert_eq!(
+            open_first(&[], |_| Ok(())),
+            Err("there is nothing to open".to_string())
+        );
     }
 
     /// The UI names a target; it never sends a link or a path (spec §5.10). The four names are

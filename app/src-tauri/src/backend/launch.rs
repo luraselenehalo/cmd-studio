@@ -7,15 +7,20 @@ use cmdstudio_core::state::State;
 
 impl<M: Machine> Backend<M> {
     /// The window "Open cmd" opens: a Windows Terminal tab with the cmd profile CMD Studio
-    /// themed when a theme is applied and that profile is there; a plain cmd window otherwise.
+    /// themed when a theme is applied and that profile is there, for both targets; a plain cmd
+    /// window is the fallback, when no theme is applied or there is no usable Terminal (and
+    /// `crate::open::open_cmd` falls back to it too when `wt.exe` fails to start).
     ///
-    /// The profile is the one window that shows the whole theme (colors, font, prompt and
-    /// welcome box), for either target: in "every cmd window" its command line is a bare
-    /// `cmd.exe`, so AutoRun loads the prompt, and in "Windows Terminal only" its command line
+    /// Why the profile for both targets (ruled in the review of Task 14, over the brief's
+    /// "plain cmd unless Terminal only"): it is the one window that shows the whole theme
+    /// (colors, font, prompt and welcome box). In "every cmd window" its command line is a bare
+    /// `cmd.exe`, so AutoRun loads the prompt there too, while a plain console window shows no
+    /// background color on Windows 10 (spec §1). In "Windows Terminal only" its command line
     /// loads Clink itself and a plain cmd window would show no theme at all (spec §5.4). The
-    /// profile is there when a Windows Terminal is installed and has a `settings.json`: the
-    /// planner writes the profile into the files that exist, and one that was never opened has
-    /// none (doctor D6).
+    /// wizard's default, "open Windows Terminal as cmd", has the user living in Windows
+    /// Terminal anyway. The profile is there when a Windows Terminal is installed and has a
+    /// `settings.json`: the planner writes the profile into the files that exist, and one that
+    /// was never opened has none (doctor D6).
     ///
     /// Nothing here can stop the button: a `state.json` that cannot be used (the Home page and
     /// the doctor tell the user about it) means no theme is known, so the window is a plain cmd.
@@ -52,6 +57,10 @@ mod tests {
         assert_eq!(b.cmd_launch(), CmdLaunch::PlainCmd);
     }
 
+    /// Pins the ruling of the Task 14 review: a theme for every cmd window (`Target::All`) with
+    /// a usable Windows Terminal opens the Terminal profile, not a plain cmd window as the
+    /// brief's `cmd_launch(Some(Target::All), true) == PlainCmd` had it. The profile shows the
+    /// colors, font, prompt and welcome box together; a plain console does not show the colors.
     #[test]
     fn a_theme_for_every_cmd_window_opens_the_terminal_profile_when_the_terminal_is_there() {
         let b = backend();
