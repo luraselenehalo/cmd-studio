@@ -13,6 +13,10 @@ workspace = true
 [lib]
 name = "cmdstudio_app"
 
+[[bin]]
+name = "cmdstudio"
+path = "src/main.rs"
+
 [build-dependencies]
 # Tauri's build step: the ACL permissions of the app's commands (`allow-<command>`), the icon
 # resource, the config check. Pinned like every version here (spec §6.4).
