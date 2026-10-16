@@ -22,6 +22,7 @@ use std::sync::{Mutex, PoisonError};
 use std::time::Instant;
 use ts_rs::TS;
 
+pub mod apply;
 pub mod preview;
 pub mod system;
 
@@ -365,8 +366,10 @@ pub struct AdvancedInfo {
 #[cfg(test)]
 pub(crate) mod testing {
     use super::*;
+    use crate::backend::apply::{ApplyOutcome, ApplyProgress, ApplyRequest, PlanOutcome};
     use cmdstudio_core::adapters::fake::{FakeFonts, FakeFs, FakeMachine};
     use cmdstudio_core::adapters::{Fs, WtLocation, WtVariant};
+    use cmdstudio_core::model::Target;
     use cmdstudio_core::plan::NERD_FONT_FAMILY;
     use cmdstudio_core::resources::{fake_resources, NERD_FONT_FILE};
     use std::path::Path;
@@ -450,6 +453,37 @@ pub(crate) mod testing {
             .find(|(key, _)| *key == "terracotta")
             .map(|(_, t)| t.id)
             .unwrap()
+    }
+
+    /// What the wizard asks for when the user changes nothing: Terracotta in every cmd window,
+    /// Windows Terminal's default profile set, another Clink left alone.
+    pub(crate) fn terracotta_request() -> ApplyRequest {
+        ApplyRequest {
+            theme_id: terracotta_id(),
+            target: Target::All,
+            set_wt_default_profile: true,
+            replace_other_clink: false,
+        }
+    }
+
+    /// Plans `req`, then applies it with the digest of the plan it was shown, as the UI does:
+    /// the outcome, and every progress event in the order it was told. The plan must be ready.
+    pub(crate) fn plan_and_apply(
+        b: &Backend<FakeMachine>,
+        req: ApplyRequest,
+    ) -> (ApplyOutcome, Vec<ApplyProgress>) {
+        let plan = match b.plan_apply(req.clone()).unwrap() {
+            PlanOutcome::Ready { plan } => plan,
+            other => panic!("{other:?}"),
+        };
+        let mut seen = Vec::new();
+        let done = b.apply(req, &plan.digest, &mut |p| seen.push(p)).unwrap();
+        (done, seen)
+    }
+
+    /// Applies Terracotta as [`terracotta_request`] asks (see [`plan_and_apply`]).
+    pub(crate) fn apply_terracotta(b: &Backend<FakeMachine>) -> (ApplyOutcome, Vec<ApplyProgress>) {
+        plan_and_apply(b, terracotta_request())
     }
 }
 
