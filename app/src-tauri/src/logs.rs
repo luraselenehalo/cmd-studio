@@ -74,19 +74,26 @@ impl Logger {
 
     /// The last `lines` lines of the current file; empty when there is none or it cannot be read.
     pub fn tail(&self, fs: &dyn Fs, lines: usize) -> String {
+        self.try_tail(fs, lines).unwrap_or_default()
+    }
+
+    /// [`Logger::tail`], with a file that cannot be read as the error, for a reader that must
+    /// say so (the diagnostics).
+    pub fn try_tail(&self, fs: &dyn Fs, lines: usize) -> Result<String, AdapterError> {
         // Not between the two renames of a rotation, where the current file is not there yet.
         let _one_at_a_time = self.files.lock().unwrap_or_else(PoisonError::into_inner);
-        let Ok(Some(bytes)) = fs.read(&self.file()) else {
-            return String::new();
+        let Some(bytes) = fs.read(&self.file())? else {
+            return Ok(String::new());
         };
         let text = String::from_utf8_lossy(&bytes);
         let all: Vec<&str> = text.lines().collect();
         let skip = all.len().saturating_sub(lines);
-        all.iter()
+        Ok(all
+            .iter()
             .skip(skip)
             .copied()
             .collect::<Vec<_>>()
-            .join("\n")
+            .join("\n"))
     }
 }
 

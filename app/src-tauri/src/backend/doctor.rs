@@ -12,14 +12,16 @@
 //!   opened (D6): open it once (words);
 //! - no cmd window has loaded the theme yet (D3): open a new one;
 //! - D1's three causes of `E_RUNTIME_MISSING`, told apart from the machine as D1 tells them
-//!   ([`RuntimeFiles`]): the files that come with CMD Studio fail their manifest, reinstall CMD
-//!   Studio (words); an add-on folder is gone, apply again (the apply installs it); files missing
-//!   or changed inside a folder that is there, nothing but D1's own hand step;
+//!   ([`RuntimeFiles`]): the files that come with CMD Studio fail their manifest (or a gone
+//!   folder's bundled files are missing or changed), reinstall CMD Studio (words); an add-on
+//!   folder is gone, apply again (the apply installs it); files missing or changed inside a
+//!   folder that is there, nothing but D1's own hand step;
 //! - nothing for a check that could not read (check again), for what the doctor says to fix by
 //!   hand (a settings.json CMD Studio can't work with, an AutoRun value that is not text), for D2
-//!   and for D3 when Clink does not run (both say to do what D1 says first), and no apply at all
-//!   while an add-on folder holds other files or the bundled files fail their manifest: that
-//!   apply would roll back, or not start.
+//!   and for D3 when Clink does not run (both say to do what D1 says first);
+//! - and no apply at all, from any check, while an add-on folder holds other files or the
+//!   bundled files are damaged (the apply would roll back, or not start), or while another
+//!   finding stops every apply before it starts (`blocks_every_apply`).
 use super::apply::{ApplyRequest, PlanOutcome};
 use super::system::WT_MIN_BUILD;
 use super::{Backend, Machine};
@@ -42,7 +44,8 @@ use ts_rs::TS;
 pub enum FixKind {
     /// Apply the applied theme again, shown as a plan first: D3, D4, D7, D8, D9, and D1 when an
     /// add-on folder is gone (the apply installs it again). Offered only while each add-on folder
-    /// is intact or gone: an apply never overwrites one that holds other files (spec §5.4).
+    /// is intact or gone (an apply never overwrites one that holds other files, spec §5.4) and
+    /// nothing stops every apply before it starts.
     Reapply,
     /// Apply again with the other Clink in the user's AutoRun turned off (D5); the plan names the
     /// commands that go, for the user's yes (spec §5.4).
@@ -54,8 +57,9 @@ pub enum FixKind {
     OpenWindowsTerminalOnce,
     /// No cmd window has loaded the theme yet (D3): open a new one.
     OpenNewCmdWindow,
-    /// The files that come with CMD Studio fail their manifest (D1): only a new install of CMD
-    /// Studio brings them back. Words, not a button.
+    /// The files that come with CMD Studio fail their manifest, or a gone add-on folder's files
+    /// are missing or changed among them (D1): only a new install of CMD Studio brings them
+    /// back. Words, not a button.
     Reinstall,
 }
 
@@ -101,10 +105,12 @@ pub struct FixProposal {
 pub enum RuntimeFiles {
     /// The manifest is good, and every runtime folder is there with its files unchanged.
     Intact,
-    /// The bundled files fail their manifest. No apply starts without them (`prepare_apply`
-    /// reads the manifest first).
+    /// The bundled files fail their manifest, so no apply starts (`prepare_apply` reads the
+    /// manifest first); or a runtime folder is gone and the bundled files it is installed from
+    /// are missing or changed, so the apply would roll back.
     BundleDamaged,
-    /// A runtime folder is gone, and each one that is there is intact: an apply installs it.
+    /// A runtime folder is gone, its bundled files are whole, and each runtime folder that is
+    /// there is intact: an apply installs the gone one.
     FolderGone,
     /// Files are missing or changed inside a runtime folder that is there. An apply never
     /// overwrites such a folder (spec §5.4, the core's `install_runtime`), so it would roll back;
@@ -114,7 +120,9 @@ pub enum RuntimeFiles {
     Unreadable,
 }
 
-/// [`RuntimeFiles`] for the applied theme `a`: the same reads as D1, in the same order.
+/// [`RuntimeFiles`] for the applied theme `a`: the same reads as D1, in the same order. A gone
+/// folder's bundled files are read too, as the apply's install reads them (every file against
+/// its pinned hash).
 fn runtime_files(sys: System<'_>, ctx: &Ctx, a: &Applied) -> RuntimeFiles {
     let m = match ctx.resources.manifest(sys.fs) {
         Ok(m) => m,
@@ -128,7 +136,11 @@ fn runtime_files(sys: System<'_>, ctx: &Ctx, a: &Applied) -> RuntimeFiles {
         (Component::Clink, launch.runtime_dir(&ctx.paths)),
     ] {
         if !sys.fs.exists(&dir) {
-            gone = true;
+            match check_bundle(sys.fs, &ctx.resources.dir(component), m.bundle(component)) {
+                Ok(()) => gone = true,
+                Err(ResourceError::Io(_)) => return RuntimeFiles::Unreadable,
+                Err(_) => return RuntimeFiles::BundleDamaged,
+            }
             continue;
         }
         match check_bundle(sys.fs, &dir, m.bundle(component)) {
@@ -144,15 +156,35 @@ fn runtime_files(sys: System<'_>, ctx: &Ctx, a: &Applied) -> RuntimeFiles {
     }
 }
 
+/// A finding that makes every apply fail before it starts, so that while it stands no check
+/// offers one:
+/// - a Windows Terminal settings.json CMD Studio can't work with (D6, D7 `E_WT_PARSE`):
+///   `prepare_apply` reads and edits it;
+/// - an AutoRun value that is there but is not text (D4 `E_AUTORUN_WRITE`): the planner refuses
+///   it for every cmd window;
+/// - a newest restore point that can't be read now (R1 `E_SNAPSHOT_READ`, `fail`): every change
+///   is refused until it can be (the core's `begin`). The `warn` of R1 is a damaged point, which
+///   the next change sets aside and goes on, so it blocks nothing.
+fn blocks_every_apply(checks: &[Check], autorun: Option<&AutoRunSummary>) -> bool {
+    checks.iter().any(|c| match (c.id, c.code) {
+        ("D6" | "D7", Some("E_WT_PARSE")) => true,
+        ("D4", Some("E_AUTORUN_WRITE")) => autorun.is_none_or(|a| a.not_text),
+        ("R1", Some("E_SNAPSHOT_READ")) => c.status == Status::Fail,
+        _ => false,
+    })
+}
+
 /// The fix for `check`, from what it found and from the machine as `doctor_run` read it.
 /// `runtime` is [`RuntimeFiles`] of the applied theme, `None` when no theme is applied or
-/// state.json can't be read (there is nothing to apply again then); `autorun` is the user's
-/// AutoRun as the planner reads it, `None` when it could not be read; `wt` the Windows Terminal
-/// locations and `build` the Windows build. A fix is offered only where it works (see the
-/// module's list).
+/// state.json can't be read (there is nothing to apply again then); `apply_blocked` says that
+/// another finding stops every apply before it starts (see `blocks_every_apply`); `autorun` is
+/// the user's AutoRun as the planner reads it, `None` when it could not be read; `wt` the
+/// Windows Terminal locations and `build` the Windows build. A fix is offered only where it
+/// works (see the module's list).
 pub fn fix_for(
     check: &Check,
     runtime: Option<RuntimeFiles>,
+    apply_blocked: bool,
     autorun: Option<&AutoRunSummary>,
     wt: &[WtLocation],
     build: Option<u32>,
@@ -162,26 +194,26 @@ pub fn fix_for(
     }
     let code = check.code?;
     // A check that could not read found nothing to fix: check again instead. A settings.json CMD
-    // Studio can't work with is fixed by hand, and stops an apply before it starts.
+    // Studio can't work with is fixed by hand.
     if matches!(code, "E_MACHINE_READ" | "E_WT_PARSE") {
         return None;
     }
-    // An apply installs both add-on folders: it works when each is intact or gone.
-    let can_apply = matches!(
-        runtime,
-        Some(RuntimeFiles::Intact | RuntimeFiles::FolderGone)
-    );
+    // An apply installs both add-on folders: it works when each is intact or gone, and nothing
+    // else stops it before it starts.
+    let can_apply = !apply_blocked
+        && matches!(
+            runtime,
+            Some(RuntimeFiles::Intact | RuntimeFiles::FolderGone)
+        );
     match (check.id, code) {
         ("D1", _) => match runtime? {
             RuntimeFiles::BundleDamaged => Some(FixKind::Reinstall),
-            RuntimeFiles::FolderGone => Some(FixKind::Reapply),
+            RuntimeFiles::FolderGone => can_apply.then_some(FixKind::Reapply),
             RuntimeFiles::Intact | RuntimeFiles::FilesChanged | RuntimeFiles::Unreadable => None,
         },
         // A bundled program does not run: both say to do what D1 says first.
         ("D2", _) | ("D3", "E_RUNTIME_MISSING") => None,
         ("D3", "E_THEME_NOT_LOADED") => Some(FixKind::OpenNewCmdWindow),
-        // A value that is there but is not text is fixed by hand: the planner refuses it.
-        ("D4", "E_AUTORUN_WRITE") if autorun.is_none_or(|a| a.not_text) => None,
         ("D3" | "D4" | "D7" | "D8" | "D9", _) => can_apply.then_some(FixKind::Reapply),
         ("D5", _) => (can_apply && autorun.is_some_and(|a| !a.foreign_clink.is_empty()))
             .then_some(FixKind::ReplaceOtherClink),
@@ -214,6 +246,7 @@ impl<M: Machine> Backend<M> {
             _ => None,
         };
         let autorun = self.autorun_now().ok();
+        let apply_blocked = blocks_every_apply(&checks, autorun.as_ref());
         let wt = sys.wt.locations();
         let build = sys.host.system_info().build;
         let checks = checks
@@ -226,7 +259,7 @@ impl<M: Machine> Backend<M> {
                 message_en: c.message_en.clone(),
                 details: c.details.clone(),
                 details_th: c.details_th.as_deref().cloned(),
-                fix: fix_for(c, runtime, autorun.as_ref(), &wt, build),
+                fix: fix_for(c, runtime, apply_blocked, autorun.as_ref(), &wt, build),
             })
             .collect();
         Ok(DoctorReport {
@@ -295,7 +328,7 @@ mod tests {
     use super::*;
     use crate::backend::apply::ApplyStatus;
     use crate::backend::testing::{
-        apply_terracotta, backend, terracotta_id, terracotta_request, WT,
+        apply_terracotta, backend, fake_fs, terracotta_id, terracotta_request, WT,
     };
     use cmdstudio_core::adapters::fake::FakeMachine;
     use cmdstudio_core::adapters::{AutoRun, RegValue, WtVariant, REG_SZ};
@@ -567,7 +600,14 @@ mod tests {
             details_th: None,
         };
         assert_eq!(
-            fix_for(&d3, Some(RuntimeFiles::Intact), None, &[], Some(26100)),
+            fix_for(
+                &d3,
+                Some(RuntimeFiles::Intact),
+                false,
+                None,
+                &[],
+                Some(26100)
+            ),
             None
         );
         // Why: the apply finds the folder there with other files, and rolls back.
@@ -576,13 +616,18 @@ mod tests {
         assert_eq!(done.error.unwrap().code, "E_RUNTIME_MISSING");
     }
 
-    /// What the doctor says to fix by hand stops an apply before it starts, so it offers none:
+    /// What the doctor says to fix by hand stops every apply before it starts, so while it
+    /// stands no check offers one, not even a hand-edited file that is otherwise applied again:
     /// a Windows Terminal settings.json CMD Studio can't work with, an AutoRun value that is not
-    /// plain text.
+    /// plain text, a newest restore point that can't be read now.
     #[test]
     fn a_problem_to_fix_by_hand_offers_no_apply() {
         let b = backend();
         applied(&b);
+        edit_by_hand(&b);
+        let d9 = |b: &Backend<FakeMachine>| by_id(&b.doctor_run().unwrap(), "D9").fix;
+        assert_eq!(d9(&b), Some(FixKind::Reapply));
+        // Windows Terminal's settings.json.
         let wt = b.sys().fs.read(Path::new(WT)).unwrap().unwrap();
         b.sys()
             .fs
@@ -597,12 +642,15 @@ mod tests {
                 "{id}"
             );
         }
+        assert!(offers_no_apply(&report), "{:?}", report.checks);
         assert_eq!(
             b.plan_apply(terracotta_request()).unwrap_err().code,
             "E_WT_PARSE"
         );
         b.sys().fs.write_atomic(Path::new(WT), &wt).unwrap();
+        assert_eq!(d9(&b), Some(FixKind::Reapply));
         // A REG_DWORD: there, but not text.
+        let ours = b.machine.autorun.read_user().unwrap().unwrap();
         b.machine
             .autorun
             .write_user(&RegValue {
@@ -621,5 +669,59 @@ mod tests {
             b.plan_apply(terracotta_request()).unwrap_err().code,
             "E_AUTORUN_WRITE"
         );
+        b.machine.autorun.write_user(&ours).unwrap();
+        assert_eq!(d9(&b), Some(FixKind::Reapply));
+        // The newest restore point's journal can't be read now: every change is refused until
+        // it can be.
+        let newest = b.snapshots_list().unwrap().points[0].id.clone();
+        let journal = b.paths().snapshots().join(newest).join("journal.json");
+        fake_fs(&b).fail_reads_of(&journal);
+        let report = b.doctor_run().unwrap();
+        let r1 = by_id(&report, "R1");
+        assert_eq!(
+            (r1.status, r1.code.as_deref(), r1.fix),
+            (Status::Fail, Some("E_SNAPSHOT_READ"), None)
+        );
+        assert!(offers_no_apply(&report), "{:?}", report.checks);
+        assert!(b.plan_apply(terracotta_request()).is_err());
+        fake_fs(&b).stop_failing(&journal);
+        assert_eq!(d9(&b), Some(FixKind::Reapply));
+    }
+
+    /// A gone runtime folder is installed again from the files that come with CMD Studio: when
+    /// those fail their manifest, the apply would roll back, so the fix is a new install. A
+    /// bundled file that can't be read now (an antivirus holds it, say) offers nothing.
+    #[test]
+    fn a_gone_runtime_folder_whose_bundled_files_are_damaged_says_reinstall() {
+        let b = backend();
+        applied(&b);
+        let bundled = b.resources.dir(Component::Omp).join("oh-my-posh.exe");
+        let bytes = b.sys().fs.read(&bundled).unwrap().unwrap();
+        b.sys().fs.remove_file(&bundled).unwrap();
+        b.sys().fs.remove_dir_all(&b.paths().omp_dir()).unwrap();
+        let report = b.doctor_run().unwrap();
+        let d1 = by_id(&report, "D1");
+        assert_eq!(
+            (d1.code.as_deref(), d1.fix),
+            (Some("E_RUNTIME_MISSING"), Some(FixKind::Reinstall))
+        );
+        assert_eq!(
+            b.doctor_fix("D1").unwrap(),
+            FixProposal {
+                kind: Some(FixKind::Reinstall),
+                request: None,
+                plan: None,
+            }
+        );
+        assert!(offers_no_apply(&report), "{:?}", report.checks);
+        // Why: the apply installs from those files, and rolls back.
+        let (done, _) = apply_terracotta(&b);
+        assert_eq!(done.status, ApplyStatus::RolledBack);
+        // Back, but unreadable now: nothing to offer until it can be read.
+        b.sys().fs.write_atomic(&bundled, &bytes).unwrap();
+        fake_fs(&b).fail_reads_of(&bundled);
+        let report = b.doctor_run().unwrap();
+        assert_eq!(by_id(&report, "D1").fix, None);
+        assert!(offers_no_apply(&report), "{:?}", report.checks);
     }
 }

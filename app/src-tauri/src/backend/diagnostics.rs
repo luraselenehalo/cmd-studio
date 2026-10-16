@@ -1,8 +1,10 @@
 //! `diagnostics_copy` (spec §4.3 "แจ้งปัญหา", §5.10): the text the user copies into a GitHub
-//! issue. English only, with every path that holds the Windows user name redacted to
-//! `%USERNAME%`. Of AutoRun it holds counts and flags, never the user's commands; of the
-//! preview's sample (the user, the computer, the home folder), nothing. The text is the answer
-//! and is written nowhere: it leaves the machine only when the user pastes it.
+//! issue. English only. Every path that holds the Windows user name, as the profile folder's
+//! name or its 8.3 alias, has it redacted to `%USERNAME%`, and every account SID to `<SID>`.
+//! Of AutoRun it holds counts and flags, never the user's commands, and of the user's own
+//! settings in checks' details nothing; of the preview's sample (the user, the computer, the
+//! home folder), nothing. The text is the answer and is written nowhere: it leaves the machine
+//! only when the user pastes it.
 use super::{versions, Backend, Machine};
 use crate::error::AppError;
 use crate::settings::{AppSettings, Language, UpdateMode};
@@ -10,14 +12,22 @@ use cmdstudio_core::adapters::{Arch, DefaultTerminal, WtVariant};
 use cmdstudio_core::doctor::{doctor, Check, Status};
 use cmdstudio_core::model::Target;
 use cmdstudio_core::snapshot::SnapshotKind;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// What a user name becomes in the copied text (spec §5.10).
+const USER_PLACEHOLDER: &str = "%USERNAME%";
+/// What an account SID becomes in the copied text.
+const SID_PLACEHOLDER: &str = "<SID>";
+/// How the SIDs of user accounts start: a local or domain account's, an Entra ID account's.
+const USER_SID_PREFIXES: [&str; 2] = ["S-1-5-21-", "S-1-12-1-"];
 
 impl<M: Machine> Backend<M> {
     /// The diagnostics, as text for the user to copy. It reads what the checks read and keeps
     /// nothing of it: no file, no log line holds the text. (The settings are read as by any
     /// command, so a damaged settings.json met here first is set aside, as `settings::load`
-    /// does.)
+    /// does.) When the user name can't be told, nothing is copied: the error says why.
     pub fn diagnostics_copy(&self) -> Result<String, AppError> {
+        let names = self.user_names()?;
         let sys = self.sys();
         let ctx = self.ctx();
         let v = versions();
@@ -44,11 +54,17 @@ impl<M: Machine> Backend<M> {
             .locations()
             .iter()
             .map(|l| {
+                // Read, not `exists`: a file that can't be read is said so, never taken for
+                // one that is not there.
+                let settings = match sys.fs.read(&l.settings) {
+                    Ok(Some(_)) => "yes",
+                    Ok(None) => "no",
+                    Err(_) => "could not be read",
+                };
                 format!(
-                    "{} (installed {}, settings.json {})",
+                    "{} (installed {}, settings.json {settings})",
                     variant_name(l.variant),
-                    yes_no(l.installed),
-                    yes_no(sys.fs.exists(&l.settings))
+                    yes_no(l.installed)
                 )
             })
             .collect();
@@ -99,11 +115,11 @@ impl<M: Machine> Backend<M> {
                 status_name(c.status),
                 c.message_en
             ));
-            if quotes_autorun(&c) {
+            if quotes_the_users_own(&c) {
                 if !c.details.is_empty() {
                     out.push_str(
-                        "           (details left out: they quote AutoRun, which holds other \
-                         programs' commands)\n",
+                        "           (details left out: they quote the user's own commands or \
+                         settings)\n",
                     );
                 }
                 continue;
@@ -145,9 +161,46 @@ impl<M: Machine> Backend<M> {
             )),
         }
         out.push_str("\n== log (last 100 lines) ==\n");
-        out.push_str(&self.log_tail(100));
-        out.push('\n');
-        Ok(redact(&out, &self.user_name()))
+        match self.log.try_tail(sys.fs, 100) {
+            Ok(tail) if tail.is_empty() => out.push_str("(no lines yet)\n"),
+            Ok(tail) => {
+                out.push_str(&tail);
+                out.push('\n');
+            }
+            Err(e) => out.push_str(&format!("could not be read: {e}\n")),
+        }
+        let out = redact_sids(&out, sys.host.user_sid().ok().as_deref());
+        Ok(names.iter().fold(out, |text, name| redact(&text, name)))
+    }
+
+    /// The forms of the user name that a path in the text can hold, longest first: the profile
+    /// folder's name (the folder before `AppData` in the data folder's own path) and its 8.3
+    /// alias (for a profile path that cmd can't take, the planner starts Clink from the alias,
+    /// and the checks print that path). Taken from the data folder, the name is never empty:
+    /// when its path has no `AppData` folder, or the alias can't be read, this is the error,
+    /// and nothing is copied.
+    fn user_names(&self) -> Result<Vec<String>, AppError> {
+        let Some(profile) = profile_of(&self.paths().data) else {
+            return Err(AppError::internal(
+                "the data folder's path holds no AppData folder, so the user name in the \
+                 diagnostics could not be told; they are not copied with it in them",
+            ));
+        };
+        let short = self.sys().host.short_path(&profile).map_err(|_| {
+            AppError::coded(
+                "E_MACHINE_READ",
+                "the 8.3 name of the profile folder could not be read, so the diagnostics are \
+                 not copied: it could be in them",
+            )
+        })?;
+        let mut names: Vec<String> = [profile.as_path(), short.as_path()]
+            .iter()
+            .filter_map(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .collect();
+        names.sort_by_key(|n| std::cmp::Reverse(n.chars().count()));
+        names.dedup();
+        Ok(names)
     }
 
     /// The settings line. Settings that could not be loaded are said to be so, and are never
@@ -170,23 +223,20 @@ impl<M: Machine> Backend<M> {
             ),
         }
     }
-
-    /// The Windows user name, as the folder before `AppData` in the local app data path.
-    fn user_name(&self) -> String {
-        let Ok(local) = self.sys().host.local_app_data() else {
-            return String::new();
-        };
-        user_name_of(&local)
-    }
 }
 
-/// Checks whose details can hold AutoRun's text, and with it the user's own commands: D4's
-/// AutoRun problems and D5 put the values there, and R3's way to fix an AutoRun step by hand
-/// can give the value it had. The diagnostics give AutoRun as counts and flags instead.
-fn quotes_autorun(c: &Check) -> bool {
+/// Checks whose details can quote the user's own commands or settings, which the diagnostics
+/// leave out: D4's AutoRun problems and D5 put AutoRun's values there, R3's way to fix an
+/// AutoRun step by hand can give the value it had, and D7's mismatch (`E_WT_WRITE`) quotes the
+/// cmd profile's command line in Windows Terminal as the user set it. AutoRun is given as counts
+/// and flags instead.
+fn quotes_the_users_own(c: &Check) -> bool {
     matches!(
         (c.id, c.code),
-        ("D5", _) | ("D4", Some("E_AUTORUN_WRITE")) | ("R3", Some("E_ROLLBACK_INCOMPLETE"))
+        ("D5", _)
+            | ("D4", Some("E_AUTORUN_WRITE"))
+            | ("D7", Some("E_WT_WRITE"))
+            | ("R3", Some("E_ROLLBACK_INCOMPLETE"))
     )
 }
 
@@ -268,66 +318,122 @@ fn settings_text(s: &AppSettings) -> String {
     )
 }
 
+/// The profile folder in a path under it: `C:\Users\<name>\AppData\Local` → `C:\Users\<name>`,
+/// the folders up to the one before `AppData`; `None` when the path has no `AppData` folder
+/// with a folder before it.
+fn profile_of(path: &Path) -> Option<PathBuf> {
+    let mut profile = PathBuf::new();
+    for part in path.components() {
+        if part.as_os_str().eq_ignore_ascii_case("AppData") {
+            return profile.file_name().is_some().then_some(profile);
+        }
+        profile.push(part);
+    }
+    None
+}
+
 /// `C:\Users\<name>\AppData\Local` → `<name>`; empty when the path has no `AppData` folder.
 pub fn user_name_of(local_app_data: &Path) -> String {
-    let parts: Vec<String> = local_app_data
-        .components()
-        .map(|c| c.as_os_str().to_string_lossy().into_owned())
-        .collect();
-    parts
-        .iter()
-        .position(|p| p.eq_ignore_ascii_case("AppData"))
-        .and_then(|i| i.checked_sub(1))
-        .and_then(|i| parts.get(i))
-        .cloned()
+    profile_of(local_app_data)
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
         .unwrap_or_default()
 }
 
-/// Replaces `\<user>` by `\%USERNAME%` wherever it ends a folder name (followed by `\`, `/`, a
-/// quote, `)`, `]`, `;`, whitespace or the end), without regard to letter case. A name that
-/// changes length when lower-cased falls back to an exact-case replacement.
+/// Replaces the user name `user` by `%USERNAME%` wherever it is a whole folder name: right
+/// after `\` or `/`, and up to a character that is not a letter or a digit, or the end of the
+/// text. So with user `tester`, `\testers\` and `\tester2\` stay: they are other folders (a
+/// profile folder named `testers` is its own name, and is redacted as that). The name is
+/// matched letter by letter on the text as it is, without regard to case, so a letter that is
+/// longer or shorter in another case (İ, the Kelvin sign) never moves or hides a match.
 pub fn redact(text: &str, user: &str) -> String {
     if user.is_empty() {
         return text.to_string();
     }
-    let needle = format!("\\{user}");
-    let (lower, lower_needle) = (text.to_lowercase(), needle.to_lowercase());
-    if lower.len() != text.len() || lower_needle.len() != needle.len() {
-        return text.replace(&needle, "\\%USERNAME%");
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(['\\', '/']) {
+        // A slash is one byte, so the text after it starts at a character.
+        let (Some(through_slash), Some(after)) = (rest.get(..=at), rest.get(at + 1..)) else {
+            break;
+        };
+        out.push_str(through_slash);
+        rest = after;
+        if let Some(len) = name_at(rest, user) {
+            out.push_str(USER_PLACEHOLDER);
+            rest = rest.get(len..).unwrap_or("");
+        }
     }
-    let ends_name = |rest: &str| {
-        rest.chars().next().is_none_or(|c| {
-            matches!(c, '\\' | '/' | '"' | '\'' | ')' | ']' | ';') || c.is_whitespace()
-        })
+    out.push_str(rest);
+    out
+}
+
+/// The length in bytes of `user` at the start of `text`, when it is there as a whole name (see
+/// [`redact`]).
+fn name_at(text: &str, user: &str) -> Option<usize> {
+    let mut chars = text.char_indices();
+    for wanted in user.chars() {
+        let (_, found) = chars.next()?;
+        if !same_letter(found, wanted) {
+            return None;
+        }
+    }
+    match chars.next() {
+        None => Some(text.len()),
+        Some((end, next)) => (!next.is_alphanumeric()).then_some(end),
+    }
+}
+
+/// The same letter, in any case: equal, or equal in lower or in upper case.
+fn same_letter(a: char, b: char) -> bool {
+    a == b || a.to_lowercase().eq(b.to_lowercase()) || a.to_uppercase().eq(b.to_uppercase())
+}
+
+/// Replaces every account SID by `<SID>`: `sid`, this account's as the host reads it, wherever
+/// it is, and any other in the form Windows gives a user account's (`S-1-5-21-` or `S-1-12-1-`,
+/// then its numbers).
+pub fn redact_sids(text: &str, sid: Option<&str>) -> String {
+    let text = match sid.filter(|s| !s.is_empty()) {
+        Some(sid) => text.replace(sid, SID_PLACEHOLDER),
+        None => text.to_string(),
     };
     let mut out = String::with_capacity(text.len());
-    let mut i = 0;
-    while let Some(pos) = lower.get(i..).and_then(|rest| rest.find(&lower_needle)) {
-        let at = i + pos;
-        let end = at + lower_needle.len();
-        let (Some(before), Some(found), Some(after)) =
-            (text.get(i..at), text.get(at..end), text.get(end..))
+    let mut rest = text.as_str();
+    while let Some((at, numbers)) = USER_SID_PREFIXES
+        .iter()
+        .filter_map(|p| rest.find(p).map(|at| (at, at + p.len())))
+        .min()
+    {
+        // The prefixes are ASCII, so these are at characters.
+        let (Some(before), Some(prefix), Some(after)) =
+            (rest.get(..at), rest.get(at..numbers), rest.get(numbers..))
         else {
-            return text.replace(&needle, "\\%USERNAME%");
+            break;
         };
         out.push_str(before);
-        out.push_str(if ends_name(after) {
-            "\\%USERNAME%"
+        let run = after
+            .find(|c: char| !c.is_ascii_digit() && c != '-')
+            .unwrap_or(after.len());
+        let run = after.get(..run).unwrap_or("").trim_end_matches('-').len();
+        if after.starts_with(|c: char| c.is_ascii_digit()) {
+            out.push_str(SID_PLACEHOLDER);
+            rest = after.get(run..).unwrap_or("");
         } else {
-            found
-        });
-        i = end;
+            out.push_str(prefix);
+            rest = after;
+        }
     }
-    out.push_str(text.get(i..).unwrap_or(""));
+    out.push_str(rest);
     out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::testing::{apply_terracotta, backend, fake_fs};
+    use crate::backend::testing::{apply_terracotta, backend, fake_fs, WT};
     use crate::settings::Language;
     use cmdstudio_core::adapters::{AutoRun, RegValue, REG_SZ};
+    use cmdstudio_core::plan::Paths;
+    use std::path::PathBuf;
 
     #[test]
     fn the_user_name_is_the_folder_before_appdata() {
@@ -355,10 +461,199 @@ mod tests {
         );
         assert_eq!(redact("nothing here", "tester"), "nothing here");
         assert_eq!(redact(r"C:\Users\tester", ""), r"C:\Users\tester");
-        // A name whose lower case is longer falls back to exact-case replacement.
+        // İ and i are two letters, in any case, as they are to Windows.
         assert_eq!(
             redact(r"C:\Users\İsa\x \isa", "İsa"),
             r"C:\Users\%USERNAME%\x \isa"
+        );
+    }
+
+    /// The rule: the name is the user's where it is a whole folder name, right after `\` or `/`
+    /// and up to a character that is not a letter or a digit, or the end of the text. With
+    /// user `tester`, `\testers\` and `\tester2\` are other folders and stay.
+    #[test]
+    fn the_name_is_redacted_after_either_slash_up_to_any_non_letter() {
+        assert_eq!(
+            redact("C:/Users/tester/AppData", "tester"),
+            "C:/Users/%USERNAME%/AppData"
+        );
+        for end in [".", ",", "&&", ":", "\n", ""] {
+            assert_eq!(
+                redact(&format!(r"in \tester{end}"), "tester"),
+                format!(r"in \%USERNAME%{end}"),
+                "{end:?}"
+            );
+        }
+        assert_eq!(
+            redact(r"C:\USERS\TeStEr\x c:/users/TESTER", "tester"),
+            r"C:\USERS\%USERNAME%\x c:/users/%USERNAME%"
+        );
+        for other in [
+            r"C:\Users\testers\x",
+            r"C:\Users\tester2\x",
+            r"C:\Users\testerä\x",
+            r"C:\Users\attester\x",
+        ] {
+            assert_eq!(redact(other, "tester"), other);
+        }
+    }
+
+    /// Letters whose lower case is longer (İ) or shorter (the Kelvin sign) than they are never
+    /// move where the name is found, nor stop it being found.
+    #[test]
+    fn letters_that_change_length_in_lower_case_do_not_move_the_name() {
+        let text = "İstanbul İzmir C:\\Users\\tester\\x C:\\Users\\Tester\\y 300 \u{212A}";
+        assert_eq!(
+            redact(text, "tester"),
+            "İstanbul İzmir C:\\Users\\%USERNAME%\\x C:\\Users\\%USERNAME%\\y 300 \u{212A}"
+        );
+    }
+
+    #[test]
+    fn a_thai_name_is_redacted_whole_and_only_whole() {
+        let name = "ผู้ทดสอบ";
+        assert_eq!(
+            redact(r"C:\Users\ผู้ทดสอบ\AppData C:/Users/ผู้ทดสอบ/x", name),
+            r"C:\Users\%USERNAME%\AppData C:/Users/%USERNAME%/x"
+        );
+        // A longer Thai word is another folder.
+        assert_eq!(
+            redact(r"C:\Users\ผู้ทดสอบระบบ\x", name),
+            r"C:\Users\ผู้ทดสอบระบบ\x"
+        );
+    }
+
+    /// The profile folder's 8.3 name is the user's too: for a profile path that cmd can't take,
+    /// the planner starts Clink from it, and the checks print that path. The name and its alias
+    /// are read from the data folder's own path, so the copied text quotes neither.
+    #[test]
+    fn the_profile_folders_short_name_is_redacted_too() {
+        let mut b = backend();
+        b.paths = Paths {
+            data: PathBuf::from(r"C:\Users\testername\AppData\Local\ai.resincore.cmdstudio"),
+        };
+        b.machine.host.short.insert(
+            PathBuf::from(r"C:\Users\testername"),
+            PathBuf::from(r"C:\Users\TESTER~1"),
+        );
+        // The log is quoted as it is: a line that holds both forms.
+        b.sys()
+            .fs
+            .write_atomic(
+                &b.log.file(),
+                b"2026-10-17T00:00:00Z cmd=x C:\\Users\\TESTER~1\\AppData\\Local\\x and \
+                  C:/Users/testername/y\n",
+            )
+            .unwrap();
+        let text = b.diagnostics_copy().unwrap();
+        assert!(
+            text.contains(r"data folder: C:\Users\%USERNAME%\AppData\Local\ai.resincore.cmdstudio"),
+            "{text}"
+        );
+        assert!(
+            text.contains(r"cmd=x C:\Users\%USERNAME%\AppData\Local\x and C:/Users/%USERNAME%/y"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("TESTER~1") && !text.to_lowercase().contains("testername"),
+            "{text}"
+        );
+    }
+
+    /// Without a user name to redact, nothing is copied: never a report with the name in it.
+    #[test]
+    fn with_no_user_name_to_redact_nothing_is_copied() {
+        let mut b = backend();
+        b.paths = Paths {
+            data: PathBuf::from(r"D:\CMD Studio data"),
+        };
+        assert_eq!(b.diagnostics_copy().unwrap_err().code, "E_INTERNAL");
+    }
+
+    /// D7's details quote the user's own cmd command line in Windows Terminal: left out, as
+    /// AutoRun's are.
+    #[test]
+    fn the_users_own_terminal_command_line_is_left_out() {
+        let b = backend();
+        apply_terracotta(&b);
+        let wt = String::from_utf8(b.sys().fs.read(Path::new(WT)).unwrap().unwrap()).unwrap();
+        let ours = r#""%SystemRoot%\\System32\\cmd.exe""#;
+        assert_eq!(wt.matches(ours).count(), 1, "{wt}");
+        let mine = wt.replacen(ours, r#""cmd.exe /k C:\\Tools\\my-secret-init.cmd""#, 1);
+        b.sys()
+            .fs
+            .write_atomic(Path::new(WT), mine.as_bytes())
+            .unwrap();
+        let text = b.diagnostics_copy().unwrap();
+        assert!(
+            text.contains("[E_WT_WRITE]\n           (details left out"),
+            "{text}"
+        );
+        assert!(!text.contains("my-secret-init"), "{text}");
+    }
+
+    /// What could not be read is said so: never "no" for a file that may be there, never an
+    /// empty section.
+    #[test]
+    fn what_could_not_be_read_is_said_so() {
+        let b = backend();
+        let text = b.diagnostics_copy().unwrap();
+        assert!(
+            text.contains("Windows Terminal: Store (installed yes, settings.json yes)\n"),
+            "{text}"
+        );
+        assert!(
+            text.ends_with("== log (last 100 lines) ==\n(no lines yet)\n"),
+            "{text}"
+        );
+        let _ = b.logged("themes_list", |_| Ok(()));
+        fake_fs(&b).fail_reads_of(Path::new(WT));
+        fake_fs(&b).fail_reads_of(b.log.file());
+        let text = b.diagnostics_copy().unwrap();
+        assert!(
+            text.contains(
+                "Windows Terminal: Store (installed yes, settings.json could not be read)\n"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("== log (last 100 lines) ==\ncould not be read: "),
+            "{text}"
+        );
+    }
+
+    /// The account's SID names the user too, in the private ProgramData folder the planner may
+    /// start Clink from: this account's, as the host reads it (here an Entra ID one), and any
+    /// other user's SID, read by its form.
+    #[test]
+    fn account_sids_are_redacted() {
+        let mut b = backend();
+        b.machine.host.sid = "S-1-12-1-11-22-33-44".to_string();
+        b.sys()
+            .fs
+            .write_atomic(
+                &b.log.file(),
+                b"2026-10-17T00:00:00Z cmd=x \
+                  C:\\ProgramData\\ai.resincore.cmdstudio-S-1-12-1-11-22-33-44\\clink_x64.exe \
+                  owner S-1-5-21-555-666-777-1001.\n",
+            )
+            .unwrap();
+        let text = b.diagnostics_copy().unwrap();
+        assert!(
+            text.contains(
+                r"cmd=x C:\ProgramData\ai.resincore.cmdstudio-<SID>\clink_x64.exe owner <SID>."
+            ),
+            "{text}"
+        );
+        assert!(
+            !text.contains("S-1-12-1") && !text.contains("S-1-5-21"),
+            "{text}"
+        );
+        // By its form alone: the numbers go, a dash after them stays; a well-known SID, or the
+        // start of one with no number after it, is no account's.
+        assert_eq!(
+            redact_sids("a S-1-5-21-1-2-3-1001-b S-1-5-18 S-1-5-21-x", None),
+            "a <SID>-b S-1-5-18 S-1-5-21-x"
         );
     }
 
@@ -479,10 +774,10 @@ mod tests {
             details: String::new(),
             details_th: None,
         };
-        assert!(quotes_autorun(&check("R3", "E_ROLLBACK_INCOMPLETE")));
-        assert!(!quotes_autorun(&check("R3", "E_SNAPSHOT_READ")));
-        assert!(!quotes_autorun(&check("D4", "E_RUNTIME_MISSING")));
-        assert!(!quotes_autorun(&check("D9", "E_GENERATED_EDITED")));
+        assert!(quotes_the_users_own(&check("R3", "E_ROLLBACK_INCOMPLETE")));
+        assert!(!quotes_the_users_own(&check("R3", "E_SNAPSHOT_READ")));
+        assert!(!quotes_the_users_own(&check("D4", "E_RUNTIME_MISSING")));
+        assert!(!quotes_the_users_own(&check("D9", "E_GENERATED_EDITED")));
     }
 
     /// Nothing CMD Studio itself writes in the diagnostics is Thai: the core's English words
