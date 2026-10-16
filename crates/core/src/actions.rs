@@ -17,7 +17,7 @@ use crate::snapshot::{
     UnreadableKind, Unrestored, KEEP,
 };
 use crate::state::{Applied, AutoRunRecord, FontRecord, RegValueRecord, State, StateError};
-use crate::txn::{self, Executor, Failure, Outcome, Stage, Verifier};
+use crate::txn::{self, Executor, Failure, Journal, Outcome, Stage, Verifier};
 use crate::verify::SystemVerifier;
 use crate::wt_edit::{apply_edit, WtEdit, WtError};
 use std::collections::BTreeMap;
@@ -589,33 +589,81 @@ pub fn undo(sys: System<'_>, ctx: &Ctx) -> Result<UndoReport, ActionError> {
     let (_lock, mut start) = begin(sys, ctx)?;
     let root = ctx.paths.snapshots();
     let store = SnapshotStore::new(sys.fs, &root);
+    before_undo(sys, ctx, &store, &mut start)?;
+    let Some((applied, journal)) = store.latest_undoable()? else {
+        return Ok(UndoReport {
+            start,
+            result: UndoResult::NothingToUndo,
+            problems: Vec::new(),
+            fonts_left: Vec::new(),
+        });
+    };
+    let one = undo_apply(sys, ctx, &store, applied, &journal, true);
+    Ok(UndoReport {
+        start,
+        result: UndoResult::Done {
+            undid: one.undid,
+            outcome: one.outcome,
+        },
+        problems: one.problems,
+        fonts_left: one.fonts_left,
+    })
+}
+
+/// What an undo checks and does under the lock before it changes anything: it is refused
+/// while the rollback of the newest transaction did not finish or its record cannot be read,
+/// and while state.json is from a newer CMD Studio or cannot be read; the font files earlier
+/// runs left to delete are tried again. What it could not do goes into `start`.
+fn before_undo(
+    sys: System<'_>,
+    ctx: &Ctx,
+    store: &SnapshotStore<'_>,
+    start: &mut StartReport,
+) -> Result<(), ActionError> {
     // `latest_undoable` skips an apply that did not commit, so with a rollback that did not
     // finish it would undo the apply before that one, and the undo, being newer, would hide
     // the record of what is left to fix. A record that cannot be read stops it the same way, and
     // one that could not be saved is rebuilt from the journal and stops it too.
-    if let Some((record, _)) = latest_record(&store)? {
+    if let Some((record, _)) = latest_record(store)? {
         return Err(ActionError::PendingIncomplete(record));
     }
     // state.json is one of the targets an undo puts back. One from a newer CMD Studio, or one
     // that cannot be read now, is never overwritten; a damaged one is replaced by the
     // state.json the apply found, as before.
     match State::load(sys.fs, &ctx.paths.state_file()) {
-        Ok(mut state) => delete_pending_and_save(sys, ctx, &mut state, &mut start),
+        Ok(mut state) => delete_pending_and_save(sys, ctx, &mut state, start),
         Err(e @ StateError::Invalid(_)) => start.problems.push(Failure {
             code: e.code(),
             message: format!("{e}; the font files it may list for a later delete were not tried"),
         }),
         Err(e) => return Err(e.into()),
     }
+    Ok(())
+}
+
+/// What undoing one apply did (see [`undo_apply`]).
+struct UndoneApply {
+    undid: String,
+    outcome: Outcome,
+    problems: Vec<Failure>,
+    fonts_left: Vec<FontLeft>,
+    /// The apply is marked undone: its undo committed, and the mark was written.
+    marked: bool,
+}
+
+/// Undoes `applied`, a committed apply that is not reversed, whose journal is `journal`, under
+/// the lock the caller holds and after [`before_undo`]: a transaction of its own over the
+/// apply's ops in reverse, with a restore point of kind `Undo`. After a commit the apply is
+/// marked undone, and old restore points are pruned when `prune` is set.
+fn undo_apply(
+    sys: System<'_>,
+    ctx: &Ctx,
+    store: &SnapshotStore<'_>,
+    applied: Manifest,
+    journal: &Journal,
+    prune: bool,
+) -> UndoneApply {
     let mut problems = Vec::new();
-    let Some((applied, journal)) = store.latest_undoable()? else {
-        return Ok(UndoReport {
-            start,
-            result: UndoResult::NothingToUndo,
-            problems,
-            fonts_left: Vec::new(),
-        });
-    };
     let priors: Vec<(Op, Option<Vec<u8>>)> = journal
         .snapshots
         .iter()
@@ -627,7 +675,7 @@ pub fn undo(sys: System<'_>, ctx: &Ctx) -> Result<UndoReport, ActionError> {
         })
         .collect();
     let ops: Vec<Op> = journal.ops.iter().rev().cloned().collect();
-    let id = next_id(&store, ctx.now_ms);
+    let id = next_id(store, ctx.now_ms);
     let manifest = Manifest {
         id: id.clone(),
         kind: SnapshotKind::Undo,
@@ -645,7 +693,7 @@ pub fn undo(sys: System<'_>, ctx: &Ctx) -> Result<UndoReport, ActionError> {
     // Into the state.json the transaction left: the apply's own, put back, after a commit.
     let (outcome, unnoted) = after_held(sys, ctx, &ops, &exec.held_files(), outcome);
     problems.extend(unnoted);
-    if let Err(f) = record_incomplete(&store, &id, &outcome) {
+    if let Err(f) = record_incomplete(store, &id, &outcome) {
         problems.push(f);
     }
     // Only a committed undo leaves a font to the user: a rolled-back one put the font back.
@@ -654,30 +702,170 @@ pub fn undo(sys: System<'_>, ctx: &Ctx) -> Result<UndoReport, ActionError> {
     } else {
         Vec::new()
     };
+    let mut marked = false;
     if outcome == Outcome::Committed {
         // The machine is back; only the restore point's note of it failed. Said, not turned
         // into an error that would hide the outcome.
-        if let Err(f) = store.mark_undone(std::slice::from_ref(&applied.id), &id) {
-            problems.push(Failure {
+        match store.mark_undone(std::slice::from_ref(&applied.id), &id) {
+            Ok(()) => marked = true,
+            Err(f) => problems.push(Failure {
                 code: f.code,
                 message: format!(
                     "the undo is done, but restore point {} could not be marked undone, so the \
                      next undo goes over it again: {}",
                     applied.id, f.message
                 ),
-            });
+            }),
         }
+        if prune {
+            // Failing to prune costs disk space only.
+            let _ = store.prune(KEEP);
+        }
+    }
+    UndoneApply {
+        undid: applied.id,
+        outcome,
+        problems,
+        fonts_left,
+        marked,
+    }
+}
+
+/// How [`restore_to`] ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RestoreResult {
+    /// Every apply from the newest down to the restore point is undone.
+    Done,
+    /// The restore point is not an apply an undo goes back to (see
+    /// [`SnapshotStore::undoable`]): an undo or a revert-all, an apply already reversed, set
+    /// aside, or one that did not commit. Nothing was undone.
+    NotRestorable,
+    /// It stopped after the last of its undos: that undo did not commit (its outcome says why),
+    /// or committed but its apply could not be marked undone (its problems say so; another undo
+    /// would undo that apply again). `refused`: the next undo was refused before it changed
+    /// anything, and why.
+    Stopped { refused: Option<ActionError> },
+}
+
+/// One undo of a restore, as [`undo`] reports one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RestoreUndo {
+    /// The apply undone, or whose undo was tried.
+    pub undid: String,
+    pub outcome: Outcome,
+    /// What it could not do besides its transaction (see [`UndoReport::problems`]).
+    pub problems: Vec<Failure>,
+    /// See [`UndoReport::fonts_left`].
+    pub fonts_left: Vec<FontLeft>,
+}
+
+/// What [`restore_to`] did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RestoreReport {
+    /// What the start of the restore found and did (see [`StartReport`]), and what the checks
+    /// before each undo could not do.
+    pub start: StartReport,
+    pub result: RestoreResult,
+    /// The undos it ran, in order, the newest apply first.
+    pub undos: Vec<RestoreUndo>,
+}
+
+/// Goes back to restore point `id`, an apply (spec §4.3 "จุดย้อนกลับทั้งหมดพร้อมปุ่มกู้คืน"): undoes
+/// every apply from the newest down to it, in the order [`undo`] takes them one after the other
+/// (newest first; undos, revert-alls, applies reversed or set aside and those that did not
+/// commit are not undone), each as a transaction of its own, exactly as `undo` does one. The
+/// restore points are layered, so an older one cannot be put back alone.
+///
+/// Unlike as many `undo`s, it takes the lock once for the whole restore, so no other command
+/// changes the machine between two of its undos, and it prunes once, at the end: every undo adds
+/// a restore point, and a prune between two of them (only the first-ever and the `KEEP` newest
+/// are kept) could delete the points it still goes back through.
+///
+/// It stops at the first undo that does not commit, or whose apply cannot be marked undone, and
+/// when the next undo is refused ([`RestoreResult::Stopped`]); what it undid stays undone and is
+/// reported. Refused, with nothing undone, when `id` is no restore point or a restore point on
+/// the way cannot be read (`E_SNAPSHOT_READ`), and for the reasons `undo` is refused.
+pub fn restore_to(sys: System<'_>, ctx: &Ctx, id: &str) -> Result<RestoreReport, ActionError> {
+    restore_with(sys, ctx, id, &mut || {})
+}
+
+/// [`restore_to`], running `between_undos` after each undo but the last, while the restore
+/// holds the lock: the tests' way into the time between two undos.
+fn restore_with(
+    sys: System<'_>,
+    ctx: &Ctx,
+    id: &str,
+    between_undos: &mut dyn FnMut(),
+) -> Result<RestoreReport, ActionError> {
+    let (_lock, mut start) = begin(sys, ctx)?;
+    let root = ctx.paths.snapshots();
+    let store = SnapshotStore::new(sys.fs, &root);
+    before_undo(sys, ctx, &store, &mut start)?;
+    let ids = store.ids()?;
+    let Some(at) = ids.iter().position(|known| known == id) else {
+        return Err(ActionError::Snapshot(Failure {
+            code: "E_SNAPSHOT_READ",
+            message: format!("there is no restore point {id}"),
+        }));
+    };
+    // The applies to undo, newest first, as `latest_undoable` would give them one after the
+    // other. One that cannot be read would stop an undo at it, so it stops the restore before
+    // anything is undone.
+    let mut todo = Vec::new();
+    for newer in ids.iter().skip(at).rev() {
+        if store.is_set_aside(newer) {
+            continue;
+        }
+        let in_the_way = |f: Failure| Failure {
+            code: f.code,
+            message: format!(
+                "restore point {newer} cannot be read, so nothing was undone: {}",
+                f.message
+            ),
+        };
+        let m = store.manifest(newer).map_err(in_the_way)?;
+        if let Some(journal) = store.undoable(newer, &m).map_err(in_the_way)? {
+            todo.push((newer, m, journal));
+        }
+    }
+    if todo.last().map(|(newer, _, _)| newer.as_str()) != Some(id) {
+        return Ok(RestoreReport {
+            start,
+            result: RestoreResult::NotRestorable,
+            undos: Vec::new(),
+        });
+    }
+    let mut undos: Vec<RestoreUndo> = Vec::new();
+    let mut result = RestoreResult::Done;
+    for (_, applied, journal) in todo {
+        if !undos.is_empty() {
+            between_undos();
+            if let Err(e) = before_undo(sys, ctx, &store, &mut start) {
+                result = RestoreResult::Stopped { refused: Some(e) };
+                break;
+            }
+        }
+        let one = undo_apply(sys, ctx, &store, applied, &journal, false);
+        let go_on = one.outcome == Outcome::Committed && one.marked;
+        undos.push(RestoreUndo {
+            undid: one.undid,
+            outcome: one.outcome,
+            problems: one.problems,
+            fonts_left: one.fonts_left,
+        });
+        if !go_on {
+            result = RestoreResult::Stopped { refused: None };
+            break;
+        }
+    }
+    if undos.iter().any(|u| u.outcome == Outcome::Committed) {
         // Failing to prune costs disk space only.
         let _ = store.prune(KEEP);
     }
-    Ok(UndoReport {
+    Ok(RestoreReport {
         start,
-        result: UndoResult::Done {
-            undid: applied.id,
-            outcome,
-        },
-        problems,
-        fonts_left,
+        result,
+        undos,
     })
 }
 
@@ -3023,5 +3211,126 @@ mod tests {
             assert!(!seen.contains(&Progress::Verifying), "{value:?}");
             assert_eq!(m.autorun.read_user().unwrap(), Some(value));
         }
+    }
+
+    fn undone_by(m: &crate::adapters::fake::FakeMachine, ctx: &Ctx, id: &str) -> Option<String> {
+        let root = ctx.paths.snapshots();
+        SnapshotStore::new(m.system().fs, &root)
+            .manifest(id)
+            .unwrap()
+            .undone_by
+    }
+
+    /// Each undo adds a restore point, and a prune keeps only the first-ever and the `KEEP`
+    /// newest. A prune between two undos of a restore would delete the points it still goes
+    /// back through: with 12 applies, restoring the second-oldest would lose it on the way.
+    #[test]
+    fn restore_to_goes_back_through_many_points_and_prunes_once_at_the_end() {
+        let (m, ctx) = machine();
+        let ids: Vec<String> = (0..12).map(|_| apply(&m, &ctx, Target::All)).collect();
+        let report = restore_to(m.system(), &later(&ctx, 100), &ids[1]).unwrap();
+        assert_eq!(report.result, RestoreResult::Done);
+        let undid: Vec<&str> = report.undos.iter().map(|u| u.undid.as_str()).collect();
+        let newest_first: Vec<&str> = ids[1..].iter().rev().map(String::as_str).collect();
+        assert_eq!(undid, newest_first);
+        assert!(report
+            .undos
+            .iter()
+            .all(|u| u.outcome == Outcome::Committed && u.problems.is_empty()));
+        // The first apply is not undone, and is the next one an undo takes.
+        assert_eq!(undone_by(&m, &ctx, &ids[0]), None);
+        let root = ctx.paths.snapshots();
+        let store = SnapshotStore::new(m.system().fs, &root);
+        assert_eq!(
+            store.latest_undoable().unwrap().map(|(m, _)| m.id),
+            Some(ids[0].clone())
+        );
+        // One prune, at the end: 12 applies and 11 undos leave the first-ever and the KEEP newest.
+        assert_eq!(store.ids().unwrap().len(), 1 + KEEP);
+        // An apply that is undone is no point to go back to.
+        let again = restore_to(m.system(), &later(&ctx, 200), &ids[11]).unwrap();
+        assert_eq!(
+            (again.result, again.undos.len()),
+            (RestoreResult::NotRestorable, 0)
+        );
+    }
+
+    #[test]
+    fn restore_to_stops_at_an_undo_that_does_not_commit() {
+        let (m, ctx) = machine();
+        let first = apply(&m, &ctx, Target::All);
+        // init.lua is gone before the second apply, which writes it anew, so undoing that apply
+        // deletes it; here the delete fails, and that undo rolls back.
+        let init = ctx.paths.generated().join("init.lua");
+        m.fs.remove_file(&init).unwrap();
+        let second = apply(&m, &ctx, Target::All);
+        let third = apply(&m, &ctx, Target::All);
+        m.fs.fail_removes_of(&init);
+        let report = restore_to(m.system(), &later(&ctx, 100), &first).unwrap();
+        assert_eq!(report.result, RestoreResult::Stopped { refused: None });
+        let undid: Vec<&str> = report.undos.iter().map(|u| u.undid.as_str()).collect();
+        assert_eq!(undid, [third.as_str(), second.as_str()]);
+        assert_eq!(report.undos[0].outcome, Outcome::Committed);
+        assert!(
+            matches!(report.undos[1].outcome, Outcome::RolledBack { .. }),
+            "{:?}",
+            report.undos[1].outcome
+        );
+        // It stopped there: the first apply was not tried.
+        assert!(undone_by(&m, &ctx, &third).is_some());
+        assert_eq!(undone_by(&m, &ctx, &second), None);
+        assert_eq!(undone_by(&m, &ctx, &first), None);
+    }
+
+    #[test]
+    fn restore_to_holds_the_lock_from_its_first_undo_to_its_last() {
+        let (m, ctx) = machine();
+        let first = apply(&m, &ctx, Target::All);
+        apply(&m, &ctx, Target::Wt);
+        apply(&m, &ctx, Target::All);
+        let mut between = 0;
+        let report = restore_with(m.system(), &later(&ctx, 100), &first, &mut || {
+            between += 1;
+            // Another CMD Studio applies a theme between two undos of the restore.
+            let e = prepare_apply(
+                m.system(),
+                &later(&ctx, 200),
+                &terracotta(),
+                &request(Target::All),
+            )
+            .unwrap_err();
+            assert_eq!(e, ActionError::Busy);
+        })
+        .unwrap();
+        assert_eq!(between, 2);
+        assert_eq!(report.result, RestoreResult::Done);
+        assert_eq!(report.undos.len(), 3);
+    }
+
+    #[test]
+    fn restore_to_stops_when_a_later_undo_is_refused_and_says_how_far_it_got() {
+        let (m, ctx) = machine();
+        let first = apply(&m, &ctx, Target::All);
+        let second = apply(&m, &ctx, Target::All);
+        let state = ctx.paths.state_file();
+        // state.json cannot be read after the first undo: the next undo would write it over
+        // unseen, so it is refused, and the restore says what it did before.
+        let report = restore_with(m.system(), &later(&ctx, 100), &first, &mut || {
+            m.fs.fail_reads_of(&state)
+        })
+        .unwrap();
+        assert!(
+            matches!(
+                &report.result,
+                RestoreResult::Stopped { refused: Some(e) } if e.code() == "E_STATE_INVALID"
+            ),
+            "{:?}",
+            report.result
+        );
+        let undid: Vec<&str> = report.undos.iter().map(|u| u.undid.as_str()).collect();
+        assert_eq!(undid, [second.as_str()]);
+        assert_eq!(report.undos[0].outcome, Outcome::Committed);
+        m.fs.stop_failing(&state);
+        assert_eq!(undone_by(&m, &ctx, &first), None);
     }
 }

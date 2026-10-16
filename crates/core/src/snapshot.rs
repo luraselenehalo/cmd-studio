@@ -418,15 +418,25 @@ impl<'a> SnapshotStore<'a> {
                 continue;
             }
             let m = self.manifest(&id).map_err(|f| in_the_way(&id, f))?;
-            if m.kind != SnapshotKind::Apply || m.undone_by.is_some() {
-                continue;
-            }
-            let j = self.journal(&id).map_err(|f| in_the_way(&id, f))?;
-            if j.stage == Stage::Committed {
+            if let Some(j) = self.undoable(&id, &m).map_err(|f| in_the_way(&id, f))? {
                 return Ok(Some((m, j)));
             }
         }
         Ok(None)
+    }
+
+    /// The journal of restore point `id`, whose manifest is `m`, when it is an apply an undo
+    /// goes back to: an apply, not reversed, not set aside, whose transaction committed. `None`
+    /// when it is not one; `Err` when its journal, which says whether it committed, cannot be
+    /// read (an undo, a revert-all and a reversed apply are told from the manifest alone). The
+    /// one test of [`SnapshotStore::latest_undoable`], of `actions::restore_to`, and of the
+    /// app's list of the points a restore can go back to.
+    pub fn undoable(&self, id: &str, m: &Manifest) -> Result<Option<Journal>, Failure> {
+        if m.kind != SnapshotKind::Apply || m.undone_by.is_some() || self.is_set_aside(id) {
+            return Ok(None);
+        }
+        let j = self.journal(id)?;
+        Ok((j.stage == Stage::Committed).then_some(j))
     }
 
     /// Marks every committed apply that is not reversed yet as reversed by `by`. Every manifest
