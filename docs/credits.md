@@ -39,7 +39,7 @@ The values were taken on 2026-10-11 from these commits:
 | One Dark | `atom/one-dark-syntax@9c96f4454362267ac45322063e193ccf9d2debb1` | `styles/colors.less`, `styles/syntax-variables.less` |
 | Solarized Light | `altercation/solarized@62f656a02f93c5190a8753159e34b385588d5ff3` | `README.md` ("The Values") |
 
-Where a project has no color for one of a theme's slots, CMD Studio took one of the project's own colors: the accent, the muted text and the frame of every upstream preset, Tokyo Night's background and text (its editor's, D1), and One Dark's terminal colors (One Dark has none; the hex values are One Dark's, which goes in which ANSI slot is CMD Studio's). The design spec's appendix B lists these choices.
+Where a project has no color for one of a theme's slots, CMD Studio took one of the project's own colors: the accent, the muted text and the frame of every upstream preset, Tokyo Night's background and text (its editor's, D1), and One Dark's terminal colors (One Dark has none; which color goes in which ANSI slot is CMD Studio's, and so is ansi 15, `#ffffff`, which is not a One Dark value; the other hex values are One Dark's). The design spec's appendix B lists these choices.
 
 ## Code signing
 
