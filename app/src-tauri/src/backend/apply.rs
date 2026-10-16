@@ -5,16 +5,16 @@
 use super::{note, start_notes, start_unrestored, Backend, Machine, Note};
 use crate::error::{AppError, INTERNAL};
 use cmdstudio_core::actions::{
-    pending_incomplete, prepare_apply, run_apply_with, undo, ActionError, Ctx, Prepared, Progress,
-    UndoResult,
+    pending_incomplete, prepare_apply, restore_to, run_apply_with, undo, ActionError, Ctx,
+    Prepared, Progress, RestoreResult, RestoreUndo, UndoResult,
 };
 use cmdstudio_core::cleanup;
-use cmdstudio_core::exec::{CLEANUP_FIX_EN, CLEANUP_FIX_TH};
+use cmdstudio_core::exec::{self, CLEANUP_FIX_EN, CLEANUP_FIX_TH};
 use cmdstudio_core::model::{Target, Theme};
-use cmdstudio_core::plan::{Component, Op, Paths, PlanError, Request, Warning};
+use cmdstudio_core::plan::{autorun_summary, Component, Op, Paths, PlanError, Request, Warning};
 use cmdstudio_core::resources::sha256_hex;
-use cmdstudio_core::snapshot::{Manifest, SnapshotKind, SnapshotStore, ThemeRef, Unrestored};
-use cmdstudio_core::txn::{Failure, Outcome, Stage};
+use cmdstudio_core::snapshot::{SnapshotKind, SnapshotStore, ThemeRef, Unrestored};
+use cmdstudio_core::txn::Outcome;
 use serde::{Deserialize, Serialize};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use ts_rs::TS;
@@ -93,6 +93,9 @@ pub struct ApplyPlan {
     pub summary_th: Vec<String>,
     pub warnings: Vec<PlanWarning>,
     pub steps: Vec<PlanStep>,
+    /// The commands of another Clink in AutoRun that this apply turns off, as the user agreed
+    /// (spec §5.4), as written, for the page that confirms it; empty when it turns none off.
+    pub replaces_other_clink: Vec<String>,
     /// What the start found (spec §5.5), to show with the plan.
     pub notes: Vec<Note>,
     /// The steps of a rollback that did not finish, which still need a hand.
@@ -212,7 +215,7 @@ pub struct RestorePoint {
     pub undoes: Option<String>,
     pub undone_by: Option<String>,
     /// An apply that committed, is not undone and was not set aside: "Restore" may go back to
-    /// it (see `restorable`).
+    /// it (the core's `SnapshotStore::undoable`, which the restore itself goes by).
     pub restorable: bool,
 }
 
@@ -235,8 +238,8 @@ pub enum RestoreStatus {
     Done,
     /// Not an apply, already undone, set aside, or it did not commit: nothing was done.
     NotRestorable,
-    /// An undo on the way did not commit, was refused, or did not undo the apply it was to
-    /// undo; `undone` says how far it got, `last` why it stopped.
+    /// An undo on the way did not commit, its apply could not be marked undone, or the next
+    /// undo was refused; `undone` says how far it got, `last` and `notes` why it stopped.
     Stopped,
 }
 
@@ -245,13 +248,14 @@ pub enum RestoreStatus {
 #[ts(export)]
 pub struct RestoreOutcome {
     pub status: RestoreStatus,
-    /// The applies undone, in the order they were undone.
+    /// The applies undone, in the order they were undone: the undos that committed.
     pub undone: Vec<String>,
-    /// The last undo that ran. When the restore stopped for a reason other than that undo's own
-    /// outcome (another CMD Studio, or the command line, changed the restore points between two
-    /// undos, the next undo was refused, or a point it undid could not be marked undone), the
-    /// last of its notes says why.
+    /// The last undo that ran: when it did not commit, or its apply could not be marked undone,
+    /// it says why the restore stopped.
     pub last: Option<UndoOutcome>,
+    /// What the start of the restore found (spec §5.5), and why the next undo was refused when
+    /// that is what stopped it.
+    pub notes: Vec<Note>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -340,24 +344,42 @@ fn warning_of(w: &Warning) -> PlanWarning {
     }
 }
 
-/// What the user is shown, reduced to a hash: the same plan gives the same digest.
-fn digest(summary_en: &[String], warnings: &[PlanWarning], steps: &[PlanStep]) -> String {
-    #[derive(Serialize)]
-    struct Fingerprint<'a> {
-        summary_en: &'a [String],
-        warnings: &'a [PlanWarning],
-        steps: &'a [PlanStep],
-    }
-    let json = serde_json::to_vec(&Fingerprint {
-        summary_en,
-        warnings,
-        steps,
-    })
-    .unwrap_or_default();
-    sha256_hex(&json)
+/// What the user is shown and agrees to, which the digest stands for.
+#[derive(Serialize)]
+struct Fingerprint<'a> {
+    theme_id: Uuid,
+    theme_name: &'a str,
+    /// What each step writes: the plan's ops, before the write of state.json, which holds the
+    /// time of the apply.
+    ops: &'a [Op],
+    summary_en: &'a [String],
+    warnings: &'a [PlanWarning],
+    steps: &'a [PlanStep],
+    replaces_other_clink: &'a [String],
+    /// The newest restore point when it was planned: the apply it leads to makes a newer one,
+    /// so a plan is applied once at most.
+    newest_restore_point: Option<&'a str>,
 }
 
-fn plan_of(theme: &Theme, prepared: &Prepared, paths: &Paths) -> ApplyPlan {
+/// The fingerprint reduced to a hash: the same plan, on the same machine and after the same
+/// restore points, gives the same digest. A fingerprint that cannot be written out is an error,
+/// never a digest that stands for nothing.
+fn digest(fingerprint: &Fingerprint<'_>) -> Result<String, AppError> {
+    let json = serde_json::to_vec(fingerprint).map_err(|e| {
+        AppError::internal(format!("the plan could not be reduced to a digest: {e}"))
+    })?;
+    Ok(sha256_hex(&json))
+}
+
+/// The plan `prepared` holds, as the UI shows it. `newest` is the newest restore point, read
+/// under the lock `prepared` holds.
+fn plan_of(
+    theme: &Theme,
+    req: &ApplyRequest,
+    prepared: &Prepared,
+    paths: &Paths,
+    newest: Option<&str>,
+) -> Result<ApplyPlan, AppError> {
     let steps: Vec<PlanStep> = prepared.ops.iter().map(|op| step_of(op, paths)).collect();
     let warnings: Vec<PlanWarning> = prepared.plan.warnings.iter().map(warning_of).collect();
     let summary_en: Vec<String> = prepared
@@ -372,16 +394,33 @@ fn plan_of(theme: &Theme, prepared: &Prepared, paths: &Paths) -> ApplyPlan {
         .iter()
         .map(|s| s.to_string())
         .collect();
-    ApplyPlan {
-        digest: digest(&summary_en, &warnings, &steps),
+    // The planner's own reading of AutoRun: the commands it takes out when the user agreed.
+    let replaces_other_clink = if req.replace_other_clink {
+        autorun_summary(&prepared.detected.machine, paths).foreign_clink
+    } else {
+        Vec::new()
+    };
+    let digest = digest(&Fingerprint {
+        theme_id: theme.id,
+        theme_name: &theme.name,
+        ops: &prepared.plan.ops,
+        summary_en: &summary_en,
+        warnings: &warnings,
+        steps: &steps,
+        replaces_other_clink: &replaces_other_clink,
+        newest_restore_point: newest,
+    })?;
+    Ok(ApplyPlan {
+        digest,
         theme_name: theme.name.clone(),
         summary_en,
         summary_th,
         warnings,
         steps,
+        replaces_other_clink,
         notes: start_notes(&prepared.start),
         unrestored: start_unrestored(&prepared.start),
-    }
+    })
 }
 
 fn progress_of(p: Progress, paths: &Paths) -> ApplyProgress {
@@ -414,24 +453,11 @@ fn progress_of(p: Progress, paths: &Paths) -> ApplyProgress {
     }
 }
 
-/// Whether "Restore" may go back to restore point `id`, whose manifest is `m`: an apply that
-/// committed, is not undone and was not set aside. These are the applies `undo` goes back
-/// through (`SnapshotStore::latest_undoable`), and both the list and the restore ask this, so
-/// the list offers exactly what a restore goes back to: never an apply that rolled back. `Err`
-/// when the journal, which says whether it committed, cannot be read.
-fn restorable(store: &SnapshotStore<'_>, id: &str, m: &Manifest) -> Result<bool, Failure> {
-    if m.kind != SnapshotKind::Apply || m.undone_by.is_some() || store.is_set_aside(id) {
-        return Ok(false);
-    }
-    Ok(store.journal(id)?.stage == Stage::Committed)
-}
-
-/// A restore that stopped after `last`.
-fn stopped(undone: Vec<String>, last: UndoOutcome) -> RestoreOutcome {
-    RestoreOutcome {
-        status: RestoreStatus::Stopped,
-        undone,
-        last: Some(last),
+fn font_left(f: &exec::FontLeft) -> FontLeft {
+    FontLeft {
+        family: f.family.clone(),
+        message_en: f.en(),
+        message_th: f.th(),
     }
 }
 
@@ -470,7 +496,13 @@ impl<M: Machine> Backend<M> {
         let ctx = self.ctx();
         match prepare_apply(self.sys(), &ctx, &theme, &req.request()) {
             Ok(prepared) => Ok(PlanOutcome::Ready {
-                plan: plan_of(&theme, &prepared, &ctx.paths),
+                plan: plan_of(
+                    &theme,
+                    &req,
+                    &prepared,
+                    &ctx.paths,
+                    self.newest_point()?.as_deref(),
+                )?,
             }),
             Err(ActionError::Plan(PlanError::ForeignClink { existing })) => {
                 Ok(PlanOutcome::OtherClink { commands: existing })
@@ -479,9 +511,18 @@ impl<M: Machine> Backend<M> {
         }
     }
 
+    /// The newest restore point there is, read while the caller holds the lock: the digest of a
+    /// plan names it (see `Fingerprint`). One that cannot be listed is an error: the plan could
+    /// not then be told from one made before another apply.
+    fn newest_point(&self) -> Result<Option<String>, AppError> {
+        let root = self.paths().snapshots();
+        Ok(SnapshotStore::new(self.sys().fs, &root).ids()?.pop())
+    }
+
     /// Applies `req` as one transaction, telling `on_progress` each step (the `apply-progress`
-    /// event). `digest` is the plan the user saw: when the plan now differs, nothing is done
-    /// and the new plan comes back as `PlanChanged`.
+    /// event). `digest` is the plan the user saw: when the plan now differs (another theme,
+    /// other steps or contents, another Clink to turn off, or a transaction since, such as this
+    /// same plan applied already), nothing is done and the new plan comes back as `PlanChanged`.
     ///
     /// `on_progress` runs between two steps of the transaction, which must run to its end
     /// whatever the listener does: the core does not catch a panic, and one would leave the
@@ -498,7 +539,8 @@ impl<M: Machine> Backend<M> {
         let (theme, _, _) = self.find_theme(req.theme_id)?;
         let ctx = self.ctx();
         let prepared = prepare_apply(self.sys(), &ctx, &theme, &req.request())?;
-        let plan = plan_of(&theme, &prepared, &ctx.paths);
+        let newest = self.newest_point()?;
+        let plan = plan_of(&theme, &req, &prepared, &ctx.paths, newest.as_deref())?;
         if plan.digest != digest {
             return Ok(ApplyOutcome {
                 status: ApplyStatus::PlanChanged,
@@ -602,51 +644,67 @@ impl<M: Machine> Backend<M> {
     pub fn undo_last(&self) -> Result<UndoOutcome, AppError> {
         let ctx = self.ctx();
         let report = undo(self.sys(), &ctx)?;
-        let mut notes = start_notes(&report.start);
-        let mut unrestored = start_unrestored(&report.start);
-        for p in &report.problems {
-            notes.push(note(p.code, p.message.clone()));
-        }
-        let fonts_left = report
-            .fonts_left
-            .iter()
-            .map(|f| FontLeft {
-                family: f.family.clone(),
-                message_en: f.en(),
-                message_th: f.th(),
-            })
-            .collect();
-        match report.result {
-            UndoResult::NothingToUndo => Ok(UndoOutcome {
+        let mut out = match report.result {
+            UndoResult::NothingToUndo => UndoOutcome {
                 status: UndoStatus::NothingToUndo,
                 undid: None,
                 error: None,
-                unrestored,
-                notes,
-                fonts_left,
-            }),
-            UndoResult::Done { undid, outcome } => {
-                let result = self.transaction_result(&outcome, &ctx);
-                notes.extend(result.notes);
-                unrestored.extend(result.unrestored);
-                Ok(UndoOutcome {
-                    status: match result.status {
-                        TxnStatus::Committed => UndoStatus::Committed,
-                        TxnStatus::RolledBack => UndoStatus::RolledBack,
-                        TxnStatus::RollbackIncomplete => UndoStatus::RollbackIncomplete,
-                    },
-                    undid: Some(undid),
-                    error: result.error,
-                    unrestored,
-                    notes,
-                    fonts_left,
-                })
-            }
+                unrestored: Vec::new(),
+                notes: report
+                    .problems
+                    .iter()
+                    .map(|p| note(p.code, p.message.clone()))
+                    .collect(),
+                fonts_left: report.fonts_left.iter().map(font_left).collect(),
+            },
+            UndoResult::Done { undid, outcome } => self.undo_outcome(
+                &ctx,
+                &RestoreUndo {
+                    undid,
+                    outcome,
+                    problems: report.problems,
+                    fonts_left: report.fonts_left,
+                },
+            ),
+        };
+        // What the start found comes first.
+        let mut notes = start_notes(&report.start);
+        notes.append(&mut out.notes);
+        out.notes = notes;
+        let mut unrestored = start_unrestored(&report.start);
+        unrestored.append(&mut out.unrestored);
+        out.unrestored = unrestored;
+        Ok(out)
+    }
+
+    /// One undo that ran, for the UI: how its transaction ended, what it could not do besides,
+    /// and the fonts it left to the user.
+    fn undo_outcome(&self, ctx: &Ctx, u: &RestoreUndo) -> UndoOutcome {
+        let mut notes: Vec<Note> = u
+            .problems
+            .iter()
+            .map(|p| note(p.code, p.message.clone()))
+            .collect();
+        let result = self.transaction_result(&u.outcome, ctx);
+        notes.extend(result.notes);
+        UndoOutcome {
+            status: match result.status {
+                TxnStatus::Committed => UndoStatus::Committed,
+                TxnStatus::RolledBack => UndoStatus::RolledBack,
+                TxnStatus::RollbackIncomplete => UndoStatus::RollbackIncomplete,
+            },
+            undid: Some(u.undid.clone()),
+            error: result.error,
+            unrestored: result.unrestored,
+            notes,
+            fonts_left: u.fonts_left.iter().map(font_left).collect(),
         }
     }
 
     /// Every restore point, newest first (spec §4.3 "จุดย้อนกลับทั้งหมด"). Read only. One whose
-    /// manifest or journal cannot be read is a problem, and is not offered for a restore.
+    /// manifest or journal cannot be read is a problem, and is not offered for a restore. A
+    /// point is offered when the restore goes back to it: the core's one test for that
+    /// (`SnapshotStore::undoable`), which an undo and a restore go by too.
     pub fn snapshots_list(&self) -> Result<RestorePoints, AppError> {
         let root = self.paths().snapshots();
         let store = SnapshotStore::new(self.sys().fs, &root);
@@ -654,19 +712,20 @@ impl<M: Machine> Backend<M> {
         let mut points = Vec::new();
         let mut problems = Vec::new();
         for id in ids.iter().rev() {
-            let unreadable =
-                |f: Failure| note(f.code, format!("restore point {id}: {}", f.message));
             let m = match store.manifest(id) {
                 Ok(m) => m,
                 Err(f) => {
-                    problems.push(unreadable(f));
+                    problems.push(note(f.code, format!("restore point {id}: {}", f.message)));
                     continue;
                 }
             };
-            let restorable = restorable(&store, id, &m).unwrap_or_else(|f| {
-                problems.push(unreadable(f));
-                false
-            });
+            let restorable = match store.undoable(id, &m) {
+                Ok(journal) => journal.is_some(),
+                Err(f) => {
+                    problems.push(note(f.code, format!("restore point {id}: {}", f.message)));
+                    false
+                }
+            };
             points.push(RestorePoint {
                 // The folder's name, which `snapshot_restore` looks for.
                 id: id.clone(),
@@ -683,139 +742,49 @@ impl<M: Machine> Backend<M> {
         Ok(RestorePoints { points, problems })
     }
 
-    /// Goes back to restore point `id` (an apply): undoes every apply from the newest down to
-    /// it, each as its own transaction, and stops at the first that does not commit. The
-    /// restore points are layered, so an older one cannot be put back alone.
-    ///
-    /// Each undo takes the core's lock (spec §5.5) and lets it go when it ends; the restore
-    /// does not hold it in between. So another CMD Studio, or the command line, can change the
-    /// machine between two undos, and the next undo would undo that change instead. The applies
-    /// to undo are listed first, and the restore stops, saying why in the last undo's notes, as
-    /// soon as an undo did not undo the next of them, an undo is refused after others were
-    /// done, or a point it undid could not be marked undone (the next undo would undo it again).
+    /// Goes back to restore point `id` (an apply) through the core's `restore_to`: undoes every
+    /// apply from the newest down to it, each as its own transaction, and stops at the first
+    /// that does not commit or cannot be marked undone. The restore points are layered, so an
+    /// older one cannot be put back alone. The core holds the lock (spec §5.5) from the first
+    /// undo to the last, so no other command changes the machine in between, and prunes old
+    /// restore points once, at the end, so none it still goes back through is lost on the way.
     pub fn snapshot_restore(&self, id: &str) -> Result<RestoreOutcome, AppError> {
-        self.restore_through(id, &mut |_| {})
-    }
-
-    /// [`Backend::snapshot_restore`], running `before_each_undo` before each undo, while this
-    /// backend holds no lock: the tests' way into the gaps where another program can change the
-    /// machine.
-    fn restore_through(
-        &self,
-        id: &str,
-        before_each_undo: &mut dyn FnMut(&Self),
-    ) -> Result<RestoreOutcome, AppError> {
-        let not_restorable = RestoreOutcome {
-            status: RestoreStatus::NotRestorable,
-            undone: Vec::new(),
-            last: None,
-        };
-        let root = self.paths().snapshots();
-        let store = SnapshotStore::new(self.sys().fs, &root);
-        let ids = store.ids()?;
-        let Some(at) = ids.iter().position(|known| known == id) else {
-            return Err(AppError::coded(
-                "E_SNAPSHOT_READ",
-                format!("there is no restore point {id}"),
-            ));
-        };
-        if !restorable(&store, id, &store.manifest(id)?)? {
-            return Ok(not_restorable);
-        }
-        // The applies the undos go back through, newest first: those `undo` takes one after the
-        // other, down to `id`. One that cannot be read would stop an undo at it, so it stops
-        // the restore before anything is undone.
-        let mut expected = Vec::new();
-        for newer in ids.iter().skip(at).rev() {
-            if store.is_set_aside(newer) {
-                continue;
-            }
-            let unreadable = |f: Failure| {
-                AppError::coded(
-                    f.code,
-                    format!(
-                        "restore point {newer} cannot be read, so nothing was undone: {}",
-                        f.message
-                    ),
-                )
-            };
-            let m = store.manifest(newer).map_err(unreadable)?;
-            if restorable(&store, newer, &m).map_err(unreadable)? {
-                expected.push(newer.clone());
-            }
-        }
-        if expected.last().map(String::as_str) != Some(id) {
-            return Ok(not_restorable);
-        }
+        let ctx = self.ctx();
+        let report = restore_to(self.sys(), &ctx, id)?;
+        let mut notes = start_notes(&report.start);
         let mut undone = Vec::new();
-        let mut last: Option<UndoOutcome> = None;
-        for want in &expected {
-            before_each_undo(self);
-            let mut this = match self.undo_last() {
-                Ok(this) => this,
-                Err(e) => {
-                    // Nothing is undone yet: the refusal is the answer, as for one undo.
-                    let Some(mut before) = last else {
-                        return Err(e);
-                    };
-                    before.notes.push(Note {
-                        code: e.code.clone(),
-                        message_th: e.message_th.clone(),
+        let mut last = None;
+        for u in &report.undos {
+            let one = self.undo_outcome(&ctx, u);
+            // An undo that did not commit put its apply back: that apply is not undone.
+            if one.status == UndoStatus::Committed {
+                undone.push(u.undid.clone());
+            }
+            last = Some(one);
+        }
+        let status = match report.result {
+            RestoreResult::Done => RestoreStatus::Done,
+            RestoreResult::NotRestorable => RestoreStatus::NotRestorable,
+            RestoreResult::Stopped { refused } => {
+                if let Some(e) = refused {
+                    let e = AppError::from(e);
+                    notes.push(Note {
+                        code: e.code,
+                        message_th: e.message_th,
                         message_en: format!(
-                            "the undo of restore point {want} was refused, so the restore \
-                             stopped there: {}",
+                            "the next undo was refused, so the restore stopped there: {}",
                             e.details
                         ),
                     });
-                    return Ok(stopped(undone, before));
                 }
-            };
-            if let Some(u) = &this.undid {
-                undone.push(u.clone());
+                RestoreStatus::Stopped
             }
-            match this.status {
-                UndoStatus::Committed if this.undid.as_ref() == Some(want) => {}
-                // It undid an apply that is not the next one listed, or found none left:
-                // another CMD Studio, or the command line, changed the machine in between.
-                UndoStatus::Committed | UndoStatus::NothingToUndo => {
-                    let what = match &this.undid {
-                        Some(got) => format!("restore point {got} was undone, not {want}"),
-                        None => format!("nothing was left to undo before restore point {want}"),
-                    };
-                    this.notes.push(note(
-                        "E_BUSY",
-                        format!(
-                            "{what}: another CMD Studio, or the command line, changed this \
-                             computer while the restore went back through the restore points, \
-                             so the restore stopped there. The restore points show where it is \
-                             now."
-                        ),
-                    ));
-                    return Ok(stopped(undone, this));
-                }
-                // It did not commit: its own outcome says why.
-                UndoStatus::RolledBack | UndoStatus::RollbackIncomplete => {
-                    return Ok(stopped(undone, this));
-                }
-            }
-            let marked = store.manifest(want).is_ok_and(|m| m.undone_by.is_some());
-            if expected.last() != Some(want) && !marked {
-                this.notes.push(note(
-                    "E_SNAPSHOT_WRITE",
-                    format!(
-                        "restore point {want} is undone but could not be marked undone, so the \
-                         next undo would undo it again: the restore stopped there. Restore again \
-                         once the restore point can be written."
-                    ),
-                ));
-                return Ok(stopped(undone, this));
-            }
-            last = Some(this);
-        }
+        };
         Ok(RestoreOutcome {
-            status: RestoreStatus::Done,
+            status,
             undone,
             last,
+            notes,
         })
     }
 
@@ -921,6 +890,7 @@ mod tests {
         assert_eq!(plan.summary_en[0], "Update the prompt and the welcome box");
         assert_eq!(plan.summary_th[0], "ปรับ prompt และกล่องต้อนรับตามธีม");
         assert!(plan.warnings.is_empty() && plan.notes.is_empty() && plan.unrestored.is_empty());
+        assert!(plan.replaces_other_clink.is_empty());
         assert_eq!(plan.digest.len(), 64);
         // The same plan twice: the same digest, and the lock is free in between (a second
         // plan under a held lock would be E_BUSY).
@@ -1013,6 +983,7 @@ mod tests {
             "{:?}",
             plan.summary_en
         );
+        assert_eq!(plan.replaces_other_clink, [other]);
         let done = b.apply(agreed, &plan.digest, &mut |_| {}).unwrap();
         assert_eq!(done.status, ApplyStatus::Committed);
         let value = b
@@ -1045,15 +1016,27 @@ mod tests {
     #[test]
     fn a_failed_check_rolls_back_and_says_why() {
         let b = backend();
+        let wt_before = b.sys().fs.read(Path::new(WT)).unwrap();
         b.machine.process.answer("oh-my-posh.exe", "print", 1, "");
         let (done, seen) = apply_terracotta(&b);
         assert_eq!(done.status, ApplyStatus::RolledBack);
         let error = done.error.unwrap();
         assert_eq!(error.code, "E_VERIFY_OMP");
         assert_eq!(error.message_th, "ขั้นตรวจผล: OMP เรนเดอร์ config ไม่ได้");
+        // The details, which the UI copies: what failed, on which file.
+        let config = b.paths().omp_config().display().to_string();
+        assert!(
+            error.details.contains("oh-my-posh exited 1 on ") && error.details.contains(&config),
+            "{}",
+            error.details
+        );
         assert!(seen.iter().any(|p| p.phase == Phase::RollingBack));
+        // Everything is as it was: no state.json, no AutoRun, Windows Terminal's settings and
+        // no generated file.
         assert!(!b.sys().fs.exists(&b.paths().state_file()));
         assert_eq!(b.machine.autorun.read_user().unwrap(), None);
+        assert_eq!(b.sys().fs.read(Path::new(WT)).unwrap(), wt_before);
+        assert!(b.advanced_read().unwrap().generated.is_empty());
         // The apply that rolled back left its restore point, which is no point to go back to:
         // the list does not offer it, and a restore of it does nothing.
         let id = done.snapshot_id.unwrap();
@@ -1122,83 +1105,6 @@ mod tests {
         );
     }
 
-    /// Spec §5.5: a restore is one undo after another, each under the lock, which it lets go in
-    /// between. Another CMD Studio, or the CLI, can apply a theme in that gap; the next undo
-    /// then undoes that apply, the newest, and the restore must stop there and say so. The fake
-    /// machine has no hook between two commands, so the test goes in through the restore's own
-    /// seam (`restore_through`) and runs a real apply in the gap.
-    #[test]
-    fn a_restore_stops_when_another_apply_lands_between_its_undos() {
-        let b = backend();
-        let (first, second) = two_applies(&b);
-        let mut undos = 0;
-        let mut foreign = None;
-        let restored = b
-            .restore_through(&first, &mut |b: &Backend<FakeMachine>| {
-                undos += 1;
-                if undos == 2 {
-                    foreign = Some(apply_terracotta(b).0);
-                }
-            })
-            .unwrap();
-        // The apply in the gap committed: the restore did not hold the lock between its undos.
-        let foreign = foreign.unwrap();
-        assert_eq!(foreign.status, ApplyStatus::Committed);
-        let foreign = foreign.snapshot_id.unwrap();
-        // Paper was undone, then the newest apply, which was not one the restore meant to undo,
-        // and the restore stopped there: Terracotta's own apply is not undone.
-        assert_eq!(restored.status, RestoreStatus::Stopped);
-        assert_eq!(restored.undone, [second, foreign.clone()]);
-        let last = restored.last.unwrap();
-        assert_eq!(last.status, UndoStatus::Committed);
-        let why = last.notes.last().unwrap();
-        assert_eq!(why.code, "E_BUSY");
-        assert_eq!(why.message_th, meaning("E_BUSY").unwrap().0);
-        assert!(
-            why.message_en.contains(&foreign) && why.message_en.contains(&first),
-            "{}",
-            why.message_en
-        );
-        let list = b.snapshots_list().unwrap();
-        assert!(point(&list, &first).restorable);
-        assert_eq!(point(&list, &first).undone_by, None);
-        // Restoring it again goes the rest of the way.
-        let again = b.snapshot_restore(&first).unwrap();
-        assert_eq!(
-            (again.status, again.undone),
-            (RestoreStatus::Done, vec![first])
-        );
-    }
-
-    #[test]
-    fn a_restore_that_finds_the_lock_taken_between_its_undos_says_how_far_it_got() {
-        let b = backend();
-        let (first, second) = two_applies(&b);
-        let mut undos = 0;
-        let mut held = None;
-        let restored = b
-            .restore_through(&first, &mut |b: &Backend<FakeMachine>| {
-                undos += 1;
-                if undos == 2 {
-                    // Another CMD Studio takes the lock, and is still changing the machine.
-                    held = b.sys().fs.try_lock(&b.paths().lock_file()).unwrap();
-                }
-            })
-            .unwrap();
-        assert!(held.is_some());
-        drop(held);
-        // Not an error that hides the undo done already: how far it got, and why it stopped.
-        assert_eq!(restored.status, RestoreStatus::Stopped);
-        assert_eq!(restored.undone, [second]);
-        let last = restored.last.unwrap();
-        assert_eq!(last.status, UndoStatus::Committed);
-        let why = last.notes.last().unwrap();
-        assert_eq!(why.code, "E_BUSY");
-        assert_eq!(why.message_th, cmdstudio_core::actions::BUSY_TH);
-        assert!(why.message_en.contains(&first), "{}", why.message_en);
-        assert!(point(&b.snapshots_list().unwrap(), &first).restorable);
-    }
-
     #[test]
     fn a_restore_stops_where_an_undone_point_could_not_be_marked_undone() {
         let b = backend();
@@ -1212,23 +1118,117 @@ mod tests {
         assert_eq!(restored.undone, std::slice::from_ref(&second));
         let last = restored.last.unwrap();
         assert_eq!(last.status, UndoStatus::Committed);
-        let codes: Vec<&str> = last.notes.iter().map(|n| n.code.as_str()).collect();
-        assert_eq!(
-            codes,
-            ["E_SNAPSHOT_WRITE", "E_SNAPSHOT_WRITE"],
-            "{:?}",
-            last.notes
-        );
+        assert_eq!(last.notes.len(), 1, "{:?}", last.notes);
+        let why = &last.notes[0];
+        assert_eq!(why.code, "E_SNAPSHOT_WRITE");
+        assert_eq!(why.message_th, meaning("E_SNAPSHOT_WRITE").unwrap().0);
         assert!(
-            last.notes[1].message_en.contains(&second),
-            "{:?}",
-            last.notes
+            why.message_en.contains(&second) && why.message_en.contains("marked undone"),
+            "{}",
+            why.message_en
         );
+        assert!(restored.notes.is_empty(), "{:?}", restored.notes);
         // Once the restore point can be written, a restore goes the whole way.
         fake_fs(&b).stop_failing(&manifest);
         let again = b.snapshot_restore(&first).unwrap();
         assert_eq!(again.status, RestoreStatus::Done);
         assert_eq!(again.undone, [second, first]);
+    }
+
+    /// Every undo adds a restore point, and only the first-ever and the 20 newest are kept: a
+    /// restore must not lose the points it still goes back through on the way.
+    #[test]
+    fn a_restore_through_many_points_goes_all_the_way() {
+        let b = backend();
+        let ids: Vec<String> = (0..12)
+            .map(|_| apply_terracotta(&b).0.snapshot_id.unwrap())
+            .collect();
+        let restored = b.snapshot_restore(&ids[1]).unwrap();
+        assert_eq!(restored.status, RestoreStatus::Done);
+        let newest_first: Vec<String> = ids[1..].iter().rev().cloned().collect();
+        assert_eq!(restored.undone, newest_first);
+        // The first apply is not undone, and is still a point to go back to.
+        let first = point(&b.snapshots_list().unwrap(), &ids[0]);
+        assert!(first.restorable && first.undone_by.is_none(), "{first:?}");
+    }
+
+    #[test]
+    fn a_restore_lists_only_the_undos_that_committed() {
+        let b = backend();
+        let (first, second) = two_applies(&b);
+        // The undo of the first apply deletes the state.json that apply made; here it cannot,
+        // so that undo rolls back.
+        fake_fs(&b).fail_removes_of(b.paths().state_file());
+        let restored = b.snapshot_restore(&first).unwrap();
+        assert_eq!(restored.status, RestoreStatus::Stopped);
+        assert_eq!(restored.undone, [second]);
+        assert_eq!(restored.last.unwrap().status, UndoStatus::RolledBack);
+        assert!(point(&b.snapshots_list().unwrap(), &first).restorable);
+    }
+
+    #[test]
+    fn a_plan_that_turned_off_another_clink_is_not_applied_to_a_different_one() {
+        let b = backend();
+        let clink_a = r#""C:\clink\clink_x64.exe" inject --autorun"#;
+        let clink_b = r#""C:\tools\clink\clink_x64.exe" inject --autorun"#;
+        b.machine
+            .autorun
+            .write_user(&RegValue::from_text(REG_SZ, clink_a))
+            .unwrap();
+        let agreed = ApplyRequest {
+            replace_other_clink: true,
+            ..terracotta_request()
+        };
+        let plan = ready(b.plan_apply(agreed.clone()).unwrap());
+        assert_eq!(plan.replaces_other_clink, [clink_a]);
+        // Another Clink takes its place before the user presses Apply: the user agreed to turn
+        // off the one shown, not this one.
+        b.machine
+            .autorun
+            .write_user(&RegValue::from_text(REG_SZ, clink_b))
+            .unwrap();
+        let done = b.apply(agreed, &plan.digest, &mut |_| {}).unwrap();
+        assert_eq!(done.status, ApplyStatus::PlanChanged);
+        assert_eq!(done.plan.unwrap().replaces_other_clink, [clink_b]);
+        assert_eq!(
+            b.machine
+                .autorun
+                .read_user()
+                .unwrap()
+                .unwrap()
+                .text()
+                .unwrap(),
+            clink_b
+        );
+    }
+
+    #[test]
+    fn a_plan_for_one_theme_does_not_apply_another() {
+        let b = backend();
+        let terracotta = ready(b.plan_apply(terracotta_request()).unwrap());
+        let done = b
+            .apply(request(paper_id()), &terracotta.digest, &mut |_| {})
+            .unwrap();
+        assert_eq!(done.status, ApplyStatus::PlanChanged);
+        assert_eq!(done.plan.unwrap().theme_name, "Paper");
+        assert!(!b.sys().fs.exists(&b.paths().state_file()));
+    }
+
+    /// Apply pressed twice with the same plan: the second press finds a newer restore point
+    /// than the plan it was shown, and applies nothing.
+    #[test]
+    fn a_plan_is_applied_once() {
+        let b = backend();
+        let req = ApplyRequest {
+            target: Target::Wt,
+            ..terracotta_request()
+        };
+        let plan = ready(b.plan_apply(req.clone()).unwrap());
+        let first = b.apply(req.clone(), &plan.digest, &mut |_| {}).unwrap();
+        assert_eq!(first.status, ApplyStatus::Committed);
+        let again = b.apply(req, &plan.digest, &mut |_| {}).unwrap();
+        assert_eq!(again.status, ApplyStatus::PlanChanged);
+        assert_eq!(b.snapshots_list().unwrap().points.len(), 1);
     }
 
     #[test]
