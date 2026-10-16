@@ -23,6 +23,8 @@ use std::time::Instant;
 use ts_rs::TS;
 
 pub mod apply;
+pub mod diagnostics;
+pub mod doctor;
 pub mod preview;
 pub mod system;
 
