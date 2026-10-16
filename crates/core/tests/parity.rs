@@ -89,9 +89,25 @@ fn pinned_omp() -> Option<PathBuf> {
     );
 }
 
-/// Runs git with no global or system settings of this machine.
+/// Starts `cmd` with an environment of its own: nothing of the parent's, apart from where the
+/// system's programs are (`PATH`, `SYSTEMROOT`, `WINDIR`). So a `GIT_DIR` from a hook, the real
+/// `LOCALAPPDATA` or the developer's git settings never reach the child. Call it before the
+/// `.env(..)` calls that set what the child is meant to see.
+fn clean_env(cmd: &mut Command) {
+    cmd.env_clear();
+    for key in ["PATH", "SYSTEMROOT", "WINDIR"] {
+        if let Some(value) = std::env::var_os(key) {
+            cmd.env(key, value);
+        }
+    }
+}
+
+/// Runs git with no global or system settings of this machine, and none of its `GIT_*`
+/// variables: the repository it works on is `dir`, whatever the test runs inside of.
 fn git(home: &Path, dir: &Path, args: &[&str]) {
-    let out = Command::new("git")
+    let mut cmd = Command::new("git");
+    clean_env(&mut cmd);
+    let out = cmd
         .arg("-C")
         .arg(dir)
         .args(["-c", "core.autocrlf=false", "-c", "commit.gpgsign=false"])
@@ -166,8 +182,9 @@ struct Stage {
 }
 
 impl Stage {
-    fn new(exe: PathBuf) -> Stage {
-        let root = TempDir::new();
+    /// The stage in `root`, a new temp folder (the caller made it first, to check the
+    /// binary's version in it before anything else runs).
+    fn new(exe: PathBuf, root: TempDir) -> Stage {
         let home = root.0.join("home");
         let plain = home.join("plain");
         std::fs::create_dir_all(&plain).unwrap();
@@ -249,6 +266,7 @@ impl Stage {
         let cache = self.root.0.join("cache").join(worker);
         std::fs::create_dir_all(&cache).unwrap();
         let mut cmd = Command::new(&self.exe);
+        clean_env(&mut cmd);
         cmd.args(["print", kind, "--shell", "cmd", "--config"])
             .arg(config)
             .arg("--pwd")
@@ -257,7 +275,6 @@ impl Stage {
             .args(["--status", &ctx.exit_code.to_string()])
             .args(["--execution-time", &ctx.duration_ms.to_string()])
             .args(extra)
-            .env_clear()
             .env("USERPROFILE", &ctx.home)
             .env("HOME", &ctx.home)
             .env("USER", &ctx.user)
@@ -268,11 +285,6 @@ impl Stage {
             .env("TEMP", &self.root.0)
             .env("TMP", &self.root.0)
             .creation_flags(CREATE_NO_WINDOW);
-        for key in ["PATH", "SYSTEMROOT", "WINDIR"] {
-            if let Some(value) = std::env::var_os(key) {
-                cmd.env(key, value);
-            }
-        }
         let out = cmd.output().unwrap();
         assert!(
             out.status.success(),
@@ -281,6 +293,30 @@ impl Stage {
         );
         String::from_utf8(out.stdout).unwrap()
     }
+}
+
+/// The version `exe` reports, run like every other Oh My Posh run of this test: a cleared
+/// environment, with the home folder, the cache folder and the temp folders inside `root`, so
+/// not even `oh-my-posh version` reads or writes anything of this machine's own.
+fn omp_version(exe: &Path, root: &Path) -> String {
+    let home = root.join("home-version");
+    let cache = root.join("cache").join("version");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&cache).unwrap();
+    let mut cmd = Command::new(exe);
+    clean_env(&mut cmd);
+    let out = cmd
+        .arg("version")
+        .env("USERPROFILE", &home)
+        .env("HOME", &home)
+        .env("LOCALAPPDATA", &cache)
+        .env("POSH_SESSION_ID", "parity-version")
+        .env("TEMP", root)
+        .env("TMP", root)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
 /// One comparison: a theme, the sample, and which prompts to print.
@@ -509,7 +545,8 @@ fn all_cases(stage: &Stage) -> Vec<Case> {
         // the cut falls in a name, not at a separator, so the full path shows. The Kelvin sign
         // (3 bytes, 1 once lowered) in the home and the folder alike: the cut falls on a
         // separator two bytes early, so the home is found and one folder too many shows,
-        // `~\b\x` (predicted from the rule; not measured when it was written)
+        // `~\b\x` (the rule predicted it before this case was first run; the real binary
+        // agreed)
         (
             r"C:\Users\İbrahim".to_string(),
             r"C:\Users\İbrahim\Documents".to_string(),
@@ -667,18 +704,14 @@ fn the_emulator_draws_what_oh_my_posh_prints() {
     let Some(exe) = pinned_omp() else {
         return;
     };
-    let version = Command::new(&exe)
-        .arg("version")
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .unwrap();
+    let root = TempDir::new();
     assert_eq!(
-        String::from_utf8_lossy(&version.stdout).trim(),
+        omp_version(&exe, &root.0),
         PINNED,
         "{} is not the pinned Oh My Posh",
         exe.display()
     );
-    let stage = Stage::new(exe);
+    let stage = Stage::new(exe, root);
     let cases = all_cases(&stage);
     let batches: Vec<&[Case]> = cases.chunks(16).collect();
     let next = AtomicUsize::new(0);
@@ -701,7 +734,9 @@ fn the_emulator_draws_what_oh_my_posh_prints() {
             });
         }
     });
-    let failures = failures.into_inner().unwrap();
+    let mut failures = failures.into_inner().unwrap();
+    // the workers finish in any order; sorted, the message is the same on every run
+    failures.sort();
     assert!(
         failures.is_empty(),
         "{} of {} cases differ from Oh My Posh {PINNED}; the first ones:\n{}",
