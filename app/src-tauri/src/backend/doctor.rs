@@ -851,6 +851,76 @@ mod tests {
         assert_eq!(done.status, ApplyStatus::RolledBack);
     }
 
+    /// `installs_font` re-derives the planner's font decision (D1 and D8 read the bundled Nerd
+    /// Font only when an apply would install it), so it is pinned to the planner itself: over
+    /// Windows Terminal with a settings file, installed but never opened, or not there, and the
+    /// theme's font and the Nerd Font each not installed, installed, or installed in another
+    /// case, it says yes exactly when the core's plan holds an `InstallFont` op.
+    #[test]
+    fn installs_font_says_what_the_planner_decides() {
+        use cmdstudio_core::actions::prepare_apply;
+        use cmdstudio_core::model::Target;
+        use cmdstudio_core::plan::{Op, Request};
+
+        #[derive(Clone, Copy, Debug)]
+        enum Wt {
+            Settings,
+            NeverOpened,
+            NotThere,
+        }
+        #[derive(Clone, Copy, Debug)]
+        enum Font {
+            Absent,
+            Installed,
+            OtherCase,
+        }
+        let theme = backend().find_theme(terracotta_id()).unwrap().0;
+        let spelled = |font: Font, family: &str| match font {
+            Font::Absent => None,
+            Font::Installed => Some(family.to_string()),
+            Font::OtherCase => Some(family.to_uppercase()),
+        };
+        let request = Request {
+            target: Target::All,
+            set_wt_default_profile: true,
+            replace_foreign_clink: false,
+        };
+        let mut answers = Vec::new();
+        for wt in [Wt::Settings, Wt::NeverOpened, Wt::NotThere] {
+            for theme_font in [Font::Absent, Font::Installed, Font::OtherCase] {
+                for nerd_font in [Font::Absent, Font::Installed, Font::OtherCase] {
+                    let mut b = backend();
+                    let mut families = vec!["Arial".to_string(), "Consolas".to_string()];
+                    families.extend(spelled(theme_font, &theme.terminal.font));
+                    families.extend(spelled(nerd_font, NERD_FONT_FAMILY));
+                    let names: Vec<&str> = families.iter().map(String::as_str).collect();
+                    b.machine.fonts = FakeFonts::new(FONTS, &names);
+                    b.machine.fonts.knows_file(NERD_FONT_FILE, NERD_FONT_FAMILY);
+                    match wt {
+                        Wt::Settings => {}
+                        Wt::NeverOpened => b.sys().fs.remove_file(Path::new(WT)).unwrap(),
+                        Wt::NotThere => b.machine.wt.locations = vec![],
+                    }
+                    let prepared = prepare_apply(b.sys(), &b.ctx(), &theme, &request).unwrap();
+                    let planned = prepared
+                        .plan
+                        .ops
+                        .iter()
+                        .any(|op| matches!(op, Op::InstallFont { .. }));
+                    drop(prepared);
+                    assert_eq!(
+                        installs_font(b.sys(), &theme),
+                        planned,
+                        "{wt:?}, theme's font {theme_font:?}, Nerd Font {nerd_font:?}"
+                    );
+                    answers.push(planned);
+                }
+            }
+        }
+        // The table holds both answers, so the pin is not empty.
+        assert!(answers.contains(&true) && answers.contains(&false));
+    }
+
     /// A gone runtime folder is installed again from the files that come with CMD Studio: when
     /// those fail their manifest, the apply would roll back, so the fix is a new install. A
     /// bundled file that can't be read now (an antivirus holds it, say) offers nothing.
