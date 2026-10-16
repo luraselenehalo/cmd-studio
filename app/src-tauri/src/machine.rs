@@ -1,6 +1,7 @@
 //! The real machine behind the app: the core's Windows adapters, wired as the CLI's `run` wires
 //! them (`crates/cli/src/lib.rs`), so the app and the CLI see the same data folder, the same
 //! bundled files beside the exe, and may run programs only from the runtime folders (spec §5.10).
+use crate::backend::preview::SampleIdentity;
 use crate::backend::{Backend, Machine};
 use cmdstudio_core::adapters::windows::{
     fonts::WinFonts, fs::WinFs, host::WinHost, process::WinProcess, registry::WinAutoRun, wt::WinWt,
@@ -57,10 +58,14 @@ pub fn real_backend() -> Result<Backend<RealMachine>, String> {
         process: WinProcess::new(allowed, Duration::from_secs(60)),
         host,
     };
+    // The one place the app reads the environment for the preview's sample (spec §5.6); a test
+    // builds a `SampleIdentity` from a table instead.
+    let sample = SampleIdentity::from_env(|name| std::env::var(name).ok());
     Ok(Backend::new(
         machine,
         data,
         exe_dir.join("resources"),
         Box::new(cmdstudio_cli::now_ms),
+        sample,
     ))
 }

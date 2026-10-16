@@ -30,6 +30,46 @@ pub struct ContrastIssue {
     pub required: f64,
 }
 
+/// Who and where the preview's sample is, as this computer says it: the Windows user name, the
+/// computer name, and the folder Oh My Posh takes as home. The UI cannot read the environment,
+/// so it gets these from `system_detect` (`SystemReport.preview_sample`) and sends them back
+/// as `user`, `host` and `home` of the `PreviewContext` it chooses.
+///
+/// The user name is the user's own, and it goes to the UI, which is the user's own app. It is
+/// never logged (`Backend::logged` writes no value of a command) and the diagnostics redact it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SampleIdentity {
+    pub user: String,
+    pub host: String,
+    pub home: String,
+}
+
+impl SampleIdentity {
+    /// The identity from an environment lookup (`std::env::var` in the real app, a table in a
+    /// test). `user` is `USERNAME` and `host` is `COMPUTERNAME`. `home` is the folder Oh My Posh
+    /// 31.5.0 takes as home (spec §5.6): `HOME`, else `HOMEDRIVE` followed by `HOMEPATH`, else
+    /// `USERPROFILE`. A variable that is empty is not set, and `HOMEDRIVE` counts only with a
+    /// `HOMEPATH` that is set too. What is missing is the core's sample value for that field, so
+    /// the preview always has something to draw.
+    pub fn from_env(get: impl Fn(&str) -> Option<String>) -> SampleIdentity {
+        let sample = PreviewContext::sample();
+        let var = |name: &str| get(name).filter(|value| !value.is_empty());
+        let home = var("HOME")
+            .or_else(|| match (var("HOMEDRIVE"), var("HOMEPATH")) {
+                (Some(drive), Some(path)) => Some(format!("{drive}{path}")),
+                _ => None,
+            })
+            .or_else(|| var("USERPROFILE"));
+        SampleIdentity {
+            user: var("USERNAME").unwrap_or(sample.user),
+            host: var("COMPUTERNAME").unwrap_or(sample.host),
+            home: home.unwrap_or(sample.home),
+        }
+    }
+}
+
 /// Draws the welcome box and the prompt for a theme and the sample the UI chose. The sample's
 /// texts are cleaned like a theme's (escape sequences, control characters, line breaks and
 /// bidi controls go), so a user-typed sample cannot reach the spans raw.
@@ -158,5 +198,75 @@ mod tests {
         assert_eq!(issues[1].required, 3.0);
         let fixed = contrast_fix(bad);
         assert!(contrast_check(&fixed).is_empty());
+    }
+
+    /// An environment of the test's own: the lookup `from_env` takes, over a table.
+    fn identity(vars: &[(&str, &str)]) -> SampleIdentity {
+        SampleIdentity::from_env(|name| {
+            vars.iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| value.to_string())
+        })
+    }
+
+    #[test]
+    fn the_sample_home_is_the_folder_oh_my_posh_takes_as_home() {
+        let sample = PreviewContext::sample();
+        let profile = (r"USERPROFILE", r"C:\Users\tester");
+        let drive_and_path = [("HOMEDRIVE", "D:"), ("HOMEPATH", r"\Users\tester")];
+        // HOME wins over everything else.
+        let all = [
+            ("HOME", r"E:\home"),
+            drive_and_path[0],
+            drive_and_path[1],
+            profile,
+        ];
+        assert_eq!(identity(&all).home, r"E:\home");
+        // An empty HOME is not set: HOMEDRIVE followed by HOMEPATH comes next, and beats
+        // USERPROFILE.
+        let empty_home = [("HOME", ""), drive_and_path[0], drive_and_path[1], profile];
+        assert_eq!(identity(&empty_home).home, r"D:\Users\tester");
+        // HOMEDRIVE needs HOMEPATH, and HOMEPATH needs HOMEDRIVE; one alone, or an empty one,
+        // is skipped and USERPROFILE is used.
+        for lone in [
+            vec![("HOMEDRIVE", "D:"), profile],
+            vec![("HOMEPATH", r"\Users\tester"), profile],
+            vec![("HOMEDRIVE", "D:"), ("HOMEPATH", ""), profile],
+            vec![("HOMEDRIVE", ""), ("HOMEPATH", r"\Users\tester"), profile],
+        ] {
+            assert_eq!(identity(&lone).home, r"C:\Users\tester", "{lone:?}");
+        }
+        // USERPROFILE alone, and an empty HOME above it.
+        assert_eq!(identity(&[profile]).home, r"C:\Users\tester");
+        assert_eq!(identity(&[("HOME", ""), profile]).home, r"C:\Users\tester");
+        // Nothing set, or only empty values: the core's sample home.
+        assert_eq!(identity(&[]).home, sample.home);
+        assert_eq!(
+            identity(&[("HOME", ""), ("HOMEDRIVE", ""), ("USERPROFILE", "")]).home,
+            sample.home
+        );
+    }
+
+    #[test]
+    fn the_sample_user_and_host_are_the_windows_ones_else_the_samples() {
+        let sample = PreviewContext::sample();
+        let named = identity(&[("USERNAME", "tester"), ("COMPUTERNAME", "TESTPC")]);
+        assert_eq!(
+            (named.user.as_str(), named.host.as_str()),
+            ("tester", "TESTPC")
+        );
+        // Each field falls back by itself, and an empty value is not a name.
+        let half = identity(&[("USERNAME", "tester"), ("COMPUTERNAME", "")]);
+        assert_eq!(half.user, "tester");
+        assert_eq!(half.host, sample.host);
+        let none = identity(&[]);
+        assert_eq!(
+            none,
+            SampleIdentity {
+                user: sample.user,
+                host: sample.host,
+                home: sample.home,
+            }
+        );
     }
 }

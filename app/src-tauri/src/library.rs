@@ -1338,6 +1338,7 @@ mod tests {
                 scratch.0.join("data"),
                 scratch.0.join("resources"),
                 now,
+                crate::backend::testing::sample_identity(),
             );
             std::thread::scope(|scope| {
                 for _ in 0..THREADS {

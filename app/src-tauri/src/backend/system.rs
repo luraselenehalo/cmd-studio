@@ -3,6 +3,7 @@
 //! and `plan::autorun_summary`. It changes nothing on the machine, but may create the data
 //! folder: `detect` creates it when it is missing, because a short path can be asked of a folder
 //! that exists only.
+use super::preview::SampleIdentity;
 use super::{versions, Backend, Machine, Versions};
 use crate::error::AppError;
 use cmdstudio_core::adapters::{Arch, WtVariant};
@@ -109,6 +110,11 @@ pub struct SystemReport {
     pub fonts: FontInfo,
     pub data_dir: String,
     pub versions: Versions,
+    /// The user, computer and home folder the preview's sample starts from (spec §5.6): the UI
+    /// cannot read the environment, so it sends these back as the `PreviewContext`'s `user`,
+    /// `host` and `home`. The user name is the user's own and stays between the backend and the
+    /// UI: it is never logged, and the diagnostics redact it.
+    pub preview_sample: SampleIdentity,
 }
 
 impl<M: Machine> Backend<M> {
@@ -176,6 +182,7 @@ impl<M: Machine> Backend<M> {
             },
             data_dir: self.paths().data.display().to_string(),
             versions: versions(),
+            preview_sample: self.sample.clone(),
         })
     }
 }
@@ -188,6 +195,26 @@ mod tests {
     use cmdstudio_core::adapters::{AutoRun, RegValue, WtLocation, REG_SZ};
     use cmdstudio_core::plan::{autorun_entry, ClinkLaunch};
     use std::path::PathBuf;
+
+    #[test]
+    fn the_report_carries_the_sample_identity_the_backend_was_built_with() {
+        // The UI cannot read the environment, so the preview's user, host and home reach it
+        // here (spec §5.6); the backend's own, not the core's sample.
+        let report = backend().system_detect().unwrap();
+        assert_eq!(
+            report.preview_sample,
+            crate::backend::testing::sample_identity()
+        );
+        assert_ne!(
+            report.preview_sample,
+            SampleIdentity::from_env(|_| None),
+            "the test's identity must differ from the core's sample to prove the source"
+        );
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["previewSample"]["user"], "tester");
+        assert_eq!(json["previewSample"]["host"], "TESTPC");
+        assert_eq!(json["previewSample"]["home"], r"C:\Users\tester");
+    }
 
     #[test]
     fn the_report_reads_the_machine_the_planner_reads() {

@@ -5,6 +5,7 @@
 //! `apply` (plan, apply, undo, restore points, revert), `doctor`, `diagnostics`, and the settings
 //! and the Advanced page here.
 
+use crate::backend::preview::SampleIdentity;
 use crate::error::AppError;
 use crate::logs::Logger;
 use crate::settings::{self, AppSettings, SettingsLoad};
@@ -66,16 +67,22 @@ pub struct Backend<M> {
     /// left is used as it is. Lock order: this one first, then `pending_import`, never the
     /// other way round; nothing under it takes `settings`.
     pub(crate) library_lock: Mutex<()>,
+    /// The user, computer and home the preview's sample starts from, read from the environment
+    /// once by `machine::real_backend` and handed to the UI by `system_detect`. The user name
+    /// in it is the user's own: it goes to the UI and nowhere else, and is never logged.
+    sample: SampleIdentity,
 }
 
 impl<M: Machine> Backend<M> {
     /// `data` is the data folder (spec §5.3), `resources` the bundled files, `now` the clock in
-    /// milliseconds since 1970 (restore point ids and the log read it).
+    /// milliseconds since 1970 (restore point ids and the log read it), `sample` who and where
+    /// the preview's sample is (`SampleIdentity::from_env`).
     pub fn new(
         machine: M,
         data: PathBuf,
         resources: PathBuf,
         now: Box<dyn Fn() -> u64 + Send + Sync>,
+        sample: SampleIdentity,
     ) -> Self {
         let paths = Paths { data };
         let log = Logger::new(paths.logs());
@@ -88,6 +95,7 @@ impl<M: Machine> Backend<M> {
             settings: Mutex::new(None),
             pending_import: Mutex::new(None),
             library_lock: Mutex::new(()),
+            sample,
         }
     }
 
@@ -382,6 +390,16 @@ pub(crate) mod testing {
         (now, Box::new(move || shared.fetch_add(1, Ordering::SeqCst)))
     }
 
+    /// The identity every test backend is built with. It is not the core's sample, so a test
+    /// can tell the backend's identity from a default.
+    pub(crate) fn sample_identity() -> SampleIdentity {
+        SampleIdentity {
+            user: "tester".to_string(),
+            host: "TESTPC".to_string(),
+            home: r"C:\Users\tester".to_string(),
+        }
+    }
+
     /// A machine with Windows Terminal, Oh My Posh and Clink answering like the real ones, and
     /// the bundled files; the backend over it.
     pub(crate) fn backend() -> Backend<FakeMachine> {
@@ -408,7 +426,13 @@ pub(crate) mod testing {
         m.process.answer("oh-my-posh.exe", "version", 0, "31.5.0");
         let resources = fake_resources(&m.fs, Path::new(r"C:\Program Files\CMD Studio\resources"));
         let (_, now) = clock();
-        Backend::new(m, PathBuf::from(DATA), resources.root, now)
+        Backend::new(
+            m,
+            PathBuf::from(DATA),
+            resources.root,
+            now,
+            sample_identity(),
+        )
     }
 
     /// The fake file system under the backend, for a test to make a file fail to read, write
