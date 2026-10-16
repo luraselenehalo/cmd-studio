@@ -58,6 +58,13 @@ pub struct Backend<M> {
     /// rename.
     settings: Mutex<Option<SettingsCache>>,
     pub(crate) pending_import: Mutex<Option<PendingImport>>,
+    /// Held for the whole of `theme_save`, `theme_duplicate`, `theme_delete` and
+    /// `theme_import_confirm` (`crate::library`), so two commands that write the library never
+    /// pick the same file name for two new themes. The IPC commands run on several threads
+    /// over this one backend. It guards files, not data in memory, so a lock a panicking thread
+    /// left is used as it is. Lock order: this one first, then `pending_import`, never the
+    /// other way round; nothing under it takes `settings`.
+    pub(crate) library_lock: Mutex<()>,
 }
 
 impl<M: Machine> Backend<M> {
@@ -79,6 +86,7 @@ impl<M: Machine> Backend<M> {
             log,
             settings: Mutex::new(None),
             pending_import: Mutex::new(None),
+            library_lock: Mutex::new(()),
         }
     }
 
@@ -348,7 +356,7 @@ pub struct AdvancedInfo {
 #[cfg(test)]
 pub(crate) mod testing {
     use super::*;
-    use cmdstudio_core::adapters::fake::{FakeFonts, FakeMachine};
+    use cmdstudio_core::adapters::fake::{FakeFonts, FakeFs, FakeMachine};
     use cmdstudio_core::adapters::{Fs, WtLocation, WtVariant};
     use cmdstudio_core::plan::NERD_FONT_FAMILY;
     use cmdstudio_core::resources::{fake_resources, NERD_FONT_FILE};
@@ -402,10 +410,11 @@ pub(crate) mod testing {
         Backend::new(m, PathBuf::from(DATA), resources.root, now)
     }
 
-    /// Makes every later read of `path` fail, as when another program holds the file. The
-    /// machine is private to this module, so a test of another module goes through here.
-    pub(crate) fn fail_reads_of(b: &Backend<FakeMachine>, path: &Path) {
-        b.machine.fs.fail_reads_of(path);
+    /// The fake file system under the backend, for a test to make a file fail to read, write
+    /// or be removed. The machine is private to this module, so a test of another module goes
+    /// through here.
+    pub(crate) fn fake_fs(b: &Backend<FakeMachine>) -> &FakeFs {
+        &b.machine.fs
     }
 
     /// The id of the Terracotta preset.

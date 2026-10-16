@@ -13,6 +13,7 @@ use cmdstudio_core::state::State;
 use cmdstudio_core::text::safe_file_stem;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::{MutexGuard, PoisonError};
 use ts_rs::TS;
 use uuid::Uuid;
 
@@ -45,7 +46,9 @@ pub struct ThemeSummary {
     pub has_draft: bool,
 }
 
-/// A file in `themes\` that is not a theme of the library, and why. The reason is an
+/// A file in `themes\`, or a draft in `drafts\` (then `file` is `drafts\<name>`), that is not a
+/// theme of the library, and why: a draft that is lost without a word would be a silent change
+/// (spec §2.1). The reason is an
 /// [`AppError`] like every other the UI shows (spec §5.9): a code, the texts of that row in
 /// Thai and English, and the English reason as the `details`. The code is the closest row:
 /// `E_THEME_INVALID` for a file that does not parse or validate as a theme, one whose id a
@@ -129,8 +132,9 @@ fn same_file_name(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// My themes as read from `themes`: each file with its theme, and the files that are not themes.
-type Mine = (Vec<(PathBuf, Theme)>, Vec<LibraryProblem>);
+/// The theme files of a folder (`themes` or `drafts`) as read: each file with its theme, and the
+/// files that are not themes.
+type ThemeFiles = (Vec<(PathBuf, Theme)>, Vec<LibraryProblem>);
 
 fn data_write(e: AdapterError) -> AppError {
     AppError::coded("E_DATA_WRITE", e.to_string())
@@ -148,9 +152,32 @@ impl<M: Machine> Backend<M> {
         Ok(presets::builtin()?.into_iter().map(|(_, t)| t).collect())
     }
 
+    /// Holds the library lock (see `Backend::library_lock`) until the guard is dropped. A
+    /// command that holds it calls only the `_locked` methods and the readers, never another
+    /// command that takes it (the lock is not reentrant); `pending_import` is taken only after
+    /// it, never before.
+    fn hold_library(&self) -> MutexGuard<'_, ()> {
+        self.library_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// A theme file as read: its theme, `None` when the file is gone, or why it is not one, as
+    /// the error the UI shows.
+    fn read_theme_file(&self, path: &Path) -> Result<Option<Theme>, AppError> {
+        let Some(bytes) =
+            self.sys().fs.read(path).map_err(|e| {
+                AppError::coded("E_MACHINE_READ", format!("could not be read: {e}"))
+            })?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(parse_theme(&bytes)?))
+    }
+
     /// My themes: every `.cmdtheme` in `themes\`, in file-name order. A file that does not
     /// parse, one whose id another file (or a preset) already has, is a problem, not a theme.
-    fn mine(&self) -> Result<Mine, AppError> {
+    fn mine(&self) -> Result<ThemeFiles, AppError> {
         let fs = self.sys().fs;
         let dir = self.paths().themes();
         let entries = fs.list_dir(&dir).map_err(|e| {
@@ -167,24 +194,11 @@ impl<M: Machine> Backend<M> {
             .filter(|e| !e.is_dir && has_theme_ext(&e.path))
         {
             let file = name_of(&entry.path);
-            let bytes = match fs.read(&entry.path) {
-                Ok(Some(bytes)) => bytes,
+            let theme = match self.read_theme_file(&entry.path) {
+                Ok(Some(theme)) => theme,
                 Ok(None) => continue,
-                Err(e) => {
-                    problems.push(LibraryProblem {
-                        file,
-                        error: AppError::coded("E_MACHINE_READ", format!("could not be read: {e}")),
-                    });
-                    continue;
-                }
-            };
-            let theme = match parse_theme(&bytes) {
-                Ok(theme) => theme,
-                Err(e) => {
-                    problems.push(LibraryProblem {
-                        file,
-                        error: AppError::from(e),
-                    });
+                Err(error) => {
+                    problems.push(LibraryProblem { file, error });
                     continue;
                 }
             };
@@ -215,20 +229,52 @@ impl<M: Machine> Backend<M> {
         Ok((themes, problems))
     }
 
-    /// Drafts in `drafts\` whose id is no theme of the library: new themes never saved.
-    fn orphan_drafts(&self, known: &[Uuid]) -> Vec<(PathBuf, Theme)> {
-        let fs = self.sys().fs;
-        let Ok(entries) = fs.list_dir(&self.paths().drafts()) else {
-            return Vec::new();
+    /// Every draft in `drafts\` that reads, in file-name order, and a problem for each that does
+    /// not (`drafts\<name>`; the folder itself when it cannot be listed). A draft that cannot be
+    /// read, is damaged or comes from a newer CMD Studio is told, not dropped: it may be the
+    /// only copy of a theme that was never saved.
+    fn drafts(&self) -> ThemeFiles {
+        let dir = self.paths().drafts();
+        let entries = match self.sys().fs.list_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) => {
+                let error = AppError::coded(
+                    "E_MACHINE_READ",
+                    format!("{} could not be listed: {e}", dir.display()),
+                );
+                return (
+                    Vec::new(),
+                    vec![LibraryProblem {
+                        file: "drafts".to_string(),
+                        error,
+                    }],
+                );
+            }
         };
-        entries
+        let mut drafts = Vec::new();
+        let mut problems = Vec::new();
+        for entry in entries
             .into_iter()
             .filter(|e| !e.is_dir && has_theme_ext(&e.path))
-            .filter_map(|e| {
-                let bytes = fs.read(&e.path).ok().flatten()?;
-                let theme = parse_theme(&bytes).ok()?;
-                (!known.contains(&theme.id)).then_some((e.path, theme))
-            })
+        {
+            match self.read_theme_file(&entry.path) {
+                Ok(Some(theme)) => drafts.push((entry.path, theme)),
+                Ok(None) => {}
+                Err(error) => problems.push(LibraryProblem {
+                    file: format!(r"drafts\{}", name_of(&entry.path)),
+                    error,
+                }),
+            }
+        }
+        (drafts, problems)
+    }
+
+    /// Drafts in `drafts\` whose id is no theme of the library: new themes never saved.
+    fn orphan_drafts(&self, known: &[Uuid]) -> Vec<(PathBuf, Theme)> {
+        self.drafts()
+            .0
+            .into_iter()
+            .filter(|(_, theme)| !known.contains(&theme.id))
             .collect()
     }
 
@@ -268,7 +314,7 @@ impl<M: Machine> Backend<M> {
             .iter()
             .map(|t| self.summary(t, ThemeSource::Preset, in_use))
             .collect();
-        let (mine, problems) = self.mine()?;
+        let (mine, mut problems) = self.mine()?;
         let mut mine: Vec<ThemeSummary> = mine
             .iter()
             .map(|(_, t)| self.summary(t, ThemeSource::Mine, in_use))
@@ -276,9 +322,11 @@ impl<M: Machine> Backend<M> {
         mine.sort_by_key(|t| t.name.to_lowercase());
         themes.extend(mine);
         let known: Vec<Uuid> = themes.iter().map(|t| t.id).collect();
-        let mut drafts: Vec<ThemeSummary> = self
-            .orphan_drafts(&known)
+        let (drafts, draft_problems) = self.drafts();
+        problems.extend(draft_problems);
+        let mut drafts: Vec<ThemeSummary> = drafts
             .iter()
+            .filter(|(_, t)| !known.contains(&t.id))
             .map(|(_, t)| self.summary(t, ThemeSource::Draft, in_use))
             .collect();
         drafts.sort_by_key(|t| t.name.to_lowercase());
@@ -337,41 +385,52 @@ impl<M: Machine> Backend<M> {
     /// §3.1). The file of a theme keeps the name it got when the theme was first saved; a new
     /// one is named after the theme (`text::safe_file_stem`), with ` (2)`, ` (3)`… when that name
     /// is taken. What is written is `Theme::to_file_bytes`: clean, within the limits, so a
-    /// theme that does not validate is refused here with the field at fault.
+    /// theme that does not validate is refused here with the field at fault. The summary is of
+    /// the theme as written (its name trimmed and cleaned), as the next listing will show it.
     pub fn theme_save(&self, theme: Theme, draft: bool) -> Result<ThemeSummary, AppError> {
+        let _held = self.hold_library();
+        self.save_locked(theme, draft)
+    }
+
+    /// `theme_save` for a caller that holds the library lock.
+    fn save_locked(&self, theme: Theme, draft: bool) -> Result<ThemeSummary, AppError> {
         let bytes = theme.to_file_bytes()?;
+        // The theme as the file holds it. `to_file_bytes` never writes what `parse_theme`
+        // refuses, so this does not fail for a theme that got this far.
+        let written = parse_theme(&bytes)?;
         let fs = self.sys().fs;
-        if self.presets()?.iter().any(|p| p.id == theme.id) {
+        if self.presets()?.iter().any(|p| p.id == written.id) {
             return Err(AppError::coded(
                 "E_THEME_INVALID",
                 format!(
                     "\"{}\" is a built-in preset, which is not changed in place; Customize makes \
                      a copy of it in My themes",
-                    theme.name
+                    written.name
                 ),
             ));
         }
         let in_use = self.applied_info().0.map(|a| a.theme_id);
         if draft {
-            fs.write_atomic(&self.draft_path(theme.id), &bytes)
+            fs.write_atomic(&self.draft_path(written.id), &bytes)
                 .map_err(data_write)?;
-            let source = match self.mine()?.0.iter().any(|(_, t)| t.id == theme.id) {
+            let source = match self.mine()?.0.iter().any(|(_, t)| t.id == written.id) {
                 true => ThemeSource::Mine,
                 false => ThemeSource::Draft,
             };
-            return Ok(self.summary(&theme, source, in_use));
+            return Ok(self.summary(&written, source, in_use));
         }
         let (mine, _) = self.mine()?;
-        let path = match mine.iter().find(|(_, t)| t.id == theme.id) {
+        let path = match mine.iter().find(|(_, t)| t.id == written.id) {
             Some((path, _)) => path.clone(),
-            None => self.new_theme_file(&theme.name, &mine),
+            None => self.new_theme_file(&written.name, &mine),
         };
         fs.write_atomic(&path, &bytes).map_err(data_write)?;
-        let draft_file = self.draft_path(theme.id);
-        if fs.exists(&draft_file) {
-            fs.remove_file(&draft_file).map_err(data_write)?;
-        }
-        Ok(self.summary(&theme, ThemeSource::Mine, in_use))
+        // The theme is saved; that is what this command was asked for. Its draft is only the
+        // editor's autosave of the same theme, so a draft that will not go (a file in use) is
+        // not a failure of a save that worked: the next autosave replaces it and the next save
+        // takes it away. Reporting an error here would tell the user their theme was not saved.
+        let _ = fs.remove_file(&self.draft_path(written.id));
+        Ok(self.summary(&written, ThemeSource::Mine, in_use))
     }
 
     fn new_theme_file(&self, name: &str, mine: &[(PathBuf, Theme)]) -> PathBuf {
@@ -399,16 +458,18 @@ impl<M: Machine> Backend<M> {
     /// A copy of a theme with a new id and the given name, saved into my themes (spec §3.1
     /// "Customize": the UI gives "My <name>" or "<ชื่อ> ของฉัน").
     pub fn theme_duplicate(&self, id: Uuid, name: String) -> Result<ThemeSummary, AppError> {
+        let _held = self.hold_library();
         let (mut theme, _, _) = self.find_theme(id)?;
         theme.id = Uuid::new_v4();
         theme.name = name;
-        self.theme_save(theme, false)
+        self.save_locked(theme, false)
     }
 
     /// Deletes a theme of mine and its draft, or (`draft_only`) just the draft. A preset is
     /// refused. Deleting the applied theme is allowed: the machine keeps its generated files
     /// until the next apply, and the UI says so first.
     pub fn theme_delete(&self, id: Uuid, draft_only: bool) -> Result<(), AppError> {
+        let _held = self.hold_library();
         let fs = self.sys().fs;
         // Found before anything is removed: a preset or an id nobody has is refused with
         // nothing touched, and a theme that is only a draft is still there to be found.
@@ -436,14 +497,16 @@ impl<M: Machine> Backend<M> {
 
     /// Import, step one (spec §3.1): reads and checks the file, and keeps the theme under a
     /// token until `theme_import_confirm`, so the file is read once. Says whether its id or
-    /// its name is already in the library.
+    /// its name (letter case aside, as file names and the listing's order treat it) is already
+    /// in the library. A file that cannot be read (locked, offline) is `E_MACHINE_READ`, not a
+    /// theme that is not valid: the user must not throw away a good theme for that.
     pub fn theme_import_preview_from(&self, path: &Path) -> Result<ImportPreview, AppError> {
         let fs = self.sys().fs;
         let bytes = fs
             .read(path)
             .map_err(|e| {
                 AppError::coded(
-                    "E_THEME_INVALID",
+                    "E_MACHINE_READ",
                     format!("{} could not be read: {e}", path.display()),
                 )
             })?
@@ -456,7 +519,8 @@ impl<M: Machine> Backend<M> {
         let theme = parse_theme(&bytes)?;
         let known = self.themes_list()?;
         let id_taken = known.themes.iter().any(|t| t.id == theme.id);
-        let name_taken = known.themes.iter().any(|t| t.name == theme.name);
+        let name = theme.name.to_lowercase();
+        let name_taken = known.themes.iter().any(|t| t.name.to_lowercase() == name);
         let token = Uuid::new_v4().to_string();
         let mut pending = self
             .pending_import
@@ -475,17 +539,21 @@ impl<M: Machine> Backend<M> {
     }
 
     /// Import, step two: saves the theme the token stands for into my themes, with a new id
-    /// when its id is taken (spec §3.3). The token is good once.
+    /// when its id is taken (spec §3.3). The token is good once, and is used up only by a save
+    /// that worked: when the save fails (a full disk, a file in use) the preview is still there
+    /// and the same token can be confirmed again. A later preview replaces an earlier one, so
+    /// the earlier token is then refused.
     pub fn theme_import_confirm(&self, token: &str) -> Result<ThemeSummary, AppError> {
+        // The library lock first, then `pending_import`, as `Backend::library_lock` says.
+        let _held = self.hold_library();
         let mut theme = {
-            let mut pending = self
+            let pending = self
                 .pending_import
                 .lock()
                 .map_err(|_| AppError::internal("the import lock is poisoned"))?;
-            match pending.take() {
-                Some(p) if p.token == token => p.theme,
-                other => {
-                    *pending = other;
+            match pending.as_ref() {
+                Some(p) if p.token == token => p.theme.clone(),
+                _ => {
                     return Err(AppError::coded(
                         "E_THEME_INVALID",
                         "the import preview is no longer there; pick the file again",
@@ -496,7 +564,18 @@ impl<M: Machine> Backend<M> {
         if self.themes_list()?.themes.iter().any(|t| t.id == theme.id) {
             theme.id = Uuid::new_v4();
         }
-        self.theme_save(theme, false)
+        let saved = self.save_locked(theme, false)?;
+        // Used up now. A preview made since (it does not wait for the library lock) has
+        // replaced this one, and is left as it is. The theme is saved, so a lock a panicking
+        // thread left is used as it is rather than reported.
+        let mut pending = self
+            .pending_import
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if pending.as_ref().is_some_and(|p| p.token == token) {
+            *pending = None;
+        }
+        Ok(saved)
     }
 
     /// The file name the Save dialog offers for an export: the theme's name as a safe stem.
@@ -521,8 +600,9 @@ impl<M: Machine> Backend<M> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::testing::{backend, fail_reads_of, terracotta_id, DATA};
+    use crate::backend::testing::{backend, fake_fs, terracotta_id, DATA};
     use crate::error::meaning;
+    use cmdstudio_core::adapters::fake::FakeMachine;
 
     fn names(lib: &Library) -> Vec<String> {
         lib.themes.iter().map(|t| t.name.clone()).collect()
@@ -846,7 +926,7 @@ mod tests {
             .fs
             .write_atomic(&locked, &other.to_file_bytes().unwrap())
             .unwrap();
-        fail_reads_of(&b, &locked);
+        fake_fs(&b).fail_reads_of(&locked);
         // The good theme is listed; the file that could not be read is named, with the read
         // code and its row's texts in both languages.
         let lib = b.themes_list().unwrap();
@@ -924,5 +1004,358 @@ mod tests {
         let back = b.theme_import_preview_from(out).unwrap();
         assert!(back.id_taken);
         assert_eq!(back.theme, theme);
+    }
+
+    /// A theme with a new id and the given name, as a preset with those two changed.
+    fn new_theme(b: &Backend<FakeMachine>, name: &str) -> Theme {
+        let (mut theme, _, _) = b.find_theme(terracotta_id()).unwrap();
+        theme.id = Uuid::new_v4();
+        theme.name = name.to_string();
+        theme
+    }
+
+    /// Writes `theme` as a `.cmdtheme` file at `path`.
+    fn put(b: &Backend<FakeMachine>, path: &str, theme: &Theme) {
+        b.sys()
+            .fs
+            .write_atomic(Path::new(path), &theme.to_file_bytes().unwrap())
+            .unwrap();
+    }
+
+    const DOWNLOADS: &str = r"C:\Users\tester\Downloads";
+
+    #[test]
+    fn a_file_that_cannot_be_read_is_not_called_an_invalid_theme_on_import() {
+        let b = backend();
+        let file = format!(r"{DOWNLOADS}\locked.cmdtheme");
+        put(&b, &file, &new_theme(&b, "Locked"));
+        fake_fs(&b).fail_reads_of(&file);
+        // Locked or offline: the read code, so the user does not throw away a good theme.
+        let e = b.theme_import_preview_from(Path::new(&file)).unwrap_err();
+        assert_eq!(e.code, "E_MACHINE_READ");
+        assert_eq!(
+            meaning("E_MACHINE_READ"),
+            Some((e.message_th.as_str(), e.message_en.as_str()))
+        );
+        assert!(e.details.contains("could not be read"), "{}", e.details);
+        // A file that is not there stays "not valid".
+        let gone = b
+            .theme_import_preview_from(Path::new(&format!(r"{DOWNLOADS}\gone.cmdtheme")))
+            .unwrap_err();
+        assert_eq!(gone.code, "E_THEME_INVALID");
+        assert!(gone.details.contains("does not exist"), "{}", gone.details);
+    }
+
+    #[test]
+    fn a_failed_save_keeps_the_import_for_a_retry() {
+        let b = backend();
+        let file = format!(r"{DOWNLOADS}\fresh.cmdtheme");
+        put(&b, &file, &new_theme(&b, "Fresh"));
+        let preview = b.theme_import_preview_from(Path::new(&file)).unwrap();
+        // The write into themes\ fails (FakeFs can fail the writes to one path).
+        let target = PathBuf::from(format!(r"{DATA}\themes\Fresh.cmdtheme"));
+        fake_fs(&b).fail_writes_to(&target);
+        let e = b.theme_import_confirm(&preview.token).unwrap_err();
+        assert_eq!(e.code, "E_DATA_WRITE");
+        assert_eq!(b.themes_list().unwrap().themes.len(), 12);
+        // Once writes work, the same token still stands for the theme.
+        fake_fs(&b).stop_failing(&target);
+        let added = b.theme_import_confirm(&preview.token).unwrap();
+        assert_eq!(
+            (added.name.as_str(), added.source),
+            ("Fresh", ThemeSource::Mine)
+        );
+        assert_eq!(b.themes_list().unwrap().themes.len(), 13);
+        // And a save that worked uses it up.
+        assert_eq!(
+            b.theme_import_confirm(&preview.token).unwrap_err().code,
+            "E_THEME_INVALID"
+        );
+    }
+
+    #[test]
+    fn a_second_preview_replaces_the_first_and_only_its_token_adds_its_theme() {
+        let b = backend();
+        let (file_a, file_b) = (
+            format!(r"{DOWNLOADS}\a.cmdtheme"),
+            format!(r"{DOWNLOADS}\b.cmdtheme"),
+        );
+        put(&b, &file_a, &new_theme(&b, "Theme A"));
+        put(&b, &file_b, &new_theme(&b, "Theme B"));
+        let first = b.theme_import_preview_from(Path::new(&file_a)).unwrap();
+        let second = b.theme_import_preview_from(Path::new(&file_b)).unwrap();
+        assert_ne!(first.token, second.token);
+        // The first token is refused and changes nothing, not even the second preview.
+        let e = b.theme_import_confirm(&first.token).unwrap_err();
+        assert_eq!(e.code, "E_THEME_INVALID");
+        assert_eq!(b.themes_list().unwrap().themes.len(), 12);
+        let added = b.theme_import_confirm(&second.token).unwrap();
+        assert_eq!(added.name, "Theme B");
+        assert!(!names(&b.themes_list().unwrap()).contains(&"Theme A".to_string()));
+    }
+
+    #[test]
+    fn the_previewed_theme_is_the_one_added_even_if_the_file_changes() {
+        let b = backend();
+        let file = format!(r"{DOWNLOADS}\changing.cmdtheme");
+        put(&b, &file, &new_theme(&b, "As previewed"));
+        let preview = b.theme_import_preview_from(Path::new(&file)).unwrap();
+        // The file is replaced, or goes, between the preview and the confirm.
+        put(&b, &file, &new_theme(&b, "Swapped in"));
+        let added = b.theme_import_confirm(&preview.token).unwrap();
+        assert_eq!(added.name, "As previewed");
+        let lib = b.themes_list().unwrap();
+        assert_eq!(&names(&lib)[12..], ["As previewed"]);
+    }
+
+    #[test]
+    fn a_name_that_differs_only_in_case_is_a_taken_name() {
+        let b = backend();
+        let file = format!(r"{DOWNLOADS}\shout.cmdtheme");
+        put(&b, &file, &new_theme(&b, "TERRACOTTA"));
+        let preview = b.theme_import_preview_from(Path::new(&file)).unwrap();
+        assert!(preview.name_taken && !preview.id_taken);
+        put(&b, &file, &new_theme(&b, "Terracotta Two"));
+        let preview = b.theme_import_preview_from(Path::new(&file)).unwrap();
+        assert!(!preview.name_taken && !preview.id_taken);
+    }
+
+    #[test]
+    fn bad_drafts_are_problems_named_with_their_folder_not_themes_that_vanish() {
+        let b = backend();
+        let drafts = b.paths().drafts();
+        // A never-saved theme whose draft reads is listed; one whose draft is damaged is not
+        // dropped without a word, and neither is the damaged draft of a saved theme.
+        let fine = new_theme(&b, "Brand new");
+        b.theme_save(fine, true).unwrap();
+        let copy = b
+            .theme_duplicate(terracotta_id(), "Mine".to_string())
+            .unwrap();
+        b.sys()
+            .fs
+            .write_atomic(&b.draft_path(copy.id), b"{ not json")
+            .unwrap();
+        b.sys()
+            .fs
+            .write_atomic(&drafts.join("future.cmdtheme"), b"{\"schemaVersion\": 99}")
+            .unwrap();
+        let locked = drafts.join("locked.cmdtheme");
+        b.sys()
+            .fs
+            .write_atomic(&locked, &new_theme(&b, "Locked").to_file_bytes().unwrap())
+            .unwrap();
+        fake_fs(&b).fail_reads_of(&locked);
+        let lib = b.themes_list().unwrap();
+        assert_eq!(&names(&lib)[12..], ["Mine", "Brand new"]);
+        let mut found: Vec<(String, String)> = lib
+            .problems
+            .iter()
+            .map(|p| (p.file.clone(), p.error.code.clone()))
+            .collect();
+        found.sort();
+        let mut expected = vec![
+            (
+                format!(r"drafts\{}.cmdtheme", copy.id),
+                "E_THEME_INVALID".to_string(),
+            ),
+            (
+                r"drafts\future.cmdtheme".to_string(),
+                "E_THEME_NEWER_SCHEMA".to_string(),
+            ),
+            (
+                r"drafts\locked.cmdtheme".to_string(),
+                "E_MACHINE_READ".to_string(),
+            ),
+        ];
+        expected.sort();
+        assert_eq!(found, expected);
+        // Each carries its row's texts in both languages, like a problem of themes\.
+        for p in &lib.problems {
+            assert_eq!(
+                meaning(&p.error.code),
+                Some((p.error.message_th.as_str(), p.error.message_en.as_str()))
+            );
+        }
+    }
+
+    #[test]
+    fn a_save_that_worked_is_not_a_failure_because_its_draft_would_not_go() {
+        let b = backend();
+        let copy = b
+            .theme_duplicate(terracotta_id(), "Mine".to_string())
+            .unwrap();
+        let (mut theme, _, path) = b.find_theme(copy.id).unwrap();
+        b.theme_save(theme.clone(), true).unwrap();
+        fake_fs(&b).fail_removes_of(b.draft_path(copy.id));
+        theme.name = "Mine, saved".to_string();
+        let saved = b.theme_save(theme, false).unwrap();
+        assert_eq!(saved.name, "Mine, saved");
+        let on_disk = parse_theme(&b.sys().fs.read(&path.unwrap()).unwrap().unwrap()).unwrap();
+        assert_eq!(on_disk.name, "Mine, saved");
+    }
+
+    #[test]
+    fn the_summary_of_a_save_is_the_theme_as_it_was_written() {
+        let b = backend();
+        // The name is trimmed when the theme is written, and the file is named after that.
+        let copy = b
+            .theme_duplicate(terracotta_id(), "  Padded  ".to_string())
+            .unwrap();
+        assert_eq!(copy.name, "Padded");
+        assert!(b
+            .sys()
+            .fs
+            .exists(Path::new(&format!(r"{DATA}\themes\Padded.cmdtheme"))));
+        let lib = b.themes_list().unwrap();
+        assert_eq!(lib.themes.iter().find(|t| t.id == copy.id), Some(&copy));
+        // The same for a draft.
+        let mut draft = new_theme(&b, " Drafted ");
+        let drafted = b.theme_save(draft.clone(), true).unwrap();
+        assert_eq!(drafted.name, "Drafted");
+        draft.name = "\u{1b}[31mRed\u{1b}[0m".to_string();
+        assert_eq!(b.theme_save(draft, true).unwrap().name, "Red");
+    }
+
+    #[test]
+    fn the_library_lock_is_let_go_after_each_command_and_a_poisoned_one_is_still_used() {
+        let b = backend();
+        let free = |b: &Backend<FakeMachine>| b.library_lock.try_lock().is_ok();
+        let copy = b
+            .theme_duplicate(terracotta_id(), "Mine".to_string())
+            .unwrap();
+        assert!(free(&b));
+        assert!(b.theme_duplicate(Uuid::new_v4(), "x".to_string()).is_err());
+        assert!(free(&b));
+        let (preset, _, _) = b.find_theme(terracotta_id()).unwrap();
+        assert!(b.theme_save(preset, false).is_err());
+        assert!(free(&b));
+        b.theme_save(b.find_theme(copy.id).unwrap().0, true)
+            .unwrap();
+        assert!(free(&b));
+        assert!(b.theme_delete(terracotta_id(), false).is_err());
+        assert!(free(&b));
+        let file = format!(r"{DOWNLOADS}\lock.cmdtheme");
+        put(&b, &file, &new_theme(&b, "Lock"));
+        let preview = b.theme_import_preview_from(Path::new(&file)).unwrap();
+        assert!(b.theme_import_confirm("not the token").is_err());
+        assert!(free(&b));
+        b.theme_import_confirm(&preview.token).unwrap();
+        assert!(free(&b));
+        b.theme_delete(copy.id, false).unwrap();
+        assert!(free(&b));
+        // A command that died holding the lock leaves it poisoned; the library goes on.
+        let died = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = b.library_lock.lock().unwrap();
+            panic!("a command died holding the library lock");
+        }));
+        assert!(died.is_err() && b.library_lock.is_poisoned());
+        let again = b
+            .theme_duplicate(terracotta_id(), "After".to_string())
+            .unwrap();
+        b.theme_delete(again.id, false).unwrap();
+        assert_eq!(b.themes_list().unwrap().themes.len(), 13);
+    }
+
+    /// The library on the real disk from several threads, as the IPC commands are
+    /// (`spawn_blocking` on one shared backend). `FakeFs` cannot be shared between threads.
+    #[cfg(windows)]
+    mod on_disk {
+        use super::*;
+        use cmdstudio_core::adapters::windows::{
+            fonts::WinFonts,
+            fs::WinFs,
+            host::WinHost,
+            process::WinProcess,
+            registry::{RegLocation, WinAutoRun},
+            wt::WinWt,
+        };
+        use cmdstudio_core::adapters::System;
+        use std::time::Duration;
+
+        /// A folder of its own under the system temp folder, removed when the test ends, also
+        /// when it fails. The tests touch nothing else on this computer.
+        struct Scratch(PathBuf);
+
+        impl Scratch {
+            fn new() -> Self {
+                let name = format!("cmdstudio-library-test-{}", Uuid::new_v4().simple());
+                Scratch(std::env::temp_dir().join(name))
+            }
+        }
+
+        impl Drop for Scratch {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        /// The real file system and adapters that are never called: the library uses only
+        /// `Fs`. Their registry places are names no program has, and nothing opens them.
+        struct DiskMachine {
+            fs: WinFs,
+            autorun: WinAutoRun,
+            fonts: WinFonts,
+            wt: WinWt,
+            process: WinProcess,
+            host: WinHost,
+        }
+
+        impl DiskMachine {
+            fn under(dir: &Path) -> Self {
+                let unused = || RegLocation::user(r"Software\CmdStudioLibraryTestNeverOpened");
+                DiskMachine {
+                    fs: WinFs,
+                    autorun: WinAutoRun::at(unused(), unused()),
+                    fonts: WinFonts::at(dir.join("fonts"), unused(), false),
+                    wt: WinWt::new(dir.join("local")),
+                    process: WinProcess::new(Vec::new(), Duration::from_secs(1)),
+                    host: WinHost,
+                }
+            }
+        }
+
+        impl Machine for DiskMachine {
+            fn system(&self) -> System<'_> {
+                System {
+                    fs: &self.fs,
+                    autorun: &self.autorun,
+                    fonts: &self.fonts,
+                    wt: &self.wt,
+                    process: &self.process,
+                    host: &self.host,
+                }
+            }
+        }
+
+        #[test]
+        fn new_themes_of_one_name_from_many_threads_each_get_a_file_of_their_own() {
+            const THREADS: usize = 8;
+            const EACH: usize = 4;
+            let scratch = Scratch::new();
+            let (_, now) = crate::backend::testing::clock();
+            let b = Backend::new(
+                DiskMachine::under(&scratch.0),
+                scratch.0.join("data"),
+                scratch.0.join("resources"),
+                now,
+            );
+            std::thread::scope(|scope| {
+                for _ in 0..THREADS {
+                    scope.spawn(|| {
+                        for _ in 0..EACH {
+                            b.theme_duplicate(terracotta_id(), "Same".to_string())
+                                .unwrap();
+                        }
+                    });
+                }
+            });
+            // Without the lock two threads choose the same free file name, and the later
+            // write replaces the other's theme.
+            let files = std::fs::read_dir(b.paths().themes()).unwrap().count();
+            assert_eq!(files, THREADS * EACH);
+            let lib = b.themes_list().unwrap();
+            assert_eq!(lib.themes.len(), 12 + THREADS * EACH);
+            assert!(lib.problems.is_empty(), "{:?}", lib.problems);
+        }
     }
 }
