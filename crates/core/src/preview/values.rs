@@ -197,7 +197,7 @@ mod tests {
 
     #[test]
     fn the_home_is_matched_as_oh_my_posh_matches_it_quirk_and_all() {
-        // (USERPROFILE, --pwd, what Oh My Posh 31.5.0 printed), measured by tests/parity.rs.
+        // (the home, --pwd, what Oh My Posh 31.5.0 printed), measured by tests/parity.rs.
         // Both are lowered as Go lowers them and the folder is cut at the lowered home's length
         // in bytes, so a letter whose lower case is shorter (`İ` 2 bytes to `i` 1, the Kelvin
         // sign U+212A 3 bytes to `k` 1) moves the cut.

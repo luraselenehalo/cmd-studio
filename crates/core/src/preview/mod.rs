@@ -114,7 +114,11 @@ pub struct PreviewContext {
     /// The computer name: `{host}`, and the prompt's `host`. (A real window shows
     /// `COMPUTERNAME` in the box and the DNS host name in the prompt; the preview shows one.)
     pub host: String,
-    /// The user's profile folder (`C:\Users\you`), which the prompt shows as `~`.
+    /// The folder Oh My Posh takes as home, which the prompt shows as `~`: `HOME` when it is
+    /// set and not empty, else `HOMEDRIVE` followed by `HOMEPATH` when those give a folder,
+    /// else `USERPROFILE` (measured on Oh My Posh 31.5.0 by `tests/parity.rs`). The app must
+    /// send that folder as cmd's environment gives it. Windows sets `HOMEDRIVE` and `HOMEPATH`
+    /// and usually not `HOME`, so it is mostly the profile folder (`C:\Users\you`).
     pub home: String,
     /// The folder cmd is in: `{cwd}` as it is, and the prompt's `path` with `home` as `~`.
     pub cwd: String,

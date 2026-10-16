@@ -226,7 +226,7 @@ impl Stage {
     /// What Oh My Posh prints, as plain text, for one of the `probe` configs.
     fn read(&self, config: &Path, worker: &str) -> String {
         let ctx = self.context(&self.plain, None);
-        let out = self.run(config, "primary", &ctx, &["--plain"], worker);
+        let out = self.run(config, "primary", &ctx, &[], &["--plain"], worker);
         out.trim().to_string()
     }
 
@@ -253,13 +253,15 @@ impl Stage {
         }
     }
 
-    /// One run of Oh My Posh. `worker` names the cache folder, so parallel runs never share
-    /// one.
+    /// One run of Oh My Posh. The child's `HOME` and `USERPROFILE` are `ctx.home`, and its
+    /// `USER` and `USERNAME` are `ctx.user`, unless `env` sets one of them (or another variable)
+    /// to something else. `worker` names the cache folder, so parallel runs never share one.
     fn run(
         &self,
         config: &Path,
         kind: &str,
         ctx: &PreviewContext,
+        env: &[(&str, String)],
         extra: &[&str],
         worker: &str,
     ) -> String {
@@ -285,6 +287,10 @@ impl Stage {
             .env("TEMP", &self.root.0)
             .env("TMP", &self.root.0)
             .creation_flags(CREATE_NO_WINDOW);
+        // a later `env` call for the same name replaces the value
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
         let out = cmd.output().unwrap();
         assert!(
             out.status.success(),
@@ -325,6 +331,8 @@ struct Case {
     theme: Theme,
     config: PathBuf,
     ctx: PreviewContext,
+    /// What the child's environment holds besides what [`Stage::run`] derives from `ctx`.
+    env: Vec<(&'static str, String)>,
     /// `print right` and `print transient` too, not only `print primary`.
     all_three: bool,
 }
@@ -337,6 +345,18 @@ struct Cases<'a> {
 
 impl Cases<'_> {
     fn add(&mut self, what: String, theme: Theme, ctx: PreviewContext, all_three: bool) {
+        self.add_with_env(what, theme, ctx, Vec::new(), all_three);
+    }
+
+    /// [`Cases::add`], with `env` set in the child's environment on top of what `ctx` gives.
+    fn add_with_env(
+        &mut self,
+        what: String,
+        theme: Theme,
+        ctx: PreviewContext,
+        env: Vec<(&'static str, String)>,
+        all_three: bool,
+    ) {
         theme.validate().unwrap();
         let config = self
             .stage
@@ -349,6 +369,7 @@ impl Cases<'_> {
             theme,
             config,
             ctx,
+            env,
             all_three,
         });
     }
@@ -496,7 +517,8 @@ fn all_cases(stage: &Stage) -> Vec<Case> {
     }
     // 4. paths: the home folder itself, under it, elsewhere, a drive's root, Thai letters with
     //    their marks, Chinese, emoji (the filler counts their cells); none of them needs to
-    //    exist. Each is (the home Oh My Posh gets as USERPROFILE, the folder it gets as --pwd).
+    //    exist. Each is (the home Oh My Posh gets as HOME and USERPROFILE alike, the folder it
+    //    gets as --pwd).
     let home = stage.home.to_string_lossy().into_owned();
     let same = |cwd: String| (home.clone(), cwd);
     let paths: Vec<(String, String)> = vec![
@@ -511,7 +533,7 @@ fn all_cases(stage: &Stage) -> Vec<Case> {
             "D:\\\u{1f4c1}\\\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}\\\u{2764}\u{fe0f}"
                 .to_string(),
         ),
-        // the home in lower case, as --pwd and as USERPROFILE
+        // the home in lower case, as --pwd and as the home
         same(home.to_lowercase()),
         (home.to_lowercase(), home.clone()),
         (home.to_lowercase(), format!(r"{home}\projects\x")),
@@ -533,7 +555,7 @@ fn all_cases(stage: &Stage) -> Vec<Case> {
         // a space in a folder's name
         same(format!(r"{home}\my folder\x")),
         same(r"D:\my folder\x".to_string()),
-        // non-ASCII letters in the home folder, in another case in --pwd than in USERPROFILE
+        // non-ASCII letters in the home folder, in another case in --pwd than in the home
         (r"C:\Users\Ünal".to_string(), r"c:\users\ünal\x".to_string()),
         (r"C:\Users\Ünal".to_string(), r"c:\users\ünal".to_string()),
         (r"C:\Users\ünal".to_string(), r"C:\USERS\ÜNAL\x".to_string()),
@@ -558,12 +580,13 @@ fn all_cases(stage: &Stage) -> Vec<Case> {
         // a network folder
         same(r"\\server\share\dir".to_string()),
     ];
+    let path_layouts = [
+        (Layout::Box, &[Segment::Path, Segment::Time][..]),
+        (Layout::Line, &[Segment::Path][..]),
+        (Layout::Powerline, &[Segment::Path][..]),
+    ];
     for (user_profile, cwd) in paths {
-        for (layout, list) in [
-            (Layout::Box, &[Segment::Path, Segment::Time][..]),
-            (Layout::Line, &[Segment::Path][..]),
-            (Layout::Powerline, &[Segment::Path][..]),
-        ] {
+        for (layout, list) in path_layouts {
             let ctx = PreviewContext {
                 home: user_profile.clone(),
                 ..with(Path::new(&cwd), None, 0, 0)
@@ -574,6 +597,53 @@ fn all_cases(stage: &Stage) -> Vec<Case> {
                 ctx,
                 false,
             );
+        }
+    }
+    // 4b. which folder `~` stands for: Oh My Posh takes HOME; when HOME is empty, HOMEDRIVE
+    //     followed by HOMEPATH; when that is empty too, USERPROFILE. Group 4 gives HOME and
+    //     USERPROFILE the same folder, so it cannot tell them apart. Here the sample's home is
+    //     the folder Oh My Posh should take, another variable names another folder, and --pwd
+    //     is under each of the two in turn. None of the folders needs to exist.
+    let profile = stage.root.0.join("profile").to_string_lossy().into_owned();
+    let (drive, rest) = home
+        .split_at_checked(2)
+        .filter(|(drive, _)| drive.ends_with(':'))
+        .expect("the temp folder is on a drive");
+    let homes: [(&str, Vec<(&'static str, String)>); 3] = [
+        (
+            "HOME",
+            vec![("HOME", home.clone()), ("USERPROFILE", profile.clone())],
+        ),
+        (
+            "HOMEDRIVE and HOMEPATH",
+            vec![
+                ("HOME", String::new()),
+                ("HOMEDRIVE", drive.to_string()),
+                ("HOMEPATH", rest.to_string()),
+                ("USERPROFILE", profile.clone()),
+            ],
+        ),
+        // the cleared environment has no HOMEDRIVE or HOMEPATH
+        (
+            "USERPROFILE",
+            vec![("HOME", String::new()), ("USERPROFILE", home.clone())],
+        ),
+    ];
+    for (which, env) in homes {
+        for cwd in [format!(r"{home}\projects\x"), format!(r"{profile}\x")] {
+            for (layout, list) in path_layouts {
+                let ctx = PreviewContext {
+                    home: home.clone(),
+                    ..with(Path::new(&cwd), None, 0, 0)
+                };
+                cases.add_with_env(
+                    format!("{layout:?} path {cwd}, the home from {which}"),
+                    terracotta(layout, list),
+                    ctx,
+                    env.clone(),
+                    false,
+                );
+            }
         }
     }
     // 5. durations in the austin style, around the threshold and across units
@@ -647,7 +717,7 @@ fn run_batch(stage: &Stage, batch: &[Case], worker: &str) -> (Clock, Vec<Printed
         let printed: Vec<Printed> = batch
             .iter()
             .map(|case| {
-                let run = |kind| stage.run(&case.config, kind, &case.ctx, &[], worker);
+                let run = |kind| stage.run(&case.config, kind, &case.ctx, &case.env, &[], worker);
                 Printed {
                     primary: run("primary"),
                     right: case.all_three.then(|| run("right")),
