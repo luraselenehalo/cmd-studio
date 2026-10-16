@@ -770,7 +770,7 @@ pub fn recover_at_start(sys: System<'_>, ctx: &Ctx) -> Result<StartReport, Actio
 
 /// What the newest transaction could not put back, if it ended `RollbackIncomplete` and
 /// nothing has run since; rebuilt from its journal when its record could not be saved (see
-/// [`latest_record`]). A record that cannot be read is an error (`E_SNAPSHOT_READ`), never
+/// `latest_record`). A record that cannot be read is an error (`E_SNAPSHOT_READ`), never
 /// "nothing": it is the one record that says what to fix by hand.
 pub fn pending_incomplete(sys: System<'_>, ctx: &Ctx) -> Result<Option<Incomplete>, ActionError> {
     let root = ctx.paths.snapshots();

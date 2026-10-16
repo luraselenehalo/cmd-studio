@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "id": "a90defff-a3cb-4533-8aaf-b5d0fd27d2e0",
+  "name": "Gruvbox",
+  "author": "CMD Studio",
+  "tone": "dark",
+  "simple": null,
+  "colors": {
+    "background": "#282828",
+    "foreground": "#ebdbb2",
+    "cursor": "#ebdbb2",
+    "selection": "#665c54",
+    "accent": "#fe8019",
+    "muted": "#928374",
+    "frame": "#665c54",
+    "ansi": [
+      "#282828", "#cc241d", "#98971a", "#d79921", "#458588", "#b16286", "#689d6a", "#a89984",
+      "#928374", "#fb4934", "#b8bb26", "#fabd2f", "#83a598", "#d3869b", "#8ec07c", "#ebdbb2"
+    ]
+  },
+  "terminal": {
+    "font": "Cascadia Mono",
+    "fontSize": 12,
+    "cursorShape": "filledBox",
+    "opacity": 96,
+    "acrylic": true,
+    "padding": [14, 10]
+  },
+  "prompt": {
+    "layout": "box",
+    "segments": ["user", "path", "git", "time"],
+    "transient": true
+  },
+  "banner": {
+    "enabled": true,
+    "title": "Welcome back, {user}!",
+    "lines": ["cwd: {cwd}", "{date} · {time} · {host}"],
+    "tips": true,
+    "clearLogo": true
+  }
+}

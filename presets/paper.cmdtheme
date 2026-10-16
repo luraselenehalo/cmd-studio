@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "id": "55b736fb-2909-43c8-ace0-086f0e5ec662",
+  "name": "Paper",
+  "author": "CMD Studio",
+  "tone": "light",
+  "simple": null,
+  "colors": {
+    "background": "#f6f1e5",
+    "foreground": "#2b2622",
+    "cursor": "#2f5d8a",
+    "selection": "#e3dac6",
+    "accent": "#2f5d8a",
+    "muted": "#6f665c",
+    "frame": "#bfb5a1",
+    "ansi": [
+      "#2b2622", "#a34945", "#357a3a", "#816500", "#346aac", "#8f4d89", "#00787d", "#d4ccc0",
+      "#5a5451", "#8c3432", "#1e6626", "#695200", "#1f5596", "#793974", "#006266", "#fffcf5"
+    ]
+  },
+  "terminal": {
+    "font": "Cascadia Mono",
+    "fontSize": 12,
+    "cursorShape": "filledBox",
+    "opacity": 100,
+    "acrylic": false,
+    "padding": [14, 10]
+  },
+  "prompt": {
+    "layout": "line",
+    "segments": ["path", "git"],
+    "transient": true
+  },
+  "banner": {
+    "enabled": true,
+    "title": "Welcome back, {user}!",
+    "lines": ["cwd: {cwd}", "{date} · {time} · {host}"],
+    "tips": true,
+    "clearLogo": true
+  }
+}

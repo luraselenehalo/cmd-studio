@@ -234,7 +234,7 @@ impl<'a> SystemExecutor<'a> {
     }
 
     /// The fonts a restore did not uninstall because they are not the ones CMD Studio
-    /// installed any more (see [`SystemExecutor::font_not_ours`]), each once.
+    /// installed any more (see `SystemExecutor::font_not_ours`), each once.
     pub fn fonts_left(&self) -> Vec<FontLeft> {
         self.left.clone()
     }

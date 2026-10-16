@@ -2,11 +2,14 @@
 //! generators write).
 //!
 //! Each test makes one generated file from fixed inputs and compares it, character for
-//! character, with the file of the same name under `tests/golden/`. The inputs are the
-//! Terracotta preset and the paths of the Thai test user of spec §7 (VM-C), so the paths have
-//! Thai letters and a space in them; only `<clink-launch>` is all ASCII, as it always is
-//! (spec §5.4). Nothing here reads the machine or the clock, and a test that fails names the
-//! file and the first line that differs.
+//! character, with the file of the same name under `tests/golden/`. The inputs of the
+//! generators are the Terracotta preset and the paths of the Thai test user of spec §7 (VM-C),
+//! so the paths have Thai letters and a space in them; only `<clink-launch>` is all ASCII, as
+//! it always is (spec §5.4). The preview (spec §5.6) is not a generator's file but what the
+//! editor draws: its inputs are four presets (Terracotta, Tokyo Night, Catppuccin Latte and
+//! Paper) in `PreviewContext::sample()`, which is all English (the user is "you", the
+//! computer "PC"). Nothing here reads the machine or the clock, and a test that fails names
+//! the file and the first line that differs.
 //!
 //! A plain run only reads the golden files. With `UPDATE_GOLDEN=1` each test writes its file
 //! first and compares after, so a file that could not be written still fails:
@@ -28,6 +31,7 @@ use cmdstudio_core::generate::lua;
 use cmdstudio_core::generate::{clink, omp, wt};
 use cmdstudio_core::model::{Layout, Segment, Target, Theme};
 use cmdstudio_core::presets;
+use cmdstudio_core::preview::{render_banner, render_prompt, PreviewContext};
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -48,12 +52,42 @@ fn clink_launch() -> PathBuf {
 
 /// The Terracotta preset, picked by its key.
 fn terracotta() -> Theme {
+    preset("terracotta")
+}
+
+/// A built-in preset, picked by its key.
+fn preset(key: &str) -> Theme {
     presets::builtin()
         .unwrap()
         .into_iter()
-        .find(|(key, _)| *key == "terracotta")
+        .find(|(k, _)| *k == key)
         .unwrap()
         .1
+}
+
+/// What the editor's preview shows for `theme` in the sample (spec §5.6): the welcome box,
+/// then the rows of the prompt, one row to a line as the JSON the app gets. Nerd Font glyphs
+/// are written as JSON escapes (a backslash, `u` and four hex digits), so the file shows them.
+fn preview_text(theme: &Theme) -> String {
+    let ctx = PreviewContext::sample();
+    let mut text = String::new();
+    for (part, rows) in [
+        ("banner", render_banner(theme, &ctx)),
+        ("prompt", render_prompt(theme, &ctx)),
+    ] {
+        for (i, row) in rows.iter().enumerate() {
+            let json: String = serde_json::to_string(row)
+                .unwrap()
+                .chars()
+                .map(|c| match u32::from(c) {
+                    code @ 0xE000..=0xF8FF => format!("\\u{code:04x}"),
+                    _ => c.to_string(),
+                })
+                .collect();
+            text.push_str(&format!("{part} {:>2} {json}\n", i + 1));
+        }
+    }
+    text
 }
 
 /// Terracotta with this layout; its segments stay as the preset lists them.
@@ -247,6 +281,12 @@ golden_tests! {
     // the theme file itself, spec §3.3: what saving and exporting write
     saved_theme_file: "terracotta.cmdtheme" =
         String::from_utf8(terracotta().to_file_bytes().unwrap()).unwrap();
+
+    // what the editor's preview shows in the sample (English, as cmd shows it)
+    terracotta_preview: "terracotta.preview.txt" = preview_text(&terracotta());
+    tokyo_night_preview: "tokyo-night.preview.txt" = preview_text(&preset("tokyo-night"));
+    catppuccin_latte_preview: "catppuccin-latte.preview.txt" = preview_text(&preset("catppuccin-latte"));
+    paper_preview: "paper.preview.txt" = preview_text(&preset("paper"));
 }
 
 #[test]

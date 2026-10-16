@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "id": "21afd671-b402-4f1b-bb4f-abcd4a8ec226",
+  "name": "Catppuccin Mocha",
+  "author": "CMD Studio",
+  "tone": "dark",
+  "simple": null,
+  "colors": {
+    "background": "#1e1e2e",
+    "foreground": "#cdd6f4",
+    "cursor": "#f5e0dc",
+    "selection": "#585b70",
+    "accent": "#cba6f7",
+    "muted": "#9399b2",
+    "frame": "#6c7086",
+    "ansi": [
+      "#45475a", "#f38ba8", "#a6e3a1", "#f9e2af", "#89b4fa", "#f5c2e7", "#94e2d5", "#bac2de",
+      "#585b70", "#f38ba8", "#a6e3a1", "#f9e2af", "#89b4fa", "#f5c2e7", "#94e2d5", "#a6adc8"
+    ]
+  },
+  "terminal": {
+    "font": "Cascadia Mono",
+    "fontSize": 12,
+    "cursorShape": "filledBox",
+    "opacity": 96,
+    "acrylic": true,
+    "padding": [14, 10]
+  },
+  "prompt": {
+    "layout": "box",
+    "segments": ["path", "git", "time"],
+    "transient": true
+  },
+  "banner": {
+    "enabled": true,
+    "title": "Welcome back, {user}!",
+    "lines": ["cwd: {cwd}", "{date} · {time} · {host}"],
+    "tips": true,
+    "clearLogo": true
+  }
+}

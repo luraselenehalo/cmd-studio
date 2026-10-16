@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "id": "aaba8cee-58c1-4709-951c-3cc04f7475a3",
+  "name": "Retro green",
+  "author": "CMD Studio",
+  "tone": "dark",
+  "simple": null,
+  "colors": {
+    "background": "#0b140c",
+    "foreground": "#b6f2c0",
+    "cursor": "#33ff66",
+    "selection": "#1d3a24",
+    "accent": "#33ff66",
+    "muted": "#6fb07b",
+    "frame": "#2e5a38",
+    "ansi": [
+      "#2b2f2b", "#e6857e", "#72b875", "#c2a140", "#6fa7ee", "#cf88c8", "#14bbc2", "#cad0ca",
+      "#606560", "#ffa098", "#8bd28d", "#dcba5c", "#91c1ff", "#e9a1e3", "#43d5dc", "#f1f7f1"
+    ]
+  },
+  "terminal": {
+    "font": "Cascadia Mono",
+    "fontSize": 12,
+    "cursorShape": "filledBox",
+    "opacity": 96,
+    "acrylic": true,
+    "padding": [14, 10]
+  },
+  "prompt": {
+    "layout": "line",
+    "segments": ["path", "git"],
+    "transient": true
+  },
+  "banner": {
+    "enabled": true,
+    "title": "Welcome back, {user}!",
+    "lines": ["cwd: {cwd}", "{date} · {time} · {host}"],
+    "tips": true,
+    "clearLogo": true
+  }
+}
