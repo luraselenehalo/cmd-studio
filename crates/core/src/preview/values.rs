@@ -4,31 +4,55 @@ use super::Clock;
 /// The `path` segment's text for `cwd` (style `full`, `home_icon` `~`), as Oh My Posh 31.5.0
 /// writes it on Windows: `/` becomes `\`, the drive letter is upper case, a trailing `\` goes
 /// (a drive's root keeps it: `C:\`, and `D:` becomes `D:\`), and `home` or a folder under it
-/// starts with `~`. Windows paths ignore case, so `home` matches in any case and the rest keeps
-/// its own. `.` and `..` stay as they are.
+/// starts with `~`. `.` and `..` stay as they are.
+///
+/// `home` is matched as Oh My Posh 31.5.0 matches it, quirk included (measured on the pinned
+/// binary by `tests/parity.rs`): both paths are lowered as Go's `strings.ToLower` lowers them,
+/// so `home` matches in any case and the rest keeps its own, and the folder is then cut at the
+/// lowered home's length in bytes ([`strip_lowered_prefix`]). Where lowering changes a letter's
+/// length (`İ` 2 bytes to `i` 1, the Kelvin sign U+212A 3 bytes to `k` 1), the cut misses the
+/// end of the home, and the folder is then mostly shown in full, even the home folder itself.
 pub(crate) fn prompt_path(home: &str, cwd: &str) -> String {
     let home = normalize(home);
     let cwd = normalize(cwd);
     if home.is_empty() {
         return cwd;
     }
-    match strip_prefix_ignoring_case(&cwd, &home) {
+    match strip_lowered_prefix(&cwd, &home) {
         Some("") => "~".to_string(),
         Some(rest) if rest.starts_with('\\') => format!("~{rest}"),
         _ => cwd,
     }
 }
 
-/// `text` without `prefix` at its start, with letters compared regardless of case.
-fn strip_prefix_ignoring_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
-    let mut rest = text.chars();
-    for p in prefix.chars() {
-        let c = rest.next()?;
-        if c != p && !c.to_lowercase().eq(p.to_lowercase()) {
-            return None;
-        }
+/// `text` after `prefix`, the way Oh My Posh cuts it: when [`go_lower`] of `text` starts with
+/// [`go_lower`] of `prefix`, `text` itself is cut at the lowered prefix's length in bytes.
+/// `None` when the lowered text does not start so, or when the cut falls inside a character
+/// (Go would leave part of one there, which is never a `\`).
+fn strip_lowered_prefix<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
+    let prefix = go_lower(prefix);
+    if !go_lower(text).starts_with(&prefix) {
+        return None;
     }
-    Some(rest.as_str())
+    text.get(prefix.len()..)
+}
+
+/// `text` lowered as Go's `strings.ToLower` lowers it: each character by itself with the simple
+/// mapping, so `İ` (U+0130) becomes `i`, and a character whose lower case is more than one
+/// character stays as it is.
+fn go_lower(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c == '\u{130}' {
+                return 'i';
+            }
+            let mut lower = c.to_lowercase();
+            match (lower.next(), lower.next()) {
+                (Some(one), None) => one,
+                _ => c,
+            }
+        })
+        .collect()
 }
 
 /// A Windows path the way the path segment starts from it: `\` only, an upper case drive
@@ -136,6 +160,52 @@ mod tests {
         );
         // no home: the folder as it is
         assert_eq!(prompt_path("", r"C:\x\"), r"C:\x");
+    }
+
+    #[test]
+    fn the_home_is_matched_as_oh_my_posh_matches_it_quirk_and_all() {
+        // (USERPROFILE, --pwd, what Oh My Posh 31.5.0 printed), measured by tests/parity.rs.
+        // Both are lowered as Go lowers them and the folder is cut at the lowered home's length
+        // in bytes, so a letter whose lower case is shorter (`İ` 2 bytes to `i` 1, the Kelvin
+        // sign U+212A 3 bytes to `k` 1) moves the cut.
+        let rows = [
+            (r"C:\Users\İsa", r"c:\users\isa\x", r"~\x"),
+            (r"C:\Users\isa", r"c:\users\İsa\x", r"C:\users\İsa\x"),
+            // the very folder of the home, and still no `~`
+            (r"C:\Users\İsa", r"C:\Users\İsa\x", r"C:\Users\İsa\x"),
+            (
+                r"C:\Users\İbrahim",
+                r"C:\Users\İbrahim\Documents",
+                r"C:\Users\İbrahim\Documents",
+            ),
+            ("C:\\Users\\\u{212a}", r"c:\users\k\x", r"~\x"),
+            // the cut falls inside the Kelvin sign
+            (
+                r"C:\Users\k",
+                "c:\\users\\\u{212a}\\x",
+                "C:\\users\\\u{212a}\\x",
+            ),
+            (r"C:\Users\Ünal", r"c:\users\ünal\x", r"~\x"),
+        ];
+        let wrong: Vec<String> = rows
+            .iter()
+            .filter_map(|(home, cwd, shown)| {
+                let got = prompt_path(home, cwd);
+                (got != *shown).then(|| format!("{home} | {cwd}: {got}, not {shown}"))
+            })
+            .collect();
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    #[test]
+    fn letters_are_lowered_one_by_one_as_go_lowers_them() {
+        // Go's simple mapping makes `İ` a plain `i`; Rust's `to_lowercase` adds a combining dot
+        assert_eq!("\u{130}".to_lowercase(), "i\u{307}");
+        assert_eq!(go_lower(r"C:\Users\İsa"), r"c:\users\isa");
+        assert_eq!(go_lower("\u{212a}"), "k");
+        assert_eq!(go_lower("\u{dc}NAL"), "\u{fc}nal");
+        // letters with no case, Thai among them, stay as they are
+        assert_eq!(go_lower(r"\ผู้ทดสอบ 1"), r"\ผู้ทดสอบ 1");
     }
 
     #[test]
