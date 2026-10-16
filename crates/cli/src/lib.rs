@@ -1727,15 +1727,32 @@ mod tests {
     #[test]
     fn a_name_of_cmd_studios_with_the_wrong_kind_is_not_taken_for_it() {
         let (m, d) = machine();
-        for (folder, put) in [
-            (r"C:\x\a", r"C:\x\a\state.json\inside.txt"),
-            (r"C:\x\b", r"C:\x\b\runtime"),
+        // Each folder holds one entry, with the name the refusal shows for it (a folder with its
+        // backslash).
+        for (folder, put, shown) in [
+            (
+                r"C:\x\a",
+                r"C:\x\a\state.json\inside.txt",
+                "\"state.json\\\"",
+            ),
+            (r"C:\x\b", r"C:\x\b\runtime", "\"runtime\""),
+            // The app's names too: a file called drafts, a folder called settings.json.
+            (r"C:\x\d", r"C:\x\d\drafts", "\"drafts\""),
+            (
+                r"C:\x\e",
+                r"C:\x\e\settings.json\inside.txt",
+                "\"settings.json\\\"",
+            ),
         ] {
             m.fs.put(put, b"x");
             let before = m.fs.snapshot();
             let (code, out, err) = cli(&m, &d, &["--cleanup", "--data-dir", folder]);
             assert_eq!(code, EXIT_INVALID, "{folder}: {out}{err}");
             assert!(err.contains(NOT_OURS), "{err}");
+            assert!(
+                err.contains(&format!("{folder} {NOT_OURS}: {shown}. --cleanup deletes")),
+                "{shown}: {err}"
+            );
             assert_eq!(m.fs.snapshot(), before, "{folder}");
         }
         // The first few are named, then how many more.
@@ -1829,6 +1846,13 @@ mod tests {
             r".notes.txt.0123456789abcdef0123456789abcdef.cmdstudio-tmp",
             r"state.json.damaged-",
             r"state.json.damaged-12ab",
+            // The same for settings.json, the app's file.
+            r"settings.json.bak",
+            r"settings.json.damaged-",
+            r"settings.json.damaged-12ab",
+            r".settings.json.0123.cmdstudio-tmp",
+            r".settings.json.0123456789abcdef0123456789abcdef0.cmdstudio-tmp",
+            r".settings.json.0123456789abcdef0123456789abcdeg.cmdstudio-tmp",
         ] {
             let (m, d) = machine();
             let folder = r"C:\Users\tester\stray";
@@ -2394,11 +2418,17 @@ mod tests {
         }
         let (code, out, err) = cli(&m, &later(&d, 1), &["--cleanup", "--data-dir", other]);
         assert_eq!(code, EXIT_OK, "{out}{err}");
+        let left = m.fs.list_dir(Path::new(other)).unwrap();
+        assert_eq!(left.len(), 1, "only the themes folder stays: {left:?}");
+        assert!(left[0].is_dir, "{left:?}");
         assert_eq!(
-            m.fs.list_dir(Path::new(other)).unwrap().len(),
-            1,
-            "only the themes folder stays"
+            left[0].path.file_name().and_then(|n| n.to_str()),
+            Some("themes"),
+            "{left:?}"
         );
+        assert!(m
+            .fs
+            .exists(Path::new(&format!(r"{other}\themes\mine.cmdtheme"))));
         // A folder with only settings.json and the app's folders is CMD Studio's too: the app
         // writes them before any theme is applied.
         let fresh = r"C:\Users\tester\fresh";
