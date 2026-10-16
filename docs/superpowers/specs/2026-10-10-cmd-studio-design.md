@@ -384,8 +384,9 @@ Layout แต่ละแบบ:
 ```
 cmd-studio/
 ├─ crates/
-│  └─ core/            cmdstudio-core: โมเดล, schema, palette, ตัวสร้างไฟล์, ตัวจำลองพรีวิว, ตัววางแผน,
-│                      ทรานแซกชัน, จุดย้อนกลับ, ตัวตรวจ, ตัวเชื่อมระบบ (trait + impl ของ Windows)
+│  ├─ core/            cmdstudio-core: โมเดล, schema, palette, ตัวสร้างไฟล์, ตัวจำลองพรีวิว, ตัววางแผน,
+│  │                   ทรานแซกชัน, จุดย้อนกลับ, ตัวตรวจ, ตัวเชื่อมระบบ (trait + impl ของ Windows)
+│  └─ cli/             cmdstudio-cli: library ของ CLI ที่ exe ของแอปเรียกเมื่อเริ่มด้วย argument (§5.7)
 ├─ app/
 │  ├─ src-tauri/       แอป Tauri 2: คำสั่ง IPC ชั้นบางๆ, CLI (--cleanup ฯลฯ), event ความคืบหน้า
 │  └─ ui/              React + TypeScript (Vite): หน้าจอ (ระบายสี span ของพรีวิวที่ core วาด), i18n
@@ -638,7 +639,7 @@ exit code: `0` สำเร็จ · `1` ล้มเหลวและย้อ
 - ไม่มี telemetry ใดๆ
 - ข้อมูลวินิจฉัยออกจากเครื่องก็ต่อเมื่อผู้ใช้กดคัดลอกเองเท่านั้น
 - path ที่มีชื่อผู้ใช้อยู่ จะถูกแทนด้วย `%USERNAME%` ก่อนคัดลอก
-- เปิด capability ของ Tauri เฉพาะคำสั่ง IPC ใน §5.7 เท่านั้น
+- เปิด capability ของ Tauri เฉพาะ 27 คำสั่ง IPC ใน §5.7 กับการฟัง event (`core:event:allow-listen` และ `allow-unlisten`) เท่านั้น (phase 2b)
 - ตั้ง CSP ห้ามโหลดสคริปต์หรือเนื้อหาจากภายนอก หน้าจอทั้งหมดอยู่ในตัวแอป
 - โปรแกรมรันแค่ไฟล์ที่แนบมาเองใน `runtime\` ด้วย argument ที่โปรแกรมกำหนด ห้ามรันคำสั่งที่มาจากไฟล์ธีมหรือ input ของผู้ใช้
 
