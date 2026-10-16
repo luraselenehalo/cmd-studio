@@ -479,6 +479,78 @@ pub fn plan(
     })
 }
 
+impl Paths {
+    /// `<data>\drafts`: the editor's autosaved drafts, one `<theme id>.cmdtheme` each (spec
+    /// §3.4, §5.3).
+    pub fn drafts(&self) -> PathBuf {
+        self.data.join("drafts")
+    }
+    /// `<data>\logs`: the app's log, `cmdstudio.log` and its rotated copies (spec §5.3).
+    pub fn logs(&self) -> PathBuf {
+        self.data.join("logs")
+    }
+    /// `<data>\webview`: WebView2's user data folder (its cache and storage). The app gives it
+    /// to its window on purpose, so that it sits in CMD Studio's data folder under a name of CMD
+    /// Studio's choosing, which `--cleanup --data-dir` knows (spec §5.3, §6.3).
+    pub fn webview(&self) -> PathBuf {
+        self.data.join("webview")
+    }
+    /// `<data>\settings.json`: the app's own settings (language, where themes go, updates).
+    /// Not in state.json, because an undo puts state.json back as it was before an apply, and
+    /// the settings must not go back with it.
+    pub fn settings_file(&self) -> PathBuf {
+        self.data.join("settings.json")
+    }
+}
+
+/// What cmd's AutoRun holds, for the wizard's machine check and the app's system report (spec
+/// §4.2 page 2): other programs' commands, which stay; every command that starts another Clink,
+/// which an apply asks about before turning off (spec §5.4); whether a Clink starts from the
+/// machine-wide value, which CMD Studio never changes; and whether the user's value is there
+/// but not plain text, which CMD Studio leaves alone. The same reading as [`plan`] and doctor
+/// D5 use (`autorun::scan`, `autorun::runs_clink`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AutoRunSummary {
+    /// Other programs' commands in the user's value, as written, in order.
+    pub other_commands: Vec<String>,
+    /// Commands in the user's value that start another Clink, as written, in order.
+    pub foreign_clink: Vec<String>,
+    /// CMD Studio's own entry is in the user's value.
+    pub ours_present: bool,
+    /// A Clink starts from the machine-wide (HKLM) value.
+    pub machine_wide_clink: bool,
+    /// The user's value is there but is not plain text, so what it holds cannot be told.
+    pub not_text: bool,
+}
+
+pub fn autorun_summary(machine: &Machine, paths: &Paths) -> AutoRunSummary {
+    let mut summary = AutoRunSummary::default();
+    let profile = paths.clink_profile();
+    let profile = profile.to_str();
+    match &machine.autorun_hkcu {
+        RegText::Absent => {}
+        RegText::NotText => summary.not_text = true,
+        RegText::Text(value) => {
+            for part in autorun::scan(value).parts {
+                if profile.is_some_and(|p| autorun::holds_ours(&part.text, p)) {
+                    summary.ours_present = true;
+                } else if autorun::runs_clink(&part.text) {
+                    summary.foreign_clink.push(part.text);
+                } else {
+                    summary.other_commands.push(part.text);
+                }
+            }
+        }
+    }
+    if let RegText::Text(value) = &machine.autorun_hklm {
+        summary.machine_wide_clink = autorun::scan(value)
+            .parts
+            .iter()
+            .any(|p| autorun::runs_clink(&p.text));
+    }
+    summary
+}
+
 #[cfg(test)]
 mod tests {
     use super::autorun::scan;
@@ -1112,5 +1184,45 @@ mod tests {
         }
         let back: Vec<Op> = serde_json::from_value(json).unwrap();
         assert_eq!(back, p.ops);
+    }
+
+    #[test]
+    fn the_autorun_summary_sorts_each_command_of_the_value() {
+        let mut m = machine();
+        let anaconda = r#"if exist "C:\Users\me\anaconda3\condabin\conda_hook.bat" "C:\Users\me\anaconda3\condabin\conda_hook.bat""#;
+        let other_clink = r#""C:\clink\clink_x64.exe" inject --autorun"#;
+        m.autorun_hkcu = RegText::Text(format!("{} & {anaconda} & {other_clink}", entry()));
+        m.autorun_hklm = RegText::Text(
+            r#""C:\Program Files\clink\clink_x64.exe" inject --autorun --quiet"#.to_string(),
+        );
+        let s = autorun_summary(&m, &paths());
+        assert!(s.ours_present);
+        assert_eq!(s.other_commands, vec![anaconda.to_string()]);
+        assert_eq!(s.foreign_clink, vec![other_clink.to_string()]);
+        assert!(s.machine_wide_clink);
+        assert!(!s.not_text);
+        // A command that only mentions Clink is another program's own, not a Clink.
+        m.autorun_hkcu = RegText::Text(r"cd /d C:\clink-notes".to_string());
+        m.autorun_hklm = RegText::Absent;
+        let s = autorun_summary(&m, &paths());
+        assert_eq!(s.other_commands, vec![r"cd /d C:\clink-notes".to_string()]);
+        assert!(s.foreign_clink.is_empty() && !s.machine_wide_clink && !s.ours_present);
+        // Nothing, and a value that is not text.
+        let mut m = machine();
+        assert_eq!(autorun_summary(&m, &paths()), AutoRunSummary::default());
+        m.autorun_hkcu = RegText::NotText;
+        assert!(autorun_summary(&m, &paths()).not_text);
+    }
+
+    #[test]
+    fn the_apps_paths_are_under_the_data_folder() {
+        let p = paths();
+        assert_eq!(p.drafts(), PathBuf::from(format!(r"{DATA}\drafts")));
+        assert_eq!(p.logs(), PathBuf::from(format!(r"{DATA}\logs")));
+        assert_eq!(p.webview(), PathBuf::from(format!(r"{DATA}\webview")));
+        assert_eq!(
+            p.settings_file(),
+            PathBuf::from(format!(r"{DATA}\settings.json"))
+        );
     }
 }
