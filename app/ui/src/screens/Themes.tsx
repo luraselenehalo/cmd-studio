@@ -17,7 +17,7 @@ import { Dialog } from "../components/Dialog";
 import { ErrorNotice, Notice } from "../components/Notices";
 import { TerminalPreview } from "../components/TerminalPreview";
 import { ThemeCard } from "../components/ThemeCard";
-import { pick, useI18n, type Key, type Translate } from "../i18n";
+import { pick, pickedLanguage, useI18n, type Key, type Translate } from "../i18n";
 import { useIpc } from "../ipc/context";
 import { useNav } from "../router";
 import { CORE_SAMPLE_IDENTITY, sampleContext } from "../sample";
@@ -285,7 +285,7 @@ export function Themes() {
           <ul className="plain-list">
             {library.problems.map((p) => (
               <li key={p.file}>
-                <code>{p.file}</code>: <span>{pick(language, p.error.messageTh, p.error.messageEn)}</span>{" "}
+                <code>{p.file}</code>: <span lang={pickedLanguage(language, p.error.messageTh)}>{pick(language, p.error.messageTh, p.error.messageEn)}</span>{" "}
                 <span className="badge">{p.error.code}</span>
                 {p.error.details && (
                   <details>

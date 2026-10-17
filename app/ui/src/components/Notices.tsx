@@ -78,7 +78,7 @@ export function UnrestoredList({ steps, live = true }: { steps: Unrestored[]; li
             <div>
               {s.target} <span className="badge">{s.code}</span>
             </div>
-            <div>{pick(language, s.fixTh, s.fix)}</div>
+            <div lang={pickedLanguage(language, s.fixTh)}>{pick(language, s.fixTh, s.fix)}</div>
           </li>
         ))}
       </ul>

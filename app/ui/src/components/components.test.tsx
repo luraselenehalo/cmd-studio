@@ -24,7 +24,7 @@ import { AfterApplyBar } from "./AfterApplyBar";
 import { ApplyFlow, ProgressView } from "./ApplyFlow";
 import { Dialog } from "./Dialog";
 import { ErrorBoundary } from "./ErrorBoundary";
-import { ErrorNotice, NotesList } from "./Notices";
+import { ErrorNotice, NotesList, UnrestoredList } from "./Notices";
 import { TerminalPreview } from "./TerminalPreview";
 import { ThemeCard } from "./ThemeCard";
 
@@ -273,6 +273,19 @@ describe("Notices", () => {
     mount(<ErrorNotice error={error} />, { language: "en" });
     expect(langOf(screen.getByText("Windows Terminal's settings could not be read"))).toBe("en");
     expect(langOf(screen.getByText(/expected `,` or `}` at line 3/))).toBe("en");
+  });
+
+  it("marks the English fallback lang=\"en\" at the other places that pick a text too (m3)", () => {
+    // One of them, the steps a rollback could not put back: the same rule as above, through
+    // pickedLanguage, at every `pick()` of the UI (AfterApplyBar, Help and Themes as well).
+    const langOf = (el: HTMLElement) => el.closest("[lang]")?.getAttribute("lang");
+    const steps = [
+      { opIndex: 1, target: "settings.json", code: "E_WT_WRITE", message: "m", fix: "Delete the scheme by hand", fixTh: "ลบชุดสีเอง" },
+      { opIndex: 2, target: "AutoRun", code: "E_AUTORUN_WRITE", message: "m", fix: "Take out our part by hand", fixTh: "" },
+    ];
+    mount(<UnrestoredList steps={steps} />, { language: "th" });
+    expect(langOf(screen.getByText("ลบชุดสีเอง"))).toBe("th");
+    expect(langOf(screen.getByText("Take out our part by hand"))).toBe("en");
   });
 
   it("tells an AppError by all four fields, so a partial one is an internal problem, not a crash", () => {

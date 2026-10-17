@@ -18,7 +18,7 @@ import type { RevertOutcome } from "../bindings/RevertOutcome";
 import { ApplyFlow, useCopyDiagnostics } from "../components/ApplyFlow";
 import { Dialog } from "../components/Dialog";
 import { ErrorNotice, Notice, NotesList, UnrestoredList } from "../components/Notices";
-import { formatTime, pick, useI18n, type Key, type Language, type Translate } from "../i18n";
+import { formatTime, pick, pickedLanguage, useI18n, type Key, type Language, type Translate } from "../i18n";
 import { useIpc } from "../ipc/context";
 import { IpcError } from "../ipc/types";
 import { useNav, type HelpTab } from "../router";
@@ -222,7 +222,7 @@ function CheckItem({ check: c, onFix }: { check: CheckReport; onFix: () => void 
         <strong className={`status-${c.status}`}>
           {c.id} · {t(`help.doctor.status.${c.status}`)}
         </strong>{" "}
-        <span>{pick(language, c.messageTh, c.messageEn)}</span>
+        <span lang={pickedLanguage(language, c.messageTh)}>{pick(language, c.messageTh, c.messageEn)}</span>
         {c.code && (
           <>
             {" "}
@@ -415,7 +415,9 @@ function RestoreResultView({ outcome, before }: { outcome: RestoreOutcome; befor
         {last && last.fontsLeft.length > 0 && (
           <ul className="plain-list">
             {last.fontsLeft.map((f, i) => (
-              <li key={i}>{pick(language, f.messageTh, f.messageEn)}</li>
+              <li key={i} lang={pickedLanguage(language, f.messageTh)}>
+                {pick(language, f.messageTh, f.messageEn)}
+              </li>
             ))}
           </ul>
         )}
@@ -543,7 +545,7 @@ function RevertResultView({ outcome }: { outcome: RevertOutcome }) {
             {!s.ok && s.error && <ErrorNotice error={s.error} live={false} />}
             {!s.ok && (s.fixEn || s.fixTh) && (
               <p>
-                <strong>{t("help.whatToDo")}</strong> <span>{pick(language, s.fixTh ?? "", s.fixEn ?? "")}</span>
+                <strong>{t("help.whatToDo")}</strong> <span lang={pickedLanguage(language, s.fixTh ?? "")}>{pick(language, s.fixTh ?? "", s.fixEn ?? "")}</span>
               </p>
             )}
             <details>

@@ -5,7 +5,7 @@
 // the app state (item 12), so an apply with its own request (a doctor fix) is worded right.
 import { useEffect, useRef, useState } from "react";
 import type { RestoreOutcome } from "../bindings/RestoreOutcome";
-import { pick, useI18n } from "../i18n";
+import { pick, pickedLanguage, useI18n } from "../i18n";
 import { useIpc } from "../ipc/context";
 import { useAppState } from "../state";
 import { ErrorNotice, NotesList, UnrestoredList } from "./Notices";
@@ -109,7 +109,9 @@ export function UndoResultView({ result }: { result: UndoResult }) {
           {last && last.fontsLeft.length > 0 && (
             <ul className="plain-list">
               {last.fontsLeft.map((f, i) => (
-                <li key={i}>{pick(language, f.messageTh, f.messageEn)}</li>
+                <li key={i} lang={pickedLanguage(language, f.messageTh)}>
+                  {pick(language, f.messageTh, f.messageEn)}
+                </li>
               ))}
             </ul>
           )}
