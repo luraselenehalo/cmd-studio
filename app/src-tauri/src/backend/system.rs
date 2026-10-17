@@ -7,7 +7,7 @@ use super::preview::SampleIdentity;
 use super::{versions, Backend, Machine, Versions};
 use crate::error::AppError;
 use cmdstudio_core::adapters::{Arch, WtVariant};
-use cmdstudio_core::detect::detect;
+use cmdstudio_core::detect::{detect, never_opened};
 use cmdstudio_core::plan::{autorun_summary, NERD_FONT_FAMILY};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -60,8 +60,16 @@ pub struct WtInfo {
     pub kind: WtKind,
     /// Its folder exists.
     pub installed: bool,
-    /// Its settings.json exists (one that was never opened has none, D6).
+    /// Its settings.json exists. A Store or Preview one that is installed but was never opened
+    /// has none yet (D6), and an apply sets it up from CMD Studio's template, colours included
+    /// (founder 2026-10-17, spec §5.4). Two are left alone: a Preview while the Store one has a
+    /// settings.json (it copies that one when it first starts), and an unpackaged folder without
+    /// one, which is a leftover, not a Terminal.
     pub has_settings: bool,
+    /// An apply sets this one up: it is installed and was never opened, by the core's
+    /// `detect::never_opened`, the rule the planner follows. The UI reads it here rather than
+    /// from `installed` and `has_settings`, which an unpackaged leftover also matches.
+    pub set_up_by_apply: bool,
 }
 
 /// What the user's AutoRun holds, from `plan::autorun_summary`. `other_commands` are the user's
@@ -131,6 +139,7 @@ impl<M: Machine> Backend<M> {
         let sys = self.sys();
         let detected = detect(sys, self.paths())?;
         let autorun = autorun_summary(&detected.machine, self.paths());
+        let set_up = never_opened(&detected.wt, |l| sys.fs.exists(&l.settings));
         let windows_terminal: Vec<WtInfo> = detected
             .wt
             .iter()
@@ -142,6 +151,8 @@ impl<M: Machine> Backend<M> {
                 },
                 installed: l.installed,
                 has_settings: sys.fs.exists(&l.settings),
+                // The very location the rule picked, not one equal to it.
+                set_up_by_apply: set_up.iter().any(|s| std::ptr::eq(*s, l)),
             })
             .collect();
         let families = &detected.machine.fonts;
@@ -233,7 +244,8 @@ mod tests {
             WtInfo {
                 kind: WtKind::Store,
                 installed: true,
-                has_settings: true
+                has_settings: true,
+                set_up_by_apply: false
             }
         );
         assert!(r.wt_installed && r.store_available);
@@ -334,9 +346,112 @@ mod tests {
             [WtInfo {
                 kind: WtKind::Preview,
                 installed: false,
-                has_settings: false
+                has_settings: false,
+                set_up_by_apply: false
             }]
         );
+    }
+
+    /// A Windows Terminal that is installed but was never opened is told apart: installed, no
+    /// settings.json yet. An apply sets it up (founder 2026-10-17), and then it has one.
+    #[test]
+    fn a_terminal_installed_but_never_opened_is_told_apart_and_has_settings_after_an_apply() {
+        let b = backend();
+        b.sys()
+            .fs
+            .remove_file(std::path::Path::new(crate::backend::testing::WT))
+            .unwrap();
+        let r = b.system_detect().unwrap();
+        assert!(r.wt_installed);
+        assert_eq!(
+            r.windows_terminal,
+            [WtInfo {
+                kind: WtKind::Store,
+                installed: true,
+                has_settings: false,
+                set_up_by_apply: true
+            }]
+        );
+        let (done, _) = crate::backend::testing::apply_terracotta(&b);
+        assert_eq!(done.status, crate::backend::apply::ApplyStatus::Committed);
+        let r = b.system_detect().unwrap();
+        assert!(r.windows_terminal[0].installed && r.windows_terminal[0].has_settings);
+        assert!(!r.windows_terminal[0].set_up_by_apply);
+    }
+
+    /// Which Terminal an apply sets up is the core's `detect::never_opened` rule, sent to the UI
+    /// as `setUpByApply`, so the wizard never reads it from `installed` and `hasSettings`: an
+    /// unpackaged folder without a settings.json reads as installed, and is a leftover. A Store
+    /// one always; a Preview one only while no Store one has a settings.json (it copies that one
+    /// when it first starts); never an unpackaged one; none that has a settings.json or is not
+    /// installed.
+    #[test]
+    fn set_up_by_apply_follows_the_cores_never_opened_rule() {
+        use WtVariant::{Preview, Store, Unpackaged};
+        let file = |v: WtVariant| match v {
+            Store => r"C:\Users\tester\wt\store\settings.json",
+            Preview => r"C:\Users\tester\wt\preview\settings.json",
+            Unpackaged => r"C:\Users\tester\wt\unpackaged\settings.json",
+        };
+        // Each location as (variant, installed, has a settings.json), then setUpByApply of each.
+        type Row = (&'static [(WtVariant, bool, bool)], &'static [bool]);
+        let table: [Row; 9] = [
+            (&[(Store, true, false)], &[true]),
+            (&[(Store, true, true)], &[false]),
+            (&[(Store, false, false)], &[false]),
+            (&[(Preview, true, false)], &[true]),
+            (
+                &[(Store, true, true), (Preview, true, false)],
+                &[false, false],
+            ),
+            (
+                &[(Store, true, false), (Preview, true, false)],
+                &[true, true],
+            ),
+            (
+                &[(Store, false, true), (Preview, true, false)],
+                &[false, false],
+            ),
+            (&[(Unpackaged, true, false)], &[false]),
+            (
+                &[(Store, true, false), (Unpackaged, true, false)],
+                &[true, false],
+            ),
+        ];
+        for (locations, expected) in table {
+            let mut b = backend();
+            for &(variant, _, has) in locations {
+                if has {
+                    b.machine.fs.put(file(variant), "{}");
+                }
+            }
+            b.machine.wt.locations = locations
+                .iter()
+                .map(|&(variant, installed, _)| WtLocation {
+                    variant,
+                    installed,
+                    settings: PathBuf::from(file(variant)),
+                })
+                .collect();
+            let r = b.system_detect().unwrap();
+            let flags: Vec<bool> = r
+                .windows_terminal
+                .iter()
+                .map(|w| w.set_up_by_apply)
+                .collect();
+            assert_eq!(flags, expected, "{locations:?}");
+            // The same Terminals the planner sets up, read by the core itself.
+            let core = cmdstudio_core::detect::never_opened(&b.machine.wt.locations, |l| {
+                b.machine.fs.file(&l.settings).is_some()
+            });
+            assert_eq!(
+                core.len(),
+                expected.iter().filter(|f| **f).count(),
+                "{locations:?}"
+            );
+        }
+        let json = serde_json::to_value(backend().system_detect().unwrap()).unwrap();
+        assert_eq!(json["windowsTerminal"][0]["setUpByApply"], false);
     }
 
     /// Our own entry is not "another program's command" and not "another Clink", though it starts

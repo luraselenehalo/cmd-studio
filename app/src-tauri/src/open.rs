@@ -36,9 +36,10 @@ pub enum CmdLaunch {
     WindowsTerminalProfile,
     /// The fallback: `cmd.exe` in a new console window, as the user would start it, so their
     /// AutoRun runs and loads the theme. It opens when no theme is applied, when there is no
-    /// usable Windows Terminal (none installed, or one never opened, which has no cmd
-    /// profile), or when `wt.exe` fails to start. Windows 11 shows it in Windows Terminal
-    /// itself when that is the default terminal.
+    /// usable Windows Terminal (none installed, or one without a settings.json, which has no
+    /// cmd profile: installed after the theme was applied, or its file deleted since; the apply
+    /// sets up one that was never opened, founder 2026-10-17), or when `wt.exe` fails to start.
+    /// Windows 11 shows it in Windows Terminal itself when that is the default terminal.
     PlainCmd,
 }
 

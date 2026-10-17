@@ -12,6 +12,7 @@ import { useState, type ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
 import type { ApplyRequest } from "../bindings/ApplyRequest";
 import type { PreviewResult } from "../bindings/PreviewResult";
+import type { Theme } from "../bindings/Theme";
 import type { ThemeSummary } from "../bindings/ThemeSummary";
 import { I18nProvider, type Language } from "../i18n";
 import { IpcProvider } from "../ipc/context";
@@ -23,7 +24,7 @@ import { AfterApplyBar } from "./AfterApplyBar";
 import { ApplyFlow, ProgressView } from "./ApplyFlow";
 import { Dialog } from "./Dialog";
 import { ErrorBoundary } from "./ErrorBoundary";
-import { ErrorNotice, NotesList } from "./Notices";
+import { ErrorNotice, NotesList, UnrestoredList } from "./Notices";
 import { TerminalPreview } from "./TerminalPreview";
 import { ThemeCard } from "./ThemeCard";
 
@@ -151,6 +152,79 @@ describe("TerminalPreview", () => {
     expect(layer.style.backgroundColor).not.toBe("");
     expect(layer.contains(text)).toBe(false);
   });
+
+  /** A result with this text on its prompt row, in one span of the theme's foreground color. */
+  function withText(...texts: string[]): { theme: Theme; result: PreviewResult } {
+    const theme = structuredClone(PRESETS.find((p) => p.name === "Nord")!);
+    const prompt = texts.map((text) => [{ text, fg: theme.colors.foreground, bg: null, bold: false }]);
+    return { theme, result: { banner: [], prompt } };
+  }
+
+  it("draws a glyph the font may lack in a box exactly one cell wide, and changes no text (V2)", () => {
+    // The welcome box's rows as the core draws them: the icon U+273B is one cell for the core,
+    // for conhost and for Windows Terminal, but Cascadia Mono has none, so a fallback font draws
+    // it wider than 1ch and pushes the frame's right edge out.
+    const { theme, result } = withText(
+      "╭──────────────────────────────────────────╮",
+      "│ ✻ Welcome back, tester!                  │",
+      "╰──────────────────────────────────────────╯",
+      " Tips: help for commands · cls to clear · ↑ for history",
+      "✗ 1 ❯ npm test \u{e0b0}",
+    );
+    mount(<TerminalPreview theme={theme} result={result} />);
+    const preview = screen.getByRole("img", { name: "Preview of the cmd window" });
+    const boxes = Array.from(preview.querySelectorAll<HTMLElement>(".cell"));
+    // Each of the glyphs is in a box of its own, one cell wide.
+    expect(boxes.map((b) => b.textContent)).toEqual(["✻", "↑", "✗", "❯", "\u{e0b0}"]);
+    for (const box of boxes) expect(box.style.width, box.textContent ?? "").toBe("1ch");
+    // The text is the core's, untouched: what is copied and what a screen reader would find in
+    // the preview's text is the same as without the boxes.
+    const pre = preview.querySelector("pre") as HTMLElement;
+    expect(pre.textContent).toBe(`${result.prompt.map((line) => line.map((span) => span.text).join("")).join("\n")}\n`);
+    // The preview is still one image to a screen reader, named by its label.
+    expect(preview.getAttribute("aria-label")).toBe("Preview of the cmd window");
+  });
+
+  it("leaves what a monospace font draws in one cell on its own, and what is two cells wide", () => {
+    const { theme, result } = withText(
+      "C:\\Users\\tester> dir ░▒▓█ ┌─┐ │ ╰╯ Ñ é · \u{a0}",
+      "中文 한글 ＡＢ 📁 ✅ \u{2764}\u{fe0f}",
+    );
+    mount(<TerminalPreview theme={theme} result={result} />);
+    const preview = screen.getByRole("img", { name: "Preview of the cmd window" });
+    // ASCII, Latin, the box-drawing and block blocks are in Cascadia Mono, and a wide character
+    // takes the two cells its font gives it: none of them is put in a one-cell box.
+    expect(preview.querySelectorAll(".cell")).toHaveLength(0);
+  });
+
+  it("keeps a letter together with its marks in one box, as the core counts them (Thai is 3 cells in ผู้ใช้)", () => {
+    // ผู้ใช้ : the core counts ผ, ใ and ช as one cell each and the vowel and tone marks as none.
+    const { theme, result } = withText("C:\\Users\\ผู้ใช้>");
+    mount(<TerminalPreview theme={theme} result={result} />);
+    const boxes = Array.from(screen.getByRole("img", { name: "Preview of the cmd window" }).querySelectorAll<HTMLElement>(".cell"));
+    expect(boxes.map((b) => b.textContent)).toEqual(["ผู้", "ใ", "ช้"]);
+    for (const box of boxes) expect(box.style.width).toBe("1ch");
+  });
+
+  it("boxes น้ำ as one glyph two cells wide, as the core counts it, and leaves joined sequences and wide brackets alone (m4)", () => {
+    // The Thai name of a user: the tone mark and SARA AM belong to the letter, so the box is the
+    // letter's, one cell for น้ and one for ำ.
+    const family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+    const rows = ["C:\\Users\\น้ำ>", `x ${family} y`, "a\u{200b}b \u{2329}c\u{232a}", "✻\u{200b}"];
+    const { theme, result } = withText(...rows);
+    mount(<TerminalPreview theme={theme} result={result} />);
+    const preview = screen.getByRole("img", { name: "Preview of the cmd window" });
+    const boxes = Array.from(preview.querySelectorAll<HTMLElement>(".cell"));
+    // น้ำ is two cells in a box 2ch wide; ✻ with its zero-width space is one cell in 1ch; nothing
+    // else is boxed: not the family, not the zero-width space, not the angle brackets.
+    expect(boxes.map((b) => [b.textContent, b.style.width])).toEqual([
+      ["น้ำ", "2ch"],
+      ["✻\u{200b}", "1ch"],
+    ]);
+    // Copy: the text of the preview is the rows, whatever was boxed.
+    const pre = preview.querySelector("pre") as HTMLElement;
+    expect(pre.textContent).toBe(`${rows.join("\n")}\n`);
+  });
 });
 
 describe("Notices", () => {
@@ -175,6 +249,63 @@ describe("Notices", () => {
     // A note with no details has no empty toggle.
     const second = screen.getByText("คืนค่าที่ค้างไว้แล้ว").closest("li") as HTMLElement;
     expect(within(second).queryByText("ดูรายละเอียด")).toBeNull();
+  });
+
+  it("marks the core's English text inside the Thai UI with lang=\"en\" (Task 1 carry)", () => {
+    /** The language of the nearest mark above `el`, the mark of the text itself included. */
+    const langOf = (el: HTMLElement) => el.closest("[lang]")?.getAttribute("lang");
+    const notes = [
+      {
+        code: "E_SNAPSHOT_READ",
+        messageTh: "อ่านจุดย้อนกลับไม่ได้",
+        messageEn: "A restore point could not be read",
+        details: "restore point 1791694709000-abcd1234: manifest.json is not valid JSON",
+      },
+      // No Thai text for this note: the English one is shown, and is marked so.
+      { code: "E_TXN_INTERRUPTED", messageTh: "", messageEn: "An unfinished apply was put back", details: "" },
+    ];
+    const th = mount(<NotesList notes={notes} />, { language: "th" });
+    expect(langOf(screen.getByText("อ่านจุดย้อนกลับไม่ได้"))).toBe("th");
+    expect(langOf(screen.getByText(/manifest\.json is not valid JSON/))).toBe("en");
+    expect(langOf(screen.getByText("An unfinished apply was put back"))).toBe("en");
+    th.unmount();
+    mount(<NotesList notes={notes} />, { language: "en" });
+    expect(langOf(screen.getByText("A restore point could not be read"))).toBe("en");
+    expect(langOf(screen.getByText(/manifest\.json is not valid JSON/))).toBe("en");
+  });
+
+  it("marks an error's details lang=\"en\" in the Thai UI, and its text by the language shown", () => {
+    const langOf = (el: HTMLElement) => el.closest("[lang]")?.getAttribute("lang");
+    const error = {
+      code: "E_WT_PARSE",
+      messageTh: "อ่านการตั้งค่า Windows Terminal ไม่ได้",
+      messageEn: "Windows Terminal's settings could not be read",
+      details: "expected `,` or `}` at line 3 column 7",
+    };
+    const th = mount(<ErrorNotice error={error} />, { language: "th" });
+    expect(langOf(screen.getByText("อ่านการตั้งค่า Windows Terminal ไม่ได้"))).toBe("th");
+    expect(langOf(screen.getByText(/expected `,` or `}` at line 3/))).toBe("en");
+    th.unmount();
+    // Without a Thai text the English one is shown in the Thai UI, and says so.
+    const bare = mount(<ErrorNotice error={{ ...error, messageTh: "" }} />, { language: "th" });
+    expect(langOf(screen.getByText("Windows Terminal's settings could not be read"))).toBe("en");
+    bare.unmount();
+    mount(<ErrorNotice error={error} />, { language: "en" });
+    expect(langOf(screen.getByText("Windows Terminal's settings could not be read"))).toBe("en");
+    expect(langOf(screen.getByText(/expected `,` or `}` at line 3/))).toBe("en");
+  });
+
+  it("marks the English fallback lang=\"en\" at the other places that pick a text too (m3)", () => {
+    // One of them, the steps a rollback could not put back: the same rule as above, through
+    // pickedLanguage, at every `pick()` of the UI (AfterApplyBar, Help and Themes as well).
+    const langOf = (el: HTMLElement) => el.closest("[lang]")?.getAttribute("lang");
+    const steps = [
+      { opIndex: 1, target: "settings.json", code: "E_WT_WRITE", message: "m", fix: "Delete the scheme by hand", fixTh: "ลบชุดสีเอง" },
+      { opIndex: 2, target: "AutoRun", code: "E_AUTORUN_WRITE", message: "m", fix: "Take out our part by hand", fixTh: "" },
+    ];
+    mount(<UnrestoredList steps={steps} />, { language: "th" });
+    expect(langOf(screen.getByText("ลบชุดสีเอง"))).toBe("th");
+    expect(langOf(screen.getByText("Take out our part by hand"))).toBe("en");
   });
 
   it("tells an AppError by all four fields, so a partial one is an internal problem, not a crash", () => {

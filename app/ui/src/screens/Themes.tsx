@@ -17,7 +17,7 @@ import { Dialog } from "../components/Dialog";
 import { ErrorNotice, Notice } from "../components/Notices";
 import { TerminalPreview } from "../components/TerminalPreview";
 import { ThemeCard } from "../components/ThemeCard";
-import { pick, useI18n, type Key } from "../i18n";
+import { pick, pickedLanguage, useI18n, type Key, type Translate } from "../i18n";
 import { useIpc } from "../ipc/context";
 import { useNav } from "../router";
 import { CORE_SAMPLE_IDENTITY, sampleContext } from "../sample";
@@ -33,6 +33,17 @@ export const NAME_MAX_CHARS = 64;
 function firstCodePoints(text: string, max: number): string {
   const points = Array.from(text);
   return points.length <= max ? text : points.slice(0, Math.max(max, 0)).join("");
+}
+
+/**
+ * A copy's name, "My <name>" / "<name> ของฉัน", within NAME_MAX_CHARS code points (item 6): a
+ * name of 64 would otherwise be refused. The name inside is shortened, so the words around it
+ * stay whole (a cut at the end of the Thai one would leave "… ของ"). Home's Customize names its
+ * copy this way too.
+ */
+export function copyName(name: string, t: Translate): string {
+  const room = NAME_MAX_CHARS - Array.from(t("themes.copyName", { name: "" })).length;
+  return t("themes.copyName", { name: firstCodePoints(name, room) });
 }
 
 /** A random version 4 UUID, 8-4-4-4-12 hexadecimal digits (the theme file's `id`). */
@@ -115,26 +126,16 @@ export function Themes() {
     await load();
   };
 
-  /**
-   * A copy's name, "My <name>" / "<name> ของฉัน", within NAME_MAX_CHARS code points (item 6): a
-   * name of 64 would otherwise be refused. The name inside is shortened, so the words around it
-   * stay whole (a cut at the end of the Thai one would leave "… ของ").
-   */
-  const copyName = (name: string): string => {
-    const room = NAME_MAX_CHARS - Array.from(t("themes.copyName", { name: "" })).length;
-    return t("themes.copyName", { name: firstCodePoints(name, room) });
-  };
-
   // Customize (spec §3.1): a copy named "My <name>" in my themes, opened in the editor.
   const customize = (s: ThemeSummary) =>
     act(async () => {
-      const copy = await ipc.themeDuplicate(s.id, copyName(s.name));
+      const copy = await ipc.themeDuplicate(s.id, copyName(s.name, t));
       go({ name: "editor", id: copy.id });
     }, false);
 
   const duplicate = (s: ThemeSummary) =>
     act(async () => {
-      await ipc.themeDuplicate(s.id, copyName(s.name));
+      await ipc.themeDuplicate(s.id, copyName(s.name, t));
     });
 
   // A new theme starts in simple mode: dark, #d97757, tint 0.10 (spec §3.1). Its colors come
@@ -284,7 +285,7 @@ export function Themes() {
           <ul className="plain-list">
             {library.problems.map((p) => (
               <li key={p.file}>
-                <code>{p.file}</code>: <span>{pick(language, p.error.messageTh, p.error.messageEn)}</span>{" "}
+                <code>{p.file}</code>: <span lang={pickedLanguage(language, p.error.messageTh)}>{pick(language, p.error.messageTh, p.error.messageEn)}</span>{" "}
                 <span className="badge">{p.error.code}</span>
                 {p.error.details && (
                   <details>

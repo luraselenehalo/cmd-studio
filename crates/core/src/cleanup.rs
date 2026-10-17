@@ -2,7 +2,9 @@
 //! (spec §6.3), key by key, so changes the user made after CMD Studio survive:
 //!
 //! 1. only our part of AutoRun goes;
-//! 2. the cmd profile keys come back and the `CMD Studio` scheme goes;
+//! 2. the cmd profile keys come back and the `CMD Studio` scheme goes; a settings.json CMD
+//!    Studio made from its template (Windows Terminal had never been opened) is deleted when it
+//!    holds nothing else, and keeps what Terminal or the user added to it otherwise;
 //! 3. fonts CMD Studio installed go;
 //! 4. (`--cleanup` only) app data except `themes\`, and the ProgramData folder.
 //!
@@ -33,7 +35,7 @@ use crate::state::{
 };
 use crate::txn::{self, Executor, Failure, Outcome};
 use crate::verify::SystemVerifier;
-use crate::wt_edit::{read_value, revert, WtError, WtKey};
+use crate::wt_edit::{holds_ours, read_value, revert, WtError, WtKey, WT_TEMPLATE};
 use serde_json::{Map, Value};
 use std::fmt::Display;
 use std::path::Path;
@@ -417,10 +419,11 @@ struct Reverted {
 }
 
 /// Steps 1–3 with `state` loaded: the AutoRun and settings.json transaction, the applies marked
-/// as reverted, the registry keys CMD Studio created, the fonts, the new state.json, and the
-/// pending rollback record settled. The new state.json has no applied theme, and keeps what
-/// could not be put back yet (the AutoRun original while AutoRun is left as it is, a
-/// settings.json left as it is, a font that stays installed), the ProgramData folder CMD Studio
+/// as reverted, the settings.json files CMD Studio made that hold nothing else deleted, the
+/// registry keys CMD Studio created, the fonts, the new state.json, and the pending rollback
+/// record settled. The new state.json has no applied theme, and keeps what could not be put back
+/// yet (the AutoRun original while AutoRun is left as it is, a settings.json left as it is or
+/// that could not be deleted, a font that stays installed), the ProgramData folder CMD Studio
 /// made, and the font files to delete later.
 fn revert_steps(sys: System<'_>, ctx: &Ctx, state: State, report: &mut Report) -> Reverted {
     let base = &state.baseline;
@@ -449,9 +452,12 @@ fn revert_steps(sys: System<'_>, ctx: &Ctx, state: State, report: &mut Report) -
         // damaged, so that every later --cleanup keeps the restore point that holds it whole.
         left.autorun = base.autorun.clone();
     }
+    let mut made = Vec::new();
     for file in &base.wt {
-        if !settings_step(sys, file, &mut ops, report) {
-            left.wt.push(file.clone());
+        match settings_step(sys, file, &mut ops, report) {
+            SettingsStep::Done => {}
+            SettingsStep::Template => made.push(file),
+            SettingsStep::Left => left.wt.push(file.clone()),
         }
     }
     let ran = transaction(sys, ctx, ops, report);
@@ -462,6 +468,11 @@ fn revert_steps(sys: System<'_>, ctx: &Ctx, state: State, report: &mut Report) -
             damaged,
             autorun_not_text,
         };
+    }
+    for file in made {
+        if !remove_template(sys, file, report) {
+            left.wt.push(file.clone());
+        }
     }
     if autorun_done && base.autorun.as_ref().is_some_and(|a| !a.key_existed) {
         command_processor_key(sys, report);
@@ -725,24 +736,39 @@ fn lossy_text(value: &RegValue) -> String {
     String::from_utf16_lossy(&units)
 }
 
+/// How step 2 left one settings.json.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SettingsStep {
+    /// Its text with CMD Studio's keys put back is queued, or it needs no change, or it is gone.
+    Done,
+    /// CMD Studio made it from the template (Windows Terminal had never been opened), and with
+    /// CMD Studio's keys put back it is the template again, byte for byte: nothing else is in
+    /// it. That text is queued when the file does not hold it yet, and the file is deleted once
+    /// the transaction commits (see [`remove_template`]).
+    Template,
+    /// Left as it is, as a failed step.
+    Left,
+}
+
 /// Step 2 for one settings.json: queues its text with CMD Studio's keys put back
-/// (`wt_edit::revert`). Whether the file needs nothing more: queued, nothing to change, or
-/// gone. CMD Studio never creates a settings.json, so one that is gone is not made again, and
-/// `revert` never gives an empty text. One that cannot be read, or that Windows Terminal could
+/// (`wt_edit::revert`). One that is gone is not made again, and `revert` never gives an empty
+/// text. One CMD Studio made from the template that holds nothing else is to be deleted after
+/// the transaction (founder 2026-10-17); one Terminal or the user added to since keeps what they
+/// added, and only CMD Studio's keys go. One that cannot be read, or that Windows Terminal could
 /// not read, is left as it is and said, with what CMD Studio set in it to take out by hand.
 fn settings_step(
     sys: System<'_>,
     file: &WtFileBaseline,
     ops: &mut Vec<Op>,
     report: &mut Report,
-) -> bool {
+) -> SettingsStep {
     let path = &file.settings;
     let what = format!("Put back {}", path.display());
     let bytes = match sys.fs.read(path) {
         Ok(Some(bytes)) => bytes,
         Ok(None) => {
             report.done(what, "the file is gone; nothing to put back");
-            return true;
+            return SettingsStep::Done;
         }
         Err(e) => {
             report.fail(
@@ -755,7 +781,7 @@ fn settings_step(
                     "CMD Studio อ่านไฟล์นี้ไม่ได้ จึงยังไม่ได้แก้",
                 )),
             );
-            return false;
+            return SettingsStep::Left;
         }
     };
     let reverted = String::from_utf8(bytes)
@@ -771,13 +797,18 @@ fn settings_step(
         });
     match reverted {
         Ok((old, new)) => {
+            let only_ours = file.from_template && new == WT_TEMPLATE;
             if old != new {
                 ops.push(Op::WriteFile {
                     path: path.clone(),
                     contents: new,
                 });
             }
-            true
+            if only_ours {
+                SettingsStep::Template
+            } else {
+                SettingsStep::Done
+            }
         }
         Err(e) => {
             report.fail(
@@ -791,6 +822,91 @@ fn settings_step(
                     "Windows Terminal อ่านไฟล์นี้ในสภาพนี้ไม่ได้ CMD Studio จึงยังไม่ได้แก้ \
                      ให้แก้ไฟล์ให้อ่านได้ก่อน",
                 )),
+            );
+            SettingsStep::Left
+        }
+    }
+}
+
+/// Step 2's end for a settings.json CMD Studio made from the template (see
+/// [`SettingsStep::Template`]), once the transaction has put it back to the template: the file is
+/// deleted, so that Windows Terminal is back to "never configured" and makes its defaults on its
+/// next start (founder 2026-10-17, spec §6.3). It is read once more first: a file that is not the
+/// template any more (Terminal wrote it in between) is kept when it holds nothing of CMD
+/// Studio's (`wt_edit::holds_ours`, the undo's test too), and is a failed step when it holds
+/// CMD Studio's part again. Whether CMD Studio is done with it. One that holds CMD Studio's part,
+/// or cannot be read or deleted (a program may hold it), is a failed step with how to finish by
+/// hand; it stays in the baseline, so the next revert, or `--cleanup`, tries again, and
+/// `--cleanup` keeps its records meanwhile.
+fn remove_template(sys: System<'_>, file: &WtFileBaseline, report: &mut Report) -> bool {
+    let path = &file.settings;
+    let what = format!("Remove {}", path.display());
+    let by_hand = || FixByHand {
+        en: format!("Close Windows Terminal, then delete {}.", path.display()),
+        th: format!("ปิด Windows Terminal แล้วลบ {}", path.display()),
+    };
+    match sys.fs.read(path) {
+        Ok(None) => {
+            report.done(what, "the file is gone already");
+            return true;
+        }
+        Ok(Some(bytes)) if bytes != WT_TEMPLATE.as_bytes() => {
+            let ours = std::str::from_utf8(&bytes)
+                .map_or(true, |text| holds_ours(text, &file.written_map()));
+            if ours {
+                report.fail(
+                    what,
+                    "E_WT_WRITE",
+                    "Windows Terminal wrote it again after CMD Studio's part was taken out, and \
+                     it holds CMD Studio's part again (such as the CMD Studio color scheme), so \
+                     it was left as it is; the next revert takes that part out",
+                    Some(settings_by_hand(
+                        file,
+                        "Windows Terminal wrote it again with CMD Studio's part in it.",
+                        "Windows Terminal เขียนไฟล์นี้ใหม่ และมีส่วนของ CMD Studio อยู่ในนั้นอีก",
+                    )),
+                );
+                return false;
+            }
+            report.done(
+                what,
+                "kept: Windows Terminal wrote to it since CMD Studio's part was taken out, and \
+                 nothing of CMD Studio's is in it",
+            );
+            return true;
+        }
+        Ok(Some(_)) => {}
+        Err(e) => {
+            report.fail(
+                what,
+                "E_MACHINE_READ",
+                format!(
+                    "it could not be read ({e}), so it was not deleted; nothing of CMD Studio's \
+                     is left in it"
+                ),
+                Some(by_hand()),
+            );
+            return false;
+        }
+    }
+    match sys.fs.remove_file(path) {
+        Ok(()) => {
+            report.done(
+                what,
+                "removed: CMD Studio made it when Windows Terminal had never been opened, and \
+                 nothing else was in it",
+            );
+            true
+        }
+        Err(e) => {
+            report.fail(
+                what,
+                "E_WT_WRITE",
+                format!(
+                    "it could not be deleted ({e}); nothing of CMD Studio's is left in it, only \
+                     the empty settings CMD Studio started it from"
+                ),
+                Some(by_hand()),
             );
             false
         }
@@ -1837,7 +1953,7 @@ fn newer_state_by_hand(data: &Path) -> FixByHand {
              changes with it; or, if you do not need what it recorded, delete {data} by hand."
         ),
         th: format!(
-            "ติดตั้ง CMD Studio รุ่นใหม่กว่าที่เขียนไฟล์ state.json นี้ แล้วใช้รุ่นนั้นเอาสิ่งที่ CMD Studio \
+            "ติดตั้ง CMD Studio เวอร์ชันใหม่กว่าที่เขียนไฟล์ state.json นี้ แล้วใช้เวอร์ชันนั้นเอาสิ่งที่ CMD Studio \
              เปลี่ยนออก หรือถ้าไม่ต้องการค่าที่บันทึกไว้แล้ว ให้ลบ {data} เอง"
         ),
     }
@@ -1846,6 +1962,7 @@ fn newer_state_by_hand(data: &Path) -> FixByHand {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::actions::testing::assert_thai_words;
     use crate::actions::testing::{machine, request, SETTINGS, WT};
     use crate::actions::{prepare_apply, run_apply, undo, UndoResult};
     use crate::adapters::{AutoRun, Fonts, Fs, RegValue, REG_EXPAND_SZ, REG_SZ};
@@ -1853,6 +1970,62 @@ mod tests {
     use crate::plan::{autorun_entry, ClinkLaunch, NERD_FONT_FAMILY};
     use crate::presets::terracotta;
     use std::path::PathBuf;
+
+    /// Every Thai way-out text of a report is shown by the UI (as `StepReport.fixTh`), so it
+    /// keeps th.ts's words (V4): the same banned words as the doctor's texts.
+    fn thai_fixes_keep_the_ui_words(report: &Report) {
+        for step in &report.steps {
+            if let Some(fix) = &step.fix {
+                assert_thai_words(&fix.th, step);
+            }
+        }
+    }
+
+    // These two stand in for the real ones in every test below, which all go through them: no
+    // test's report can hold a Thai fix text with a banned word.
+    fn revert_all(sys: System<'_>, ctx: &Ctx) -> Result<Report, ActionError> {
+        let report = super::revert_all(sys, ctx)?;
+        thai_fixes_keep_the_ui_words(&report);
+        Ok(report)
+    }
+
+    fn cleanup(sys: System<'_>, ctx: &Ctx, remove_themes: bool) -> Result<Report, ActionError> {
+        let report = super::cleanup(sys, ctx, remove_themes)?;
+        thai_fixes_keep_the_ui_words(&report);
+        Ok(report)
+    }
+
+    #[test]
+    fn every_way_out_text_keeps_the_ui_words() {
+        // The builders called directly, so a text no scenario above reaches is checked too: the
+        // ones that need no machine, and autorun_original_by_hand on a machine with no restore
+        // point, the one text of it no scenario reaches (the scenarios reach its other two, as
+        // they do settings_by_hand and the step fixes).
+        let data = Path::new(r"C:\Users\tester\AppData\Local\CMD Studio");
+        let font = FontRecord {
+            family: NERD_FONT_FAMILY.to_string(),
+            file: PathBuf::from(r"C:\Users\tester\fonts\f.ttf"),
+            value_name: "CaskaydiaCove NF (TrueType)".to_string(),
+        };
+        let (m, ctx) = machine();
+        let no_copy = autorun_original_by_hand(m.system(), &ctx);
+        assert!(
+            no_copy.en.starts_with("No restore point holds a copy"),
+            "{no_copy:?}"
+        );
+        for fix in [
+            autorun_by_hand("cmd /d", r"C:\data\clink-profile"),
+            autorun_not_text_by_hand(r"C:\data\clink-profile"),
+            held_file_by_hand(&font.file),
+            font_by_hand(&font),
+            folder_by_hand(data),
+            records_by_hand(data),
+            newer_state_by_hand(data),
+            no_copy,
+        ] {
+            assert_thai_words(&fix.th, &fix);
+        }
+    }
 
     fn apply(m: &crate::adapters::fake::FakeMachine, ctx: &Ctx, target: Target) {
         let p = prepare_apply(m.system(), ctx, &terracotta(), &request(target)).unwrap();
@@ -2693,6 +2866,272 @@ mod tests {
         assert!(!m.fs.exists(&ctx.paths.data), "{report:?}");
         assert_eq!(m.fs.file(&file), Some(b"the user's own build".to_vec()));
         assert!(registered(&m));
+    }
+
+    // ---- A settings.json CMD Studio made (founder 2026-10-17) ----
+
+    /// `machine()`, with its Windows Terminal never opened: the apply makes its settings.json.
+    fn applied_to_a_terminal_never_opened(m: &FakeMachine, ctx: &Ctx) {
+        m.fs.remove_file(Path::new(WT)).unwrap();
+        apply(m, ctx, Target::All);
+        assert!(state(m, ctx).baseline.wt.iter().all(|f| f.from_template));
+    }
+
+    /// The settings.json the apply made, with a profile Windows Terminal adds when it starts.
+    fn terminal_adds_its_profiles(m: &FakeMachine) {
+        let text = String::from_utf8(m.fs.file(WT).unwrap()).unwrap();
+        let added = text.replacen(
+            "\"list\": [",
+            "\"list\": [\n            {\n                \"guid\": \"{61c54bbd-c2c6-5271-96e7-009a87ff44bf}\",\n                \"name\": \"Windows PowerShell\"\n            },",
+            1,
+        );
+        assert_ne!(added, text);
+        m.fs.put(WT, added);
+    }
+
+    #[test]
+    fn revert_all_removes_a_settings_file_it_made_that_holds_nothing_but_its_parts() {
+        let (m, ctx) = machine();
+        applied_to_a_terminal_never_opened(&m, &ctx);
+        let report = revert_all(m.system(), &later(&ctx, 1)).unwrap();
+        assert!(report.ok(), "{report:#?}");
+        assert!(!m.fs.exists(Path::new(WT)));
+        assert!(report
+            .steps
+            .iter()
+            .any(|s| s.ok && s.what == format!("Remove {WT}")));
+        assert!(state(&m, &ctx).baseline.wt.is_empty());
+        // Once more: nothing is left to do, and nothing is made.
+        let again = revert_all(m.system(), &later(&ctx, 2)).unwrap();
+        assert!(again.ok(), "{again:#?}");
+        assert!(!m.fs.exists(Path::new(WT)));
+
+        // Two applies, of other themes and targets, over the file the first one made: the
+        // first original of each key and its last write still take it back to the template.
+        let (m, ctx) = machine();
+        applied_to_a_terminal_never_opened(&m, &ctx);
+        let (_, paper) = crate::presets::builtin()
+            .unwrap()
+            .into_iter()
+            .find(|(key, _)| *key == "paper")
+            .unwrap();
+        let next = later(&ctx, 1);
+        let p = prepare_apply(m.system(), &next, &paper, &request(Target::Wt)).unwrap();
+        assert_eq!(run_apply(m.system(), &next, p), Outcome::Committed);
+        let report = revert_all(m.system(), &later(&ctx, 2)).unwrap();
+        assert!(report.ok(), "{report:#?}");
+        assert!(!m.fs.exists(Path::new(WT)));
+    }
+
+    #[test]
+    fn revert_all_keeps_a_settings_file_terminal_added_to_and_takes_out_its_parts() {
+        let (m, ctx) = machine();
+        applied_to_a_terminal_never_opened(&m, &ctx);
+        terminal_adds_its_profiles(&m);
+        let report = revert_all(m.system(), &later(&ctx, 1)).unwrap();
+        assert!(report.ok(), "{report:#?}");
+        let text = String::from_utf8(m.fs.file(WT).unwrap()).unwrap();
+        assert!(text.contains("Windows PowerShell"), "{text}");
+        assert!(
+            !text.contains("CMD Studio") && !text.contains("0caa0dad"),
+            "{text}"
+        );
+        assert!(!text.contains("defaultProfile"), "{text}");
+        assert!(!report.steps.iter().any(|s| s.what.starts_with("Remove ")));
+        assert!(state(&m, &ctx).baseline.wt.is_empty());
+    }
+
+    #[test]
+    fn cleanup_removes_a_settings_file_it_made_and_keeps_one_terminal_added_to() {
+        let (m, ctx) = machine();
+        applied_to_a_terminal_never_opened(&m, &ctx);
+        let report = cleanup(m.system(), &later(&ctx, 1), false).unwrap();
+        assert!(report.ok(), "{report:#?}");
+        assert!(!m.fs.exists(Path::new(WT)));
+        assert!(!m.fs.exists(&ctx.paths.state_file()), "the data goes too");
+
+        let (m, ctx) = machine();
+        applied_to_a_terminal_never_opened(&m, &ctx);
+        terminal_adds_its_profiles(&m);
+        let report = cleanup(m.system(), &later(&ctx, 1), false).unwrap();
+        assert!(report.ok(), "{report:#?}");
+        let text = String::from_utf8(m.fs.file(WT).unwrap()).unwrap();
+        assert!(text.contains("Windows PowerShell") && !text.contains("CMD Studio"));
+        assert!(!m.fs.exists(&ctx.paths.state_file()));
+    }
+
+    #[test]
+    fn a_settings_file_it_made_that_cannot_be_deleted_is_said_and_tried_again() {
+        // Something holds the file: the revert still takes CMD Studio's parts out, says how to
+        // delete what is left (the bare template), and the next revert deletes it.
+        let (m, ctx) = machine();
+        applied_to_a_terminal_never_opened(&m, &ctx);
+        m.fs.fail_removes_of(WT);
+        let report = revert_all(m.system(), &later(&ctx, 1)).unwrap();
+        let [step] = failed(&report, "E_WT_WRITE")[..] else {
+            panic!("{report:#?}")
+        };
+        assert_eq!(step.what, format!("Remove {WT}"));
+        let fix = step.fix.as_ref().unwrap();
+        assert_eq!(fix.en, format!("Close Windows Terminal, then delete {WT}."));
+        assert_eq!(fix.th, format!("ปิด Windows Terminal แล้วลบ {WT}"));
+        assert_eq!(
+            m.fs.file(WT),
+            Some(crate::wt_edit::WT_TEMPLATE.as_bytes().to_vec()),
+            "nothing of CMD Studio's is left in it"
+        );
+        assert_eq!(m.autorun.read_user().unwrap(), None, "the rest is put back");
+        let kept = state(&m, &ctx).baseline.wt;
+        assert!(
+            kept.len() == 1 && kept.iter().all(|f| f.from_template),
+            "{kept:?}"
+        );
+        // --cleanup keeps the records while it is there, and says so.
+        let report = cleanup(m.system(), &later(&ctx, 2), false).unwrap();
+        assert!(!report.ok());
+        assert!(m.fs.exists(&ctx.paths.state_file()));
+        // Once it can be deleted, the next run finishes.
+        m.fs.stop_failing(WT);
+        let report = cleanup(m.system(), &later(&ctx, 3), false).unwrap();
+        assert!(report.ok(), "{report:#?}");
+        assert!(!m.fs.exists(Path::new(WT)));
+        assert!(!m.fs.exists(&ctx.paths.state_file()));
+    }
+
+    /// The fake file system, but once `path` has been written and then read (the revert's
+    /// write and its read-back), it holds `then`: Windows Terminal wrote it in between.
+    struct TerminalWritesAfter<'a> {
+        fs: &'a FakeFs,
+        path: PathBuf,
+        then: String,
+        written: std::cell::Cell<bool>,
+    }
+
+    impl Fs for TerminalWritesAfter<'_> {
+        fn read(&self, path: &Path) -> Result<Option<Vec<u8>>, AdapterError> {
+            let got = self.fs.read(path);
+            if path == self.path && self.written.replace(false) {
+                self.fs.put(path, &self.then);
+            }
+            got
+        }
+        fn write_atomic(&self, path: &Path, bytes: &[u8]) -> Result<(), AdapterError> {
+            self.fs.write_atomic(path, bytes)?;
+            if path == self.path {
+                self.written.set(true);
+            }
+            Ok(())
+        }
+        fn remove_file(&self, path: &Path) -> Result<(), AdapterError> {
+            self.fs.remove_file(path)
+        }
+        fn exists(&self, path: &Path) -> bool {
+            self.fs.exists(path)
+        }
+        fn is_dir(&self, path: &Path) -> bool {
+            self.fs.is_dir(path)
+        }
+        fn create_dir_all(&self, path: &Path) -> Result<(), AdapterError> {
+            self.fs.create_dir_all(path)
+        }
+        fn remove_dir(&self, path: &Path) -> Result<(), AdapterError> {
+            self.fs.remove_dir(path)
+        }
+        fn remove_dir_all(&self, path: &Path) -> Result<(), AdapterError> {
+            self.fs.remove_dir_all(path)
+        }
+        fn rename(&self, from: &Path, to: &Path) -> Result<(), AdapterError> {
+            self.fs.rename(from, to)
+        }
+        fn list_dir(&self, path: &Path) -> Result<Vec<DirEntry>, AdapterError> {
+            self.fs.list_dir(path)
+        }
+        fn try_lock(&self, path: &Path) -> Result<Option<FsLock>, AdapterError> {
+            self.fs.try_lock(path)
+        }
+    }
+
+    const TERMINAL_DEFAULTS: &str = include_str!("../tests/fixtures/wt/terminal-defaults.json");
+
+    #[test]
+    fn a_settings_file_terminal_wrote_again_is_kept_only_while_nothing_of_ours_is_in_it() {
+        // Between the revert's write of the template and the delete, a running Terminal writes
+        // the file. Its own defaults: kept, done, nothing to retry. What it had loaded, the
+        // theme's scheme included: said, kept in the baseline, and the next revert finishes
+        // (coordinator's ruling on the Task WT review).
+        let (m, ctx) = machine();
+        applied_to_a_terminal_never_opened(&m, &ctx);
+        let terminal = TerminalWritesAfter {
+            fs: &m.fs,
+            path: PathBuf::from(WT),
+            then: TERMINAL_DEFAULTS.to_string(),
+            written: std::cell::Cell::new(false),
+        };
+        let sys = System {
+            fs: &terminal,
+            ..m.system()
+        };
+        let report = revert_all(sys, &later(&ctx, 1)).unwrap();
+        assert!(report.ok(), "{report:#?}");
+        assert_eq!(m.fs.file(WT), Some(TERMINAL_DEFAULTS.as_bytes().to_vec()));
+        let step = report
+            .steps
+            .iter()
+            .find(|s| s.what == format!("Remove {WT}"))
+            .unwrap();
+        assert!(step.detail.starts_with("kept: "), "{step:?}");
+        assert!(state(&m, &ctx).baseline.wt.is_empty());
+
+        let (m, ctx) = machine();
+        applied_to_a_terminal_never_opened(&m, &ctx);
+        let themed = TERMINAL_DEFAULTS.replace(
+            "\"schemes\": []",
+            "\"schemes\": [ { \"name\": \"CMD Studio\", \"background\": \"#1f1e1d\" } ]",
+        );
+        let terminal = TerminalWritesAfter {
+            fs: &m.fs,
+            path: PathBuf::from(WT),
+            then: themed.clone(),
+            written: std::cell::Cell::new(false),
+        };
+        let sys = System {
+            fs: &terminal,
+            ..m.system()
+        };
+        let report = revert_all(sys, &later(&ctx, 1)).unwrap();
+        let [step] = failed(&report, "E_WT_WRITE")[..] else {
+            panic!("{report:#?}")
+        };
+        assert_eq!(step.what, format!("Remove {WT}"));
+        assert!(step.detail.contains("CMD Studio"), "{step:?}");
+        assert!(step.fix.is_some(), "{step:?}");
+        assert_eq!(m.fs.file(WT), Some(themed.into_bytes()), "left as it is");
+        assert_eq!(
+            state(&m, &ctx).baseline.wt.len(),
+            1,
+            "tried again next time"
+        );
+        // The next revert takes CMD Studio's part out of it and keeps Terminal's.
+        let report = revert_all(m.system(), &later(&ctx, 2)).unwrap();
+        assert!(report.ok(), "{report:#?}");
+        let text = String::from_utf8(m.fs.file(WT).unwrap()).unwrap();
+        assert!(!text.contains("CMD Studio") && text.contains("Windows PowerShell"));
+        assert!(state(&m, &ctx).baseline.wt.is_empty());
+    }
+
+    #[test]
+    fn a_settings_file_that_was_there_is_never_deleted_even_when_it_ends_as_the_template() {
+        // The user's own file happens to be the template: CMD Studio did not make it, so it stays.
+        let (m, ctx) = machine();
+        m.fs.put(WT, crate::wt_edit::WT_TEMPLATE);
+        apply(&m, &ctx, Target::All);
+        assert!(state(&m, &ctx).baseline.wt.iter().all(|f| !f.from_template));
+        let report = revert_all(m.system(), &later(&ctx, 1)).unwrap();
+        assert!(report.ok(), "{report:#?}");
+        assert_eq!(
+            m.fs.file(WT),
+            Some(crate::wt_edit::WT_TEMPLATE.as_bytes().to_vec())
+        );
     }
 
     #[test]

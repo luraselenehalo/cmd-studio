@@ -132,6 +132,7 @@ impl<'a> SystemVerifier<'a> {
                 scheme,
                 profile,
                 set_default,
+                ..
             } => {
                 let bytes = fs
                     .read(settings)
@@ -693,6 +694,67 @@ mod tests {
         assert_eq!(out, Outcome::Committed);
         assert!(settings_text(&m).contains("\"weight\": \"bold\""));
         assert_eq!(m.process.calls().len(), 2);
+    }
+
+    #[test]
+    fn a_settings_file_made_from_the_template_is_read_back_as_any_other() {
+        // Founder 2026-10-17: Windows Terminal was never opened, so the apply makes the file.
+        let m = FakeMachine::new();
+        let res = fake_resources(&m.fs, Path::new(r"C:\app\resources"));
+        let paths = Paths {
+            data: PathBuf::from(r"C:\Users\tester\AppData\Local\ai.resincore.cmdstudio"),
+        };
+        m.process.answer("oh-my-posh.exe", "print", 0, "> ");
+        m.fs.create_dir_all(Path::new(WT_SETTINGS).parent().unwrap())
+            .unwrap();
+        let machine = Machine {
+            data_short: Some(paths.data.clone()),
+            wt_create: vec![crate::plan::WtToCreate {
+                settings: PathBuf::from(WT_SETTINGS),
+                folder_exists: true,
+            }],
+            ..Machine::default()
+        };
+        let req = Request {
+            target: Target::All,
+            set_wt_default_profile: true,
+            replace_foreign_clink: false,
+        };
+        let p = plan(&terracotta(), &req, &machine, &paths).unwrap();
+        let wt = p
+            .ops
+            .iter()
+            .find(|o| matches!(o, Op::WtApply { create: true, .. }))
+            .cloned()
+            .unwrap();
+        let launch = Some(p.launch);
+        let out = run(
+            "t",
+            p.ops,
+            &mut SystemExecutor::new(m.system(), &res),
+            &mut SystemVerifier::new(m.system(), &paths, &res, launch.clone()),
+            &mut Mem::default(),
+        );
+        assert_eq!(out, Outcome::Committed);
+        let text = settings_text(&m);
+        assert!(text.contains("\"$schema\"") && text.contains("\"name\": \"CMD Studio\""));
+        verify_ops(&m, &paths, &res, &launch, std::slice::from_ref(&wt)).unwrap();
+        // A value changed in it is caught as in a file that was there before.
+        m.fs.put(
+            WT_SETTINGS,
+            text.replace(
+                "\"colorScheme\": \"CMD Studio\"",
+                "\"colorScheme\": \"Campbell\"",
+            ),
+        );
+        let err = verify_ops(&m, &paths, &res, &launch, std::slice::from_ref(&wt)).unwrap_err();
+        assert_eq!(err.code, "E_VERIFY_READBACK");
+        assert!(err.message.contains("colorScheme"), "{}", err.message);
+        // And one that is gone is said to be gone.
+        m.fs.remove_file(Path::new(WT_SETTINGS)).unwrap();
+        let err = verify_ops(&m, &paths, &res, &launch, &[wt]).unwrap_err();
+        assert_eq!(err.code, "E_VERIFY_READBACK");
+        assert!(err.message.ends_with("is gone"), "{}", err.message);
     }
 
     #[test]

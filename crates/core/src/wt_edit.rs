@@ -1,7 +1,7 @@
 //! Edits Windows Terminal's settings.json in place (spec §5.4, G9). Only the
 //! keys CMD Studio owns change; comments, order, spacing, newlines and a
 //! UTF-8 BOM stay byte-for-byte. Pure: text in, text out.
-use crate::generate::wt::{CMD_PROFILE_GUID, SCHEME_NAME};
+use crate::generate::wt::{CMD_EXE, CMD_PROFILE_GUID, SCHEME_NAME};
 use jsonc_parser::cst::{CstArray, CstInputValue, CstNode, CstObject, CstRootNode};
 use jsonc_parser::ParseOptions;
 use serde::{Deserialize, Serialize};
@@ -23,6 +23,13 @@ pub fn wt_parse_options() -> ParseOptions {
         allow_extended_string_escapes: false,
     }
 }
+
+/// The settings.json CMD Studio starts from when Windows Terminal is installed but was never
+/// opened, so it has none yet (founder 2026-10-17, spec §5.4): the smallest file Windows Terminal
+/// reads, with its schema, an empty profile list and no schemes. [`apply_edit`] then writes the
+/// scheme, the cmd profile and, when asked, `defaultProfile` into it, as into any other file.
+/// With CMD Studio's parts taken out again ([`revert`]), the text is this one byte for byte.
+pub const WT_TEMPLATE: &str = "{\n    \"$schema\": \"https://aka.ms/terminal-profiles-schema\",\n    \"profiles\": {\n        \"list\": []\n    },\n    \"schemes\": []\n}\n";
 
 /// One setting CMD Studio owns in a settings.json.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -75,6 +82,66 @@ pub struct WtEdit<'a> {
     pub scheme: &'a Value,
     pub profile: &'a Map<String, Value>,
     pub set_default: bool,
+}
+
+impl WtEdit<'_> {
+    /// What this edit writes, key by key, in the form a baseline's last writes take
+    /// (`WtFileBaseline::written_map`): the scheme, each profile key (an object such as `font`
+    /// whole), and `defaultProfile` when it is set. For [`holds_ours`].
+    pub fn written(&self) -> BTreeMap<WtKey, Value> {
+        let mut written = BTreeMap::new();
+        written.insert(WtKey::Scheme, self.scheme.clone());
+        for (key, value) in self.profile {
+            written.insert(WtKey::Profile { key: key.clone() }, value.clone());
+        }
+        if self.set_default {
+            written.insert(
+                WtKey::DefaultProfile,
+                Value::String(CMD_PROFILE_GUID.into()),
+            );
+        }
+        written
+    }
+}
+
+/// Whether `text` may still hold a part of CMD Studio's, given what CMD Studio wrote into that
+/// file (`written`, each key's last write): a scheme named `CMD Studio`, whatever it holds; a
+/// key of the cmd profile that holds what CMD Studio wrote, or for an object-valued key such as
+/// `font` a key inside it that does; or `defaultProfile` naming the cmd profile when CMD Studio
+/// set it. A `commandline` that is the plain `%SystemRoot%\System32\cmd.exe` does not count:
+/// Windows Terminal writes that for the cmd profile itself. Text Windows Terminal could not
+/// read, or a shape CMD Studio refuses (a key it owns written twice), counts as holding it.
+///
+/// The one test of "nothing of CMD Studio's is in it" for a settings.json CMD Studio made from
+/// [`WT_TEMPLATE`] that is there again: the undo's check, when a running Terminal wrote the
+/// file again right after the undo deleted it, and revert everything's, when Terminal wrote it
+/// after CMD Studio's parts were taken out (founder 2026-10-17).
+pub fn holds_ours(text: &str, written: &BTreeMap<WtKey, Value>) -> bool {
+    if check_parses(text).is_err() || !matches!(read_value(text, &WtKey::Scheme), Ok(None)) {
+        return true;
+    }
+    written.iter().any(|(key, wrote)| {
+        let Ok(now) = read_value(text, key) else {
+            return true;
+        };
+        match key {
+            WtKey::Scheme => false,
+            WtKey::DefaultProfile => now
+                .as_ref()
+                .and_then(Value::as_str)
+                .is_some_and(|g| g.eq_ignore_ascii_case(CMD_PROFILE_GUID)),
+            WtKey::Profile { key } if key == "commandline" && wrote.as_str() == Some(CMD_EXE) => {
+                false
+            }
+            WtKey::Profile { .. } => match (wrote, &now) {
+                (Value::Object(wrote), Some(Value::Object(now))) => {
+                    wrote.iter().any(|(sub, v)| now.get(sub) == Some(v))
+                }
+                (_, now) => now.as_ref() == Some(wrote),
+            },
+            WtKey::ProfileSub { .. } => now.as_ref() == Some(wrote),
+        }
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -1451,6 +1518,122 @@ mod tests {
             let written = BTreeMap::from([(key.clone(), json!(2))]);
             refused(revert(text, &originals, &written, &[]).map(|_| ()));
         }
+    }
+
+    #[test]
+    fn the_template_is_the_smallest_settings_file_and_the_same_edit_fills_it() {
+        // Founder 2026-10-17: a Windows Terminal that was never opened has no settings.json, and
+        // an apply starts it from this template.
+        let parsed = |t: &str| {
+            CstRootNode::parse(t, &wt_parse_options())
+                .unwrap()
+                .to_serde_value()
+                .unwrap()
+        };
+        check_parses(WT_TEMPLATE).unwrap();
+        assert_eq!(
+            parsed(WT_TEMPLATE),
+            json!({
+                "$schema": "https://aka.ms/terminal-profiles-schema",
+                "profiles": { "list": [] },
+                "schemes": []
+            })
+        );
+        let (s, p) = (scheme(), profile());
+        for set_default in [true, false] {
+            let e = apply_edit(WT_TEMPLATE, &edit(&s, &p, set_default)).unwrap();
+            check_parses(&e.text).unwrap();
+            assert_eq!(
+                read_value(&e.text, &WtKey::Scheme).unwrap(),
+                Some(s.clone())
+            );
+            let key = |key: &str| read_value(&e.text, &WtKey::Profile { key: key.into() });
+            assert_eq!(key("guid").unwrap(), Some(json!(CMD_PROFILE_GUID)));
+            assert_eq!(key("colorScheme").unwrap(), Some(json!("CMD Studio")));
+            assert_eq!(
+                key("font").unwrap(),
+                Some(json!({ "face": "Cascadia Mono", "size": 12 }))
+            );
+            assert_eq!(
+                read_value(&e.text, &WtKey::DefaultProfile).unwrap(),
+                set_default.then(|| json!(CMD_PROFILE_GUID))
+            );
+            // Only the cmd profile is new: the template has the list and the schemes already.
+            assert_eq!(e.created, vec![WtCreated::CmdProfile]);
+            // With CMD Studio's parts taken out, it is the template again, byte for byte: that is
+            // how a revert of everything knows a file that holds nothing but ours.
+            let back = revert(&e.text, &originals(&e), &written(&e), &e.created).unwrap();
+            assert_eq!(back, WT_TEMPLATE, "set_default: {set_default}");
+        }
+    }
+
+    /// What a running Windows Terminal writes when its settings.json is gone: its own defaults,
+    /// with a cmd profile whose command line is the plain `cmd.exe`.
+    const TERMINAL_DEFAULTS: &str = include_str!("../tests/fixtures/wt/terminal-defaults.json");
+
+    #[test]
+    fn holds_ours_tells_terminals_own_defaults_from_cmd_studios_parts() {
+        let s = scheme();
+        let mut p = profile();
+        // As the planner writes it for every cmd window: the plain command line.
+        p.insert(
+            "commandline".into(),
+            json!(crate::generate::wt::CMD_EXE.to_string()),
+        );
+        let written = edit(&s, &p, true).written();
+        assert!(!holds_ours(TERMINAL_DEFAULTS, &written));
+        assert!(!holds_ours(WT_TEMPLATE, &written));
+        // Each of CMD Studio's parts counts on its own.
+        let ours = apply_edit(TERMINAL_DEFAULTS, &edit(&s, &p, true))
+            .unwrap()
+            .text;
+        assert!(holds_ours(&ours, &written));
+        let with_scheme = TERMINAL_DEFAULTS.replace(
+            "\"schemes\": []",
+            "\"schemes\": [ { \"name\": \"CMD Studio\" } ]",
+        );
+        assert!(
+            holds_ours(&with_scheme, &written),
+            "the scheme, whatever it holds"
+        );
+        let cmd = "\"name\": \"Command Prompt\"";
+        for (part, why) in [
+            ("\"colorScheme\": \"CMD Studio\"", "a key"),
+            (
+                "\"font\": { \"weight\": \"bold\", \"face\": \"Cascadia Mono\" }",
+                "a sub-key",
+            ),
+            ("\"opacity\": 96", "a number"),
+        ] {
+            let text = TERMINAL_DEFAULTS.replacen(cmd, &format!("{cmd}, {part}"), 1);
+            assert!(holds_ours(&text, &written), "{why}");
+        }
+        // A value CMD Studio did not write is not its own, nor a key it did not write.
+        let other = TERMINAL_DEFAULTS.replacen(cmd, &format!("{cmd}, \"opacity\": 50"), 1);
+        assert!(!holds_ours(&other, &written));
+        // The command line counts when it is CMD Studio's own Clink line.
+        let mut wt_only = profile();
+        let line = r#"%SystemRoot%\System32\cmd.exe /k ""C:\d\clink_x64.exe" inject --quiet --profile "C:\d\clink-profile"""#;
+        wt_only.insert("commandline".into(), json!(line));
+        let written_wt = edit(&s, &wt_only, false).written();
+        let theirs = TERMINAL_DEFAULTS.replace(
+            "\"commandline\": \"%SystemRoot%\\\\System32\\\\cmd.exe\"",
+            &format!("\"commandline\": {}", json!(line)),
+        );
+        assert!(holds_ours(&theirs, &written_wt));
+        assert!(!holds_ours(TERMINAL_DEFAULTS, &written_wt));
+        // defaultProfile counts only when CMD Studio set it.
+        let cmd_default = TERMINAL_DEFAULTS.replace(
+            "\"defaultProfile\": \"{61c54bbd-c2c6-5271-96e7-009a87ff44bf}\"",
+            "\"defaultProfile\": \"{0CAA0DAD-35BE-5F56-A8FF-AFCEEEAA6101}\"",
+        );
+        assert!(holds_ours(&cmd_default, &written));
+        assert!(!holds_ours(&cmd_default, &edit(&s, &p, false).written()));
+        // Text Windows Terminal could not read, or a key written twice, may hold anything.
+        assert!(holds_ours("{ \"profiles\": ", &written));
+        let twice =
+            TERMINAL_DEFAULTS.replacen("\"schemes\": []", "\"schemes\": [], \"schemes\": []", 1);
+        assert!(holds_ours(&twice, &written));
     }
 
     #[test]

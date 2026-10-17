@@ -207,6 +207,19 @@ pub struct WtFileBaseline {
     pub originals: Vec<WtOriginal>,
     pub written: Vec<WtWritten>,
     pub created: Vec<WtCreated>,
+    /// CMD Studio made this settings.json from `wt_edit::WT_TEMPLATE` at its first apply,
+    /// because Windows Terminal was installed but had never been opened (founder 2026-10-17,
+    /// spec §5.4). Revert everything and `--cleanup` delete the file again while, with CMD
+    /// Studio's parts taken out, it is the template; one Terminal or the user added to stays.
+    /// Not written while false, so the baseline of a file that was there stays byte for byte
+    /// what it was before this field existed.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub from_template: bool,
+}
+
+/// For `skip_serializing_if`: a flag that is off is not written.
+fn is_false(flag: &bool) -> bool {
+    !*flag
 }
 
 impl WtFileBaseline {
@@ -272,6 +285,17 @@ impl Baseline {
     /// Keeps each key's first-ever original and its latest written value, and the containers
     /// CMD Studio added, once each, across any number of applies.
     pub fn note_wt(&mut self, settings: &Path, edited: &WtEdited) {
+        self.note_wt_file(settings, edited, false);
+    }
+
+    /// [`Baseline::note_wt`] for an edit of `wt_edit::WT_TEMPLATE`: the file is not there, and
+    /// the apply makes it. A file the baseline has not seen yet is marked
+    /// [`WtFileBaseline::from_template`]; one it knows keeps what its first apply found.
+    pub fn note_wt_from_template(&mut self, settings: &Path, edited: &WtEdited) {
+        self.note_wt_file(settings, edited, true);
+    }
+
+    fn note_wt_file(&mut self, settings: &Path, edited: &WtEdited, from_template: bool) {
         let index = match self.wt.iter().position(|f| f.settings == settings) {
             Some(i) => i,
             None => {
@@ -280,6 +304,7 @@ impl Baseline {
                     originals: Vec::new(),
                     written: Vec::new(),
                     created: Vec::new(),
+                    from_template,
                 });
                 self.wt.len().saturating_sub(1)
             }
@@ -458,6 +483,44 @@ mod tests {
         s.baseline.fonts_key_existed = Some(false);
         let text = String::from_utf8(s.to_bytes().unwrap()).unwrap();
         assert!(text.contains("\"fontsKeyExisted\": false"), "{text}");
+        let fs = FakeFs::new();
+        let p = Path::new(r"C:\d\state.json");
+        fs.put(p, &text);
+        assert_eq!(State::load(&fs, p).unwrap(), s);
+    }
+
+    #[test]
+    fn a_settings_file_cmd_studio_made_is_remembered_from_its_first_apply_on() {
+        // Founder 2026-10-17: CMD Studio makes the settings.json of a Windows Terminal that was
+        // never opened, and revert everything needs to know which file that was.
+        let f = Path::new(r"C:\wt\settings.json");
+        let key = WtKey::Profile {
+            key: "opacity".into(),
+        };
+        let first = edited(
+            vec![change(&key, None, json!(96))],
+            vec![WtCreated::CmdProfile],
+        );
+        let second = edited(vec![change(&key, Some(json!(96)), json!(90))], vec![]);
+        let mut b = Baseline::default();
+        b.note_wt_from_template(f, &first);
+        b.note_wt(f, &second);
+        assert!(b.wt[0].from_template, "the first apply's word stands");
+        // A file that was there at its first apply is not one CMD Studio made, whatever a later
+        // apply finds.
+        let mut b = Baseline::default();
+        b.note_wt(f, &second);
+        b.note_wt_from_template(f, &first);
+        assert!(!b.wt[0].from_template);
+        // Written as `fromTemplate` when true, and not at all when false, so a state.json of a
+        // file that was there stays byte for byte what it was before the field existed.
+        let mut s = State::default();
+        s.baseline.note_wt(f, &first);
+        let text = String::from_utf8(s.to_bytes().unwrap()).unwrap();
+        assert!(!text.contains("fromTemplate"), "{text}");
+        s.baseline.wt[0].from_template = true;
+        let text = String::from_utf8(s.to_bytes().unwrap()).unwrap();
+        assert!(text.contains("\"fromTemplate\": true"), "{text}");
         let fs = FakeFs::new();
         let p = Path::new(r"C:\d\state.json");
         fs.put(p, &text);

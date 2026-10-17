@@ -70,7 +70,13 @@ export function formatTime(ms: number, language: Language, withDate = true): str
   return new Intl.DateTimeFormat(locale, options).format(new Date(ms));
 }
 
+/** The language of the text `pick` gives: Thai only when the UI is Thai and there is a Thai text;
+ * otherwise the core's English text is shown, and a Thai UI marks it `lang="en"` with this. */
+export function pickedLanguage(language: Language, th: string): Language {
+  return language === "th" && th.length > 0 ? "th" : "en";
+}
+
 /** The language's own text of a bilingual value from the Rust side. */
 export function pick(language: Language, th: string, en: string): string {
-  return language === "th" && th.length > 0 ? th : en;
+  return pickedLanguage(language, th) === "th" ? th : en;
 }

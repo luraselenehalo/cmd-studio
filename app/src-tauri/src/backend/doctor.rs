@@ -6,10 +6,12 @@
 //! What a finding offers ([`fix_for`]):
 //! - a generated file edited by hand (D9), a cmd add-on that can't load the theme's scripts
 //!   (D3), CMD Studio's AutoRun entry gone or not first (D4), cmd's profile in Windows Terminal
-//!   changed (D7), the theme's font gone (D8): apply the theme again;
+//!   changed (D7), the theme's font gone (D8), a Windows Terminal that was never opened after a
+//!   theme was applied (D6; the apply sets it up, founder 2026-10-17): apply the theme again;
 //! - another Clink in the user's AutoRun after an apply (D5): apply again with it turned off;
 //! - no Windows Terminal, on a Windows that can have it (D6): its Store page; installed but never
-//!   opened (D6): open it once (words);
+//!   opened before any apply (D6): nothing, because the wizard and Themes apply, and that sets it
+//!   up;
 //! - no cmd window has loaded the theme yet (D3): open a new one;
 //! - D1's three causes of `E_RUNTIME_MISSING`, told apart from the machine as D1 tells them
 //!   ([`RuntimeFiles`]): the files that come with CMD Studio fail their manifest (or a gone
@@ -31,6 +33,7 @@ use super::{Backend, Machine};
 use crate::error::AppError;
 use cmdstudio_core::actions::Ctx;
 use cmdstudio_core::adapters::{AdapterError, RegText, System, WtLocation};
+use cmdstudio_core::detect::never_opened;
 use cmdstudio_core::doctor::{doctor, Check, Status};
 use cmdstudio_core::model::Theme;
 use cmdstudio_core::plan::{
@@ -43,8 +46,9 @@ use std::path::Path;
 use ts_rs::TS;
 
 /// What the app offers for a finding. `reapply`, `replaceOtherClink`, `installWindowsTerminal`
-/// and `openNewCmdWindow` are buttons; `openWindowsTerminalOnce` and `reinstall` are steps only
-/// the user can take, shown as words.
+/// and `openNewCmdWindow` are buttons; `reinstall` is a step only the user can take, shown as
+/// words. A Windows Terminal that was never opened needs no step of the user's: an apply sets it
+/// up (founder 2026-10-17), so D6 offers `reapply` for it once a theme is applied.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
@@ -59,9 +63,6 @@ pub enum FixKind {
     ReplaceOtherClink,
     /// Open Windows Terminal's Store page (D6: no Windows Terminal, on build 19041 or later).
     InstallWindowsTerminal,
-    /// Windows Terminal is installed but was never opened, so it has no settings.json yet (D6):
-    /// the user opens it once, then applies again. Words, not a button.
-    OpenWindowsTerminalOnce,
     /// No cmd window has loaded the theme yet (D3): open a new one.
     OpenNewCmdWindow,
     /// The files that come with CMD Studio fail their manifest, or files an apply would install
@@ -178,15 +179,16 @@ fn runtime_files(sys: System<'_>, ctx: &Ctx, a: &Applied, installs_font: bool) -
 }
 
 /// Whether an apply of `theme` installs the bundled Nerd Font, as the planner decides it: when
-/// Windows Terminal has a settings file and neither the theme's font nor the Nerd Font is
-/// installed (the theme's font falls back to the Nerd Font, which is installed). A font list
-/// that can't be read counts as yes, so the font file is checked rather than taken as unused.
+/// Windows Terminal has a settings file, or is one that was never opened (the apply sets it
+/// up, founder 2026-10-17; which ones, the core's `detect::never_opened`), and neither the
+/// theme's font nor the Nerd Font is installed (the
+/// theme's font falls back to the Nerd Font, which is installed). A font list that can't be read
+/// counts as yes, so the font file is checked rather than taken as unused.
 fn installs_font(sys: System<'_>, theme: &Theme) -> bool {
-    let wt = sys
-        .wt
-        .locations()
-        .iter()
-        .any(|l| sys.fs.exists(&l.settings));
+    let locations = sys.wt.locations();
+    let has_settings = |l: &WtLocation| sys.fs.exists(&l.settings);
+    let wt =
+        locations.iter().any(has_settings) || !never_opened(&locations, has_settings).is_empty();
     let Ok(families) = sys.fonts.families() else {
         return wt;
     };
@@ -268,8 +270,12 @@ pub fn fix_for(
         ("D5", _) => (can_apply && autorun.is_some_and(|a| !a.foreign_clink.is_empty()))
             .then_some(FixKind::ReplaceOtherClink),
         ("D6", "E_WT_NOT_FOUND") => {
-            if wt.iter().any(|l| l.installed) {
-                Some(FixKind::OpenWindowsTerminalOnce)
+            // D6 finds this only while no Terminal has a settings.json, so none has one here.
+            if !never_opened(wt, |_| false).is_empty() {
+                // Installed but never opened: an apply sets it up (founder 2026-10-17). Once a
+                // theme is applied, that is applying it again; before any apply there is nothing
+                // to offer, because the wizard and Themes apply.
+                can_apply.then_some(FixKind::Reapply)
             } else {
                 build
                     .is_some_and(|b| b >= WT_MIN_BUILD)
@@ -387,7 +393,7 @@ mod tests {
         apply_terracotta, backend, fake_fs, plan_and_apply, terracotta_id, terracotta_request, WT,
     };
     use cmdstudio_core::adapters::fake::{FakeFonts, FakeMachine};
-    use cmdstudio_core::adapters::{AutoRun, RegValue, WtVariant, REG_SZ};
+    use cmdstudio_core::adapters::{AutoRun, Fs, RegValue, WtVariant, REG_SZ};
     use cmdstudio_core::plan::NERD_FONT_FAMILY;
     use cmdstudio_core::resources::{MANIFEST, NERD_FONT_FILE};
     use std::path::{Path, PathBuf};
@@ -511,15 +517,119 @@ mod tests {
         // Too old for Windows Terminal: nothing to offer.
         b.machine.host.info.build = Some(18363);
         assert_eq!(by_id(&b.doctor_run().unwrap(), "D6").fix, None);
-        // Installed but never opened: open it once.
+        // Installed but never opened, before any apply: nothing to offer, because the wizard and
+        // Themes apply, and an apply sets it up (founder 2026-10-17). It was "open it once".
+        b.machine.host.info.build = Some(26100);
         b.machine.wt.locations = vec![WtLocation {
             variant: WtVariant::Store,
             installed: true,
             settings: PathBuf::from(r"C:\nowhere\settings.json"),
         }];
+        let d6 = b.doctor_run().unwrap();
+        let d6 = by_id(&d6, "D6");
         assert_eq!(
-            by_id(&b.doctor_run().unwrap(), "D6").fix,
-            Some(FixKind::OpenWindowsTerminalOnce)
+            (d6.status, d6.code.as_deref(), d6.fix),
+            (Status::Warn, Some("E_WT_NOT_FOUND"), None)
+        );
+    }
+
+    #[test]
+    fn a_terminal_never_opened_after_an_apply_offers_to_apply_again_which_sets_it_up() {
+        // Founder 2026-10-17: an apply sets up a Windows Terminal that was never opened, so once
+        // a theme is applied the fix is to apply it again, shown as a plan first.
+        let mut b = backend();
+        applied(&b);
+        let new_wt = r"C:\Users\tester\AppData\Local\Packages\Microsoft.WindowsTerminalPreview_8wekyb3d8bbwe\LocalState\settings.json";
+        b.machine.wt.locations = vec![WtLocation {
+            variant: WtVariant::Preview,
+            installed: true,
+            settings: PathBuf::from(new_wt),
+        }];
+        let report = b.doctor_run().unwrap();
+        let d6 = by_id(&report, "D6");
+        assert_eq!(
+            (d6.code.as_deref(), d6.fix),
+            (Some("E_WT_NOT_FOUND"), Some(FixKind::Reapply))
+        );
+        let proposal = b.doctor_fix("D6").unwrap();
+        assert_eq!(proposal.kind, Some(FixKind::Reapply));
+        let Some(PlanOutcome::Ready { plan }) = proposal.plan else {
+            panic!("{proposal:?}")
+        };
+        assert!(
+            plan.summary_en
+                .iter()
+                .any(|s| s == "Set up Windows Terminal's settings so cmd gets this theme"),
+            "{:?}",
+            plan.summary_en
+        );
+        let done = b
+            .apply(proposal.request.unwrap(), &plan.digest, &mut |_| {})
+            .unwrap();
+        assert_eq!(done.status, ApplyStatus::Committed);
+        assert!(fake_fs(&b).exists(Path::new(new_wt)));
+        let d6 = b.doctor_run().unwrap();
+        assert_eq!(by_id(&d6, "D6").status, Status::Ok);
+    }
+
+    #[test]
+    fn a_terminal_that_was_never_opened_counts_for_the_font_an_apply_installs() {
+        // The planner sets up such a Terminal and writes the font into it, so the bundled Nerd
+        // Font is installed for it as for one that was opened.
+        let mut b = backend();
+        let (_, theme) = cmdstudio_core::presets::builtin()
+            .unwrap()
+            .into_iter()
+            .find(|(key, _)| *key == "terracotta")
+            .unwrap();
+        let fonts_without_the_themes = FakeFonts::new(FONTS, &["Arial"]);
+        fonts_without_the_themes.knows_file(NERD_FONT_FILE, NERD_FONT_FAMILY);
+        b.machine.fonts = fonts_without_the_themes;
+        assert!(
+            installs_font(b.sys(), &theme),
+            "a settings file that is there"
+        );
+        b.machine.wt.locations = vec![WtLocation {
+            variant: WtVariant::Store,
+            installed: true,
+            settings: PathBuf::from(r"C:\nowhere\settings.json"),
+        }];
+        assert!(installs_font(b.sys(), &theme), "installed, never opened");
+        b.machine.wt.locations = vec![WtLocation {
+            variant: WtVariant::Store,
+            installed: false,
+            settings: PathBuf::from(r"C:\nowhere\settings.json"),
+        }];
+        assert!(!installs_font(b.sys(), &theme), "not installed");
+        // An unpackaged folder without a settings.json is no Terminal the apply sets up.
+        b.machine.wt.locations = vec![WtLocation {
+            variant: WtVariant::Unpackaged,
+            installed: true,
+            settings: PathBuf::from(r"C:\nowhere\settings.json"),
+        }];
+        assert!(!installs_font(b.sys(), &theme), "an unpackaged leftover");
+    }
+
+    #[test]
+    fn an_unpackaged_folder_without_settings_offers_the_store_not_an_apply() {
+        // The apply does not set it up (coordinator's ruling on the Task WT review), so D6 says
+        // Windows Terminal is not installed, and offers its Store page.
+        let mut b = backend();
+        applied(&b);
+        b.machine.wt.locations = vec![WtLocation {
+            variant: WtVariant::Unpackaged,
+            installed: true,
+            settings: PathBuf::from(r"C:\nowhere\settings.json"),
+        }];
+        let report = b.doctor_run().unwrap();
+        let d6 = by_id(&report, "D6");
+        assert_eq!(
+            (d6.code.as_deref(), d6.message_en.as_str(), d6.fix),
+            (
+                Some("E_WT_NOT_FOUND"),
+                "Windows Terminal is not installed",
+                Some(FixKind::InstallWindowsTerminal)
+            )
         );
     }
 

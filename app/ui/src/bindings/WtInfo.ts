@@ -7,6 +7,16 @@ export type WtInfo = { kind: WtKind,
  */
 installed: boolean, 
 /**
- * Its settings.json exists (one that was never opened has none, D6).
+ * Its settings.json exists. A Store or Preview one that is installed but was never opened
+ * has none yet (D6), and an apply sets it up from CMD Studio's template, colours included
+ * (founder 2026-10-17, spec §5.4). Two are left alone: a Preview while the Store one has a
+ * settings.json (it copies that one when it first starts), and an unpackaged folder without
+ * one, which is a leftover, not a Terminal.
  */
-hasSettings: boolean, };
+hasSettings: boolean, 
+/**
+ * An apply sets this one up: it is installed and was never opened, by the core's
+ * `detect::never_opened`, the rule the planner follows. The UI reads it here rather than
+ * from `installed` and `has_settings`, which an unpackaged leftover also matches.
+ */
+setUpByApply: boolean, };

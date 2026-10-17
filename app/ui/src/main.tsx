@@ -2,12 +2,10 @@
 // a plain browser, never in the shipped app) swaps in the in-memory mock through a dynamic
 // import behind a build-time constant, so the production build drops that branch and the mock
 // and the preset files stay out of the bundle (checked by grepping ui/dist after `vite build`).
-// A render that throws anywhere below shows the E_INTERNAL notice, never a blank window.
-import { StrictMode } from "react";
-import { createRoot } from "react-dom/client";
-import { App } from "./App";
-import { ErrorBoundary } from "./components/ErrorBoundary";
-import { IpcProvider } from "./ipc/context";
+// The IPC that cannot be picked (its module does not load, or `pickIpc` rejects), and a render that
+// throws anywhere below, show the E_INTERNAL notice (start.tsx, ErrorBoundary.tsx), never a blank
+// window.
+import { start } from "./start";
 import type { Ipc } from "./ipc/types";
 import "./styles.css";
 
@@ -22,15 +20,5 @@ async function pickIpc(): Promise<Ipc> {
 
 const root = document.getElementById("root");
 if (root) {
-  void pickIpc().then((ipc) => {
-    createRoot(root).render(
-      <StrictMode>
-        <ErrorBoundary>
-          <IpcProvider ipc={ipc}>
-            <App />
-          </IpcProvider>
-        </ErrorBoundary>
-      </StrictMode>,
-    );
-  });
+  void start(root, pickIpc);
 }

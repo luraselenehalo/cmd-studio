@@ -2,7 +2,8 @@
 
 /**
  * What the app offers for a finding. `reapply`, `replaceOtherClink`, `installWindowsTerminal`
- * and `openNewCmdWindow` are buttons; `openWindowsTerminalOnce` and `reinstall` are steps only
- * the user can take, shown as words.
+ * and `openNewCmdWindow` are buttons; `reinstall` is a step only the user can take, shown as
+ * words. A Windows Terminal that was never opened needs no step of the user's: an apply sets it
+ * up (founder 2026-10-17), so D6 offers `reapply` for it once a theme is applied.
  */
-export type FixKind = "reapply" | "replaceOtherClink" | "installWindowsTerminal" | "openWindowsTerminalOnce" | "openNewCmdWindow" | "reinstall";
+export type FixKind = "reapply" | "replaceOtherClink" | "installWindowsTerminal" | "openNewCmdWindow" | "reinstall";
