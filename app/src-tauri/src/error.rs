@@ -299,29 +299,39 @@ mod tests {
         rows
     }
 
-    /// The Thai text these rows of spec §5.9 still hold, though `MEANINGS` has V4's words now
-    /// (the Thai of the UI follows th.ts: "version" is เวอร์ชัน, never รุ่น; the part of
-    /// AutoRun is "ส่วนของ CMD Studio", never "ส่วนของเรา"). Task 3 of phase 3 edits the spec's
-    /// rows; until then each of these must still read exactly so. Once a row says what
-    /// `MEANINGS` says, the test fails and asks for its entry here to be deleted; with the last
-    /// one gone, delete this list and the match in `the_meanings_are_exactly_the_rows_of_spec_5_9`.
-    const SPEC_NOT_YET_AT_V4: &[(&str, &str)] = &[
+    /// The five rows of spec §5.9 whose Thai `MEANINGS` changed for V4 (the Thai of the UI follows
+    /// th.ts: "version" is เวอร์ชัน, never รุ่น; the part of AutoRun is "ส่วนของ CMD Studio", never
+    /// "ส่วนของเรา"; a build of the add-on is "แบบ"). Each entry is (code, the Thai the spec still
+    /// holds, the Thai `MEANINGS` must hold). Task 3 of phase 3 edits the spec's rows; until then
+    /// the spec's row must still read as the second member and `MEANINGS` as the third, so a typo
+    /// in one of them fails. Once a row says what `MEANINGS` says, the test fails and asks for its
+    /// entry to be deleted; with the last one gone, delete this list, the match in
+    /// `the_meanings_are_exactly_the_rows_of_spec_5_9` and the test below it.
+    const SPEC_NOT_YET_AT_V4: &[(&str, &str, &str)] = &[
         (
             "E_AUTORUN_WRITE",
             r#"เขียน AutoRun ไม่ได้ หรือแก้อย่างปลอดภัยไม่ได้จึงต้องแก้ด้วยมือ หรือ (D4) ส่วนของเราหายไปหรือไม่อยู่หน้าสุด"#,
+            r#"เขียน AutoRun ไม่ได้ หรือแก้อย่างปลอดภัยไม่ได้จึงต้องแก้ด้วยมือ หรือ (D4) ส่วนของ CMD Studio หายไปหรือไม่อยู่หน้าสุด"#,
         ),
-        ("E_THEME_NEWER_SCHEMA", r#"ไฟล์ธีมมาจากโปรแกรมรุ่นใหม่กว่า"#),
+        (
+            "E_THEME_NEWER_SCHEMA",
+            r#"ไฟล์ธีมมาจากโปรแกรมรุ่นใหม่กว่า"#,
+            r#"ไฟล์ธีมมาจากโปรแกรมเวอร์ชันใหม่กว่า"#,
+        ),
         (
             "E_UNSUPPORTED_PLATFORM",
             r#"เครื่องนี้ไม่ใช่ Windows แบบ x64 (เช่น ARM64) ส่วนเสริมที่แนบมากับ v1 มีแต่รุ่น x64"#,
+            r#"เครื่องนี้ไม่ใช่ Windows แบบ x64 (เช่น ARM64) ส่วนเสริมที่แนบมากับ v1 มีแต่แบบ x64"#,
         ),
         (
             "E_STATE_INVALID",
             r#"ใช้ `state.json` ไม่ได้ เพราะไฟล์เสีย ถูกแก้ เปิดไม่ได้ หรือเขียนโดย CMD Studio รุ่นที่ใหม่กว่า · ไฟล์ที่เปิดไม่ได้หรือมาจากรุ่นใหม่กว่าจะไม่ถูกเขียนทับ ส่วนไฟล์ที่เสีย "ย้อนกลับ" จะเอา `state.json` ก่อนใช้ธีมครั้งนั้นมาแทน และ "ย้อนทุกอย่าง" กับ `--cleanup` จะเปลี่ยนชื่อเป็น `state.json.damaged-<ms>` เก็บไว้ให้ดู"#,
+            r#"ใช้ `state.json` ไม่ได้ เพราะไฟล์เสีย ถูกแก้ เปิดไม่ได้ หรือเขียนโดย CMD Studio เวอร์ชันที่ใหม่กว่า · ไฟล์ที่เปิดไม่ได้หรือมาจากเวอร์ชันใหม่กว่าจะไม่ถูกเขียนทับ ส่วนไฟล์ที่เสีย "ย้อนกลับ" จะเอา `state.json` ก่อนใช้ธีมครั้งนั้นมาแทน และ "ย้อนทุกอย่าง" กับ `--cleanup` จะเปลี่ยนชื่อเป็น `state.json.damaged-<ms>` เก็บไว้ให้ดู"#,
         ),
         (
             "E_THEME_NOT_LOADED",
             r#"ใช้ธีมแล้วแต่ยังไม่มีหน้าต่าง cmd ไหนโหลดธีม ให้เปิดหน้าต่างใหม่ ในโหมด "cmd ทุกหน้าต่าง" ถ้าเปิดแล้วยังเป็นแบบนี้ แปลว่า cmd หยุดก่อนถึงส่วนของเราใน AutoRun ต้องแก้ค่า AutoRun ด้วยมือ ส่วนโหมด "เฉพาะใน Windows Terminal" ให้เปิดแท็บ cmd ใหม่ใน WT และถ้ายังเป็นแบบนี้ให้ใช้ธีมซ้ำ (D3)"#,
+            r#"ใช้ธีมแล้วแต่ยังไม่มีหน้าต่าง cmd ไหนโหลดธีม ให้เปิดหน้าต่างใหม่ ในโหมด "cmd ทุกหน้าต่าง" ถ้าเปิดแล้วยังเป็นแบบนี้ แปลว่า cmd หยุดก่อนถึงส่วนของ CMD Studio ใน AutoRun ต้องแก้ค่า AutoRun ด้วยมือ ส่วนโหมด "เฉพาะใน Windows Terminal" ให้เปิดแท็บ cmd ใหม่ใน WT และถ้ายังเป็นแบบนี้ให้ใช้ธีมซ้ำ (D3)"#,
         ),
     ];
 
@@ -341,9 +351,9 @@ mod tests {
         );
         for (code, (th, en)) in &here {
             let (spec_th, spec_en) = &spec[code];
-            match SPEC_NOT_YET_AT_V4.iter().find(|(c, _)| *c == code.as_str()) {
+            match SPEC_NOT_YET_AT_V4.iter().find(|(c, _, _)| *c == code.as_str()) {
                 // Still the words before V4; the entry goes once the spec has caught up.
-                Some((_, old)) => assert_eq!(
+                Some((_, old, _)) => assert_eq!(
                     spec_th, old,
                     "{code}: spec §5.9 no longer holds the old Thai text: delete its entry in SPEC_NOT_YET_AT_V4"
                 ),
@@ -370,12 +380,18 @@ mod tests {
         // spec's, and no other row differs: nothing hides in the list.
         let spec = spec_rows();
         for (code, th, _) in MEANINGS {
-            let listed = SPEC_NOT_YET_AT_V4.iter().any(|(c, _)| c == code);
+            let listed = SPEC_NOT_YET_AT_V4.iter().find(|(c, _, _)| c == code);
             let differs = spec[*code].0 != *th;
             assert_eq!(
-                listed, differs,
-                "{code}: listed in SPEC_NOT_YET_AT_V4 = {listed}"
+                listed.is_some(),
+                differs,
+                "{code}: listed in SPEC_NOT_YET_AT_V4 = {}",
+                listed.is_some()
             );
+            // And the table holds exactly the new words of the entry, not nearly them.
+            if let Some((_, _, new)) = listed {
+                assert_eq!(th, new, "{code}: MEANINGS is not the Thai the list expects");
+            }
         }
     }
 
