@@ -15,6 +15,8 @@ export const DICTIONARIES: Record<Language, Dictionary> = { en, th };
 export function fill(text: string, vars?: Record<string, string | number>): string {
   if (!vars) return text;
   return text.replace(/\{(\w+)\}/g, (whole, name: string) => {
+    // Own properties only: `{constructor}` must not be filled from Object.prototype.
+    if (!Object.hasOwn(vars, name)) return whole;
     const value = vars[name];
     return value === undefined ? whole : String(value);
   });
@@ -39,8 +41,10 @@ export function I18nProvider({
   setLanguage: (language: Language) => void;
   children: ReactNode;
 }) {
+  // A key missing at run time (a stale build) falls back to English, then to the key itself;
+  // the types and i18n.test.ts keep it from happening, and a screen must never throw for it.
   const t = useCallback<Translate>(
-    (key, vars) => fill(DICTIONARIES[language][key], vars),
+    (key, vars) => fill(DICTIONARIES[language][key] ?? en[key] ?? key, vars),
     [language],
   );
   const value = useMemo(() => ({ language, setLanguage, t }), [language, setLanguage, t]);

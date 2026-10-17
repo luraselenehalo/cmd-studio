@@ -1,7 +1,10 @@
+import { createElement, type ReactNode } from "react";
+import { renderHook } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { en } from "./en";
 import { th } from "./th";
-import { fill, formatTime } from "./index";
+import { fill, formatTime, I18nProvider, useT } from "./index";
+import type { Dictionary, Key } from "./types";
 
 const THAI = /[฀-๿]/;
 
@@ -10,22 +13,25 @@ const SAME_IN_BOTH = new Set<string>([
   "app.name",
   "language.en",
   "language.th",
-  "wizard.check.windows",
   "home.update.placeholder",
   "home.restore.latest",
-  "editor.prompt.title",
   "editor.prompt.layout.powerline",
   "help.credits.signpath",
   "advanced.version.app",
   "advanced.version.ohMyPosh",
   "advanced.version.clink",
   "advanced.version.nerdFonts",
-  "advanced.log",
 ]);
 
 describe("the two dictionaries", () => {
   it("have exactly the same keys", () => {
     expect(Object.keys(th).sort()).toEqual(Object.keys(en).sort());
+  });
+
+  it("list as the same in both only keys that exist", () => {
+    for (const key of SAME_IN_BOTH) {
+      expect(Object.hasOwn(en, key), `${key} is not a key of the English dictionary`).toBe(true);
+    }
   });
 
   it("have no empty text except the reserved update notice", () => {
@@ -57,11 +63,23 @@ describe("the two dictionaries", () => {
     }
   });
 
-  it("start every button text with a verb, as spec §4.5 asks (spot checks)", () => {
+  it("never say สำรอง: the spec's word for a backup is จุดย้อนกลับ (§4.5)", () => {
+    const offenders = Object.entries(th)
+      .filter(([, text]) => text.includes("สำรอง"))
+      .map(([key]) => key);
+    expect(offenders).toEqual([]);
+  });
+
+  // Spot checks of buttons, not a proof for every text: these buttons start with a verb.
+  it("have these buttons start with a verb, as spec §4.5 asks", () => {
     expect(en["apply.start"]).toBe("Apply");
     expect(en["editor.saveApply"]).toBe("Save and apply");
-    expect(th["editor.saveApply"]).toBe("บันทึกและใช้");
+    expect(th["editor.saveApply"]).toBe("บันทึกและใช้ธีม");
     expect(en["home.active.openCmd"]).toBe("Open cmd");
+    expect(en["themes.new"]).toBe("Create a theme");
+    expect(en["common.details"]).toBe("Show details");
+    expect(en["home.restore.all"]).toBe("See all restore points");
+    expect(en["wizard.where.setDefault"]).toBe("Make Windows Terminal open cmd by default");
   });
 });
 
@@ -72,9 +90,36 @@ describe("fill and formatTime", () => {
     expect(fill("plain")).toBe("plain");
   });
 
+  it("does not fill a hole from a property every object inherits", () => {
+    expect(fill("{constructor} {toString}", {})).toBe("{constructor} {toString}");
+  });
+
   it("formats a time in the language", () => {
     const ms = Date.UTC(2026, 9, 9, 9, 47);
     expect(formatTime(ms, "en")).toMatch(/2026/);
     expect(formatTime(ms, "th")).toMatch(/2569/);
+  });
+});
+
+describe("t", () => {
+  const wrapper = ({ children }: { children: ReactNode }) =>
+    createElement(I18nProvider, { language: "th", setLanguage: () => {}, children });
+
+  it("falls back to English, then to the key, and never throws", () => {
+    const { result } = renderHook(() => useT(), { wrapper });
+    expect(result.current("editor.save")).toBe("บันทึก");
+
+    // A key missing in the Thai dictionary at run time (a stale build): the English text.
+    const loose = th as Partial<Dictionary>;
+    const saved = th["editor.save"];
+    delete loose["editor.save"];
+    try {
+      expect(result.current("editor.save")).toBe(en["editor.save"]);
+    } finally {
+      loose["editor.save"] = saved;
+    }
+
+    // A key in neither dictionary: the key itself.
+    expect(result.current("no.such.key" as Key)).toBe("no.such.key");
   });
 });
