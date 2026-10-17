@@ -8,12 +8,13 @@ import { pick, useI18n } from "../i18n";
 import { isAppError, toIpcError } from "../ipc/types";
 
 /** An error in the UI's language with its code; anything that is not an `AppError` (all four
- * fields) is shown as `toIpcError` makes it: E_INTERNAL, with what was thrown as the details. */
-export function ErrorNotice({ error, title }: { error: AppError | unknown; title?: string }) {
+ * fields) is shown as `toIpcError` makes it: E_INTERNAL, with what was thrown as the details.
+ * `live={false}` drops the alert role, for a box that takes focus and is read by that (item 11). */
+export function ErrorNotice({ error, title, live = true }: { error: AppError | unknown; title?: string; live?: boolean }) {
   const { language, t } = useI18n();
   const e: AppError = isAppError(error) ? error : toIpcError(error).toAppError();
   return (
-    <div className="notice error" role="alert">
+    <div className="notice error" role={live ? "alert" : undefined}>
       <strong>{title ?? t("error.title")}</strong>
       <p>{pick(language, e.messageTh, e.messageEn)}</p>
       <details>
@@ -60,12 +61,13 @@ export function NotesList({ notes }: { notes: Note[] }) {
   );
 }
 
-/** The steps a rollback could not put back, each with how to fix it by hand (spec §5.5). */
-export function UnrestoredList({ steps }: { steps: Unrestored[] }) {
+/** The steps a rollback could not put back, each with how to fix it by hand (spec §5.5).
+ * `live={false}` as for `ErrorNotice`. */
+export function UnrestoredList({ steps, live = true }: { steps: Unrestored[]; live?: boolean }) {
   const { language, t } = useI18n();
   if (steps.length === 0) return null;
   return (
-    <div className="notice error" role="alert">
+    <div className="notice error" role={live ? "alert" : undefined}>
       <strong>{t("apply.unrestoredTitle")}</strong>
       <ul className="plain-list">
         {steps.map((s, i) => (

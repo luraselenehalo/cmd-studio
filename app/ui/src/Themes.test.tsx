@@ -11,6 +11,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { ApplyOutcome } from "./bindings/ApplyOutcome";
+import type { RestoreOutcome } from "./bindings/RestoreOutcome";
 import { App } from "./App";
 import { IpcProvider } from "./ipc/context";
 import { createMockIpc, type MockOptions } from "./ipc/mock";
@@ -419,6 +420,64 @@ describe("the after-apply bar", () => {
     expect(screen.queryByText("The undo stopped part-way. See why below.")).toBeNull();
     expect(screen.getByText("(E_BUSY)")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Undo" })).toBeTruthy();
+  });
+
+  it("says how an undo went wrong once, by moving focus to it, with no live region in it (item 11)", async () => {
+    const failure = { code: "E_WT_WRITE", messageTh: "(E_WT_WRITE)", messageEn: "(E_WT_WRITE)", details: "settings.json is locked" };
+    const cases: { text: string; answer: (undid: string | null) => Promise<RestoreOutcome> }[] = [
+      {
+        text: "The undo did not go through, so nothing changed: the theme is still applied.",
+        answer: async (undid) => ({
+          status: "stopped",
+          undone: [],
+          last: { status: "rolledBack", undid, error: failure, unrestored: [], notes: [], fontsLeft: [] },
+          notes: [],
+        }),
+      },
+      {
+        text: "The undo did not go through, and not everything could be put back. Fix these by hand:",
+        answer: async (undid) => ({
+          status: "stopped",
+          undone: [],
+          last: {
+            status: "rollbackIncomplete",
+            undid,
+            error: failure,
+            unrestored: [{ opIndex: 3, target: "Windows Terminal settings.json", code: "E_WT_WRITE", message: "locked", fix: "Close Windows Terminal.", fixTh: "ปิด Windows Terminal" }],
+            notes: [],
+            fontsLeft: [],
+          },
+          notes: [],
+        }),
+      },
+      {
+        text: "Nothing was undone: the undo was refused. See why below.",
+        answer: async () => ({ status: "stopped", undone: [], last: null, notes: [{ ...failure, code: "E_BUSY" }] }),
+      },
+      {
+        text: "This apply can no longer be undone.",
+        answer: async () => ({ status: "notRestorable", undone: [], last: null, notes: [] }),
+      },
+      {
+        text: "(E_SNAPSHOT_READ)",
+        answer: async () => {
+          throw ipcError("E_SNAPSHOT_READ", "manifest.json is not valid JSON");
+        },
+      },
+    ];
+    for (const c of cases) {
+      const { ipc, user, view } = mount();
+      await openThemes(user);
+      await applyFromCard(user, "Nord");
+      const undid = ipc.state.applied?.snapshotId ?? null;
+      vi.spyOn(ipc, "snapshotRestore").mockImplementation(() => c.answer(undid));
+      await user.click(screen.getByRole("button", { name: "Undo" }));
+      const said = await screen.findByText(c.text);
+      await waitFor(() => expect(document.activeElement?.contains(said), c.text).toBe(true));
+      const box = document.activeElement as HTMLElement;
+      expect(box.querySelectorAll('[role="alert"], [role="status"], [aria-live]'), c.text).toHaveLength(0);
+      view.unmount();
+    }
   });
 
   it("announces an apply in one live region only (fix 12)", async () => {

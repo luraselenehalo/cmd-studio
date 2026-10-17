@@ -90,15 +90,18 @@ export function AfterApplyBar() {
   );
 }
 
-/** How the bar's Undo went, in its own words for each outcome (ruling R4). */
+/**
+ * How the bar's Undo went, in its own words for each outcome (ruling R4). No live region in any
+ * of them, the errors included: the box around them takes focus, which reads them, and an alert
+ * as well would read them twice (item 11).
+ */
 export function UndoResultView({ result }: { result: UndoResult }) {
   const { t, language } = useI18n();
-  if (result.kind === "error") return <ErrorNotice error={result.error} />;
+  if (result.kind === "error") return <ErrorNotice error={result.error} live={false} />;
   const { outcome } = result;
   const last = outcome.last;
   const notes = [...outcome.notes, ...(last?.notes ?? [])];
   if (outcome.status === "done") {
-    // No live region: the notice takes focus, which reads it.
     return (
       <>
         <div className="notice ok">
@@ -118,9 +121,7 @@ export function UndoResultView({ result }: { result: UndoResult }) {
   if (outcome.status === "notRestorable") {
     return (
       <>
-        <div className="notice warn" role="alert">
-          {t("apply.undoNotRestorable")}
-        </div>
+        <div className="notice warn">{t("apply.undoNotRestorable")}</div>
         <NotesList notes={notes} />
       </>
     );
@@ -129,10 +130,8 @@ export function UndoResultView({ result }: { result: UndoResult }) {
   if (last?.status === "rolledBack") {
     return (
       <>
-        <div className="notice error" role="alert">
-          {t("apply.undoFailed")}
-        </div>
-        {last.error && <ErrorNotice error={last.error} />}
+        <div className="notice error">{t("apply.undoFailed")}</div>
+        {last.error && <ErrorNotice error={last.error} live={false} />}
         <NotesList notes={notes} />
       </>
     );
@@ -140,22 +139,20 @@ export function UndoResultView({ result }: { result: UndoResult }) {
   if (last?.status === "rollbackIncomplete") {
     return (
       <>
-        <div className="notice error" role="alert">
-          {t("apply.undoIncomplete")}
-        </div>
-        <UnrestoredList steps={last.unrestored} />
-        {last.error && <ErrorNotice error={last.error} />}
+        <div className="notice error">{t("apply.undoIncomplete")}</div>
+        <UnrestoredList steps={last.unrestored} live={false} />
+        {last.error && <ErrorNotice error={last.error} live={false} />}
         <NotesList notes={notes} />
       </>
     );
   }
   return (
     <>
-      <div className="notice warn" role="alert">
+      <div className="notice warn">
         {/* The very first undo was refused (fix 8): nothing was undone, rather than "part-way". */}
         {outcome.undone.length === 0 ? t("apply.undoRefused") : t("apply.undoStopped")}
       </div>
-      {last?.error && <ErrorNotice error={last.error} />}
+      {last?.error && <ErrorNotice error={last.error} live={false} />}
       <NotesList notes={notes} />
     </>
   );
