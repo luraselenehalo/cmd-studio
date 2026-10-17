@@ -467,6 +467,7 @@ mod tests {
                 profile: serde_json::Map::new(),
                 set_default: false,
                 create: false,
+                make_folder: false,
             },
             Op::SetAutoRun {
                 value: Some("ours".into()),

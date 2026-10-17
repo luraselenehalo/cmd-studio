@@ -709,7 +709,10 @@ mod tests {
             .unwrap();
         let machine = Machine {
             data_short: Some(paths.data.clone()),
-            wt_create: vec![PathBuf::from(WT_SETTINGS)],
+            wt_create: vec![crate::plan::WtToCreate {
+                settings: PathBuf::from(WT_SETTINGS),
+                folder_exists: true,
+            }],
             ..Machine::default()
         };
         let req = Request {

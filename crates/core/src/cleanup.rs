@@ -35,7 +35,7 @@ use crate::state::{
 };
 use crate::txn::{self, Executor, Failure, Outcome};
 use crate::verify::SystemVerifier;
-use crate::wt_edit::{read_value, revert, WtError, WtKey, WT_TEMPLATE};
+use crate::wt_edit::{holds_ours, read_value, revert, WtError, WtKey, WT_TEMPLATE};
 use serde_json::{Map, Value};
 use std::fmt::Display;
 use std::path::Path;
@@ -832,10 +832,12 @@ fn settings_step(
 /// [`SettingsStep::Template`]), once the transaction has put it back to the template: the file is
 /// deleted, so that Windows Terminal is back to "never configured" and makes its defaults on its
 /// next start (founder 2026-10-17, spec §6.3). It is read once more first: a file that is not the
-/// template any more (Terminal wrote it in between) keeps what it holds, and holds nothing of
-/// CMD Studio's. Whether CMD Studio is done with it. One that cannot be read or deleted (a program
-/// may hold it) is a failed step with how to delete it by hand; it stays in the baseline, so the
-/// next revert, or `--cleanup`, tries again, and `--cleanup` keeps its records meanwhile.
+/// template any more (Terminal wrote it in between) is kept when it holds nothing of CMD
+/// Studio's (`wt_edit::holds_ours`, the undo's test too), and is a failed step when it holds
+/// CMD Studio's part again. Whether CMD Studio is done with it. One that holds CMD Studio's part,
+/// or cannot be read or deleted (a program may hold it), is a failed step with how to finish by
+/// hand; it stays in the baseline, so the next revert, or `--cleanup`, tries again, and
+/// `--cleanup` keeps its records meanwhile.
 fn remove_template(sys: System<'_>, file: &WtFileBaseline, report: &mut Report) -> bool {
     let path = &file.settings;
     let what = format!("Remove {}", path.display());
@@ -849,6 +851,23 @@ fn remove_template(sys: System<'_>, file: &WtFileBaseline, report: &mut Report) 
             return true;
         }
         Ok(Some(bytes)) if bytes != WT_TEMPLATE.as_bytes() => {
+            let ours = std::str::from_utf8(&bytes)
+                .map_or(true, |text| holds_ours(text, &file.written_map()));
+            if ours {
+                report.fail(
+                    what,
+                    "E_WT_WRITE",
+                    "Windows Terminal wrote it again after CMD Studio's part was taken out, and \
+                     it holds CMD Studio's part again (such as the CMD Studio color scheme), so \
+                     it was left as it is; the next revert takes that part out",
+                    Some(settings_by_hand(
+                        file,
+                        "Windows Terminal wrote it again with CMD Studio's part in it.",
+                        "Windows Terminal เขียนไฟล์นี้ใหม่ และมีส่วนของ CMD Studio อยู่ในนั้นอีก",
+                    )),
+                );
+                return false;
+            }
             report.done(
                 what,
                 "kept: Windows Terminal wrote to it since CMD Studio's part was taken out, and \
@@ -2920,6 +2939,127 @@ mod tests {
         assert!(report.ok(), "{report:#?}");
         assert!(!m.fs.exists(Path::new(WT)));
         assert!(!m.fs.exists(&ctx.paths.state_file()));
+    }
+
+    /// The fake file system, but once `path` has been written and then read (the revert's
+    /// write and its read-back), it holds `then`: Windows Terminal wrote it in between.
+    struct TerminalWritesAfter<'a> {
+        fs: &'a FakeFs,
+        path: PathBuf,
+        then: String,
+        written: std::cell::Cell<bool>,
+    }
+
+    impl Fs for TerminalWritesAfter<'_> {
+        fn read(&self, path: &Path) -> Result<Option<Vec<u8>>, AdapterError> {
+            let got = self.fs.read(path);
+            if path == self.path && self.written.replace(false) {
+                self.fs.put(path, &self.then);
+            }
+            got
+        }
+        fn write_atomic(&self, path: &Path, bytes: &[u8]) -> Result<(), AdapterError> {
+            self.fs.write_atomic(path, bytes)?;
+            if path == self.path {
+                self.written.set(true);
+            }
+            Ok(())
+        }
+        fn remove_file(&self, path: &Path) -> Result<(), AdapterError> {
+            self.fs.remove_file(path)
+        }
+        fn exists(&self, path: &Path) -> bool {
+            self.fs.exists(path)
+        }
+        fn is_dir(&self, path: &Path) -> bool {
+            self.fs.is_dir(path)
+        }
+        fn create_dir_all(&self, path: &Path) -> Result<(), AdapterError> {
+            self.fs.create_dir_all(path)
+        }
+        fn remove_dir(&self, path: &Path) -> Result<(), AdapterError> {
+            self.fs.remove_dir(path)
+        }
+        fn remove_dir_all(&self, path: &Path) -> Result<(), AdapterError> {
+            self.fs.remove_dir_all(path)
+        }
+        fn rename(&self, from: &Path, to: &Path) -> Result<(), AdapterError> {
+            self.fs.rename(from, to)
+        }
+        fn list_dir(&self, path: &Path) -> Result<Vec<DirEntry>, AdapterError> {
+            self.fs.list_dir(path)
+        }
+        fn try_lock(&self, path: &Path) -> Result<Option<FsLock>, AdapterError> {
+            self.fs.try_lock(path)
+        }
+    }
+
+    const TERMINAL_DEFAULTS: &str = include_str!("../tests/fixtures/wt/terminal-defaults.json");
+
+    #[test]
+    fn a_settings_file_terminal_wrote_again_is_kept_only_while_nothing_of_ours_is_in_it() {
+        // Between the revert's write of the template and the delete, a running Terminal writes
+        // the file. Its own defaults: kept, done, nothing to retry. What it had loaded, the
+        // theme's scheme included: said, kept in the baseline, and the next revert finishes
+        // (coordinator's ruling on the Task WT review).
+        let (m, ctx) = machine();
+        applied_to_a_terminal_never_opened(&m, &ctx);
+        let terminal = TerminalWritesAfter {
+            fs: &m.fs,
+            path: PathBuf::from(WT),
+            then: TERMINAL_DEFAULTS.to_string(),
+            written: std::cell::Cell::new(false),
+        };
+        let sys = System {
+            fs: &terminal,
+            ..m.system()
+        };
+        let report = revert_all(sys, &later(&ctx, 1)).unwrap();
+        assert!(report.ok(), "{report:#?}");
+        assert_eq!(m.fs.file(WT), Some(TERMINAL_DEFAULTS.as_bytes().to_vec()));
+        let step = report
+            .steps
+            .iter()
+            .find(|s| s.what == format!("Remove {WT}"))
+            .unwrap();
+        assert!(step.detail.starts_with("kept: "), "{step:?}");
+        assert!(state(&m, &ctx).baseline.wt.is_empty());
+
+        let (m, ctx) = machine();
+        applied_to_a_terminal_never_opened(&m, &ctx);
+        let themed = TERMINAL_DEFAULTS.replace(
+            "\"schemes\": []",
+            "\"schemes\": [ { \"name\": \"CMD Studio\", \"background\": \"#1f1e1d\" } ]",
+        );
+        let terminal = TerminalWritesAfter {
+            fs: &m.fs,
+            path: PathBuf::from(WT),
+            then: themed.clone(),
+            written: std::cell::Cell::new(false),
+        };
+        let sys = System {
+            fs: &terminal,
+            ..m.system()
+        };
+        let report = revert_all(sys, &later(&ctx, 1)).unwrap();
+        let [step] = failed(&report, "E_WT_WRITE")[..] else {
+            panic!("{report:#?}")
+        };
+        assert_eq!(step.what, format!("Remove {WT}"));
+        assert!(step.detail.contains("CMD Studio"), "{step:?}");
+        assert!(step.fix.is_some(), "{step:?}");
+        assert_eq!(m.fs.file(WT), Some(themed.into_bytes()), "left as it is");
+        assert_eq!(
+            state(&m, &ctx).baseline.wt.len(),
+            1,
+            "tried again next time"
+        );
+        // The next revert takes CMD Studio's part out of it and keeps Terminal's.
+        let report = revert_all(m.system(), &later(&ctx, 2)).unwrap();
+        assert!(report.ok(), "{report:#?}");
+        let text = String::from_utf8(m.fs.file(WT).unwrap()).unwrap();
+        assert!(!text.contains("CMD Studio") && text.contains("Windows PowerShell"));
+        assert!(state(&m, &ctx).baseline.wt.is_empty());
     }
 
     #[test]

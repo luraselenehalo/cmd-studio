@@ -704,13 +704,15 @@ fn d6(sys: System<'_>) -> Check {
     }
     if present == 0 {
         // Installed but never opened: an apply sets it up from the template (founder 2026-10-17,
-        // spec §5.4), so there is nothing to open first.
-        return if locations.iter().any(|l| l.installed) {
+        // spec §5.4), so there is nothing to open first. The same reading as the planner's: an
+        // unpackaged folder without a settings.json is no Terminal to set up.
+        let never_opened = crate::detect::never_opened(&locations, |l| sys.fs.exists(&l.settings));
+        return if !never_opened.is_empty() {
             check(
                 "D6",
                 Status::Warn,
                 Some("E_WT_NOT_FOUND"),
-                "Windows Terminal ยังไม่เคยเปิด จึงยังไม่มีการตั้งค่า การใช้ธีมจะตั้งค่าให้เอง",
+                "Windows Terminal ยังไม่เคยเปิด จึงยังไม่มีการตั้งค่า ใช้ธีมแล้ว CMD Studio จะตั้งค่าให้เอง",
                 "Windows Terminal has never been opened, so it has no settings yet. Applying a \
                  theme sets them up",
                 "settings.json does not exist yet",
@@ -1462,7 +1464,7 @@ mod tests {
         );
         assert_eq!(
             d6.message_th,
-            "Windows Terminal ยังไม่เคยเปิด จึงยังไม่มีการตั้งค่า การใช้ธีมจะตั้งค่าให้เอง"
+            "Windows Terminal ยังไม่เคยเปิด จึงยังไม่มีการตั้งค่า ใช้ธีมแล้ว CMD Studio จะตั้งค่าให้เอง"
         );
         let p = prepare_apply(m.system(), &ctx, &terracotta(), &request(Target::All)).unwrap();
         assert!(!p
@@ -1485,18 +1487,30 @@ mod tests {
         let checks = doctor(m.system(), &ctx);
         assert_eq!(by_id(&checks, "D6").status, Status::Ok);
         assert_eq!(by_id(&checks, "D7").status, Status::Ok, "{checks:?}");
-        // Not installed at all: the warning it always was.
-        let (mut m, ctx) = machine();
-        m.wt.locations.clear();
-        let d6 = by_id(&doctor(m.system(), &ctx), "D6");
-        assert_eq!(
-            (d6.status, d6.code, d6.message_en.as_str()),
-            (
-                Status::Warn,
-                Some("E_WT_NOT_FOUND"),
-                "Windows Terminal is not installed"
-            )
-        );
+        // Not installed at all: the warning it always was. So is an unpackaged folder without a
+        // settings.json, which no apply sets up (coordinator's ruling on the Task WT review).
+        let leftover = crate::adapters::WtLocation {
+            variant: crate::adapters::WtVariant::Unpackaged,
+            installed: true,
+            settings: PathBuf::from(
+                r"C:\Users\tester\AppData\Local\Microsoft\Windows Terminal\settings.json",
+            ),
+        };
+        for locations in [vec![], vec![leftover]] {
+            let (mut m, ctx) = machine();
+            m.wt.locations = locations;
+            let d6 = by_id(&doctor(m.system(), &ctx), "D6");
+            assert_eq!(
+                (d6.status, d6.code, d6.message_en.as_str()),
+                (
+                    Status::Warn,
+                    Some("E_WT_NOT_FOUND"),
+                    "Windows Terminal is not installed"
+                ),
+                "{:?}",
+                m.wt.locations
+            );
+        }
     }
 
     #[test]

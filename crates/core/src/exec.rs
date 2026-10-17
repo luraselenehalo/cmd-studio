@@ -16,7 +16,7 @@ use crate::plan::{Component, Op, Paths, AUTORUN_NOT_TEXT};
 use crate::resources::{check_bundle, sha256_hex, Manifest, ResourceError, Resources};
 use crate::state::{AutoRunRecord, RegValueRecord};
 use crate::txn::{Executor, Failure, Verifier};
-use crate::wt_edit::{apply_edit, WtEdit, WT_TEMPLATE};
+use crate::wt_edit::{apply_edit, holds_ours, WtEdit, WT_TEMPLATE};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -759,6 +759,7 @@ impl Executor for SystemExecutor<'_> {
                 profile,
                 set_default,
                 create,
+                ..
             } => {
                 // A file that is there is edited, also when the op was planned to create it
                 // (Windows Terminal was opened in between): it is never replaced by the template.
@@ -834,7 +835,10 @@ impl Executor for SystemExecutor<'_> {
             }
             .map_err(|e| failure("E_DATA_WRITE", e)),
             Op::WtApply {
-                settings, create, ..
+                settings,
+                create,
+                make_folder,
+                ..
             } => match prior {
                 Some(bytes)
                     if fs.read(settings).ok().flatten().as_deref() != Some(bytes.as_slice()) =>
@@ -848,10 +852,18 @@ impl Executor for SystemExecutor<'_> {
                 // Also when Windows Terminal has added its own profiles to it since: changes made
                 // after the apply are not kept by an undo, and the machine is back to "Terminal
                 // never configured", so Terminal makes its defaults again on its next start. The
-                // folder that holds it is Windows Terminal's, and stays.
-                None if *create => fs
-                    .remove_file(settings)
-                    .map_err(|e| failure("E_WT_WRITE", e)),
+                // folder that holds it goes too when the apply made it and nothing else is in it
+                // (`remove_dir` deletes only an empty folder); one that was there stays.
+                None if *create => {
+                    fs.remove_file(settings)
+                        .map_err(|e| failure("E_WT_WRITE", e))?;
+                    if let (true, Some(folder)) = (*make_folder, settings.parent()) {
+                        // Best effort: a folder something else is in, or that Terminal holds,
+                        // is Terminal's to keep.
+                        let _ = fs.remove_dir(folder);
+                    }
+                    Ok(())
+                }
                 // An op that does not create never creates or deletes a settings.json.
                 None => Ok(()),
             },
@@ -1242,11 +1254,41 @@ fn font_left_to_the_user(
         .is_some())
 }
 
+/// Whether `op` made its settings.json from the template where none was (`want` is what it
+/// captured: absent), and the file there now is one a running Windows Terminal wrote again
+/// right after the undo deleted it, holding nothing of CMD Studio's (`wt_edit::holds_ours`):
+/// the undo did its part (coordinator's ruling on the Task WT review). Only this op may come
+/// back so; every other target comes back byte for byte.
+fn settings_terminal_made_again(op: &Op, want: &Option<Vec<u8>>, now: &Option<Vec<u8>>) -> bool {
+    let Op::WtApply {
+        scheme,
+        profile,
+        set_default,
+        create: true,
+        ..
+    } = op
+    else {
+        return false;
+    };
+    let (None, Some(bytes)) = (want, now) else {
+        return false;
+    };
+    let edit = WtEdit {
+        scheme,
+        profile,
+        set_default: *set_default,
+    };
+    std::str::from_utf8(bytes).is_ok_and(|text| !holds_ours(text, &edit.written()))
+}
+
 impl Verifier for UndoVerifier<'_> {
     fn verify(&mut self, _ops: &[Op]) -> Result<(), Failure> {
         for (op, want) in &self.expected {
             let now = self.exec.capture(op)?;
-            if !same_state(op, &now, want) && !font_left_to_the_user(&mut self.exec, op, want)? {
+            if !same_state(op, &now, want)
+                && !settings_terminal_made_again(op, want, &now)
+                && !font_left_to_the_user(&mut self.exec, op, want)?
+            {
                 return Err(failure(
                     "E_VERIFY_READBACK",
                     format!("undo did not restore {}", op_label(op)),
@@ -1365,6 +1407,7 @@ mod tests {
                 profile,
                 set_default: true,
                 create: false,
+                make_folder: false,
             },
             Op::SetAutoRun {
                 value: Some("%A% & echo hi & ours".into()),
@@ -1501,6 +1544,7 @@ mod tests {
             profile: Map::new(),
             set_default: false,
             create: false,
+            make_folder: false,
         };
         let mut ex = SystemExecutor::new(m.system(), &res);
         assert_eq!(ex.apply(&op).unwrap_err().code, "E_WT_PARSE");
@@ -1587,6 +1631,7 @@ mod tests {
                 profile: Map::new(),
                 set_default: false,
                 create: false,
+                make_folder: false,
             })
             .unwrap_err();
         assert_eq!(err.code, "E_WT_WRITE");
@@ -1633,6 +1678,7 @@ mod tests {
             profile: serde_json::Map::new(),
             set_default: false,
             create: false,
+            make_folder: false,
         };
         assert_eq!(
             fix_by_hand(&wt, &Some(b"{}".to_vec()), payload).en,
@@ -1748,6 +1794,7 @@ mod tests {
             profile: Map::new(),
             set_default: false,
             create: false,
+            make_folder: false,
         };
         let th = fix_by_hand(&wt, &Some(b"{}".to_vec()), payload).th;
         assert!(
@@ -2367,6 +2414,7 @@ mod tests {
             profile: Map::new(),
             set_default: false,
             create: false,
+            make_folder: false,
         };
         for op in [write, wt] {
             let err = ex.capture(&op).unwrap_err();
@@ -2573,6 +2621,7 @@ mod tests {
             profile: Map::new(),
             set_default: false,
             create: false,
+            make_folder: false,
         };
         let mut ex = SystemExecutor::new(m.system(), &res);
         let prior = ex.capture(&op).unwrap();
@@ -2595,6 +2644,7 @@ mod tests {
             profile: Map::new(),
             set_default: false,
             create: false,
+            make_folder: false,
         };
         ex.restore(&gone, &None).unwrap();
         assert!(!m.fs.exists(Path::new(r"C:\wt\other.json")));
@@ -2619,6 +2669,7 @@ mod tests {
             profile,
             set_default,
             create: true,
+            make_folder: false,
         }
     }
 
@@ -2674,6 +2725,58 @@ mod tests {
     }
 
     #[test]
+    fn a_local_state_folder_it_made_goes_again_with_the_file_and_only_when_empty() {
+        // The packaged Terminal's LocalState is missing: the apply makes it, and an undo or a
+        // rollback takes it away again once the file is gone and nothing else is in it
+        // (coordinator's ruling on the Task WT review).
+        let (m, res, _) = setup();
+        let folder = Path::new(NEW_WT).parent().unwrap();
+        m.fs.create_dir_all(folder.parent().unwrap()).unwrap();
+        assert!(!m.fs.is_dir(folder));
+        let Op::WtApply {
+            settings,
+            scheme,
+            profile,
+            set_default,
+            ..
+        } = set_up_op(true)
+        else {
+            unreachable!()
+        };
+        let op = Op::WtApply {
+            settings,
+            scheme,
+            profile,
+            set_default,
+            create: true,
+            make_folder: true,
+        };
+        let before = m.fs.snapshot();
+        let mut ex = SystemExecutor::new(m.system(), &res);
+        let prior = ex.capture(&op).unwrap();
+        ex.apply(&op).unwrap();
+        assert!(m.fs.is_dir(folder) && m.fs.exists(Path::new(NEW_WT)));
+        ex.restore(&op, &prior).unwrap();
+        ex.restore(&op, &prior).unwrap();
+        assert_eq!(m.fs.snapshot(), before, "the folder went with the file");
+        // Something else is in it by the time of the undo: the folder stays, the file goes.
+        ex.apply(&op).unwrap();
+        let other = folder.join("state.json");
+        m.fs.put(&other, b"{}");
+        ex.restore(&op, &prior).unwrap();
+        assert!(!m.fs.exists(Path::new(NEW_WT)));
+        assert_eq!(m.fs.file(&other), Some(b"{}".to_vec()));
+        // A folder that was there (the op does not make it) stays, empty or not.
+        let (m, res) = new_wt_machine();
+        let mut ex = SystemExecutor::new(m.system(), &res);
+        let op = set_up_op(true);
+        let prior = ex.capture(&op).unwrap();
+        ex.apply(&op).unwrap();
+        ex.restore(&op, &prior).unwrap();
+        assert!(m.fs.is_dir(folder) && !m.fs.exists(Path::new(NEW_WT)));
+    }
+
+    #[test]
     fn a_settings_file_that_appeared_since_the_plan_is_edited_never_replaced() {
         // Windows Terminal was opened between the plan and the apply: its own file is edited.
         let (m, res) = new_wt_machine();
@@ -2710,6 +2813,7 @@ mod tests {
             profile,
             set_default,
             create: false,
+            make_folder: false,
         };
         let mut ex = SystemExecutor::new(m.system(), &res);
         let err = ex.apply(&op).unwrap_err();
@@ -2782,6 +2886,172 @@ mod tests {
             (m.fs.snapshot(), m.autorun.snapshot(), m.fonts.snapshot()),
             before
         );
+    }
+
+    /// What a running Windows Terminal writes when its settings.json is gone: its own defaults.
+    const TERMINAL_DEFAULTS: &str = include_str!("../tests/fixtures/wt/terminal-defaults.json");
+
+    /// The fake file system, but deleting `path` puts `again` there at once, as a running
+    /// Windows Terminal writes its settings.json again within moments of a delete.
+    struct TerminalRunning<'a> {
+        fs: &'a FakeFs,
+        path: PathBuf,
+        again: String,
+    }
+
+    impl Fs for TerminalRunning<'_> {
+        fn read(&self, path: &Path) -> Result<Option<Vec<u8>>, AdapterError> {
+            self.fs.read(path)
+        }
+        fn write_atomic(&self, path: &Path, bytes: &[u8]) -> Result<(), AdapterError> {
+            self.fs.write_atomic(path, bytes)
+        }
+        fn remove_file(&self, path: &Path) -> Result<(), AdapterError> {
+            self.fs.remove_file(path)?;
+            if path == self.path {
+                self.fs.put(path, &self.again);
+            }
+            Ok(())
+        }
+        fn exists(&self, path: &Path) -> bool {
+            self.fs.exists(path)
+        }
+        fn is_dir(&self, path: &Path) -> bool {
+            self.fs.is_dir(path)
+        }
+        fn create_dir_all(&self, path: &Path) -> Result<(), AdapterError> {
+            self.fs.create_dir_all(path)
+        }
+        fn remove_dir(&self, path: &Path) -> Result<(), AdapterError> {
+            self.fs.remove_dir(path)
+        }
+        fn remove_dir_all(&self, path: &Path) -> Result<(), AdapterError> {
+            self.fs.remove_dir_all(path)
+        }
+        fn rename(&self, from: &Path, to: &Path) -> Result<(), AdapterError> {
+            self.fs.rename(from, to)
+        }
+        fn list_dir(&self, path: &Path) -> Result<Vec<DirEntry>, AdapterError> {
+            self.fs.list_dir(path)
+        }
+        fn try_lock(&self, path: &Path) -> Result<Option<FsLock>, AdapterError> {
+            self.fs.try_lock(path)
+        }
+    }
+
+    /// Undoes `ops` on `sys`, as `undo_all` does on the fake machine.
+    fn undo_on(
+        sys: System<'_>,
+        res: &Resources,
+        ops: &[Op],
+        priors: Vec<(Op, Option<Vec<u8>>)>,
+    ) -> Outcome {
+        let mut exec = UndoExecutor::new(SystemExecutor::new(sys, res), priors.clone());
+        let mut verifier = UndoVerifier::new(SystemExecutor::new(sys, res), priors);
+        let reversed: Vec<Op> = ops.iter().rev().cloned().collect();
+        txn::run(
+            "undo",
+            reversed,
+            &mut exec,
+            &mut verifier,
+            &mut Journals::default(),
+        )
+    }
+
+    #[test]
+    fn an_undo_while_terminal_runs_and_writes_its_defaults_again_commits() {
+        // The app's own "Open cmd" leaves Terminal running; it writes its own defaults again
+        // right after the undo deletes the file. Nothing of CMD Studio's is in them, so the undo
+        // is done (coordinator's ruling on the Task WT review).
+        let (m, res) = new_wt_machine();
+        let ops = vec![set_up_op(true)];
+        let priors = apply_all(&m, &res, &ops);
+        let terminal = TerminalRunning {
+            fs: &m.fs,
+            path: PathBuf::from(NEW_WT),
+            again: TERMINAL_DEFAULTS.to_string(),
+        };
+        let sys = System {
+            fs: &terminal,
+            ..m.system()
+        };
+        assert_eq!(undo_on(sys, &res, &ops, priors), Outcome::Committed);
+        assert_eq!(
+            m.fs.file(NEW_WT),
+            Some(TERMINAL_DEFAULTS.as_bytes().to_vec())
+        );
+    }
+
+    #[test]
+    fn an_undo_after_which_terminal_writes_cmd_studios_scheme_back_rolls_back() {
+        // Terminal wrote what it had loaded, the theme included: the undo did not take it out.
+        let (m, res) = new_wt_machine();
+        let ops = vec![set_up_op(true)];
+        let priors = apply_all(&m, &res, &ops);
+        let themed = String::from_utf8(m.fs.file(NEW_WT).unwrap()).unwrap();
+        let again = TERMINAL_DEFAULTS.replace(
+            "\"schemes\": []",
+            "\"schemes\": [ { \"name\": \"CMD Studio\", \"background\": \"#1f1e1d\" } ]",
+        );
+        let terminal = TerminalRunning {
+            fs: &m.fs,
+            path: PathBuf::from(NEW_WT),
+            again,
+        };
+        let sys = System {
+            fs: &terminal,
+            ..m.system()
+        };
+        let out = undo_on(sys, &res, &ops, priors);
+        assert!(
+            matches!(
+                out,
+                Outcome::RolledBack {
+                    code: "E_VERIFY_READBACK",
+                    ..
+                }
+            ),
+            "{out:?}"
+        );
+        // The rollback put the themed file back.
+        assert_eq!(m.fs.file(NEW_WT), Some(themed.into_bytes()));
+    }
+
+    #[test]
+    fn only_a_settings_file_it_made_may_come_back_after_an_undo() {
+        // Every other target stays byte for byte: a settings.json that was there before, put
+        // back differently, is a failed undo, even holding nothing of CMD Studio's.
+        let (m, res) = new_wt_machine();
+        m.fs.put(NEW_WT, TERMINAL_DEFAULTS);
+        let Op::WtApply {
+            settings,
+            scheme,
+            profile,
+            set_default,
+            ..
+        } = set_up_op(true)
+        else {
+            unreachable!()
+        };
+        let edit = Op::WtApply {
+            settings,
+            scheme,
+            profile,
+            set_default,
+            create: false,
+            make_folder: false,
+        };
+        let ops = vec![edit.clone()];
+        let priors = apply_all(&m, &res, &ops);
+        let mut verifier = UndoVerifier::new(SystemExecutor::new(m.system(), &res), priors);
+        m.fs.put(NEW_WT, crate::wt_edit::WT_TEMPLATE);
+        assert_eq!(verifier.verify(&[]).unwrap_err().code, "E_VERIFY_READBACK");
+        // And a file made from the template that is still there, unchanged, is not undone.
+        let (m, res) = new_wt_machine();
+        let ops = vec![set_up_op(true)];
+        let priors = apply_all(&m, &res, &ops);
+        let mut verifier = UndoVerifier::new(SystemExecutor::new(m.system(), &res), priors);
+        assert_eq!(verifier.verify(&[]).unwrap_err().code, "E_VERIFY_READBACK");
     }
 
     #[test]
@@ -2972,6 +3242,7 @@ mod tests {
                 profile: Map::new(),
                 set_default: true,
                 create: false,
+                make_folder: false,
             },
             Op::SetAutoRun {
                 value: Some("ours & %A% & echo hi".into()),

@@ -212,6 +212,7 @@ pub fn prepare_apply(
                 profile,
                 set_default,
                 create,
+                ..
             } => {
                 // Reading it is reading the machine; only text Windows Terminal cannot read is
                 // E_WT_PARSE.
