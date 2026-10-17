@@ -7,6 +7,7 @@ pub mod cleanup;
 pub mod color;
 pub mod detect;
 pub mod doctor;
+pub mod eventlog;
 pub mod exec;
 pub mod generate;
 pub mod model;

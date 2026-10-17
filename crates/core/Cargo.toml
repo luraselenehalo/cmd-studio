@@ -37,7 +37,8 @@ winreg = "=0.56.0"
 # System_Threading, UI_Shell. fonts.rs: Foundation, Graphics_Gdi, System_Threading (its leak
 # test's GetGuiResources), UI_WindowsAndMessaging. mod.rs: System_Diagnostics_Debug
 # (FormatMessageW) and System_LibraryLoader (GetModuleHandleW for ntdll), for Windows' error
-# text in English.
+# text in English. eventlog.rs: System_EventLog (EvtQuery, EvtNext, EvtRender, EvtClose) and
+# Foundation (GetLastError), for cmd's crashes in Windows' Application log (recovery spec §4.3).
 windows-sys = { version = "=0.61.2", features = [
     "Win32_Foundation",
     "Win32_Globalization",
@@ -48,6 +49,7 @@ windows-sys = { version = "=0.61.2", features = [
     "Win32_Storage_Packaging_Appx",
     "Win32_System_Com",
     "Win32_System_Diagnostics_Debug",
+    "Win32_System_EventLog",
     "Win32_System_LibraryLoader",
     "Win32_System_SystemInformation",
     "Win32_System_SystemServices",

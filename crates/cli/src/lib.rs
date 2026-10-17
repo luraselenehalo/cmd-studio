@@ -1072,8 +1072,8 @@ pub fn now_ms() -> u64 {
 #[cfg(windows)]
 pub fn run(args: &[OsString], io: &mut Io<'_>) -> i32 {
     use cmdstudio_core::adapters::windows::{
-        fonts::WinFonts, fs::WinFs, host::WinHost, process::WinProcess, registry::WinAutoRun,
-        wt::WinWt,
+        eventlog::WinEventLog, fonts::WinFonts, fs::WinFs, host::WinHost, process::WinProcess,
+        registry::WinAutoRun, wt::WinWt,
     };
     use cmdstudio_core::adapters::{program_data_dir, Host};
     let host = WinHost;
@@ -1114,6 +1114,7 @@ pub fn run(args: &[OsString], io: &mut Io<'_>) -> i32 {
         WinWt::new(local.clone()),
     );
     let process = WinProcess::new(allowed, std::time::Duration::from_secs(60));
+    let event_log = WinEventLog::real();
     let sys = System {
         fs: &fs,
         autorun: &autorun,
@@ -1121,6 +1122,7 @@ pub fn run(args: &[OsString], io: &mut Io<'_>) -> i32 {
         wt: &wt,
         process: &process,
         host: &host,
+        event_log: &event_log,
     };
     run_with(args, io, sys, &defaults)
 }

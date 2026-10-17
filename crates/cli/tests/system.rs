@@ -16,7 +16,8 @@
 
 use cmdstudio_cli::{now_ms, run_with, Defaults, Io, EXIT_OK};
 use cmdstudio_core::adapters::windows::{
-    fonts::WinFonts, fs::WinFs, host::WinHost, process::WinProcess, registry::WinAutoRun, wt::WinWt,
+    eventlog::WinEventLog, fonts::WinFonts, fs::WinFs, host::WinHost, process::WinProcess,
+    registry::WinAutoRun, wt::WinWt,
 };
 use cmdstudio_core::adapters::{program_data_dir, AdapterError, Fonts, Host, RegValue, System};
 use cmdstudio_core::exec::font_target;
@@ -452,6 +453,7 @@ fn system_apply_doctor_undo_is_byte_identical() {
         vec![data.join("runtime"), program_data.clone()],
         Duration::from_secs(60),
     );
+    let event_log = WinEventLog::real();
     let sys = System {
         fs: &fs,
         autorun: &autorun,
@@ -459,6 +461,7 @@ fn system_apply_doctor_undo_is_byte_identical() {
         wt: &wt_loc,
         process: &process,
         host: &host,
+        event_log: &event_log,
     };
     let (_, font_file, font_value) = font_target(
         sys,
