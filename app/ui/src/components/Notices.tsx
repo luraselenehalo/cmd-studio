@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 import type { AppError } from "../bindings/AppError";
 import type { Note } from "../bindings/Note";
 import type { Unrestored } from "../bindings/Unrestored";
-import { pick, useI18n } from "../i18n";
+import { pick, pickedLanguage, useI18n } from "../i18n";
 import { isAppError, toIpcError } from "../ipc/types";
 
 /** An error in the UI's language with its code; anything that is not an `AppError` (all four
@@ -16,12 +16,13 @@ export function ErrorNotice({ error, title, live = true }: { error: AppError | u
   return (
     <div className="notice error" role={live ? "alert" : undefined}>
       <strong>{title ?? t("error.title")}</strong>
-      <p>{pick(language, e.messageTh, e.messageEn)}</p>
+      <p lang={pickedLanguage(language, e.messageTh)}>{pick(language, e.messageTh, e.messageEn)}</p>
       <details>
         <summary>
           {t("common.details")} · {t("error.code", { code: e.code })}
         </summary>
-        {e.details && <pre>{e.details}</pre>}
+        {/* The core's own text, in English whatever the UI's language is. */}
+        {e.details && <pre lang="en">{e.details}</pre>}
       </details>
     </div>
   );
@@ -37,7 +38,8 @@ export function Notice({ kind = "info", children }: { kind?: "info" | "ok" | "wa
 
 /** Notes from the start of a command (spec §5.5), in the UI's language. Each note's specific
  * reason (`details`, in the core's English) sits under its message behind a toggle, so a Thai
- * UI shows as much as an English one. */
+ * UI shows as much as an English one. The core's English inside the Thai UI is marked
+ * `lang="en"`: the details always, the message when the note has no Thai text. */
 export function NotesList({ notes }: { notes: Note[] }) {
   const { language, t } = useI18n();
   if (notes.length === 0) return null;
@@ -47,11 +49,12 @@ export function NotesList({ notes }: { notes: Note[] }) {
       <ul className="plain-list">
         {notes.map((n, i) => (
           <li key={i}>
-            {pick(language, n.messageTh, n.messageEn)} <span className="badge">{n.code}</span>
+            <span lang={pickedLanguage(language, n.messageTh)}>{pick(language, n.messageTh, n.messageEn)}</span>{" "}
+            <span className="badge">{n.code}</span>
             {n.details && (
               <details>
                 <summary>{t("common.details")}</summary>
-                <pre>{n.details}</pre>
+                <pre lang="en">{n.details}</pre>
               </details>
             )}
           </li>

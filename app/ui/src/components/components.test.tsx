@@ -177,6 +177,50 @@ describe("Notices", () => {
     expect(within(second).queryByText("ดูรายละเอียด")).toBeNull();
   });
 
+  it("marks the core's English text inside the Thai UI with lang=\"en\" (Task 1 carry)", () => {
+    /** The language of the nearest mark above `el`, the mark of the text itself included. */
+    const langOf = (el: HTMLElement) => el.closest("[lang]")?.getAttribute("lang");
+    const notes = [
+      {
+        code: "E_SNAPSHOT_READ",
+        messageTh: "อ่านจุดย้อนกลับไม่ได้",
+        messageEn: "A restore point could not be read",
+        details: "restore point 1791694709000-abcd1234: manifest.json is not valid JSON",
+      },
+      // No Thai text for this note: the English one is shown, and is marked so.
+      { code: "E_TXN_INTERRUPTED", messageTh: "", messageEn: "An unfinished apply was put back", details: "" },
+    ];
+    const th = mount(<NotesList notes={notes} />, { language: "th" });
+    expect(langOf(screen.getByText("อ่านจุดย้อนกลับไม่ได้"))).toBe("th");
+    expect(langOf(screen.getByText(/manifest\.json is not valid JSON/))).toBe("en");
+    expect(langOf(screen.getByText("An unfinished apply was put back"))).toBe("en");
+    th.unmount();
+    mount(<NotesList notes={notes} />, { language: "en" });
+    expect(langOf(screen.getByText("A restore point could not be read"))).toBe("en");
+    expect(langOf(screen.getByText(/manifest\.json is not valid JSON/))).toBe("en");
+  });
+
+  it("marks an error's details lang=\"en\" in the Thai UI, and its text by the language shown", () => {
+    const langOf = (el: HTMLElement) => el.closest("[lang]")?.getAttribute("lang");
+    const error = {
+      code: "E_WT_PARSE",
+      messageTh: "อ่านการตั้งค่า Windows Terminal ไม่ได้",
+      messageEn: "Windows Terminal's settings could not be read",
+      details: "expected `,` or `}` at line 3 column 7",
+    };
+    const th = mount(<ErrorNotice error={error} />, { language: "th" });
+    expect(langOf(screen.getByText("อ่านการตั้งค่า Windows Terminal ไม่ได้"))).toBe("th");
+    expect(langOf(screen.getByText(/expected `,` or `}` at line 3/))).toBe("en");
+    th.unmount();
+    // Without a Thai text the English one is shown in the Thai UI, and says so.
+    const bare = mount(<ErrorNotice error={{ ...error, messageTh: "" }} />, { language: "th" });
+    expect(langOf(screen.getByText("Windows Terminal's settings could not be read"))).toBe("en");
+    bare.unmount();
+    mount(<ErrorNotice error={error} />, { language: "en" });
+    expect(langOf(screen.getByText("Windows Terminal's settings could not be read"))).toBe("en");
+    expect(langOf(screen.getByText(/expected `,` or `}` at line 3/))).toBe("en");
+  });
+
   it("tells an AppError by all four fields, so a partial one is an internal problem, not a crash", () => {
     mount(<ErrorNotice error={{ code: "E_WT_PARSE", messageEn: "Windows Terminal's settings could not be read" }} />, {
       language: "th",
