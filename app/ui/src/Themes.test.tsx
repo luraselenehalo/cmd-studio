@@ -274,6 +274,8 @@ describe("the theme library", () => {
         },
         { settings: { language: c.language } },
       );
+      // The final shell opens on Home: the Themes page is its sidebar button, named as its heading.
+      await user.click(await screen.findByRole("button", { name: c.heading }));
       await screen.findByRole("heading", { name: c.heading });
       await user.click(within(await card(long)).getByRole("button", { name: c.duplicate }));
       await waitFor(() => expect(ipc.themeDuplicate).toHaveBeenCalledTimes(1));
@@ -373,7 +375,7 @@ describe("the theme library", () => {
   });
 
   it("shows a library problem in the chosen language, after opening in English", async () => {
-    const { view } = await mountWith(
+    const { user, view } = await mountWith(
       (m) => {
         const list = m.themesList.bind(m);
         vi.spyOn(m, "themesList").mockImplementation(async () => ({
@@ -395,6 +397,8 @@ describe("the theme library", () => {
     );
     // The UI opens in English; the saved Thai takes over once the settings are read.
     expect(view.container.querySelector("div[lang]")?.getAttribute("lang")).toBe("en");
+    // The library is the Themes page's, a click from Home in the final shell.
+    await user.click(await screen.findByRole("button", { name: "ธีม" }));
     expect(await screen.findByText("ไฟล์ธีมนี้ไม่ถูกต้อง")).toBeTruthy();
     expect(screen.queryByText("This theme file is not valid")).toBeNull();
     expect(screen.getByText("broken.cmdtheme")).toBeTruthy();
@@ -662,8 +666,9 @@ describe("the editor", () => {
     held.on = true;
     await user.click(screen.getByRole("radio", { name: "Light" }));
     await waitFor(() => expect(held.gates).toHaveLength(1));
-    // Meanwhile the user sets a color by hand.
-    await user.click(screen.getByRole("button", { name: "Advanced" }));
+    // Meanwhile the user sets a color by hand. Advanced is the mode in its group, not the
+    // sidebar's page of that name.
+    await user.click(within(screen.getByRole("group", { name: "Color mode" })).getByRole("button", { name: "Advanced" }));
     fireEvent.change(screen.getByLabelText("Background"), { target: { value: "#123456" } });
     await act(async () => {
       held.gates[0]?.();

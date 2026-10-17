@@ -1,19 +1,25 @@
-// The shell as the themes plan leaves it: the settings loaded once, English unless the saved
-// language is Thai, the Themes page and the editor behind the sidebar, and the after-apply bar
-// (spec §4.4). The wizard, the home page, Settings, Help and Advanced come with the next plan,
-// which replaces this file and keeps what lives elsewhere: the bar, DraftProblemNotice above the
-// screen, useRouteFocus. Everything sits in an element whose `lang` is the UI's language, so a
-// screen reader reads Thai as Thai and the `:lang(th)` styles apply.
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+// The shell (spec §4.3, §4.4, §4.5): the settings loaded once, English until the saved language
+// says Thai (founder 2026-10-16), the wizard until it is done, then the five pages behind a
+// sidebar with the after-apply bar above them. What lives elsewhere is kept as the themes plan
+// left it: the bar (components/AfterApplyBar, fed with the applied request's target by every
+// apply), DraftProblemNotice above the screen, the editor keyed by its theme, useRouteFocus, and
+// main.tsx's ErrorBoundary around it all. Everything sits in an element whose `lang` is the UI's
+// language, so a screen reader reads Thai as Thai and the `:lang(th)` styles apply.
+import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import type { AppSettings } from "./bindings/AppSettings";
 import { AfterApplyBar } from "./components/AfterApplyBar";
 import { DraftProblemNotice } from "./components/DraftProblemNotice";
 import { ErrorNotice, Notice } from "./components/Notices";
-import { I18nProvider, useI18n, type Language } from "./i18n";
+import { I18nProvider, useI18n, type Key, type Language } from "./i18n";
 import { useIpc } from "./ipc/context";
 import { NavContext, useNav, type Nav, type Route } from "./router";
+import { Advanced } from "./screens/Advanced";
 import { Editor } from "./screens/Editor";
+import { Help } from "./screens/Help";
+import { Home } from "./screens/Home";
+import { Settings } from "./screens/Settings";
 import { Themes } from "./screens/Themes";
+import { Wizard } from "./screens/Wizard";
 import { AppStateContext, DEFAULT_SETTINGS, useDraftProblems, type AppState, type LastApply } from "./state";
 import { useRouteFocus } from "./useRouteFocus";
 
@@ -38,12 +44,13 @@ export function App() {
         setSettings(loaded.settings);
         setLanguage(loaded.settings.language);
         setResetFrom(loaded.resetFrom);
-        setRoute({ name: "themes" });
+        setRoute(loaded.settings.wizardDone ? { name: "home" } : { name: "wizard" });
       },
       (e: unknown) => {
         if (!alive) return;
+        // Said on the home page; the wizard is not shown over settings that could not be read.
         setStartError(e);
-        setRoute({ name: "themes" });
+        setRoute({ name: "home" });
       },
     );
     return () => {
@@ -65,7 +72,7 @@ export function App() {
     () => ({ settings, saveSettings, lastApply, setLastApply, draftProblems, version, bump }),
     [settings, saveSettings, lastApply, draftProblems, version, bump],
   );
-  const nav = useMemo<Nav>(() => ({ route: route ?? { name: "themes" }, go: (r: Route) => setRoute(r) }), [route]);
+  const nav = useMemo<Nav>(() => ({ route: route ?? { name: "home" }, go: (r: Route) => setRoute(r) }), [route]);
 
   return (
     <I18nProvider language={language} setLanguage={setLanguage}>
@@ -77,7 +84,7 @@ export function App() {
                 …
               </p>
             ) : (
-              <Shell startError={startError} resetFrom={resetFrom} />
+              <Screens startError={startError} resetFrom={resetFrom} />
             )}
           </div>
         </NavContext.Provider>
@@ -86,13 +93,55 @@ export function App() {
   );
 }
 
-function Shell({ startError, resetFrom }: { startError: unknown; resetFrom: string | null }) {
-  const { t } = useI18n();
-  const { route, go } = useNav();
+interface StartProblems {
+  startError: unknown;
+  resetFrom: string | null;
+}
+
+/**
+ * The wizard or the shell, each with its `main` in one ref the route focus follows: a change of
+ * screen puts focus on the new screen's heading (spec §4.5), the first Home after the wizard
+ * included; the first screen of the app leaves it at the top of the page.
+ */
+function Screens(problems: StartProblems) {
+  const { route } = useNav();
   const main = useRef<HTMLElement>(null);
   useRouteFocus(route, main);
+  if (route.name === "wizard") {
+    return (
+      <main id="content" className="wizard" ref={main}>
+        <StartNotices {...problems} />
+        <Wizard />
+      </main>
+    );
+  }
+  return <Shell main={main} {...problems} />;
+}
 
-  const onThemes = route.name === "themes" || route.name === "editor";
+/** What went wrong as the app started: settings that could not be read, or were reset. */
+function StartNotices({ startError, resetFrom }: StartProblems) {
+  const { t } = useI18n();
+  return (
+    <>
+      {startError !== null && <ErrorNotice error={startError} />}
+      {resetFrom && <Notice kind="warn">{t("settings.reset", { file: resetFrom })}</Notice>}
+    </>
+  );
+}
+
+const PAGES: { route: Route; label: Key }[] = [
+  { route: { name: "home" }, label: "nav.home" },
+  { route: { name: "themes" }, label: "nav.themes" },
+  { route: { name: "settings" }, label: "nav.settings" },
+  { route: { name: "help", tab: "doctor" }, label: "nav.help" },
+  { route: { name: "advanced" }, label: "nav.advanced" },
+];
+
+function Shell({ main, ...problems }: StartProblems & { main: RefObject<HTMLElement | null> }) {
+  const { t } = useI18n();
+  const { route, go } = useNav();
+  // The editor belongs to the Themes page; every Help tab to Help.
+  const current = (page: Route) => page.name === route.name || (page.name === "themes" && route.name === "editor");
 
   return (
     <>
@@ -103,15 +152,26 @@ function Shell({ startError, resetFrom }: { startError: unknown; resetFrom: stri
       <div className="shell">
         <nav className="sidebar" aria-label={t("a11y.mainMenu")}>
           <div className="brand">{t("app.name")}</div>
-          <button type="button" aria-current={onThemes ? "page" : undefined} onClick={() => go({ name: "themes" })}>
-            {t("nav.themes")}
-          </button>
+          {PAGES.map((page) => (
+            <button
+              key={page.route.name}
+              type="button"
+              aria-current={current(page.route) ? "page" : undefined}
+              onClick={() => go(page.route)}
+            >
+              {t(page.label)}
+            </button>
+          ))}
         </nav>
         <main id="content" ref={main}>
-          {startError !== null && <ErrorNotice error={startError} />}
-          {resetFrom && <Notice kind="warn">{t("settings.reset", { file: resetFrom })}</Notice>}
+          <StartNotices {...problems} />
           <DraftProblemNotice />
-          {route.name === "editor" ? <Editor key={route.id} id={route.id} /> : <Themes />}
+          {route.name === "home" && <Home />}
+          {route.name === "themes" && <Themes />}
+          {route.name === "editor" && <Editor key={route.id} id={route.id} />}
+          {route.name === "settings" && <Settings />}
+          {route.name === "help" && <Help tab={route.tab} />}
+          {route.name === "advanced" && <Advanced />}
         </main>
       </div>
     </>
