@@ -551,308 +551,310 @@ export function Editor({ id }: { id: string }) {
           )}
         </>
       )}
-      <div className="editor">
-        <div>
-          <fieldset>
-            <legend>{t("common.name")}</legend>
-            <label>
-              {t("editor.name")}
-              <input type="text" value={theme.name} maxLength={64} onChange={(e) => edit({ ...theme, name: e.target.value })} />
-            </label>
-            <label>
-              {t("editor.author")}
-              <input type="text" value={theme.author} maxLength={64} onChange={(e) => edit({ ...theme, author: e.target.value })} />
-            </label>
-          </fieldset>
-
-          {/* Two toggle buttons in a named group, as the library's filter is (item 9): the tab
-              pattern would need arrow keys and tab panels, which this switch does not have. */}
-          <div className="tabs" role="group" aria-label={t("editor.mode.label")}>
-            <button type="button" aria-pressed={state.mode === "simple"} onClick={() => dispatch({ type: "setMode", mode: "simple" })}>
-              {t("editor.mode.simple")}
-            </button>
-            <button type="button" aria-pressed={state.mode === "advanced"} onClick={() => dispatch({ type: "setMode", mode: "advanced" })}>
-              {t("editor.mode.advanced")}
-            </button>
-          </div>
-
-          {state.mode === "simple" && (
+      <div className="editor-box">
+        <div className="editor">
+          <div>
             <fieldset>
-              <legend>{t("editor.mode.simple")}</legend>
-              {state.keptEditsNotice && <Notice>{t("editor.simple.keptNotice")}</Notice>}
-              <div role="radiogroup" aria-label={t("editor.simple.tone")}>
-                {(["dark", "light"] as Tone[]).map((tone) => (
-                  <label className="row" key={tone}>
-                    <input
-                      type="radio"
-                      name="tone"
-                      checked={theme.tone === tone}
-                      onChange={() => void regenerate(tone, recipe.accent, recipe.tint)}
-                    />
-                    {t(tone === "dark" ? "editor.simple.dark" : "editor.simple.light")}
-                  </label>
-                ))}
-              </div>
-              <label className="row">
-                {t("editor.simple.accent")}
-                <input type="color" value={recipe.accent} onChange={(e) => void regenerate(theme.tone, e.target.value, recipe.tint)} />
-                <code>{recipe.accent}</code>
+              <legend>{t("common.name")}</legend>
+              <label>
+                {t("editor.name")}
+                <input type="text" value={theme.name} maxLength={64} onChange={(e) => edit({ ...theme, name: e.target.value })} />
               </label>
-              <label className="row">
-                {t("editor.simple.tint")}
+              <label>
+                {t("editor.author")}
+                <input type="text" value={theme.author} maxLength={64} onChange={(e) => edit({ ...theme, author: e.target.value })} />
+              </label>
+            </fieldset>
+
+            {/* Two toggle buttons in a named group, as the library's filter is (item 9): the tab
+                pattern would need arrow keys and tab panels, which this switch does not have. */}
+            <div className="tabs" role="group" aria-label={t("editor.mode.label")}>
+              <button type="button" aria-pressed={state.mode === "simple"} onClick={() => dispatch({ type: "setMode", mode: "simple" })}>
+                {t("editor.mode.simple")}
+              </button>
+              <button type="button" aria-pressed={state.mode === "advanced"} onClick={() => dispatch({ type: "setMode", mode: "advanced" })}>
+                {t("editor.mode.advanced")}
+              </button>
+            </div>
+
+            {state.mode === "simple" && (
+              <fieldset>
+                <legend>{t("editor.mode.simple")}</legend>
+                {state.keptEditsNotice && <Notice>{t("editor.simple.keptNotice")}</Notice>}
+                <div role="radiogroup" aria-label={t("editor.simple.tone")}>
+                  {(["dark", "light"] as Tone[]).map((tone) => (
+                    <label className="row" key={tone}>
+                      <input
+                        type="radio"
+                        name="tone"
+                        checked={theme.tone === tone}
+                        onChange={() => void regenerate(tone, recipe.accent, recipe.tint)}
+                      />
+                      {t(tone === "dark" ? "editor.simple.dark" : "editor.simple.light")}
+                    </label>
+                  ))}
+                </div>
+                <label className="row">
+                  {t("editor.simple.accent")}
+                  <input type="color" value={recipe.accent} onChange={(e) => void regenerate(theme.tone, e.target.value, recipe.tint)} />
+                  <code>{recipe.accent}</code>
+                </label>
+                <label className="row">
+                  {t("editor.simple.tint")}
+                  <input
+                    type="range"
+                    min={0}
+                    max={0.3}
+                    step={0.01}
+                    value={recipe.tint}
+                    onChange={(e) => void regenerate(theme.tone, recipe.accent, Number(e.target.value))}
+                  />
+                  <span>{recipe.tint.toFixed(2)}</span>
+                </label>
+              </fieldset>
+            )}
+
+            {state.mode === "advanced" && (
+              <fieldset>
+                <legend>{t("editor.colors.title")}</legend>
+                <div className="color-grid">
+                  {BASIC_SLOTS.map((slot) => (
+                    <label key={slot}>
+                      <input type="color" value={getSlot(theme.colors, slot)} onChange={(e) => dispatch({ type: "setColor", slot, value: e.target.value })} />
+                      {t(`editor.colors.${slot}` as Key)}
+                    </label>
+                  ))}
+                </div>
+                <h3>{t("editor.colors.ansi")}</h3>
+                <div className="color-grid">
+                  {ANSI_SLOTS.map((slot) => (
+                    <label key={slot}>
+                      <input type="color" value={getSlot(theme.colors, slot)} onChange={(e) => dispatch({ type: "setColor", slot, value: e.target.value })} />
+                      {t(`editor.colors.${slot}` as Key)}
+                    </label>
+                  ))}
+                </div>
+              </fieldset>
+            )}
+
+            <fieldset>
+              <legend>{t("editor.readability.title")}</legend>
+              {checkError !== null && <ErrorNotice error={checkError} />}
+              {issues.length === 0 ? (
+                checkError === null && <p className="status-ok">{t("editor.readability.ok")}</p>
+              ) : (
+                <>
+                  <ul className="plain-list">
+                    {issues.map((issue) => (
+                      <li key={issue.slot} className="status-warn">
+                        {t("editor.readability.issue", {
+                          slot: t(`editor.colors.${issue.slot}` as Key),
+                          ratio: issue.ratio.toFixed(1),
+                          required: issue.required.toFixed(1),
+                        })}
+                      </li>
+                    ))}
+                  </ul>
+                  <button type="button" onClick={() => void fixReadability()}>
+                    {t("editor.readability.fix")}
+                  </button>
+                </>
+              )}
+            </fieldset>
+
+            <fieldset>
+              <legend>{t("editor.font.title")}</legend>
+              {powerlineNotice && <Notice>{t("editor.font.powerlineNotice")}</Notice>}
+              <label>
+                {t("editor.font.family")}
+                <select
+                  value={customFont || !knownFont ? "__custom" : theme.terminal.font}
+                  onChange={(e) => {
+                    if (e.target.value === "__custom") setCustomFont(true);
+                    else {
+                      setCustomFont(false);
+                      edit({ ...theme, terminal: { ...theme.terminal, font: e.target.value } });
+                    }
+                  }}
+                >
+                  {[NERD_FONT, ...fonts.filter((f) => f !== NERD_FONT)].map((f) => (
+                    <option key={f} value={f}>
+                      {f}
+                    </option>
+                  ))}
+                  <option value="__custom">{t("editor.font.custom")}</option>
+                </select>
+              </label>
+              {(customFont || !knownFont) && (
+                <label>
+                  {t("editor.font.custom")}
+                  <input
+                    type="text"
+                    value={theme.terminal.font}
+                    maxLength={64}
+                    onChange={(e) => edit({ ...theme, terminal: { ...theme.terminal, font: e.target.value } })}
+                  />
+                </label>
+              )}
+              <NumberField
+                label={t("editor.font.size")}
+                value={theme.terminal.fontSize}
+                min={8}
+                max={32}
+                onChange={(fontSize) => edit({ ...theme, terminal: { ...theme.terminal, fontSize } })}
+              />
+              <label>
+                {t("editor.font.cursor")}
+                <select
+                  value={theme.terminal.cursorShape}
+                  onChange={(e) => edit({ ...theme, terminal: { ...theme.terminal, cursorShape: e.target.value as CursorShape } })}
+                >
+                  {CURSOR_SHAPES.map((shape) => (
+                    <option key={shape} value={shape}>
+                      {t(`editor.font.cursor.${shape}`)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                {t("editor.font.opacity")}
                 <input
                   type="range"
-                  min={0}
-                  max={0.3}
-                  step={0.01}
-                  value={recipe.tint}
-                  onChange={(e) => void regenerate(theme.tone, recipe.accent, Number(e.target.value))}
+                  min={30}
+                  max={100}
+                  step={1}
+                  value={theme.terminal.opacity}
+                  onChange={(e) => edit({ ...theme, terminal: { ...theme.terminal, opacity: clamp(Number(e.target.value), 30, 100) } })}
                 />
-                <span>{recipe.tint.toFixed(2)}</span>
+                <span>{theme.terminal.opacity}%</span>
               </label>
-            </fieldset>
-          )}
-
-          {state.mode === "advanced" && (
-            <fieldset>
-              <legend>{t("editor.colors.title")}</legend>
-              <div className="color-grid">
-                {BASIC_SLOTS.map((slot) => (
-                  <label key={slot}>
-                    <input type="color" value={getSlot(theme.colors, slot)} onChange={(e) => dispatch({ type: "setColor", slot, value: e.target.value })} />
-                    {t(`editor.colors.${slot}` as Key)}
-                  </label>
-                ))}
-              </div>
-              <h3>{t("editor.colors.ansi")}</h3>
-              <div className="color-grid">
-                {ANSI_SLOTS.map((slot) => (
-                  <label key={slot}>
-                    <input type="color" value={getSlot(theme.colors, slot)} onChange={(e) => dispatch({ type: "setColor", slot, value: e.target.value })} />
-                    {t(`editor.colors.${slot}` as Key)}
-                  </label>
-                ))}
-              </div>
-            </fieldset>
-          )}
-
-          <fieldset>
-            <legend>{t("editor.readability.title")}</legend>
-            {checkError !== null && <ErrorNotice error={checkError} />}
-            {issues.length === 0 ? (
-              checkError === null && <p className="status-ok">{t("editor.readability.ok")}</p>
-            ) : (
-              <>
-                <ul className="plain-list">
-                  {issues.map((issue) => (
-                    <li key={issue.slot} className="status-warn">
-                      {t("editor.readability.issue", {
-                        slot: t(`editor.colors.${issue.slot}` as Key),
-                        ratio: issue.ratio.toFixed(1),
-                        required: issue.required.toFixed(1),
-                      })}
-                    </li>
-                  ))}
-                </ul>
-                <button type="button" onClick={() => void fixReadability()}>
-                  {t("editor.readability.fix")}
-                </button>
-              </>
-            )}
-          </fieldset>
-
-          <fieldset>
-            <legend>{t("editor.font.title")}</legend>
-            {powerlineNotice && <Notice>{t("editor.font.powerlineNotice")}</Notice>}
-            <label>
-              {t("editor.font.family")}
-              <select
-                value={customFont || !knownFont ? "__custom" : theme.terminal.font}
-                onChange={(e) => {
-                  if (e.target.value === "__custom") setCustomFont(true);
-                  else {
-                    setCustomFont(false);
-                    edit({ ...theme, terminal: { ...theme.terminal, font: e.target.value } });
-                  }
-                }}
-              >
-                {[NERD_FONT, ...fonts.filter((f) => f !== NERD_FONT)].map((f) => (
-                  <option key={f} value={f}>
-                    {f}
-                  </option>
-                ))}
-                <option value="__custom">{t("editor.font.custom")}</option>
-              </select>
-            </label>
-            {(customFont || !knownFont) && (
-              <label>
-                {t("editor.font.custom")}
-                <input
-                  type="text"
-                  value={theme.terminal.font}
-                  maxLength={64}
-                  onChange={(e) => edit({ ...theme, terminal: { ...theme.terminal, font: e.target.value } })}
-                />
+              <label className="row">
+                <input type="checkbox" checked={theme.terminal.acrylic} onChange={(e) => edit({ ...theme, terminal: { ...theme.terminal, acrylic: e.target.checked } })} />
+                {t("editor.font.acrylic")}
               </label>
-            )}
-            <NumberField
-              label={t("editor.font.size")}
-              value={theme.terminal.fontSize}
-              min={8}
-              max={32}
-              onChange={(fontSize) => edit({ ...theme, terminal: { ...theme.terminal, fontSize } })}
-            />
-            <label>
-              {t("editor.font.cursor")}
-              <select
-                value={theme.terminal.cursorShape}
-                onChange={(e) => edit({ ...theme, terminal: { ...theme.terminal, cursorShape: e.target.value as CursorShape } })}
-              >
-                {CURSOR_SHAPES.map((shape) => (
-                  <option key={shape} value={shape}>
-                    {t(`editor.font.cursor.${shape}`)}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              {t("editor.font.opacity")}
-              <input
-                type="range"
-                min={30}
-                max={100}
-                step={1}
-                value={theme.terminal.opacity}
-                onChange={(e) => edit({ ...theme, terminal: { ...theme.terminal, opacity: clamp(Number(e.target.value), 30, 100) } })}
+              <NumberField
+                label={t("editor.font.paddingX")}
+                value={theme.terminal.padding[0]}
+                min={0}
+                max={40}
+                onChange={(x) => edit({ ...theme, terminal: { ...theme.terminal, padding: [x, theme.terminal.padding[1]] } })}
               />
-              <span>{theme.terminal.opacity}%</span>
-            </label>
-            <label className="row">
-              <input type="checkbox" checked={theme.terminal.acrylic} onChange={(e) => edit({ ...theme, terminal: { ...theme.terminal, acrylic: e.target.checked } })} />
-              {t("editor.font.acrylic")}
-            </label>
-            <NumberField
-              label={t("editor.font.paddingX")}
-              value={theme.terminal.padding[0]}
-              min={0}
-              max={40}
-              onChange={(x) => edit({ ...theme, terminal: { ...theme.terminal, padding: [x, theme.terminal.padding[1]] } })}
-            />
-            <NumberField
-              label={t("editor.font.paddingY")}
-              value={theme.terminal.padding[1]}
-              min={0}
-              max={40}
-              onChange={(y) => edit({ ...theme, terminal: { ...theme.terminal, padding: [theme.terminal.padding[0], y] } })}
-            />
-          </fieldset>
+              <NumberField
+                label={t("editor.font.paddingY")}
+                value={theme.terminal.padding[1]}
+                min={0}
+                max={40}
+                onChange={(y) => edit({ ...theme, terminal: { ...theme.terminal, padding: [theme.terminal.padding[0], y] } })}
+              />
+            </fieldset>
 
-          <fieldset>
-            <legend>{t("editor.prompt.title")}</legend>
-            <div role="radiogroup" aria-label={t("editor.prompt.layout")}>
-              {LAYOUTS.map((layout) => (
-                <label className="row" key={layout}>
-                  <input type="radio" name="layout" checked={theme.prompt.layout === layout} onChange={() => setLayout(layout)} />
-                  {t(`editor.prompt.layout.${layout}`)}
+            <fieldset>
+              <legend>{t("editor.prompt.title")}</legend>
+              <div role="radiogroup" aria-label={t("editor.prompt.layout")}>
+                {LAYOUTS.map((layout) => (
+                  <label className="row" key={layout}>
+                    <input type="radio" name="layout" checked={theme.prompt.layout === layout} onChange={() => setLayout(layout)} />
+                    {t(`editor.prompt.layout.${layout}`)}
+                  </label>
+                ))}
+              </div>
+              <h3>{t("editor.prompt.segments")}</h3>
+              <ul className="plain-list segments">
+                {theme.prompt.segments.map((segment, i) => (
+                  <li key={segment}>
+                    <label className="row">
+                      <input type="checkbox" checked onChange={() => toggleSegment(segment, false)} />
+                      {segmentName(segment)}
+                    </label>
+                    <button
+                      type="button"
+                      disabled={i === 0}
+                      aria-label={t("editor.prompt.moveUp", { segment: segmentName(segment) })}
+                      onClick={() => moveSegment(segment, -1)}
+                    >
+                      ↑
+                    </button>
+                    <button
+                      type="button"
+                      disabled={i === theme.prompt.segments.length - 1}
+                      aria-label={t("editor.prompt.moveDown", { segment: segmentName(segment) })}
+                      onClick={() => moveSegment(segment, 1)}
+                    >
+                      ↓
+                    </button>
+                  </li>
+                ))}
+                {SEGMENTS.filter((s) => !theme.prompt.segments.includes(s)).map((segment) => (
+                  <li key={segment}>
+                    <label className="row">
+                      <input type="checkbox" checked={false} onChange={() => toggleSegment(segment, true)} />
+                      {segmentName(segment)}
+                    </label>
+                  </li>
+                ))}
+              </ul>
+              <label className="row">
+                <input type="checkbox" checked={theme.prompt.transient} onChange={(e) => edit({ ...theme, prompt: { ...theme.prompt, transient: e.target.checked } })} />
+                {t("editor.prompt.transient")}
+              </label>
+            </fieldset>
+
+            <fieldset>
+              <legend>{t("editor.banner.title")}</legend>
+              <label className="row">
+                <input type="checkbox" checked={theme.banner.enabled} onChange={(e) => edit({ ...theme, banner: { ...theme.banner, enabled: e.target.checked } })} />
+                {t("editor.banner.enabled")}
+              </label>
+              <label>
+                {t("editor.banner.titleField")}
+                <input type="text" value={theme.banner.title} maxLength={80} onChange={(e) => edit({ ...theme, banner: { ...theme.banner, title: e.target.value } })} />
+              </label>
+              <p>
+                <small>{t("editor.banner.variables")}</small>
+              </p>
+              <div>{t("editor.banner.lines")}</div>
+              {[0, 1, 2, 3].map((i) => (
+                <label key={i}>
+                  {t("editor.banner.line", { n: i + 1 })}
+                  <input
+                    type="text"
+                    value={theme.banner.lines[i] ?? ""}
+                    maxLength={80}
+                    onChange={(e) => {
+                      const lines = [...theme.banner.lines];
+                      while (lines.length <= i) lines.push("");
+                      lines[i] = e.target.value;
+                      while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+                      edit({ ...theme, banner: { ...theme.banner, lines } });
+                    }}
+                  />
                 </label>
               ))}
-            </div>
-            <h3>{t("editor.prompt.segments")}</h3>
-            <ul className="plain-list segments">
-              {theme.prompt.segments.map((segment, i) => (
-                <li key={segment}>
-                  <label className="row">
-                    <input type="checkbox" checked onChange={() => toggleSegment(segment, false)} />
-                    {segmentName(segment)}
-                  </label>
-                  <button
-                    type="button"
-                    disabled={i === 0}
-                    aria-label={t("editor.prompt.moveUp", { segment: segmentName(segment) })}
-                    onClick={() => moveSegment(segment, -1)}
-                  >
-                    ↑
-                  </button>
-                  <button
-                    type="button"
-                    disabled={i === theme.prompt.segments.length - 1}
-                    aria-label={t("editor.prompt.moveDown", { segment: segmentName(segment) })}
-                    onClick={() => moveSegment(segment, 1)}
-                  >
-                    ↓
-                  </button>
-                </li>
-              ))}
-              {SEGMENTS.filter((s) => !theme.prompt.segments.includes(s)).map((segment) => (
-                <li key={segment}>
-                  <label className="row">
-                    <input type="checkbox" checked={false} onChange={() => toggleSegment(segment, true)} />
-                    {segmentName(segment)}
-                  </label>
-                </li>
-              ))}
-            </ul>
-            <label className="row">
-              <input type="checkbox" checked={theme.prompt.transient} onChange={(e) => edit({ ...theme, prompt: { ...theme.prompt, transient: e.target.checked } })} />
-              {t("editor.prompt.transient")}
-            </label>
-          </fieldset>
+              <label className="row">
+                <input type="checkbox" checked={theme.banner.tips} onChange={(e) => edit({ ...theme, banner: { ...theme.banner, tips: e.target.checked } })} />
+                {t("editor.banner.tips")}
+              </label>
+              <label className="row">
+                <input type="checkbox" checked={theme.banner.clearLogo} onChange={(e) => edit({ ...theme, banner: { ...theme.banner, clearLogo: e.target.checked } })} />
+                {t("editor.banner.clearLogo")}
+              </label>
+            </fieldset>
+          </div>
 
-          <fieldset>
-            <legend>{t("editor.banner.title")}</legend>
-            <label className="row">
-              <input type="checkbox" checked={theme.banner.enabled} onChange={(e) => edit({ ...theme, banner: { ...theme.banner, enabled: e.target.checked } })} />
-              {t("editor.banner.enabled")}
+          <div className="preview-column">
+            <h2 style={{ marginTop: 0 }}>{t("editor.preview.title")}</h2>
+            <TerminalPreview theme={theme} result={preview} />
+            {previewError !== null && <ErrorNotice error={previewError} />}
+            <label>
+              {t("editor.preview.user")}
+              <input type="text" value={sample.user} maxLength={64} onChange={(e) => setSample({ ...sample, user: e.target.value })} />
             </label>
             <label>
-              {t("editor.banner.titleField")}
-              <input type="text" value={theme.banner.title} maxLength={80} onChange={(e) => edit({ ...theme, banner: { ...theme.banner, title: e.target.value } })} />
+              {t("editor.preview.folder")}
+              <input type="text" value={sample.cwd} maxLength={200} onChange={(e) => setSample({ ...sample, cwd: e.target.value })} />
             </label>
-            <p>
-              <small>{t("editor.banner.variables")}</small>
-            </p>
-            <div>{t("editor.banner.lines")}</div>
-            {[0, 1, 2, 3].map((i) => (
-              <label key={i}>
-                {t("editor.banner.line", { n: i + 1 })}
-                <input
-                  type="text"
-                  value={theme.banner.lines[i] ?? ""}
-                  maxLength={80}
-                  onChange={(e) => {
-                    const lines = [...theme.banner.lines];
-                    while (lines.length <= i) lines.push("");
-                    lines[i] = e.target.value;
-                    while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
-                    edit({ ...theme, banner: { ...theme.banner, lines } });
-                  }}
-                />
-              </label>
-            ))}
-            <label className="row">
-              <input type="checkbox" checked={theme.banner.tips} onChange={(e) => edit({ ...theme, banner: { ...theme.banner, tips: e.target.checked } })} />
-              {t("editor.banner.tips")}
-            </label>
-            <label className="row">
-              <input type="checkbox" checked={theme.banner.clearLogo} onChange={(e) => edit({ ...theme, banner: { ...theme.banner, clearLogo: e.target.checked } })} />
-              {t("editor.banner.clearLogo")}
-            </label>
-          </fieldset>
-        </div>
-
-        <div className="preview-column">
-          <h2 style={{ marginTop: 0 }}>{t("editor.preview.title")}</h2>
-          <TerminalPreview theme={theme} result={preview} />
-          {previewError !== null && <ErrorNotice error={previewError} />}
-          <label>
-            {t("editor.preview.user")}
-            <input type="text" value={sample.user} maxLength={64} onChange={(e) => setSample({ ...sample, user: e.target.value })} />
-          </label>
-          <label>
-            {t("editor.preview.folder")}
-            <input type="text" value={sample.cwd} maxLength={200} onChange={(e) => setSample({ ...sample, cwd: e.target.value })} />
-          </label>
-          <NumberField label={t("editor.preview.width")} value={sample.width} min={20} max={200} onChange={(width) => setSample({ ...sample, width })} />
+            <NumberField label={t("editor.preview.width")} value={sample.width} min={20} max={200} onChange={(width) => setSample({ ...sample, width })} />
+          </div>
         </div>
       </div>
       {draftOffer && (
