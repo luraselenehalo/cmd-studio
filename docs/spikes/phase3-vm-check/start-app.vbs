@@ -5,9 +5,10 @@ Option Explicit
 '   wscript.exe //B //Nologo start-app.vbs [debug [<exe>]]
 ' With "debug" it first sets WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222
 ' for this script's own process, which the app inherits and nothing else does. That is the CSP
-' check of protocol.md (the page's console is read from Edge at edge://inspect, spec 5.10 and
-' the CSP in app/src-tauri/tauri.conf.json). It is for the VM only: the app has no devtools
-' feature and none is to be added.
+' check of protocol.md: the page's console is read over the Chrome DevTools Protocol on that
+' port by Get-GuestConsoleLog in helpers.ps1 (spec 5.10 and the CSP in
+' app/src-tauri/tauri.conf.json). It is for the VM only: the app has no devtools feature and
+' none is to be added.
 ' <exe> defaults to C:\cmdstudio\phase3\app\cmdstudio.exe, the CI artifact's folder.
 
 Dim net, sh, env, exe

@@ -71,7 +71,7 @@ $wtState = "C:\Users\$u\AppData\Local\Packages\Microsoft.WindowsTerminal_8wekyb3
 | `protocol.md` | this file |
 | `helpers.ps1` | host functions used by the steps (dot-source after `vm.ps1`) |
 | `step0-wt-state.vbs` | Step 0: Windows Terminal's state, written to a text file, no console |
-| `read-autorun.vbs` | the AutoRun value of cmd (type and text) written to a text file, no console, in the user's own session |
+| `read-autorun.vbs` | the AutoRun value of cmd (type and text) written to a text file, no console, in the user's own session; `AutoRun: (read failed)` when the registry could not be read, which is never printed as `(absent)` |
 | `start-app.vbs` | starts the app with no console; `debug` also sets the CSP check's debug port, for the app's process only |
 | `exit-code.vbs` | runs one command like the uninstaller's `ExecWait` (hidden, no console, waiting) and writes the exit code to a file; a token `@NAME@` in an argument becomes the value of the variable NAME in the user's environment, quoted as one argument |
 | `wt-precreate.ps1`, `run.ps1` | the pre-check of Run 4: does Terminal's first start use a settings.json written before it? |
@@ -190,17 +190,24 @@ Terminal's state does not matter here, so desktop readings are allowed. This run
    - Themes: Tab from the heading to "Create a theme" and to "Import a theme file", and in the editor to "Back to themes" and to the "Light" tone radio;
 
    Last, press "Undo" in the bar and record the Settings count again (3 expected, because no theme is applied).
-7. **Read the console as text (check 1).** The page's console is read over the Chrome DevTools Protocol, inside the guest, on the debug port of step 2. `Get-GuestConsoleLog` gets `http://127.0.0.1:9222/json`, takes the page's `webSocketDebuggerUrl`, connects with `System.Net.WebSockets.ClientWebSocket`, sends `Runtime.enable` and `Log.enable` (both replay what the page logged before they were sent), collects for 10 seconds, and writes every message to `C:\cmdstudio\out\phase3\console.txt`.
+7. **Read the console as text (check 1).** The page's console is read over the Chrome DevTools Protocol, inside the guest, on the debug port of step 2. `Get-GuestConsoleLog` gets `http://127.0.0.1:9222/json`, takes the page's `webSocketDebuggerUrl`, connects with `System.Net.WebSockets.ClientWebSocket`, sends `Runtime.enable` and `Log.enable` (both replay what the page logged before they were sent), collects for 10 seconds, and writes every message to `C:\cmdstudio\out\phase3\console.txt`. A message is taken whole (its bytes are joined and decoded as UTF-8 once, at its end, so Thai is not split across frames). A message that is not JSON is written to the file raw and skipped, and the collection goes on; the 10 seconds last whatever happens.
+
+   **Run `Get-GuestConsoleLog` once per app start.** Its second control makes the page refuse an inline `<style>`, and that refusal stays in the page's console. A second call in the same app start finds the refusal in its own first window and counts a violation that the app did not make. For another read, close the app and start it again with `start-app.vbs debug`.
 
    ```powershell
    Get-GuestConsoleLog $vm $u -Seconds 10
    Get-GuestText $vm "$($P3.Out)\console.txt" $u
    ```
 
-   PASS: `Runtime.enable and Log.enable answered: True`; the count of messages in the first window that mention "Content Security Policy" or "Refused to" is 0 (no `style-src`, `connect-src` or `script-src` violation, and no error line in the file). It was read after step 6 had drawn every screen, so a blocked inline style would be in it. The function ends with two controls, so that "no message" cannot mean "nothing was read": the page logs a probe line (`control 1 … True`) and creates an inline `<style>`, which the CSP must refuse and report (`control 2 … True`). If a control says `False`, the read proves nothing: record that, not a PASS. If the debug port or the read cannot be had at all, record the visible proxies instead: the colors are painted (`Measure-Color` of the app's surface color in the screenshots of every screen is not zero) and no area of any screenshot is blank. The debug port exists only on this VM and only for this run; no devtools feature is added to the app. `Get-GuestConsoleLog` has been parsed, not run: this is its first run.
+   PASS: `Runtime.enable and Log.enable answered: True`; the count of messages in the first window that mention "Content Security Policy" or "Refused to" is 0 (no `style-src`, `connect-src` or `script-src` violation, and no error line in the file). It was read after step 6 had drawn every screen, so a blocked inline style would be in it. The function ends with four controls, so that "no message" cannot mean "nothing was read":
+
+   - **Live delivery.** The page logs a probe line (`control 1 … True`) and creates an inline `<style>`, which the CSP must refuse and report (`control 2 … True`).
+   - **Replay.** The first window's "nothing" rests on `Runtime.enable` and `Log.enable` replaying what the page logged before the connection, and the live controls do not test that. So the function then reconnects once, sends both again, and requires that the earlier probe line (`control 3 … True`) and the earlier refused `<style>` (`control 4 … True`) come back as replayed entries, and that both domains answered the second time. The line `replay proven … True` says all of it.
+
+   If a control says `False`, or the line says `replay proven … False` (and `REPLAY NOT PROVEN` follows), the read proves nothing: **the PASS cannot be given**. Record "replay not proven" (or the control that failed), keep `console.txt`, and use the visible proxies instead. The same fallback applies if the debug port or the read cannot be had at all: the colors are painted (`Measure-Color` of the app's surface color in the screenshots of every screen is not zero) and no area of any screenshot is blank. The debug port exists only on this VM and only for this run; no devtools feature is added to the app. `Get-GuestConsoleLog` has been parsed, not run: this is its first run.
 8. **Close.** `Send-Key $vm AltF4`, and wait until `Get-GuestProcesses $vm $u` lists no `cmdstudio` and no `msedgewebview2`.
 
-Record in `results.md`: the Tab counts that held, the console result with its two controls, and the page-6 text.
+Record in `results.md`: the Tab counts that held, the console result with its four controls (or "replay not proven"), and the page-6 text.
 
 ## Run 2 — VM-A: the gate (criterion 1)
 
@@ -215,7 +222,7 @@ Restore `clean`. The Terminal is in the state Step 0 recorded. On a never-opened
    Invoke-GuestPs $vm "Test-Path -LiteralPath '$data'" $u      # False: the app has not started yet
    ```
 
-   `Get-GuestAutoRun` types a Win+R line, so on VM-C press `Send-Key $vm WinSpace` first (Run 6).
+   `Get-GuestAutoRun` types a Win+R line, so on VM-C press `Send-Key $vm WinSpace` first (Run 6). Its line is `AutoRun: (absent)`, `AutoRun: [REG_SZ] …` or `AutoRun: [REG_EXPAND_SZ] …`. `AutoRun: (read failed)`, and a missing result file, are **no reading** (the function warns for either): two of them are equal text, so a comparison of them proves nothing. Read again before going on. `(absent)` is believed only once step 5 has shown that the same script reads a value.
 
 2. **Start the app (plain).** No debug port. This is the first window.
 
@@ -258,6 +265,8 @@ Restore `clean`. The Terminal is in the state Step 0 recorded. On a never-opened
 
    ```powershell
    Get-InputTally                                       # the walk's tally
+   $autoApplied = Get-GuestAutoRun $vm 'applied' $u      # AutoRun right after the apply: the positive control
+   $autoApplied
    Get-GuestTiming $vm $u -NoConsole
    Get-GuestText $vm "$data\settings.json" $u
    Get-GuestText $vm "$data\state.json" $u
@@ -267,13 +276,14 @@ Restore `clean`. The Terminal is in the state Step 0 recorded. On a never-opened
    ```
 
    - **The tally.** PASS: `Get-InputTally` prints `5 activations, 0 characters, N navigation keys, 0 other keys`. Write that line, with N, in `results.md` as "5 activations, 0 characters, N navigation keys".
+   - **AutoRun, the positive control.** PASS: `$autoApplied` starts `AutoRun: [REG_SZ]` or `AutoRun: [REG_EXPAND_SZ]` and holds CMD Studio's entry: `if exist "<exe>" "<exe>" inject --autorun --quiet --profile "<dir>"` (the exe under the data folder's `runtime\`, or the short or ProgramData path that `state.json`'s `launch` names). This is what shows that `read-autorun.vbs` can read a value at all. If it says `(absent)` or `(read failed)` here, the apply set no AutoRun or the script cannot read one: either way the AutoRun comparisons of steps 16 and 18 (and Run 3 step 5) prove nothing, and that is recorded, not passed. The Terminal-only apply of Run 1 leaves AutoRun alone, so `(absent)` is its expected reading, not this one.
    - **Timing (check 3).** PASS: "seconds from the first window to Done" is under 120. The host pressed its keys faster than a person would, so a result above 60 is flagged in `results.md` even when it passes.
    - **The app's settings.** `settings.json` holds `"wizardDone": true`, `"language": "en"`, `"target": "all"` and `"setWtDefaultProfile": true`.
    - **The apply.** `state.json` names Terracotta as applied. The log has a `cmd=apply` line that ends `ok`.
    - **Terminal's file, by Step 0's state.**
      - `neverOpened`: `settings.json` now exists and is CMD Studio's file. It holds `$schema`, a `schemes` entry named "CMD Studio" with `"background": "#1f1e1d"`, the cmd profile `{0caa0dad-35be-5f56-a8ff-afceeeaa6101}` with `"colorScheme": "CMD Studio"`, and `defaultProfile` set to that guid; `state.json` holds `"fromTemplate": true` for it. If Step 0 said `LocalState` was absent, it exists now.
      - `present`: the file is the one `$before` hashed, with the same keys added and the rest untouched.
-6. **Try cmd (the first Terminal start, on a never-opened one).** Press "Try cmd" (Tab 1 from the heading of page 6, then Enter; this is not a sixth click of the walk). Screenshots at once, three times, then again after 10 seconds.
+6. **Try cmd (the first Terminal start, on a never-opened one).** Press "Try cmd" (Tab 1 from the heading of page 6, then Enter; this is not a sixth click of the walk; if step 5's Win+R read of AutoRun moved the focus, which `Get-GuestFocus $vm $u` shows, press it with `Invoke-GuestButton $vm 'Try cmd' $u` instead). Screenshots at once, three times, then again after 10 seconds.
 
    ```powershell
    $base = Save-Shot $vm 'r2-before-try'
@@ -300,6 +310,8 @@ Restore `clean`. The Terminal is in the state Step 0 recorded. On a never-opened
    - the frame color `#5F5D58` (the welcome box and the prompt's box) and the accent `#D97757` each **rise** over `$base`, the screenshot taken before "Try cmd", by at least 500 and 200 pixels. The rise matters, not the count: page 6's own preview in the app paints both colors, so a count alone could be met by the wrong window. The floors are well under what a 44-cell box draws (its top and bottom lines alone are about 800 pixels); record the real numbers, and raise a floor if they are far above it. The lines and letters are drawn in full-coverage pixels, which acrylic does not blend. The near count of step 6 holds as well.
 
    The screenshot shows the Terracotta welcome box with the box-layout prompt in English, the frame's right edge in one column, and `✻` on the tab. Keep `r2-wt` for `results.md`.
+
+   **If a rise falls short of its floor,** the floor is not the verdict. Record the three numbers for each color (before, now, rise) and judge from the screenshot `r2-wt`: the Terracotta welcome box with its frame, and the prompt in the accent, in the window of step 6 and in no other window, is a PASS; `results.md` then says that the rise was short and why (a smaller window, another resolution or DPI than the floors were set for). A box that is missing or cut, colors that are not Terracotta's, or a window that is not the tab of step 6 is a FAIL, with the numbers. Write which way it went and why. A short rise alone is not an app FAIL.
 8. **A second cmd window (gate).** Close the window of step 6 first (`Send-Key $vm AltF4`; it is in front), so that the only cmd that can be found is the new one, and take a baseline of what is on the screen now. Then type `cmd` in Win+R, as a person does.
 
    ```powershell
@@ -318,6 +330,8 @@ Restore `clean`. The Terminal is in the state Step 0 recorded. On a never-opened
    - `Get-GuestCmdWindows` lists exactly one `cmd.exe`, and Clink's DLL is loaded in it (AutoRun injected it);
    - the frame and accent counts of `$second` rise over `$pre` by at least 500 and 200 pixels, as in step 7 (`$pre` shows the app with page 6's preview, which has both colors, so the rise is the new window's);
    - the near count of `#1F1E1D` rises by at least 100000 over `$pre`.
+
+   **If a rise falls short of a floor,** it is judged as in step 7: record the numbers (before, now, rise) for each count, judge from the screenshot `r2-second` (the box and the prompt in Terracotta's colors, in the one new window), write which way it went and why. A short rise alone is not an app FAIL; the `cmd.exe` and Clink condition above is not a floor and stands.
 
    On Windows 11 this window opens in Windows Terminal (the default terminal), which maps it to the cmd profile (G7): its colors come from the profile and its prompt and box from AutoRun.
 9. **Home.** Close the Terminal window of step 8 (`Send-Key $vm AltF4`; it is in front, and the app is behind it), then press "Go to the home page" (Tab 2 from the heading of page 6, or `Invoke-GuestButton $vm 'Go to the home page' $u`). Screenshot `r2-home`.
@@ -411,7 +425,54 @@ Restore `clean`. The Terminal is in the state Step 0 recorded. On a never-opened
       ```
       PASS: `False`. The user name is taken out of both texts first, because on VM-C it is Thai and sits inside paths.
     - Settings → English (Tab 4, Up on the radio): the UI is English again. Undo is pressed in English in the next step.
-16. **Undo (gate).** In the app, from any page: ShiftTab 7 from the heading reaches "Undo" in the bar; Enter.
+16. **Undo (gate).** How the press is made depends on what Step 0 recorded.
+    - `present`: in the app, from any page, ShiftTab 7 from the heading reaches "Undo" in the bar; Enter.
+    - `neverOpened`: **the gate's "Undo" item is judged on the open-window path of 16a**, with a Terminal window still open, because that is how a person who pressed "Try cmd" meets it. Run 3 is the other path, with no Terminal ever started, and does not stand in for this one. Do 16a, then go on with the checks below.
+
+    **16a. Undo with a Terminal window still open (`neverOpened` only; it comes before the Undo).** A running Terminal holds its settings in memory and may write them back after the undo has taken away the file CMD Studio made. `settings_terminal_made_again` in `crates/core/src/exec.rs` accepts a file that a running Terminal wrote again right after the undo deleted it, when that file holds nothing of CMD Studio's. Whether it also covers a Terminal that writes back the settings it holds in memory, the scheme "CMD Studio" among them, has not been seen on a real Terminal. This sub-step sees it.
+    1. **After "Try cmd", leave the Terminal tab open.** The tab of step 6 was closed in step 8, so open it again with the button that does what "Try cmd" does, "Open cmd" on Home. The keys would go to whatever is in front, so press by name. Wait ten seconds, and leave the window open.
+
+       ```powershell
+       Invoke-GuestButton $vm 'Home' $u
+       Invoke-GuestButton $vm 'Open cmd' $u
+       Start-Sleep -Seconds 10
+       Save-Shot $vm 'r2-undo-wt'
+       Get-GuestProcesses $vm $u                        # must list WindowsTerminal
+       ```
+    2. **Go to the home page.** The app is behind the Terminal window, and Terminal stays open.
+
+       ```powershell
+       Invoke-GuestButton $vm 'Home' $u                 # a press on the page that is showing, harmless
+       Save-Shot $vm 'r2-undo-home'                     # Home, and the bar above it with "Undo"
+       ```
+
+       If the names find nothing, bring the app forward with a second start (`Send-Run $vm 'C:\cmdstudio\phase3\app\cmdstudio.exe'`; step 10 shows that it focuses the first window) and press Undo with ShiftTab 7 from the heading, as in the `present` path.
+    3. **Press the bar's Undo,** with the Terminal window still open, and read what is left:
+
+       ```powershell
+       Invoke-GuestButton $vm 'Undo' $u
+       Start-Sleep -Seconds 20
+       Save-Shot $vm 'r2-undo-open'
+       $wtFile = "$wtState\settings.json"
+       $probe = "if (Test-Path -LiteralPath '$wtFile') { 'settings.json present: ' + (Get-Item -LiteralPath '$wtFile').Length + ' bytes, CMD Studio occurs ' + (Select-String -SimpleMatch 'CMD Studio' -LiteralPath '$wtFile' | Measure-Object).Count + ' time(s)' } else { 'settings.json absent' }"
+       Invoke-GuestPs $vm $probe $u                      # at once
+       Get-GuestText $vm $wtFile $u                      # its text, whole
+       Start-Sleep -Seconds 10
+       Invoke-GuestPs $vm $probe $u                      # ten seconds later: Terminal may write after the undo has checked
+       Get-GuestText $vm "$data\state.json" $u           # names no applied theme when the undo committed
+       Get-GuestProcesses $vm $u                         # Terminal is still running
+       ```
+
+       Then close the Terminal window (`Send-Key $vm AltF4`; it is in front) and read `$probe` once more: Terminal may write on its way out. The checks below start from here, with Terminal closed.
+
+    Record in `results.md` as R2.16a:
+    - whether the Undo **committed or rolled back**, and the outcome text on the bar from `r2-undo-open`: "Undone: everything is as it was before." for a commit; "The undo did not go through, so nothing changed: the theme is still applied." for a roll-back;
+    - what `settings.json` of Terminal held afterwards, at each of the three readings: **absent**, **Terminal's defaults** (present, "CMD Studio occurs 0 time(s)"), or **still holding "CMD Studio"** (a count above 0);
+    - whether **`E_VERIFY_READBACK`** appeared (on a roll-back the bar's error shows "Code E_VERIFY_READBACK" under "Show details").
+
+    PASS: the Undo committed, and the file is absent or holds no CMD Studio part at all three readings; `E_VERIFY_READBACK` did not appear.
+
+    **If it rolled back,** or committed and Terminal then wrote CMD Studio's scheme back, record it as a **finding for the controller**, with the whole text of the file (`Get-GuestText` above, saved into `results.md`). It decides whether `settings_terminal_made_again` covers a running Terminal that writes back its in-memory settings. The gate's Undo item is FAIL on this path; nothing is repaired on the VM, and the other bullets below are recorded for the state it left (for example Home still showing the theme).
 
     ```powershell
     $autoAfter = Get-GuestAutoRun $vm 'after' $u
@@ -424,10 +485,10 @@ Restore `clean`. The Terminal is in the state Step 0 recorded. On a never-opened
 
     PASS:
     - the bar reads "Undone: everything is as it was before." and Home reads "No theme is applied yet.";
-    - `$autoAfter -eq $autoBefore` prints `True`: both read AutoRun with `read-autorun.vbs` (type and text), so this is a real comparison, and on a fresh VM both are `AutoRun: (absent)`;
+    - `$autoAfter -eq $autoBefore` prints `True`: both read AutoRun with `read-autorun.vbs` (type and text), so this is a real comparison, and on a fresh VM both are `AutoRun: (absent)`. It counts only if neither line says `(read failed)` and step 5's `$autoApplied` showed a value, so that `(absent)` is a reading and not a script that cannot read;
     - the fonts: when page 5 listed "Install 1 font for this account only", the `user fonts folder:` line is in the comparison and `user font registrations` in `$after` names no CaskaydiaCove. The undo compares the registration; a font file that Windows Terminal still holds is deleted later (`exec.rs` `same_state`), so a lone file with no registration is recorded, not failed. A font the user had installed over CMD Studio's stays, and is not a failure;
     - `present`: Terminal's `settings.json` has the hash that `$before` has, and `Compare-Object` prints nothing;
-    - `neverOpened`: the file CMD Studio made is gone, or, because the Terminal of step 6 is still running and writes a file again, `Select-String -SimpleMatch 'CMD Studio'` finds nothing in it. `LocalState` is removed only if CMD Studio made it and it is empty: after a Terminal has run it holds Terminal's own files, so it stays. Run 3 checks the case where it goes;
+    - `neverOpened`: judged by 16a, which was done with a Terminal window open: the undo committed, and the file CMD Studio made is gone, or, because that Terminal was running and wrote a file again, `Select-String -SimpleMatch 'CMD Studio'` finds nothing in it (the `$before` and `$after` hashes of the Terminal file then differ, and that difference is Terminal's own file, not a failure). `LocalState` is removed only if CMD Studio made it and it is empty: after a Terminal has run it holds Terminal's own files, so it stays. Run 3 checks the case where it goes;
     - Help → Restore points lists the apply with the badge "Undone" and without a "Go back to this point" button, and `state.json` in the data folder names no applied theme;
     - **a new cmd window is plain again.** Open one and compare it with a baseline taken just before:
 
@@ -451,17 +512,17 @@ Restore `clean`. The Terminal is in the state Step 0 recorded. On a never-opened
     Get-GuestAutoRun $vm 'cleanup' $u
     ```
 
-    The token `@LOCALAPPDATA@` is replaced by `exit-code.vbs`, in the user's environment, and the whole path is quoted as one argument; the Run dialog never sees `%…%`, and the host never types a Thai path. PASS: `exit=0`. The data folder is gone except `themes\`, which holds the saved themes of step 14: `drafts\`, `logs\`, `webview\` and `settings.json` were accepted as CMD Studio's own. An exit 2 that names `EBWebView\` or another entry means the app put something in its data folder that `--cleanup` does not know. AutoRun is `(absent)`.
+    The token `@LOCALAPPDATA@` is replaced by `exit-code.vbs`, in the user's environment, and the whole path is quoted as one argument; the Run dialog never sees `%…%`, and the host never types a Thai path. PASS: `exit=0`. The data folder is gone except `themes\`, which holds the saved themes of step 14: `drafts\`, `logs\`, `webview\` and `settings.json` were accepted as CMD Studio's own. An exit 2 that names `EBWebView\` or another entry means the app put something in its data folder that `--cleanup` does not know. AutoRun is `(absent)` (a `(read failed)` line is no reading).
 19. **After the run.** Copy the screenshots named in "Results" into the docs folder. Do not take a snapshot: the next run restores `clean`.
 
 ## Run 3 — VM-A: a Terminal that was never opened, undone before it opens
 
-Only if Step 0 said `neverOpened`. The point is the undo of a file that CMD Studio made, with no Terminal running to write it again. **Everything is console-free until the last step.**
+Only if Step 0 said `neverOpened`. The point is the undo of a file that CMD Studio made, with no Terminal running to write it again. **Everything is console-free until the last step.** The undo with a Terminal window still open, which a person who pressed "Try cmd" meets, is Run 2 step 16a, and the gate's "Undo" item is judged there; this run does not stand in for it.
 
 1. Restore `clean`; `Install-Phase3App`; Step 0's `.vbs` again (the same facts as before); `$before = Get-GuestFacts $vm $u -NoConsole`; `$autoBefore = Get-GuestAutoRun $vm 'before' $u` (no console).
 2. Start the app and walk the five clicks exactly as in Run 2 step 4. At page 6 do **not** press "Try cmd": press "Go to the home page" (Tab 2).
-3. `$applied = Get-GuestFacts $vm $u -NoConsole` and `Get-GuestText $vm "$wtState\settings.json" $u`. PASS: the file is CMD Studio's, as in Run 2 step 5, and `state.json` holds `"fromTemplate": true`. Record that `LocalState` was made, if Step 0 said it was absent.
-4. Press "Undo" (ShiftTab 7 from the Home heading, Enter).
+3. `$applied = Get-GuestFacts $vm $u -NoConsole`, `$autoApplied = Get-GuestAutoRun $vm 'applied' $u` (no console) and `Get-GuestText $vm "$wtState\settings.json" $u`. PASS: the file is CMD Studio's, as in Run 2 step 5, and `state.json` holds `"fromTemplate": true`. Record that `LocalState` was made, if Step 0 said it was absent. `$autoApplied` is the same positive control as in Run 2 step 5: `AutoRun: [REG_SZ]` or `[REG_EXPAND_SZ]` with CMD Studio's entry (`inject --autorun --quiet --profile`); `(absent)` or `(read failed)` here means the comparison of step 5 proves nothing.
+4. Press "Undo" (ShiftTab 7 from the Home heading, Enter). The AutoRun read of step 3 used Win+R, which takes the focus for a moment: take `Save-Shot $vm 'r3-before-undo'` first and check that Home with the bar is showing. No desktop reading may be used here (Terminal must stay unopened), so there is no `Invoke-GuestButton`.
 5. ```powershell
    $autoAfter = Get-GuestAutoRun $vm 'after' $u
    $after = Get-GuestFacts $vm $u -NoConsole
@@ -480,10 +541,10 @@ Only if Step 0 said `neverOpened`. The point is the undo of a file that CMD Stud
    $d = Save-Shot $vm 'r3-wt-default'
    '#1F1E1D near: before {0}, now {1}, rise {2}' -f (Measure-ColorNear $pre '#1F1E1D'), (Measure-ColorNear $d '#1F1E1D'), ((Measure-ColorNear $d '#1F1E1D') - (Measure-ColorNear $pre '#1F1E1D'))
    Get-GuestProcesses $vm $u
-   Invoke-GuestPs $vm "(Select-String -SimpleMatch 'CMD Studio' -LiteralPath '$wtState\settings.json' -ErrorAction SilentlyContinue | Measure-Object).Count" $u
+   Invoke-GuestPs $vm "if (Test-Path -LiteralPath '$wtState\settings.json') { 'settings.json present, CMD Studio occurs ' + (Select-String -SimpleMatch 'CMD Studio' -LiteralPath '$wtState\settings.json' | Measure-Object).Count + ' time(s)' } else { 'settings.json is MISSING' }" $u
    ```
 
-   PASS: a `WindowsTerminal` process is up; the near count (±12) of `#1F1E1D` rises by **less than 5000** over `$pre` (a Terminal with CMD Studio's scheme would raise it by 100000 or more, as in Run 2 step 6); Terminal wrote its own `settings.json`, in which "CMD Studio" occurs 0 times. Record the new background color Terminal paints (Campbell `#0C0C0C` or another default scheme), read from the screenshot.
+   PASS: a `WindowsTerminal` process is up; the near count (±12) of `#1F1E1D` rises by **less than 5000** over `$pre` (a Terminal with CMD Studio's scheme would raise it by 100000 or more, as in Run 2 step 6); Terminal wrote its own `settings.json` (the line says `present`), in which "CMD Studio" occurs 0 times. **A missing file is its own result,** never a 0 that passes: the line says `settings.json is MISSING`, which counts nothing. Then this part is neither PASS nor FAIL: record "settings.json missing after Terminal started" with the process list and the screenshot, and send it to the controller. Record the new background color Terminal paints (Campbell `#0C0C0C` or another default scheme), read from the screenshot.
 
 ## Run 4 — VM-A: Terminal's first start with a pre-written file
 
@@ -587,7 +648,7 @@ Criterion 1 of spec §1 is met when all of these pass on VM-A:
 - the five-click apply, with colors in Windows Terminal in whichever state Step 0 recorded, and the never-opened path (Runs 2, 3 and 4) when a snapshot allows it;
 - the themed cmd window (Run 2 step 7);
 - the second cmd window (Run 2 step 8);
-- Undo (Run 2 step 16).
+- Undo (Run 2 step 16; on a snapshot that was never-opened it is judged on the open-window path of step 16a, with a Terminal window still open).
 
 Everything else is recorded PASS or FAIL and goes back to the task that owns it before the PR. Check 3, the two minutes, is criterion 1's own limit: a FAIL there is reported next to the pass rule, not among the rest. VM-B is information only. A run that is not run is recorded as not run, with the reason.
 

@@ -156,13 +156,19 @@ function Get-ExitCode($Vm, [string] $Label, [string] $ArgLine, [string] $User = 
 
 # The AutoRun value of cmd for the signed-in user, read by read-autorun.vbs typed with Win+R: no
 # console, and HKCU is the user's, so this is the AutoRun reading to use on a Terminal that is
-# still never-opened. Returns the one line of the file ("AutoRun: (absent)" or
-# "AutoRun: [REG_SZ] <value>"); compare two of them as strings.
+# still never-opened. Returns the one line of the file ("AutoRun: (absent)", "AutoRun: [REG_SZ]
+# <value>" or "AutoRun: (read failed)"); compare two of them as strings. A "(read failed)" line, or
+# a missing result file, is no reading, and two of them are equal strings that would pass a
+# comparison for nothing, so the function warns for either. The reading of "absent" is worth
+# something only once the same script has been seen to read a value: read it right after an apply
+# (Get-GuestAutoRun $vm 'applied' $u) and expect [REG_SZ] or [REG_EXPAND_SZ].
 function Get-GuestAutoRun($Vm, [string] $Label, [string] $User = 'tester', [int] $WaitSec = 60) {
   $result = "$($P3.Out)\autorun-$Label.txt"
   Invoke-GuestPs $Vm "New-Item -ItemType Directory -Force -Path '$($P3.Out)' | Out-Null; Remove-Item -LiteralPath '$result' -ErrorAction SilentlyContinue" $User 60 | Out-Null
   Send-Run $Vm ('wscript.exe //B //Nologo {0}\read-autorun.vbs {1}' -f $P3.Check, $result)
-  if (Wait-GuestFile $Vm $result $User $WaitSec) { "$(Get-GuestText $Vm $result $User 'Unicode')".Trim() } else { "(no result file after $WaitSec s: $result)" }
+  $line = if (Wait-GuestFile $Vm $result $User $WaitSec) { "$(Get-GuestText $Vm $result $User 'Unicode')".Trim() } else { "(no result file after $WaitSec s: $result)" }
+  if ($line -notmatch '^AutoRun: (\(absent\)|\[REG_)') { Write-Warning "AutoRun '$Label' was not read: $line" }
+  $line
 }
 
 # Which of these processes run, and since when. Console-free.
@@ -302,12 +308,24 @@ New-Item -ItemType Directory -Force -Path 'C:\cmdstudio\out\phase3' | Out-Null
 # The page's console as text, for the CSP check of Run 1, over the Chrome DevTools Protocol on the
 # debug port that start-app.vbs debug opened (9222). In the guest: GET /json, take the page's
 # webSocketDebuggerUrl, connect with System.Net.WebSockets.ClientWebSocket, send Runtime.enable and
-# Log.enable (both replay what the page logged before they were sent), collect for $Seconds, and
-# write every message to C:\cmdstudio\out\phase3\console.txt. Two controls follow, so that "no
-# message" cannot mean "nothing was read": the page logs a probe line, and creates an inline
-# <style>, which the CSP must refuse and report. PASS: no line mentions "Content Security Policy"
-# or "Refused to" in the first window, and both controls were seen. A desktop reading. It has
-# been parsed, not run: the first run is on the VM.
+# Log.enable (both replay what the page logged before they were sent) and collect for $Seconds.
+# Every message is written to C:\cmdstudio\out\phase3\console.txt. Four controls follow, so that
+# "no message" cannot mean "nothing was read":
+#   1 and 2  live delivery: the page logs a probe line and creates an inline <style>, which the CSP
+#            must refuse and report; both must arrive on the open connection.
+#   3 and 4  replay: the function reconnects once and sends Runtime.enable and Log.enable again;
+#            the probe line and the refused <style>, both earlier than this connection, must come
+#            back as replayed entries. The first window can only be trusted if a replay works: a
+#            console that replayed nothing would show "no message" too. Without 3 and 4 the PASS
+#            cannot be given: record "replay not proven" and use the visible proxies instead.
+# PASS: Runtime.enable and Log.enable answered, no line of the first window mentions "Content
+# Security Policy" or "Refused to", and all four controls were seen. A desktop reading. It has been
+# parsed, not run: the first run is on the VM.
+# Run it ONCE per app start. Control 2's refused <style> stays in the page's console, so a second
+# call finds it in its own first window and counts a violation the app did not make. Start the app
+# again (start-app.vbs debug) for another read.
+# A message is taken whole (its bytes are joined and decoded as UTF-8 once, at its end), one that
+# is not JSON is logged raw and skipped, and the first window lasts $Seconds whatever happens.
 function Get-GuestConsoleLog($Vm, [string] $User = 'tester', [int] $Seconds = 10) {
   $code = @'
 $seconds = __SECONDS__
@@ -317,84 +335,156 @@ $targets = Invoke-RestMethod -Uri 'http://127.0.0.1:9222/json'
 $page = @($targets | Where-Object { $_.type -eq 'page' }) | Select-Object -First 1
 if (-not $page) { 'no page target on port 9222: was the app started with start-app.vbs debug?'; return }
 'target: {0} | {1}' -f $page.title, $page.url
-$ws = New-Object System.Net.WebSockets.ClientWebSocket
 $cts = New-Object System.Threading.CancellationTokenSource
-$ws.ConnectAsync([Uri]$page.webSocketDebuggerUrl, $cts.Token).Wait()
 $lines = New-Object System.Collections.Generic.List[string]
+$script:ws = $null
 $script:answers = @{}
 $script:buffer = New-Object byte[] 65536
-$script:partial = ''
+$script:message = New-Object System.IO.MemoryStream
 $script:pending = $null
+$script:dead = $false
 
-function Send-Cdp([int] $id, [string] $method, $arguments) {
-  $message = @{ id = $id; method = $method }
-  if ($arguments) { $message.params = $arguments }
-  $bytes = [Text.Encoding]::UTF8.GetBytes(($message | ConvertTo-Json -Compress -Depth 6))
-  $ws.SendAsync([ArraySegment[byte]]::new($bytes), [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $cts.Token).Wait()
-}
-
-function Read-Message([string] $json) {
-  $m = $json | ConvertFrom-Json
-  if ($m.id) { $script:answers[[int]$m.id] = $m; return }
-  switch ($m.method) {
-    'Log.entryAdded' {
-      $e = $m.params.entry
-      $lines.Add(('log [{0}/{1}] {2} {3}' -f $e.source, $e.level, $e.text, $e.url))
-    }
-    'Runtime.consoleAPICalled' {
-      $parts = @($m.params.args | ForEach-Object { if ($null -ne $_.value) { "$($_.value)" } else { "$($_.description)" } })
-      $lines.Add(('console.{0}: {1}' -f $m.params.type, ($parts -join ' ')))
-    }
-    'Runtime.exceptionThrown' {
-      $d = $m.params.exceptionDetails
-      $lines.Add(('exception: {0} {1}' -f $d.text, $d.exception.description))
-    }
+# A fresh connection to the page: nothing is left over from the one before.
+function Open-Cdp {
+  $script:answers = @{}
+  $script:message.SetLength(0)
+  $script:pending = $null
+  $script:dead = $false
+  $script:ws = New-Object System.Net.WebSockets.ClientWebSocket
+  try {
+    $script:ws.ConnectAsync([Uri]$page.webSocketDebuggerUrl, $cts.Token).Wait()
+  } catch {
+    $script:dead = $true
+    $lines.Add('connect failed: ' + $_.Exception.Message)
   }
 }
 
-# Reads messages for $ms. One receive stays outstanding between calls, so that nothing is lost
-# and the socket is never cancelled.
+function Close-Cdp {
+  try { $script:ws.Abort() } catch { }
+  try { $script:ws.Dispose() } catch { }
+}
+
+function Send-Cdp([int] $id, [string] $method, $arguments) {
+  $request = @{ id = $id; method = $method }
+  if ($arguments) { $request.params = $arguments }
+  $bytes = [Text.Encoding]::UTF8.GetBytes(($request | ConvertTo-Json -Compress -Depth 6))
+  try {
+    $script:ws.SendAsync([ArraySegment[byte]]::new($bytes), [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $cts.Token).Wait()
+  } catch {
+    $script:dead = $true
+    $lines.Add('send failed: ' + $_.Exception.Message)
+  }
+}
+
+# One whole message. A message that cannot be read is logged as it came and skipped; the
+# collection goes on.
+function Read-Message([string] $json) {
+  try {
+    $m = $json | ConvertFrom-Json -ErrorAction Stop
+    if ($m.id) { $script:answers[[int]$m.id] = $m; return }
+    switch ($m.method) {
+      'Log.entryAdded' {
+        $e = $m.params.entry
+        $lines.Add(('log [{0}/{1}] {2} {3}' -f $e.source, $e.level, $e.text, $e.url))
+      }
+      'Runtime.consoleAPICalled' {
+        $parts = @($m.params.args | ForEach-Object { if ($null -ne $_.value) { "$($_.value)" } else { "$($_.description)" } })
+        $lines.Add(('console.{0}: {1}' -f $m.params.type, ($parts -join ' ')))
+      }
+      'Runtime.exceptionThrown' {
+        $d = $m.params.exceptionDetails
+        $lines.Add(('exception: {0} {1}' -f $d.text, $d.exception.description))
+      }
+    }
+  } catch {
+    $lines.Add(('message not read ({0}): {1}' -f $_.Exception.Message, $json))
+  }
+}
+
+# Reads messages for $ms, and lasts $ms whatever happens: a connection that has ended is noted once
+# and the rest of the time is waited out. One receive stays outstanding between calls, so that
+# nothing is lost and the socket is never cancelled. The bytes of a message are joined first and
+# decoded once at its end, so a Thai letter split across two frames stays whole.
 function Pump([int] $ms) {
   $end = (Get-Date).AddMilliseconds($ms)
-  try {
-    while ((Get-Date) -lt $end) {
-      if (-not $script:pending) { $script:pending = $ws.ReceiveAsync([ArraySegment[byte]]::new($script:buffer), $cts.Token) }
+  while ((Get-Date) -lt $end) {
+    if ($script:dead) { Start-Sleep -Milliseconds 100; continue }
+    try {
+      if (-not $script:pending) { $script:pending = $script:ws.ReceiveAsync([ArraySegment[byte]]::new($script:buffer), $cts.Token) }
       $slice = [int][Math]::Max(50, [Math]::Min(500, ($end - (Get-Date)).TotalMilliseconds))
       if ($script:pending.Wait($slice)) {
         $r = $script:pending.Result
         $script:pending = $null
-        $script:partial += [Text.Encoding]::UTF8.GetString($script:buffer, 0, $r.Count)
-        if ($r.MessageType -eq 'Close') { $lines.Add('connection closed by the page'); return }
-        if ($r.EndOfMessage) { $json = $script:partial; $script:partial = ''; Read-Message $json }
+        if ($r.MessageType -eq [System.Net.WebSockets.WebSocketMessageType]::Close) {
+          $lines.Add('connection closed by the page')
+          $script:dead = $true
+          continue
+        }
+        $script:message.Write($script:buffer, 0, $r.Count)
+        if ($r.EndOfMessage) {
+          $text = [Text.Encoding]::UTF8.GetString($script:message.ToArray())
+          $script:message.SetLength(0)
+          Read-Message $text
+        }
       }
+    } catch {
+      $lines.Add('connection ended: ' + $_.Exception.Message)
+      $script:dead = $true
     }
-  } catch {
-    $lines.Add('connection ended: ' + $_.Exception.Message)
   }
 }
 
+# The first window: whatever the page logged before it is replayed, then what comes live.
+Open-Cdp
 Send-Cdp 1 'Runtime.enable' $null
 Send-Cdp 2 'Log.enable' $null
 Pump ($seconds * 1000)
 $first = $lines.Count
+$answered = $script:answers.ContainsKey(1) -and $script:answers.ContainsKey(2)
+
+# Controls 1 and 2, live: a probe line, and an inline style, which the CSP must refuse and report.
 Send-Cdp 3 'Runtime.evaluate' @{ expression = "console.log('phase3-cdp-probe')" }
 Pump 2000
 Send-Cdp 4 'Runtime.evaluate' @{ expression = "var s = document.createElement('style'); s.textContent = 'x{}'; document.head.appendChild(s); 'done'" }
 Pump 3000
+$live = $lines.Count
+
+# Controls 3 and 4, the replay: a new connection, the two domains enabled again. Everything the
+# page logged before that, the two lines above included, has to come back as replayed entries.
+Close-Cdp
+$lines.Add('--- reconnected once: what follows is the replay ---')
+Open-Cdp
+Send-Cdp 5 'Runtime.enable' $null
+Send-Cdp 6 'Log.enable' $null
+Pump 4000
+$answeredAgain = $script:answers.ContainsKey(5) -and $script:answers.ContainsKey(6)
+Close-Cdp
 Set-Content -LiteralPath $outFile -Value $lines -Encoding UTF8
 
-$inFirst = @($lines | Select-Object -First $first)
-$later = @($lines | Select-Object -Skip $first)
+$inFirst = $lines.GetRange(0, $first)
+$later = $lines.GetRange($first, $live - $first)
+$replayed = $lines.GetRange($live + 1, $lines.Count - $live - 1)
 $pattern = 'Content Security Policy|Refused to'
-'Runtime.enable and Log.enable answered: {0}' -f ($script:answers.ContainsKey(1) -and $script:answers.ContainsKey(2))
+$cspInFirst = @($inFirst | Where-Object { $_ -match $pattern }).Count
+$control1 = [bool]($later | Where-Object { $_ -match 'phase3-cdp-probe' })
+$control2 = [bool]($later | Where-Object { $_ -match $pattern })
+$control3 = [bool]($replayed | Where-Object { $_ -match 'phase3-cdp-probe' })
+$control4 = @($replayed | Where-Object { $_ -match $pattern }).Count -gt $cspInFirst
+$replayProven = $answeredAgain -and $control3 -and $control4
+'Runtime.enable and Log.enable answered: {0}' -f $answered
 'messages in the first {0} s: {1}' -f $seconds, $first
-'  of them mentioning "Content Security Policy" or "Refused to": {0}' -f @($inFirst | Where-Object { $_ -match $pattern }).Count
-'control 1, the probe line was read: {0}' -f [bool]($later | Where-Object { $_ -match 'phase3-cdp-probe' })
-'control 2, the refused inline style was reported: {0}' -f [bool]($later | Where-Object { $_ -match $pattern })
+'  of them mentioning "Content Security Policy" or "Refused to": {0}' -f $cspInFirst
+'control 1, the probe line was read live: {0}' -f $control1
+'control 2, the refused inline style was reported live: {0}' -f $control2
+'control 3, after the reconnect, the earlier probe line came back replayed: {0}' -f $control3
+'control 4, after the reconnect, the earlier refused inline style came back replayed: {0}' -f $control4
+'replay proven (both domains answered again, controls 3 and 4): {0}' -f $replayProven
+if (-not $replayProven) { 'REPLAY NOT PROVEN: the count of the first window proves nothing, so no PASS can be given; record "replay not proven" and use the visible proxies of protocol.md (Run 1 step 7)' }
+'messages that were not JSON and are logged raw in the file: {0}' -f @($lines | Where-Object { $_ -like 'message not read*' }).Count
 'all messages are in ' + $outFile
 $inFirst | Select-Object -First 40 | ForEach-Object { '  ' + $_ }
 '@
-  Invoke-GuestSnippet $Vm $code.Replace('__SECONDS__', [string]$Seconds) $User ($Seconds + 90)
+  Invoke-GuestSnippet $Vm $code.Replace('__SECONDS__', [string]$Seconds) $User ($Seconds + 120)
 }
 
 # Which control has the keyboard focus, by name, through UI Automation. Best effort: it is how
