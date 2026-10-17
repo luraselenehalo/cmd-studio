@@ -10,9 +10,12 @@ import type { Line } from "../bindings/Line";
 import { useT } from "../i18n";
 import { pieces } from "./cells";
 
-/** One cell: a box 1ch wide whose glyph is centered, so a fallback font's wider glyph spills
- * out evenly on both sides instead of pushing what follows. */
-const CELL_STYLE = { display: "inline-flex", justifyContent: "center", width: "1ch" } as const;
+/** The box of a glyph of `cells` cells (1 but for Thai SARA AM): `cells` ch wide, the glyph
+ * centered, so a fallback font's wider glyph spills out evenly on both sides instead of pushing
+ * what follows. */
+function cellStyle(cells: number) {
+  return { display: "inline-flex", justifyContent: "center", width: `${cells}ch` } as const;
+}
 
 function Row({ line }: { line: Line }) {
   return (
@@ -28,7 +31,7 @@ function Row({ line }: { line: Line }) {
         >
           {pieces(span.text).map((piece, j) =>
             piece.cell ? (
-              <span key={j} className="cell" style={CELL_STYLE}>
+              <span key={j} className="cell" style={cellStyle(piece.cells)}>
                 {piece.text}
               </span>
             ) : (

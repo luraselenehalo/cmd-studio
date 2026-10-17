@@ -205,6 +205,26 @@ describe("TerminalPreview", () => {
     expect(boxes.map((b) => b.textContent)).toEqual(["ผู้", "ใ", "ช้"]);
     for (const box of boxes) expect(box.style.width).toBe("1ch");
   });
+
+  it("boxes น้ำ as one glyph two cells wide, as the core counts it, and leaves joined sequences and wide brackets alone (m4)", () => {
+    // The Thai name of a user: the tone mark and SARA AM belong to the letter, so the box is the
+    // letter's, one cell for น้ and one for ำ.
+    const family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+    const rows = ["C:\\Users\\น้ำ>", `x ${family} y`, "a\u{200b}b \u{2329}c\u{232a}", "✻\u{200b}"];
+    const { theme, result } = withText(...rows);
+    mount(<TerminalPreview theme={theme} result={result} />);
+    const preview = screen.getByRole("img", { name: "Preview of the cmd window" });
+    const boxes = Array.from(preview.querySelectorAll<HTMLElement>(".cell"));
+    // น้ำ is two cells in a box 2ch wide; ✻ with its zero-width space is one cell in 1ch; nothing
+    // else is boxed: not the family, not the zero-width space, not the angle brackets.
+    expect(boxes.map((b) => [b.textContent, b.style.width])).toEqual([
+      ["น้ำ", "2ch"],
+      ["✻\u{200b}", "1ch"],
+    ]);
+    // Copy: the text of the preview is the rows, whatever was boxed.
+    const pre = preview.querySelector("pre") as HTMLElement;
+    expect(pre.textContent).toBe(`${rows.join("\n")}\n`);
+  });
 });
 
 describe("Notices", () => {

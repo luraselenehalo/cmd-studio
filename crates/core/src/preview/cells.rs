@@ -69,6 +69,13 @@ mod tests {
             ("\u{2764}\u{fe0f}", 1),
             ("ﾊ가", 3),
             ("\u{e0b0}\u{e0a0}╭─✓✗❯", 7),
+            // SARA AM takes a cell of its own, after the letter and its tone mark; the preview
+            // (app/ui/src/components/cells.ts) boxes น้ำ as one glyph two cells wide
+            ("น้ำ", 2),
+            ("สำนักงาน", 7),
+            // a zero-width space takes none; U+2329 and U+232A are wide
+            ("a\u{200b}b", 2),
+            ("\u{2329}x\u{232a}", 5),
         ] {
             assert_eq!(prompt_cells(text), cells, "{text:?}");
         }
@@ -85,6 +92,10 @@ mod tests {
             ("\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}", 2),
             ("\u{2764}\u{fe0f}", 2),
             ("✻ Welcome", 9),
+            ("น้ำ", 2),
+            ("สำนักงาน", 7),
+            ("a\u{200b}b", 2),
+            ("\u{2329}x\u{232a}", 5),
         ] {
             assert_eq!(banner_cells(text), cells, "{text:?}");
         }
