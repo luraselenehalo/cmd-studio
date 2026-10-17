@@ -104,6 +104,22 @@ async function mountHoldingPalette() {
   return { ...mounted, held };
 }
 
+/** A mount whose `contrastFix` answers only when its gate is opened, once `held.on` is set: each
+ * held call adds its gate to `held.gates`, in the order the calls came. With `held.fail` set a
+ * held call then refuses instead of answering. */
+async function mountHoldingFix() {
+  const held = { on: false, fail: false, gates: [] as (() => void)[] };
+  const mounted = await mountWith((m) => {
+    const fix = m.contrastFix.bind(m);
+    vi.spyOn(m, "contrastFix").mockImplementation(async (colors) => {
+      if (held.on) await new Promise<void>((resolve) => held.gates.push(resolve));
+      if (held.on && held.fail) throw ipcError("E_INTERNAL", "the fix was refused");
+      return fix(colors);
+    });
+  });
+  return { ...mounted, held };
+}
+
 /**
  * A mount whose draft writes are refused while `control.refuse` is set, with `control.details`
  * as the reason. With `control.holdNext` set, the next draft write waits until
@@ -705,6 +721,120 @@ describe("the editor", () => {
       expect(screen.queryByText("0.20"), `answers in the order ${order.join(", ")}`).toBeNull();
       view.unmount();
     }
+  });
+
+  it("keeps a hand edit made while a readability fix was on its way", async () => {
+    const { user, held } = await mountHoldingFix();
+    await openThemes(user);
+    await user.click(within(await card("Gruvbox")).getByRole("button", { name: "Customize" }));
+    await screen.findByRole("heading", { name: "Edit theme" });
+    await screen.findByText("Red is hard to read (2.7:1, needs 3.0:1)");
+    held.on = true;
+    await user.click(screen.getByRole("button", { name: "Fix automatically" }));
+    await waitFor(() => expect(held.gates).toHaveLength(1));
+    // Gruvbox has no recipe, so the editor is in advanced mode already.
+    fireEvent.change(screen.getByLabelText("Background"), { target: { value: "#123456" } });
+    await act(async () => {
+      held.gates[0]?.();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    // The fix was computed for the colors as they were: it would put the old background back.
+    expect((screen.getByLabelText("Background") as HTMLInputElement).value).toBe("#123456");
+    // And it made no undo step: the one step back is the hand edit.
+    await user.click(screen.getByRole("button", { name: "Undo" }));
+    expect((screen.getByLabelText("Background") as HTMLInputElement).value).not.toBe("#123456");
+    expect((screen.getByRole("button", { name: "Undo" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("lets a tone change made while a readability fix was on its way win over the fix's late answer", async () => {
+    const { user, held } = await mountHoldingFix();
+    await openThemes(user);
+    await user.click(within(await card("Gruvbox")).getByRole("button", { name: "Customize" }));
+    await screen.findByRole("heading", { name: "Edit theme" });
+    await screen.findByText("Red is hard to read (2.7:1, needs 3.0:1)");
+    // Simple mode has the tone; Gruvbox opens in advanced mode.
+    await user.click(within(screen.getByRole("group", { name: "Color mode" })).getByRole("button", { name: "Simple" }));
+    held.on = true;
+    await user.click(screen.getByRole("button", { name: "Fix automatically" }));
+    await waitFor(() => expect(held.gates).toHaveLength(1));
+    // Light is a palette request, which is not held: it lands before the fix's answer does.
+    await user.click(screen.getByRole("radio", { name: "Light" }));
+    await waitFor(() => expect((screen.getByRole("radio", { name: "Light" }) as HTMLInputElement).checked).toBe(true));
+    await act(async () => {
+      held.gates[0]?.();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    // The late fix would put the tone it was asked for (dark) back.
+    expect((screen.getByRole("radio", { name: "Light" }) as HTMLInputElement).checked).toBe(true);
+  });
+
+  it("lets the newest readability fix win, whichever answer comes first", async () => {
+    for (const order of [
+      [0, 1],
+      [1, 0],
+    ]) {
+      const { user, held, view } = await mountHoldingFix();
+      await openThemes(user);
+      await user.click(within(await card("Gruvbox")).getByRole("button", { name: "Customize" }));
+      await screen.findByRole("heading", { name: "Edit theme" });
+      await screen.findByText("Red is hard to read (2.7:1, needs 3.0:1)");
+      held.on = true;
+      const fix = screen.getByRole("button", { name: "Fix automatically" });
+      await user.click(fix);
+      await user.click(fix);
+      await waitFor(() => expect(held.gates).toHaveLength(2));
+      // One answer at a time, the page drawn after each.
+      for (const i of order) {
+        await act(async () => {
+          held.gates[i]?.();
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        });
+      }
+      // The fixed colors are there once, as ONE undo step: the older answer, whichever turn it
+      // had, did not make a second one.
+      expect(await screen.findByText("Every color is easy to read."), `answers in the order ${order.join(", ")}`).toBeTruthy();
+      await user.click(screen.getByRole("button", { name: "Undo" }));
+      expect((screen.getByRole("button", { name: "Undo" }) as HTMLButtonElement).disabled, `answers in the order ${order.join(", ")}`).toBe(true);
+      expect(await screen.findByText("Red is hard to read (2.7:1, needs 3.0:1)")).toBeTruthy();
+      view.unmount();
+    }
+  });
+
+  it("does not say the refusal of a readability fix that a newer request has replaced", async () => {
+    const { user, held } = await mountHoldingFix();
+    await openThemes(user);
+    await user.click(within(await card("Gruvbox")).getByRole("button", { name: "Customize" }));
+    await screen.findByRole("heading", { name: "Edit theme" });
+    await screen.findByText("Red is hard to read (2.7:1, needs 3.0:1)");
+    await user.click(within(screen.getByRole("group", { name: "Color mode" })).getByRole("button", { name: "Simple" }));
+    held.on = true;
+    held.fail = true;
+    await user.click(screen.getByRole("button", { name: "Fix automatically" }));
+    await waitFor(() => expect(held.gates).toHaveLength(1));
+    await user.click(screen.getByRole("radio", { name: "Light" }));
+    await waitFor(() => expect((screen.getByRole("radio", { name: "Light" }) as HTMLInputElement).checked).toBe(true));
+    await act(async () => {
+      held.gates[0]?.();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(screen.queryByText(/the fix was refused/)).toBeNull();
+  });
+
+  it("says the refusal of a readability fix that is still the newest request", async () => {
+    const { user, held } = await mountHoldingFix();
+    await openThemes(user);
+    await user.click(within(await card("Gruvbox")).getByRole("button", { name: "Customize" }));
+    await screen.findByRole("heading", { name: "Edit theme" });
+    await screen.findByText("Red is hard to read (2.7:1, needs 3.0:1)");
+    held.on = true;
+    held.fail = true;
+    await user.click(screen.getByRole("button", { name: "Fix automatically" }));
+    await waitFor(() => expect(held.gates).toHaveLength(1));
+    await act(async () => {
+      held.gates[0]?.();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(await screen.findByText(/the fix was refused/)).toBeTruthy();
   });
 
   it("undoes with Ctrl+Z and redoes with Ctrl+Y, on a Thai keyboard layout too", async () => {

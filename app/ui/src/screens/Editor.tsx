@@ -84,8 +84,9 @@ export function Editor({ id }: { id: string }) {
    * so an undo made while a write is on its way is written after it (round 3, C). */
   const queuedDraft = useRef<Theme | null>(null);
   const applies = useRef(0);
-  /** Counts the regenerates of simple mode: only the newest one's answer is used (item 5). */
-  const regenerations = useRef(0);
+  /** Counts the requests for a whole set of colors, the regenerates of simple mode and the
+   * readability fixes alike: only the newest one's answer is used (item 5). */
+  const colorRequests = useRef(0);
   const heading = useRef<HTMLHeadingElement>(null);
   const offered = useRef(false);
   /** Every draft write and removal, one after the other; a save waits for the last (fix 5). */
@@ -346,29 +347,35 @@ export function Editor({ id }: { id: string }) {
   };
 
   // Simple mode: every color from the Rust palette, the tone with them, as ONE undo step (R9).
-  // An answer that comes late is dropped when another regenerate started after it, or when the
-  // theme on screen changed meanwhile (a color set by hand above all): it would overwrite them
-  // (item 5).
+  // An answer that comes late is dropped when another request for colors started after it, or
+  // when the theme on screen changed meanwhile (a color set by hand above all): it would
+  // overwrite them (item 5).
   const regenerate = async (tone: Tone, accent: string, tint: number) => {
-    const n = ++regenerations.current;
+    const n = ++colorRequests.current;
     const from = theme;
     setError(null);
     try {
       const colors = await ipc.paletteGenerate(tone, accent, tint);
-      if (n !== regenerations.current || latest.current.state?.theme !== from) return;
+      if (n !== colorRequests.current || latest.current.state?.theme !== from) return;
       dispatch({ type: "setColors", colors, simple: { accent, tint }, tone });
     } catch (e) {
-      if (n === regenerations.current) setError(e);
+      if (n === colorRequests.current) setError(e);
     }
   };
 
+  // The readability fix is answered for the colors it was asked about, so it follows the same
+  // rule as `regenerate`: a late answer is dropped when a newer request for colors started after
+  // it, or when the theme on screen is no longer the one it was asked about.
   const fixReadability = async () => {
+    const n = ++colorRequests.current;
+    const from = theme;
     setError(null);
     try {
-      const colors = await ipc.contrastFix(theme.colors);
-      dispatch({ type: "setColors", colors, simple: null, tone: theme.tone });
+      const colors = await ipc.contrastFix(from.colors);
+      if (n !== colorRequests.current || latest.current.state?.theme !== from) return;
+      dispatch({ type: "setColors", colors, simple: null, tone: from.tone });
     } catch (e) {
-      setError(e);
+      if (n === colorRequests.current) setError(e);
     }
   };
 
