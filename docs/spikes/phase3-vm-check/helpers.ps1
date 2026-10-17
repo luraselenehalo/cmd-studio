@@ -38,6 +38,21 @@ $P3Keys = @{
   CtrlA = '1d 1e 9e 9d'; CtrlV = '1d 2f af 9d'
 }
 
+# A tally of what the host sent since Reset-InputTally, kept on the host. Enter and Space count as
+# activations (of whatever has the focus: a button, in the walk); Tab and the arrows as navigation;
+# every other key as other; Send-Text's characters as characters. The walk of the gate resets it
+# before the first key and prints it after the apply, so that results.md can say "5 activations,
+# 0 characters, N navigation keys". Send-Run (vm.ps1) is not tallied; the walk does not use it.
+$P3KeyKind = @{
+  Enter = 'Activations'; Space = 'Activations'
+  Tab = 'Navigation'; ShiftTab = 'Navigation'; Up = 'Navigation'; Down = 'Navigation'; Left = 'Navigation'; Right = 'Navigation'
+}
+$script:P3Tally = @{ Activations = 0; Navigation = 0; Other = 0; Characters = 0 }
+function Reset-InputTally { $script:P3Tally = @{ Activations = 0; Navigation = 0; Other = 0; Characters = 0 } }
+function Get-InputTally {
+  '{0} activations, {1} characters, {2} navigation keys, {3} other keys' -f $script:P3Tally.Activations, $script:P3Tally.Characters, $script:P3Tally.Navigation, $script:P3Tally.Other
+}
+
 # Restores the "clean" snapshot, starts the VM and waits until guestcontrol can run a command.
 # 'separate' gives a window to watch; closing that window leaves the VM running.
 function Start-CleanVm($Vm, [string] $User = 'tester', [ValidateSet('headless', 'separate')] [string] $Type = 'headless') {
@@ -54,7 +69,7 @@ function Install-Phase3App($Vm, [string] $User, [string] $Artifact) {
   Invoke-GuestPs $Vm "New-Item -ItemType Directory -Force -Path '$($P3.Out)' | Out-Null" $User 60 | Out-Null
   # Invoke-GuestDesktop runs this file; a snapshot taken before any probe may not have it.
   Copy-ToGuest $Vm @((Join-Path $repo 'spikes\vm\guest\run-on-desktop.ps1')) 'C:\cmdstudio\spikes\vm\guest\' $User | Out-Null
-  $scripts = 'wt-precreate.ps1', 'step0-wt-state.vbs', 'start-app.vbs', 'exit-code.vbs' | ForEach-Object { Join-Path $P3Docs $_ }
+  $scripts = 'wt-precreate.ps1', 'step0-wt-state.vbs', 'read-autorun.vbs', 'start-app.vbs', 'exit-code.vbs' | ForEach-Object { Join-Path $P3Docs $_ }
   Copy-ToGuest $Vm $scripts ($P3.Check + '\') $User | Out-Null
   Copy-ToGuest $Vm @((Join-Path $Artifact 'cmdstudio.exe'), (Join-Path $Artifact 'resources')) ($P3.App + '\') $User | Out-Null
   $hostHash = (Get-FileHash -LiteralPath (Join-Path $Artifact 'cmdstudio.exe') -Algorithm SHA256).Hash
@@ -69,8 +84,10 @@ function Install-Phase3App($Vm, [string] $User, [string] $Artifact) {
 function Send-Key($Vm, [string] $Name, [int] $Times = 1, [int] $PauseMs = 500) {
   if (-not $P3Keys.ContainsKey($Name)) { throw "unknown key '$Name'; known: $($P3Keys.Keys -join ', ')" }
   $codes = $P3Keys[$Name] -split ' '
+  $kind = if ($P3KeyKind.ContainsKey($Name)) { $P3KeyKind[$Name] } else { 'Other' }
   for ($i = 0; $i -lt $Times; $i++) {
     & $Vbm controlvm $Vm keyboardputscancode @codes
+    $script:P3Tally[$kind] += 1
     Start-Sleep -Milliseconds $PauseMs
   }
 }
@@ -83,10 +100,11 @@ function ConvertTo-CommandLineArg([string] $Text) {
 
 # Types a text into the VM. Windows PowerShell 5.1 does not escape double quotes inside an argument
 # for a native program, so vm.ps1's Send-Run cannot type a text that has a quote in it; this builds
-# the whole command line itself. -Enter presses Enter afterwards.
+# the whole command line itself. -Enter presses Enter afterwards. Every character is tallied.
 function Send-Text($Vm, [string] $Text, [switch] $Enter) {
   $line = 'controlvm {0} keyboardputstring {1}' -f (ConvertTo-CommandLineArg $Vm), (ConvertTo-CommandLineArg $Text)
   Start-Process -FilePath $Vbm -ArgumentList $line -NoNewWindow -Wait
+  $script:P3Tally.Characters += $Text.Length
   if ($Enter) { Start-Sleep -Milliseconds 400; Send-Key $Vm Enter }
 }
 
@@ -123,14 +141,28 @@ function Wait-GuestFile($Vm, [string] $Path, [string] $User = 'tester', [int] $T
 
 # Runs cmdstudio.exe with these arguments the way an NSIS ExecWait does (exit-code.vbs under
 # wscript.exe: hidden, no console, waiting), and returns the file it wrote: "exit=<code>" and the
-# command that ran. Typed with Win+R, so it runs as the signed-in user and %NAME% in $ArgLine
-# is expanded for that user. $ArgLine holds no double quote and no space: the script quotes
-# every argument itself. Console-free.
+# command that ran. Typed with Win+R, so it runs as the signed-in user. A token @NAME@ in $ArgLine
+# is replaced by the script, in the user's environment, with the value of the variable NAME
+# (@LOCALAPPDATA@ gives the data folder's parent, with a Thai name and a space on VM-C); write
+# @NAME@, not %NAME%, because the Run dialog may expand %NAME% itself before the script sees it.
+# $ArgLine holds no double quote and no space inside an argument: the script quotes every
+# argument itself. Console-free.
 function Get-ExitCode($Vm, [string] $Label, [string] $ArgLine, [string] $User = 'tester', [int] $WaitSec = 90) {
   $result = "$($P3.Out)\exit-$Label.txt"
   Invoke-GuestPs $Vm "New-Item -ItemType Directory -Force -Path '$($P3.Out)' | Out-Null; Remove-Item -LiteralPath '$result' -ErrorAction SilentlyContinue" $User 60 | Out-Null
   Send-Run $Vm ('wscript.exe //B //Nologo {0}\exit-code.vbs {1} {2}\cmdstudio.exe {3}' -f $P3.Check, $result, $P3.App, $ArgLine)
   if (Wait-GuestFile $Vm $result $User $WaitSec) { Get-GuestText $Vm $result $User 'Unicode' } else { "(no result file after $WaitSec s: $result)" }
+}
+
+# The AutoRun value of cmd for the signed-in user, read by read-autorun.vbs typed with Win+R: no
+# console, and HKCU is the user's, so this is the AutoRun reading to use on a Terminal that is
+# still never-opened. Returns the one line of the file ("AutoRun: (absent)" or
+# "AutoRun: [REG_SZ] <value>"); compare two of them as strings.
+function Get-GuestAutoRun($Vm, [string] $Label, [string] $User = 'tester', [int] $WaitSec = 60) {
+  $result = "$($P3.Out)\autorun-$Label.txt"
+  Invoke-GuestPs $Vm "New-Item -ItemType Directory -Force -Path '$($P3.Out)' | Out-Null; Remove-Item -LiteralPath '$result' -ErrorAction SilentlyContinue" $User 60 | Out-Null
+  Send-Run $Vm ('wscript.exe //B //Nologo {0}\read-autorun.vbs {1}' -f $P3.Check, $result)
+  if (Wait-GuestFile $Vm $result $User $WaitSec) { "$(Get-GuestText $Vm $result $User 'Unicode')".Trim() } else { "(no result file after $WaitSec s: $result)" }
 }
 
 # Which of these processes run, and since when. Console-free.
@@ -265,6 +297,104 @@ New-Item -ItemType Directory -Force -Path 'C:\cmdstudio\out\phase3' | Out-Null
 '<SID> present: ' + $text.Contains('<SID>')
 '@
   Invoke-GuestSnippet $Vm $code $User
+}
+
+# The page's console as text, for the CSP check of Run 1, over the Chrome DevTools Protocol on the
+# debug port that start-app.vbs debug opened (9222). In the guest: GET /json, take the page's
+# webSocketDebuggerUrl, connect with System.Net.WebSockets.ClientWebSocket, send Runtime.enable and
+# Log.enable (both replay what the page logged before they were sent), collect for $Seconds, and
+# write every message to C:\cmdstudio\out\phase3\console.txt. Two controls follow, so that "no
+# message" cannot mean "nothing was read": the page logs a probe line, and creates an inline
+# <style>, which the CSP must refuse and report. PASS: no line mentions "Content Security Policy"
+# or "Refused to" in the first window, and both controls were seen. A desktop reading. It has
+# been parsed, not run: the first run is on the VM.
+function Get-GuestConsoleLog($Vm, [string] $User = 'tester', [int] $Seconds = 10) {
+  $code = @'
+$seconds = __SECONDS__
+$outFile = 'C:\cmdstudio\out\phase3\console.txt'
+New-Item -ItemType Directory -Force -Path (Split-Path $outFile) | Out-Null
+$targets = Invoke-RestMethod -Uri 'http://127.0.0.1:9222/json'
+$page = @($targets | Where-Object { $_.type -eq 'page' }) | Select-Object -First 1
+if (-not $page) { 'no page target on port 9222: was the app started with start-app.vbs debug?'; return }
+'target: {0} | {1}' -f $page.title, $page.url
+$ws = New-Object System.Net.WebSockets.ClientWebSocket
+$cts = New-Object System.Threading.CancellationTokenSource
+$ws.ConnectAsync([Uri]$page.webSocketDebuggerUrl, $cts.Token).Wait()
+$lines = New-Object System.Collections.Generic.List[string]
+$script:answers = @{}
+$script:buffer = New-Object byte[] 65536
+$script:partial = ''
+$script:pending = $null
+
+function Send-Cdp([int] $id, [string] $method, $arguments) {
+  $message = @{ id = $id; method = $method }
+  if ($arguments) { $message.params = $arguments }
+  $bytes = [Text.Encoding]::UTF8.GetBytes(($message | ConvertTo-Json -Compress -Depth 6))
+  $ws.SendAsync([ArraySegment[byte]]::new($bytes), [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $cts.Token).Wait()
+}
+
+function Read-Message([string] $json) {
+  $m = $json | ConvertFrom-Json
+  if ($m.id) { $script:answers[[int]$m.id] = $m; return }
+  switch ($m.method) {
+    'Log.entryAdded' {
+      $e = $m.params.entry
+      $lines.Add(('log [{0}/{1}] {2} {3}' -f $e.source, $e.level, $e.text, $e.url))
+    }
+    'Runtime.consoleAPICalled' {
+      $parts = @($m.params.args | ForEach-Object { if ($null -ne $_.value) { "$($_.value)" } else { "$($_.description)" } })
+      $lines.Add(('console.{0}: {1}' -f $m.params.type, ($parts -join ' ')))
+    }
+    'Runtime.exceptionThrown' {
+      $d = $m.params.exceptionDetails
+      $lines.Add(('exception: {0} {1}' -f $d.text, $d.exception.description))
+    }
+  }
+}
+
+# Reads messages for $ms. One receive stays outstanding between calls, so that nothing is lost
+# and the socket is never cancelled.
+function Pump([int] $ms) {
+  $end = (Get-Date).AddMilliseconds($ms)
+  try {
+    while ((Get-Date) -lt $end) {
+      if (-not $script:pending) { $script:pending = $ws.ReceiveAsync([ArraySegment[byte]]::new($script:buffer), $cts.Token) }
+      $slice = [int][Math]::Max(50, [Math]::Min(500, ($end - (Get-Date)).TotalMilliseconds))
+      if ($script:pending.Wait($slice)) {
+        $r = $script:pending.Result
+        $script:pending = $null
+        $script:partial += [Text.Encoding]::UTF8.GetString($script:buffer, 0, $r.Count)
+        if ($r.MessageType -eq 'Close') { $lines.Add('connection closed by the page'); return }
+        if ($r.EndOfMessage) { $json = $script:partial; $script:partial = ''; Read-Message $json }
+      }
+    }
+  } catch {
+    $lines.Add('connection ended: ' + $_.Exception.Message)
+  }
+}
+
+Send-Cdp 1 'Runtime.enable' $null
+Send-Cdp 2 'Log.enable' $null
+Pump ($seconds * 1000)
+$first = $lines.Count
+Send-Cdp 3 'Runtime.evaluate' @{ expression = "console.log('phase3-cdp-probe')" }
+Pump 2000
+Send-Cdp 4 'Runtime.evaluate' @{ expression = "var s = document.createElement('style'); s.textContent = 'x{}'; document.head.appendChild(s); 'done'" }
+Pump 3000
+Set-Content -LiteralPath $outFile -Value $lines -Encoding UTF8
+
+$inFirst = @($lines | Select-Object -First $first)
+$later = @($lines | Select-Object -Skip $first)
+$pattern = 'Content Security Policy|Refused to'
+'Runtime.enable and Log.enable answered: {0}' -f ($script:answers.ContainsKey(1) -and $script:answers.ContainsKey(2))
+'messages in the first {0} s: {1}' -f $seconds, $first
+'  of them mentioning "Content Security Policy" or "Refused to": {0}' -f @($inFirst | Where-Object { $_ -match $pattern }).Count
+'control 1, the probe line was read: {0}' -f [bool]($later | Where-Object { $_ -match 'phase3-cdp-probe' })
+'control 2, the refused inline style was reported: {0}' -f [bool]($later | Where-Object { $_ -match $pattern })
+'all messages are in ' + $outFile
+$inFirst | Select-Object -First 40 | ForEach-Object { '  ' + $_ }
+'@
+  Invoke-GuestSnippet $Vm $code.Replace('__SECONDS__', [string]$Seconds) $User ($Seconds + 90)
 }
 
 # Which control has the keyboard focus, by name, through UI Automation. Best effort: it is how

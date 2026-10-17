@@ -1,8 +1,10 @@
 Option Explicit
 ' Step 0 of the phase 3 VM check (protocol.md): what Windows Terminal looks like on a clean
-' snapshot, read only. It starts no program and opens no console, so it cannot end the
-' never-opened state that it is there to record. Run it with wscript.exe, never with a console
-' host:
+' snapshot. It reads and writes one text file (the second argument, under C:\cmdstudio\out\phase3
+' by default) and nothing else. It starts no program and opens no console, so it cannot end the
+' never-opened state that it is there to record. Like the other scripts of this folder it quits
+' with exit code 99 on a machine whose name does not start with CMDSTUDIO-. Run it with
+' wscript.exe, never with a console host:
 '   wscript.exe //B //Nologo step0-wt-state.vbs [<local-app-data> [<out-file>]]
 ' <local-app-data> defaults to %LOCALAPPDATA% of the user it runs as. Pass it when a program
 ' started through guestcontrol runs this, because that may not have the user's environment.
@@ -19,9 +21,10 @@ Const STORE_PACKAGE = "Microsoft.WindowsTerminal_8wekyb3d8bbwe"
 Const PREVIEW_PACKAGE = "Microsoft.WindowsTerminalPreview_8wekyb3d8bbwe"
 
 Dim fso, sh, net, root, outFile, lines
+Set net = CreateObject("WScript.Network")
+If UCase(Left(net.ComputerName, 10)) <> "CMDSTUDIO-" Then WScript.Quit 99
 Set fso = CreateObject("Scripting.FileSystemObject")
 Set sh = CreateObject("WScript.Shell")
-Set net = CreateObject("WScript.Network")
 lines = ""
 
 If WScript.Arguments.Count >= 1 Then
