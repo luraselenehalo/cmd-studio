@@ -1,9 +1,10 @@
 // The after-apply bar (spec §4.4), for every shell: this plan's interim one and phase 3's final
 // one. "Theme X applied · open a new cmd window…" (a new cmd tab in Windows Terminal when that is
 // where the theme went) with Undo, which goes back to that apply's own restore point (ruling R3).
+// Where the theme went is the target of the request that was applied, kept with the outcome in
+// the app state (item 12), so an apply with its own request (a doctor fix) is worded right.
 import { useEffect, useRef, useState } from "react";
 import type { RestoreOutcome } from "../bindings/RestoreOutcome";
-import type { Target } from "../bindings/Target";
 import { pick, useI18n } from "../i18n";
 import { useIpc } from "../ipc/context";
 import { useAppState } from "../state";
@@ -19,7 +20,7 @@ export type UndoResult = { kind: "restore"; outcome: RestoreOutcome } | { kind: 
  * The applied text is not a live region: every apply ends in an `ApplyFlow`, whose outcome is
  * the one announcement of it (fix 12).
  */
-export function AfterApplyBar({ target }: { target: Target }) {
+export function AfterApplyBar() {
   const ipc = useIpc();
   const { t } = useI18n();
   const { lastApply, setLastApply, bump } = useAppState();
@@ -37,7 +38,9 @@ export function AfterApplyBar({ target }: { target: Target }) {
     if (result) resultBox.current?.focus();
   }, [result]);
 
-  const offer = lastApply && lastApply.status === "committed" && lastApply.snapshotId ? lastApply : null;
+  const applied = lastApply?.outcome;
+  const offer = applied && applied.status === "committed" && applied.snapshotId ? applied : null;
+  const target = lastApply?.target;
   if (!offer && !result) return null;
 
   const undo = async () => {

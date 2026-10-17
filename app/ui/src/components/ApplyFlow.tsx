@@ -196,9 +196,10 @@ export function ApplyFlow({
   request: ApplyRequest;
   /** Whether the plan carries its own "What will change" heading (a dialog has it as its title). */
   titled?: boolean;
-  /** Called once an apply committed (the after-apply bar and the caller's refresh); never for
-   * an apply that rolled back, though its outcome carries a `snapshotId` too. */
-  onApplied?: (outcome: ApplyOutcome) => void;
+  /** Called once an apply committed (the after-apply bar and the caller's refresh), with the
+   * request that was applied, whose `target` words the bar; never for an apply that rolled
+   * back, though its outcome carries a `snapshotId` too. */
+  onApplied?: (outcome: ApplyOutcome, request: ApplyRequest) => void;
   onCancel?: () => void;
   /** `true` just before the apply starts and `false` once it has ended, however it ended: a
    * dialog around the flow cannot be closed in between (ruling R7). */
@@ -265,7 +266,7 @@ export function ApplyFlow({
         return;
       }
       setStage({ kind: "done", outcome });
-      if (outcome.status === "committed") onApplied?.(outcome);
+      if (outcome.status === "committed") onApplied?.(outcome, request);
     } catch (thrown) {
       setStage({ kind: "error", error: toIpcError(thrown) });
     } finally {

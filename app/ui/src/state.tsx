@@ -4,13 +4,22 @@
 import { createContext, useContext } from "react";
 import type { AppSettings } from "./bindings/AppSettings";
 import type { ApplyOutcome } from "./bindings/ApplyOutcome";
+import type { Target } from "./bindings/Target";
+
+/** The last committed apply and the target of the request that made it (the bar's words
+ * depend on it): that request's own, not the settings', since a doctor fix or a later
+ * Settings change can differ from them (item 12). */
+export interface LastApply {
+  outcome: ApplyOutcome;
+  target: Target;
+}
 
 export interface AppState {
   settings: AppSettings;
   /** Saves and remembers the settings; `language` is applied to the UI at once. */
   saveSettings: (settings: AppSettings) => Promise<void>;
-  lastApply: ApplyOutcome | null;
-  setLastApply: (outcome: ApplyOutcome | null) => void;
+  lastApply: LastApply | null;
+  setLastApply: (applied: LastApply | null) => void;
   /** Bumped after an apply, undo, restore or revert: screens that show the machine reload. */
   version: number;
   bump: () => void;

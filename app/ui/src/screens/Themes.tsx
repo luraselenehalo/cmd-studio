@@ -393,8 +393,8 @@ export function Themes() {
             request={applying.request}
             onBusy={setApplyBusy}
             onCancel={closeApply}
-            onApplied={(o) => {
-              setLastApply(o);
+            onApplied={(outcome, request) => {
+              setLastApply({ outcome, target: request.target });
               bump();
             }}
           />

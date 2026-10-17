@@ -6,7 +6,7 @@
 // commands it turns off; Try again asks about that add-on again; a plan that changed is shown
 // again, never applied; what a rollback left is listed under its header; focus follows the
 // stages; "busy" brackets the apply; "Copy details" says whether it copied.
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState, type ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
@@ -18,6 +18,8 @@ import { IpcProvider } from "../ipc/context";
 import { createMockIpc } from "../ipc/mock";
 import { PRESETS } from "../ipc/presets";
 import type { Ipc } from "../ipc/types";
+import { AppStateContext, DEFAULT_SETTINGS, type AppState, type LastApply } from "../state";
+import { AfterApplyBar } from "./AfterApplyBar";
 import { ApplyFlow, ProgressView } from "./ApplyFlow";
 import { Dialog } from "./Dialog";
 import { ErrorNotice, NotesList } from "./Notices";
@@ -256,6 +258,8 @@ describe("ApplyFlow", () => {
     await screen.findByText(/Theme "Nord" applied/);
     expect(onApplied).toHaveBeenCalledTimes(1);
     expect(onApplied.mock.calls[0]?.[0]).toMatchObject({ status: "committed", themeName: "Nord" });
+    // The request that was applied comes with it: the user's yes to the other add-on included.
+    expect(onApplied.mock.calls[0]?.[1]).toEqual({ ...REQUEST, replaceOtherClink: true });
   });
 
   it("asks about the other add-on again when a failed apply is tried again", async () => {
@@ -453,5 +457,43 @@ describe("ApplyFlow", () => {
     await user.click(await screen.findByRole("button", { name: "Apply" }));
     await screen.findByText(/Theme "Nord" applied/);
     expect(events).toEqual(["busy true", "apply starts", "apply ends", "busy false"]);
+  });
+});
+
+describe("AfterApplyBar", () => {
+  it("words the bar by the target of the request that was applied, not by the settings (item 12)", async () => {
+    // As phase 3's doctor fixes do: a flow with its own request, here for Windows Terminal
+    // only, while the settings say every cmd window.
+    function Host() {
+      const [lastApply, setLastApply] = useState<LastApply | null>(null);
+      const state: AppState = {
+        settings: { ...DEFAULT_SETTINGS, target: "all" },
+        saveSettings: async () => {},
+        lastApply,
+        setLastApply,
+        version: 0,
+        bump: () => {},
+      };
+      return (
+        <AppStateContext.Provider value={state}>
+          <AfterApplyBar />
+          <ApplyFlow
+            request={{ ...REQUEST, target: "wt" }}
+            onApplied={(outcome, request) => setLastApply({ outcome, target: request.target })}
+          />
+        </AppStateContext.Provider>
+      );
+    }
+    const user = userEvent.setup();
+    const { container } = mount(<Host />);
+    await user.click(await screen.findByRole("button", { name: "Apply" }));
+    await screen.findAllByText(/Theme "Nord" applied/);
+    const bar = await waitFor(() => {
+      const found = container.querySelector(".bar");
+      expect(found).not.toBeNull();
+      return found as HTMLElement;
+    });
+    expect(within(bar).getByText(/open a new cmd tab in Windows Terminal/)).toBeTruthy();
+    expect(screen.queryByText(/open a new cmd window/)).toBeNull();
   });
 });

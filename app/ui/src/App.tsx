@@ -5,8 +5,6 @@
 // screen reader reads Thai as Thai and the `:lang(th)` styles apply.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AppSettings } from "./bindings/AppSettings";
-import type { ApplyOutcome } from "./bindings/ApplyOutcome";
-import type { Target } from "./bindings/Target";
 import { AfterApplyBar } from "./components/AfterApplyBar";
 import { ErrorNotice, Notice } from "./components/Notices";
 import { I18nProvider, useI18n, type Language } from "./i18n";
@@ -14,7 +12,7 @@ import { useIpc } from "./ipc/context";
 import { NavContext, useNav, type Nav, type Route } from "./router";
 import { Editor } from "./screens/Editor";
 import { Themes } from "./screens/Themes";
-import { AppStateContext, DEFAULT_SETTINGS, type AppState } from "./state";
+import { AppStateContext, DEFAULT_SETTINGS, type AppState, type LastApply } from "./state";
 import { useRouteFocus } from "./useRouteFocus";
 
 export function App() {
@@ -23,8 +21,8 @@ export function App() {
   const [language, setLanguage] = useState<Language>("en");
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [route, setRoute] = useState<Route | null>(null);
-  /** The last committed apply, with the target it went to (the bar's words depend on it). */
-  const [applied, setApplied] = useState<{ outcome: ApplyOutcome; target: Target } | null>(null);
+  /** The last committed apply, with the target of the request that made it (item 12). */
+  const [lastApply, setLastApply] = useState<LastApply | null>(null);
   const [version, setVersion] = useState(0);
   const [startError, setStartError] = useState<unknown>(null);
   const [resetFrom, setResetFrom] = useState<string | null>(null);
@@ -59,16 +57,10 @@ export function App() {
     [ipc],
   );
 
-  // Every apply of this shell asks for `settings.target`, so that is where it went.
-  const target = settings.target;
-  const setLastApply = useCallback(
-    (outcome: ApplyOutcome | null) => setApplied(outcome ? { outcome, target } : null),
-    [target],
-  );
   const bump = useCallback(() => setVersion((v) => v + 1), []);
   const appState = useMemo<AppState>(
-    () => ({ settings, saveSettings, lastApply: applied?.outcome ?? null, setLastApply, version, bump }),
-    [settings, saveSettings, applied, setLastApply, version, bump],
+    () => ({ settings, saveSettings, lastApply, setLastApply, version, bump }),
+    [settings, saveSettings, lastApply, version, bump],
   );
   const nav = useMemo<Nav>(() => ({ route: route ?? { name: "themes" }, go: (r: Route) => setRoute(r) }), [route]);
 
@@ -82,7 +74,7 @@ export function App() {
                 …
               </p>
             ) : (
-              <Shell startError={startError} resetFrom={resetFrom} appliedTarget={applied?.target ?? target} />
+              <Shell startError={startError} resetFrom={resetFrom} />
             )}
           </div>
         </NavContext.Provider>
@@ -91,7 +83,7 @@ export function App() {
   );
 }
 
-function Shell({ startError, resetFrom, appliedTarget }: { startError: unknown; resetFrom: string | null; appliedTarget: Target }) {
+function Shell({ startError, resetFrom }: { startError: unknown; resetFrom: string | null }) {
   const { t } = useI18n();
   const { route, go } = useNav();
   const main = useRef<HTMLElement>(null);
@@ -104,7 +96,7 @@ function Shell({ startError, resetFrom, appliedTarget }: { startError: unknown; 
       <a className="skip-link" href="#content">
         {t("a11y.skipToContent")}
       </a>
-      <AfterApplyBar target={appliedTarget} />
+      <AfterApplyBar />
       <div className="shell">
         <nav className="sidebar" aria-label={t("a11y.mainMenu")}>
           <div className="brand">{t("app.name")}</div>
