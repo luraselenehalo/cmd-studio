@@ -21,14 +21,25 @@ export interface EditorState {
   mode: Mode;
   /** Simple mode is shown while `simple` is null: the hand edits are kept (spec §3.4). */
   keptEditsNotice: boolean;
-  /** Changed since it was loaded or saved. */
+  /** The theme as it is stored: what the last load or the last save held. */
+  savedTheme: Theme;
+  /**
+   * Changed since it was stored. DERIVED, never set by a case: `theme !== savedTheme`, by
+   * identity (history restores the same object references, so an undo back to the stored
+   * theme is clean). `reduce` computes it in one place, after every action.
+   */
   dirty: boolean;
 }
 
 export type ColorSlot = Exclude<keyof Colors, "ansi"> | `ansi${number}`;
 
 export type EditorAction =
-  | { type: "load"; theme: Theme; mode?: Mode }
+  /**
+   * Start editing `theme`. `savedTheme` is the theme as it is stored; it defaults to `theme`
+   * (a fresh load, which starts clean). For a draft it is the stored theme, so a loaded draft
+   * starts dirty.
+   */
+  | { type: "load"; theme: Theme; savedTheme?: Theme; mode?: Mode }
   /** A field other than a color (name, font, prompt, banner…): the new theme. */
   | { type: "edit"; theme: Theme }
   /**
@@ -49,23 +60,39 @@ export type EditorAction =
   | { type: "setMode"; mode: Mode }
   | { type: "undo" }
   | { type: "redo" }
-  | { type: "saved" };
+  /**
+   * `theme` was saved: the very object that was sent (keep a reference to it when the save
+   * starts, do not pass a copy the backend returned: dirty compares by identity). An edit made
+   * while the save was awaited stays dirty.
+   */
+  | { type: "saved"; theme: Theme };
 
-export function initialState(theme: Theme): EditorState {
+export function initialState(theme: Theme, savedTheme: Theme = theme): EditorState {
   return {
     theme,
+    savedTheme,
     past: [],
     future: [],
     mode: theme.simple ? "simple" : "advanced",
     keptEditsNotice: false,
-    dirty: false,
+    dirty: theme !== savedTheme,
   };
 }
 
 function push(state: EditorState, theme: Theme): EditorState {
   const past = [...state.past, state.theme];
   if (past.length > HISTORY) past.shift();
-  return { ...state, theme, past, future: [], dirty: true };
+  return { ...state, theme, past, future: [] };
+}
+
+/** The notice (spec §3.4) is shown in simple mode while the theme on screen has no recipe. */
+function keptEdits(mode: Mode, theme: Theme): boolean {
+  return mode === "simple" && theme.simple === null;
+}
+
+function sameRecipe(a: SimpleRecipe | null, b: SimpleRecipe | null): boolean {
+  if (a === null || b === null) return a === b;
+  return a.accent === b.accent && a.tint === b.tint;
 }
 
 /** The index of an `ansiN` slot, or null when `N` is not a whole number (`ansi`, `ansi-1`, `ansi3.5`). */
@@ -100,10 +127,13 @@ export function getSlot(colors: Colors, slot: ColorSlot): string {
   return colors[slot as Exclude<keyof Colors, "ansi">];
 }
 
-export function reduce(state: EditorState, action: EditorAction): EditorState {
+/** One action applied, without the derived `dirty` (see `reduce`). */
+function step(state: EditorState, action: EditorAction): EditorState {
   switch (action.type) {
-    case "load":
-      return { ...initialState(action.theme), mode: action.mode ?? initialState(action.theme).mode };
+    case "load": {
+      const fresh = initialState(action.theme, action.savedTheme);
+      return action.mode ? { ...fresh, mode: action.mode } : fresh;
+    }
     case "edit":
       return push(state, action.theme);
     case "setColor": {
@@ -114,28 +144,53 @@ export function reduce(state: EditorState, action: EditorAction): EditorState {
       return push(state, { ...state.theme, colors, simple: null });
     }
     case "setColors": {
+      // Nothing new (the same colors object, recipe and tone) is no change: no undo step.
+      if (
+        action.colors === state.theme.colors &&
+        action.tone === state.theme.tone &&
+        sameRecipe(action.simple, state.theme.simple)
+      ) {
+        return state;
+      }
       const theme: Theme = { ...state.theme, colors: action.colors, simple: action.simple, tone: action.tone };
       // A regenerate from the recipe replaces the hand edits: the notice is over.
       return { ...push(state, theme), keptEditsNotice: action.simple ? false : state.keptEditsNotice };
     }
     case "setMode":
       if (action.mode === state.mode) return state;
-      return {
-        ...state,
-        mode: action.mode,
-        keptEditsNotice: action.mode === "simple" && state.theme.simple === null,
-      };
+      return { ...state, mode: action.mode, keptEditsNotice: keptEdits(action.mode, state.theme) };
+    // Undo and redo put back a theme that may or may not have its recipe, so the notice is
+    // worked out again for the theme now on screen, by the rule `setMode` uses.
     case "undo": {
       const previous = state.past[state.past.length - 1];
       if (!previous) return state;
-      return { ...state, theme: previous, past: state.past.slice(0, -1), future: [state.theme, ...state.future], dirty: true };
+      return {
+        ...state,
+        theme: previous,
+        past: state.past.slice(0, -1),
+        future: [state.theme, ...state.future],
+        keptEditsNotice: keptEdits(state.mode, previous),
+      };
     }
     case "redo": {
       const [next, ...rest] = state.future;
       if (!next) return state;
-      return { ...state, theme: next, past: [...state.past, state.theme], future: rest, dirty: true };
+      return {
+        ...state,
+        theme: next,
+        past: [...state.past, state.theme],
+        future: rest,
+        keptEditsNotice: keptEdits(state.mode, next),
+      };
     }
     case "saved":
-      return { ...state, dirty: false };
+      return { ...state, savedTheme: action.theme };
   }
+}
+
+export function reduce(state: EditorState, action: EditorAction): EditorState {
+  const next = step(state, action);
+  // `dirty` is derived in this one place. A no-op action returns the same state object.
+  const dirty = next.theme !== next.savedTheme;
+  return dirty === next.dirty ? next : { ...next, dirty };
 }
