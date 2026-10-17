@@ -306,7 +306,6 @@ export const en = {
   "help.doctor.fix.reapply": "Apply the theme again",
   "help.doctor.fix.replaceOtherClink": "Replace the other add-on",
   "help.doctor.fix.installWindowsTerminal": "Install Windows Terminal",
-  "help.doctor.fix.openWindowsTerminalOnce": "Open Windows Terminal once, then apply the theme again",
   "help.doctor.fix.openNewCmdWindow": "Open a new cmd window",
   "help.doctor.fix.reinstall": "Reinstall CMD Studio",
   "help.restore.title": "Restore points",

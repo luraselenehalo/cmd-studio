@@ -2,7 +2,7 @@
 // group rather than the tab pattern, so choosing one leaves focus on it (ruling Q4, as the
 // editor's modes). The health check with the fix the backend offers for each finding (the F2
 // mapping: an apply goes through the plan, the Store and a new cmd window open from here, and
-// the two steps only the user can take are said in words); every restore point with "Go back to
+// the step only the user can take is said in words); every restore point with "Go back to
 // this point"; "Undo everything"; "Report a problem" (the diagnostics, the user name replaced,
 // copied for a GitHub issue); the short guide; the credits and licenses. Every failure, a window
 // that could not be opened included, is shown (spec §5.9).
@@ -27,8 +27,9 @@ import { BUNDLED, SCHEMES, type Credit } from "./credits";
 
 const TABS: HelpTab[] = ["doctor", "restore", "revert", "report", "guide", "credits"];
 
-/** The fixes this page runs (F2): an apply through the plan, the Store, a new cmd window. Opening
- * Windows Terminal once and reinstalling only the user can do: they are said, not buttons. */
+/** The fixes this page runs (F2): an apply through the plan, the Store, a new cmd window.
+ * Reinstalling only the user can do: it is said, not a button. A Windows Terminal that was
+ * never opened needs nothing of the user's, since an apply sets it up (founder 2026-10-17). */
 const RUNNABLE: ReadonlySet<FixKind> = new Set<FixKind>([
   "reapply",
   "replaceOtherClink",

@@ -397,6 +397,8 @@ describe("the health check", () => {
         fix: "reinstall",
       },
       {
+        // Never opened, before any apply: the apply sets it up, so there is nothing to do first
+        // (founder 2026-10-17) and no fix; its details are Thai here.
         id: "D6",
         status: "warn",
         code: "E_WT_NOT_FOUND",
@@ -404,7 +406,7 @@ describe("the health check", () => {
         messageEn: "Windows Terminal is installed but was never opened",
         details: "Windows Terminal's settings.json is not there yet",
         detailsTh: "ยังไม่มีไฟล์ settings.json ของ Windows Terminal",
-        fix: "openWindowsTerminalOnce",
+        fix: null,
       },
       {
         id: "D2",
@@ -429,7 +431,7 @@ describe("the health check", () => {
     expect(english.closest("[lang]")?.getAttribute("lang")).toBe("en");
     const d6 = await check("มี Windows Terminal แต่ยังไม่เคยเปิด");
     expect(within(d6).queryAllByRole("button")).toEqual([]);
-    expect(within(d6).getByText(th["help.doctor.fix.openWindowsTerminalOnce"])).toBeTruthy();
+    expect(within(d6).queryByText(th["help.whatToDo"])).toBeNull();
     const thai = within(d6).getByText("ยังไม่มีไฟล์ settings.json ของ Windows Terminal");
     expect(thai.closest("[lang]")?.getAttribute("lang")).toBe("th");
     expect(within(d6).queryByText("Windows Terminal's settings.json is not there yet")).toBeNull();

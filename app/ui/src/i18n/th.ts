@@ -310,7 +310,6 @@ export const th: Dictionary = {
   "help.doctor.fix.reapply": "ใช้ธีมอีกครั้ง",
   "help.doctor.fix.replaceOtherClink": "แทนที่ส่วนเสริมตัวอื่น",
   "help.doctor.fix.installWindowsTerminal": "ติดตั้ง Windows Terminal",
-  "help.doctor.fix.openWindowsTerminalOnce": "เปิด Windows Terminal หนึ่งครั้ง แล้วใช้ธีมอีกครั้ง",
   "help.doctor.fix.openNewCmdWindow": "เปิด cmd หน้าต่างใหม่",
   "help.doctor.fix.reinstall": "ติดตั้ง CMD Studio ใหม่",
   "help.restore.title": "จุดย้อนกลับ",

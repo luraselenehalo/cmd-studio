@@ -164,6 +164,19 @@ export interface MockOptions {
   failApplyWith?: string;
   /** Windows Terminal is not installed. */
   noWindowsTerminal?: boolean;
+  /**
+   * Windows Terminal (the Store one) is installed and was never opened: it has no settings.json
+   * yet, and `system_detect` says an apply sets it up (`setUpByApply`). The plan says so in the
+   * core's words, and D6 says so until a theme is applied.
+   */
+  wtNeverOpened?: boolean;
+  /** Windows' build as `system_detect` reports it, `null` when it could not be read; 26100 when
+   * not given. */
+  build?: number | null;
+  /** `system_detect`'s `storeAvailable` as given, never worked out from `build` (the backend's
+   * rule, build 19041 or later, is Rust's); `true` when not given. D6 offers the Store only
+   * when it is `true`, as the backend's `fix_for` does. */
+  storeAvailable?: boolean;
   settings?: Partial<AppSettings>;
 }
 
@@ -280,6 +293,11 @@ export function createMockIpc(options: MockOptions = {}): Ipc & { state: MockSta
       warnings.push({ kind: "noWindowsTerminal" });
     } else {
       steps.push({ kind: "windowsTerminal", detail: "settings.json" });
+      if (options.wtNeverOpened) {
+        // The core's line for a Terminal that was never opened (crates/core/src/plan.rs).
+        summaryEn.push("Set up Windows Terminal's settings so cmd gets this theme");
+        summaryTh.push("ตั้งค่า Windows Terminal ให้ cmd ได้ธีมนี้");
+      }
       summaryEn.push("Colors and font of cmd in Windows Terminal");
       summaryTh.push("สีและตัวอักษรของหน้าต่าง cmd ใน Windows Terminal");
       if (request.setWtDefaultProfile) {
@@ -298,7 +316,7 @@ export function createMockIpc(options: MockOptions = {}): Ipc & { state: MockSta
     }
     steps.push({ kind: "saveState", detail: "state.json" });
     return {
-      digest: `digest-${theme.id}-${request.target}-${request.setWtDefaultProfile}-${request.replaceOtherClink}-${options.noWindowsTerminal ? "nowt" : "wt"}`,
+      digest: `digest-${theme.id}-${request.target}-${request.setWtDefaultProfile}-${request.replaceOtherClink}-${options.noWindowsTerminal ? "nowt" : options.wtNeverOpened ? "newwt" : "wt"}`,
       themeName: theme.name,
       summaryEn,
       summaryTh,
@@ -363,9 +381,23 @@ export function createMockIpc(options: MockOptions = {}): Ipc & { state: MockSta
             messageEn: "Windows Terminal was not found",
             details: "",
             detailsTh: null,
-            fix: "installWindowsTerminal",
+            // As the backend's fix_for: the Store page only where it applies.
+            fix: (options.storeAvailable ?? true) ? "installWindowsTerminal" : null,
           }
-        : ok("D6", "Windows Terminal is installed and its settings parse", "มี Windows Terminal และอ่าน settings.json ได้"),
+        : options.wtNeverOpened && !applied
+          ? {
+              // The core's D6 for it (crates/core/src/doctor.rs): before any apply there is
+              // nothing to offer, since the apply sets it up; after one, it has its settings.
+              id: "D6",
+              status: "warn",
+              code: "E_WT_NOT_FOUND",
+              messageTh: "Windows Terminal ยังไม่เคยเปิด จึงยังไม่มีการตั้งค่า ใช้ธีมแล้ว CMD Studio จะตั้งค่าให้เอง",
+              messageEn: "Windows Terminal has never been opened, so it has no settings yet. Applying a theme sets them up",
+              details: "settings.json does not exist yet",
+              detailsTh: null,
+              fix: null,
+            }
+          : ok("D6", "Windows Terminal is installed and its settings parse", "มี Windows Terminal และอ่าน settings.json ได้"),
       applied ? ok("D7", "The cmd profile matches the theme", "โปรไฟล์ cmd ตรงกับธีม") : skip("D7"),
       applied ? ok("D8", "The theme's font is installed", "ฟอนต์ของธีมติดตั้งอยู่") : skip("D8"),
       applied ? ok("D9", "The generated files are as written", "ไฟล์ที่สร้างตรงกับที่บันทึกไว้") : skip("D9"),
@@ -380,15 +412,19 @@ export function createMockIpc(options: MockOptions = {}): Ipc & { state: MockSta
     async systemDetect(): Promise<SystemReport> {
       state.calls.push("systemDetect");
       return {
-        build: 26100,
+        build: options.build === undefined ? 26100 : options.build,
         arch: "x64",
         packaged: false,
         unreadable: [],
+        // Fixed answers, one per option: whether an apply sets a Terminal up is the backend's
+        // flag (the core's `detect::never_opened`), given here, never worked out.
         windowsTerminal: options.noWindowsTerminal
-          ? [{ kind: "store", installed: false, hasSettings: false }]
-          : [{ kind: "store", installed: true, hasSettings: true }],
+          ? [{ kind: "store", installed: false, hasSettings: false, setUpByApply: false }]
+          : options.wtNeverOpened
+            ? [{ kind: "store", installed: true, hasSettings: false, setUpByApply: true }]
+            : [{ kind: "store", installed: true, hasSettings: true, setUpByApply: false }],
         wtInstalled: !options.noWindowsTerminal,
-        storeAvailable: true,
+        storeAvailable: options.storeAvailable ?? true,
         autorun: {
           otherCommands: ['if exist "C:\\conda\\conda_hook.bat" "C:\\conda\\conda_hook.bat"'],
           foreignClink: options.otherClink ?? [],

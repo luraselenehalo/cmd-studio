@@ -179,4 +179,52 @@ describe("the mock IPC", () => {
     const reverted = await ipc.revertAll();
     expect(reverted.steps.map((s) => s.error)).toEqual([null, null]);
   });
+
+  it("reports the build, the Store and Windows Terminal as it is told, working nothing out (Q3)", async () => {
+    let report = await createMockIpc().systemDetect();
+    expect([report.build, report.storeAvailable, report.wtInstalled]).toEqual([26100, true, true]);
+    expect(report.windowsTerminal).toEqual([{ kind: "store", installed: true, hasSettings: true, setUpByApply: false }]);
+    // Given values come back as given, even a pair the backend would never send: the mock
+    // derives `storeAvailable` from nothing.
+    report = await createMockIpc({ build: 18363, storeAvailable: true }).systemDetect();
+    expect([report.build, report.storeAvailable]).toEqual([18363, true]);
+    report = await createMockIpc({ build: null, storeAvailable: false, noWindowsTerminal: true }).systemDetect();
+    expect([report.build, report.storeAvailable, report.wtInstalled]).toEqual([null, false, false]);
+    expect(report.windowsTerminal).toEqual([{ kind: "store", installed: false, hasSettings: false, setUpByApply: false }]);
+    report = await createMockIpc({ wtNeverOpened: true }).systemDetect();
+    expect(report.wtInstalled).toBe(true);
+    expect(report.windowsTerminal).toEqual([{ kind: "store", installed: true, hasSettings: false, setUpByApply: true }]);
+  });
+
+  it("plans a Terminal that was never opened as set up by the apply, and D6 says so until one is applied", async () => {
+    const ipc = createMockIpc({ wtNeverOpened: true });
+    const request = { themeId: preset("Terracotta").id, target: "all" as const, setWtDefaultProfile: true, replaceOtherClink: false };
+    const planned = await ipc.planApply(request);
+    if (planned.kind !== "ready") throw new Error("not ready");
+    // The core's own lines (crates/core/src/plan.rs): the set-up first, then the colors.
+    const en = planned.plan.summaryEn;
+    expect(en.indexOf("Set up Windows Terminal's settings so cmd gets this theme")).toBeGreaterThanOrEqual(0);
+    expect(en.indexOf("Set up Windows Terminal's settings so cmd gets this theme")).toBeLessThan(en.indexOf("Colors and font of cmd in Windows Terminal"));
+    expect(planned.plan.summaryTh).toContain("ตั้งค่า Windows Terminal ให้ cmd ได้ธีมนี้");
+    expect(planned.plan.warnings).toEqual([]);
+    expect(planned.plan.steps.map((s) => s.kind)).toContain("windowsTerminal");
+    const d6 = async () => (await ipc.doctorRun()).checks.find((c) => c.id === "D6")!;
+    // The core's D6 for it (crates/core/src/doctor.rs); nothing to offer before an apply.
+    expect(await d6()).toMatchObject({
+      status: "warn",
+      code: "E_WT_NOT_FOUND",
+      messageEn: "Windows Terminal has never been opened, so it has no settings yet. Applying a theme sets them up",
+      fix: null,
+    });
+    expect((await ipc.apply(request, planned.plan.digest, () => {})).status).toBe("committed");
+    expect((await d6()).status).toBe("ok");
+  });
+
+  it("offers the Store for a missing Windows Terminal only where the Store applies", async () => {
+    const d6 = async (options: Parameters<typeof createMockIpc>[0]) =>
+      (await createMockIpc(options).doctorRun()).checks.find((c) => c.id === "D6")!;
+    expect((await d6({ noWindowsTerminal: true })).fix).toBe("installWindowsTerminal");
+    expect((await d6({ noWindowsTerminal: true, build: 18363, storeAvailable: false })).fix).toBeNull();
+    expect((await d6({ noWindowsTerminal: true, build: null, storeAvailable: false })).fix).toBeNull();
+  });
 });

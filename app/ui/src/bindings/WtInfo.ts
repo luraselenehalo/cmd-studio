@@ -13,4 +13,10 @@ installed: boolean,
  * settings.json (it copies that one when it first starts), and an unpackaged folder without
  * one, which is a leftover, not a Terminal.
  */
-hasSettings: boolean, };
+hasSettings: boolean, 
+/**
+ * An apply sets this one up: it is installed and was never opened, by the core's
+ * `detect::never_opened`, the rule the planner follows. The UI reads it here rather than
+ * from `installed` and `has_settings`, which an unpackaged leftover also matches.
+ */
+setUpByApply: boolean, };

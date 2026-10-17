@@ -46,8 +46,9 @@ use std::path::Path;
 use ts_rs::TS;
 
 /// What the app offers for a finding. `reapply`, `replaceOtherClink`, `installWindowsTerminal`
-/// and `openNewCmdWindow` are buttons; `openWindowsTerminalOnce` and `reinstall` are steps only
-/// the user can take, shown as words.
+/// and `openNewCmdWindow` are buttons; `reinstall` is a step only the user can take, shown as
+/// words. A Windows Terminal that was never opened needs no step of the user's: an apply sets it
+/// up (founder 2026-10-17), so D6 offers `reapply` for it once a theme is applied.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
@@ -62,12 +63,6 @@ pub enum FixKind {
     ReplaceOtherClink,
     /// Open Windows Terminal's Store page (D6: no Windows Terminal, on build 19041 or later).
     InstallWindowsTerminal,
-    /// Was: Windows Terminal is installed but was never opened, so it has no settings.json yet
-    /// (D6): the user opens it once, then applies again. Words, not a button. No check offers it
-    /// since the founder's decision of 2026-10-17: an apply sets such a Terminal up, so D6 offers
-    /// `reapply` once a theme is applied, and nothing before. Kept while the UI still has words
-    /// for it.
-    OpenWindowsTerminalOnce,
     /// No cmd window has loaded the theme yet (D3): open a new one.
     OpenNewCmdWindow,
     /// The files that come with CMD Studio fail their manifest, or files an apply would install
