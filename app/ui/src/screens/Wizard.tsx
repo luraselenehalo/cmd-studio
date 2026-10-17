@@ -30,7 +30,13 @@ export const RECOMMENDED = ["Terracotta", "Tokyo Night", "Catppuccin Mocha", "Dr
 
 const LANGUAGES: Language[] = ["en", "th"];
 
-export function Wizard() {
+export function Wizard({
+  onUnsaved,
+}: {
+  /** The wizard went home with `settings` that could not be saved: the app keeps them in memory,
+   * and its shell says that the wizard shows again at the next start (fix I1). */
+  onUnsaved?: (settings: AppSettings, error: unknown) => void;
+}) {
   const ipc = useIpc();
   const { t, language, setLanguage } = useI18n();
   const { settings, saveSettings, setLastApply, bump } = useAppState();
@@ -146,20 +152,26 @@ export function Wizard() {
     }
   };
 
-  /** The wizard is done: saved with the language on screen and whatever else is given. */
-  const saveDone = (more: Partial<AppSettings> = {}) => saveSettings({ ...settings, language, ...more, wizardDone: true });
+  /** The settings of a wizard that is done: the language on screen and whatever else is given. */
+  const doneSettings = (more: Partial<AppSettings> = {}): AppSettings => ({ ...settings, language, ...more, wizardDone: true });
 
-  /** Skip (pages 1 to 4) and "Go to the home page": saved as done unless the apply's commit did
-   * it already, then home. A save that failed is said, and the wizard stays: it would come back
-   * at the next start. */
+  /**
+   * Skip (pages 1 to 4) and "Go to the home page": saved as done unless the apply's commit did it
+   * already, then home. Home whatever the save did (fix I1): the route is in memory, so the
+   * after-apply bar and Help's Undo everything stay in reach, as page 5 promised; a save that
+   * failed goes to the app, whose shell says so.
+   */
   const leave = async (more: Partial<AppSettings> = {}) => {
     setSaveError(null);
-    try {
-      if (!settings.wizardDone) await saveDone(more);
-      go({ name: "home" });
-    } catch (e) {
-      setSaveError(e);
+    if (!settings.wizardDone) {
+      const next = doneSettings(more);
+      try {
+        await saveSettings(next);
+      } catch (e) {
+        onUnsaved?.(next, e);
+      }
     }
+    go({ name: "home" });
   };
 
   const onApplied = (outcome: ApplyOutcome, request: ApplyRequest) => {
@@ -169,7 +181,9 @@ export function Wizard() {
     setPage(6);
     // Done as the apply committed (Q12): an app closed on page 6 does not bring the wizard back.
     setSaveError(null);
-    saveDone({ target: request.target, setWtDefaultProfile: request.setWtDefaultProfile }).catch((e: unknown) => setSaveError(e));
+    saveSettings(doneSettings({ target: request.target, setWtDefaultProfile: request.setWtDefaultProfile })).catch((e: unknown) =>
+      setSaveError(e),
+    );
   };
 
   const tryCmd = async () => {
@@ -213,8 +227,10 @@ export function Wizard() {
       )}
       {page === 2 && (
         <section>
+          {/* One heading for the page, its text by how far the check got (V6), so the focus it
+              took as the page came stays on it. */}
           <h1 ref={heading} tabIndex={-1}>
-            {t("wizard.check.title")}
+            {report || reportError !== null ? t("wizard.check.titleDone") : t("wizard.check.title")}
           </h1>
           {reportError !== null && (
             <>
@@ -305,7 +321,8 @@ export function Wizard() {
           <h1 ref={heading} tabIndex={-1}>
             {t("wizard.done.title")}
           </h1>
-          <p>{t("wizard.done.text")}</p>
+          {/* Worded by where the theme went, as the status region and the bar are (m1). */}
+          <p>{t(applied?.target === "wt" ? "wizard.done.textWt" : "wizard.done.text")}</p>
           {preview && <TerminalPreview theme={preview.theme} result={preview.result} />}
           {previewError !== null && <ErrorNotice error={previewError} />}
           <div className="row-actions">

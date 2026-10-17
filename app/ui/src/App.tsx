@@ -35,6 +35,9 @@ export function App() {
   const [version, setVersion] = useState(0);
   const [startError, setStartError] = useState<unknown>(null);
   const [resetFrom, setResetFrom] = useState<string | null>(null);
+  /** Why the wizard's settings could not be saved as it went home: they are kept in memory, the
+   * next save that goes through writes them, and the shell says so until then (fix I1). */
+  const [unsaved, setUnsaved] = useState<unknown>(null);
 
   useEffect(() => {
     let alive = true;
@@ -63,9 +66,17 @@ export function App() {
       const saved = await ipc.settingsSet(next);
       setSettings(saved);
       setLanguage(saved.language);
+      // Everything in memory is saved now, the wizard's choices included.
+      setUnsaved(null);
     },
     [ipc],
   );
+
+  const keepUnsaved = useCallback((next: AppSettings, error: unknown) => {
+    setSettings(next);
+    setLanguage(next.language);
+    setUnsaved(error);
+  }, []);
 
   const bump = useCallback(() => setVersion((v) => v + 1), []);
   const appState = useMemo<AppState>(
@@ -84,7 +95,7 @@ export function App() {
                 …
               </p>
             ) : (
-              <Screens startError={startError} resetFrom={resetFrom} />
+              <Screens startError={startError} resetFrom={resetFrom} unsaved={unsaved} onUnsaved={keepUnsaved} />
             )}
           </div>
         </NavContext.Provider>
@@ -93,9 +104,14 @@ export function App() {
   );
 }
 
+/** What the shell says above every screen about the settings themselves. */
 interface StartProblems {
+  /** settings.json could not be read as the app started. */
   startError: unknown;
+  /** settings.json was reset, and the old one kept as this file. */
   resetFrom: string | null;
+  /** The wizard's settings could not be saved (fix I1). */
+  unsaved: unknown;
 }
 
 /**
@@ -103,7 +119,7 @@ interface StartProblems {
  * screen puts focus on the new screen's heading (spec §4.5), the first Home after the wizard
  * included; the first screen of the app leaves it at the top of the page.
  */
-function Screens(problems: StartProblems) {
+function Screens({ onUnsaved, ...problems }: StartProblems & { onUnsaved: (settings: AppSettings, error: unknown) => void }) {
   const { route } = useNav();
   const main = useRef<HTMLElement>(null);
   useRouteFocus(route, main);
@@ -111,20 +127,22 @@ function Screens(problems: StartProblems) {
     return (
       <main id="content" className="wizard" ref={main}>
         <StartNotices {...problems} />
-        <Wizard />
+        <Wizard onUnsaved={onUnsaved} />
       </main>
     );
   }
   return <Shell main={main} {...problems} />;
 }
 
-/** What went wrong as the app started: settings that could not be read, or were reset. */
-function StartNotices({ startError, resetFrom }: StartProblems) {
+/** The settings could not be read as the app started, were reset, or could not be saved by the
+ * wizard: then the wizard shows again at the next start, as the notice says. */
+function StartNotices({ startError, resetFrom, unsaved }: StartProblems) {
   const { t } = useI18n();
   return (
     <>
       {startError !== null && <ErrorNotice error={startError} />}
       {resetFrom && <Notice kind="warn">{t("settings.reset", { file: resetFrom })}</Notice>}
+      {unsaved !== null && <ErrorNotice error={unsaved} title={t("wizard.notSaved")} />}
     </>
   );
 }

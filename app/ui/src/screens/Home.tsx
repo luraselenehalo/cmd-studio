@@ -117,8 +117,9 @@ export function Home() {
     // `sampleIdentity` reads only the ipc and a ref.
   }, [ipc, appliedId, version]);
 
-  // The dialog gives focus back to the button that opened it; when that button is now disabled
-  // (its theme is in use), focus goes to the page's heading rather than to the page's body.
+  // The dialog gives focus back to the button that opened it; when that button went (its theme
+  // is in use now, so it is no longer offered), focus goes to the page's heading rather than to
+  // the page's body.
   useEffect(() => {
     if (applying !== null || !closing.current) return;
     closing.current = false;
@@ -176,16 +177,21 @@ export function Home() {
   const inUse = lib?.applied ? (lib.themes.find((s) => s.id === lib.applied?.themeId) ?? null) : null;
 
   // Used recently: the newest apply of each theme that committed (a rolled-back one has no
-  // restore point left and was never undone), still in the library, up to five.
+  // restore point left and was never undone), still in the library, up to five. The theme in use
+  // is not offered: switching to it would change nothing (V5).
   const recent: ThemeSummary[] = [];
   for (const p of points.value?.points ?? []) {
     if (recent.length === RECENT) break;
     if (p.kind !== "apply" || !p.theme || !(p.restorable || p.undoneBy !== null)) continue;
     const id = p.theme.id;
+    if (id === appliedId) continue;
     const summary = lib?.themes.find((s) => s.id === id && s.source !== "draft");
     if (summary && !recent.some((r) => r.id === id)) recent.push(summary);
   }
-  const latest = points.value?.points[0] ?? null;
+  // The newest point there is to go back to (m2): a rolled-back apply or an undone one is listed
+  // in Help, but cannot be gone back to.
+  const latest = points.value?.points.find((p) => p.restorable) ?? null;
+  const anyPoint = (points.value?.points.length ?? 0) > 0;
 
   return (
     <section>
@@ -225,7 +231,7 @@ export function Home() {
               <strong>{inUse?.name ?? lib.applied.themeName}</strong>
             </p>
             {preview && <TerminalPreview theme={preview.theme} result={preview.result} />}
-            {systemError !== null && <ErrorNotice error={systemError} title={t("home.active.systemUnknown")} />}
+            {systemError !== null && <ErrorNotice error={systemError} title={t("themes.import.systemUnknown")} />}
             {previewError !== null && <ErrorNotice error={previewError} />}
             <div className="row-actions">
               {inUse && inUse.source !== "draft" && (
@@ -249,7 +255,7 @@ export function Home() {
         {recent.length === 0 && <p>{t("home.quick.none")}</p>}
         <div className="row-actions">
           {recent.map((s) => (
-            <button key={s.id} type="button" disabled={appliedId === s.id} onClick={() => startApply(s)}>
+            <button key={s.id} type="button" onClick={() => startApply(s)}>
               {t("home.quick.use", { name: s.name })}
             </button>
           ))}
@@ -258,7 +264,7 @@ export function Home() {
       <div className="card">
         <h2 style={{ marginTop: 0 }}>{t("home.restore.title")}</h2>
         {points.error !== null && <ErrorNotice error={points.error} />}
-        {points.value && !latest && <p>{t("home.restore.none")}</p>}
+        {points.value && !latest && <p>{t(anyPoint ? "home.restore.noneRestorable" : "home.restore.none")}</p>}
         {latest && (
           <p>
             {t("home.restore.latest", {

@@ -70,6 +70,25 @@ describe("the two dictionaries", () => {
     expect(offenders).toEqual([]);
   });
 
+  // Short labels may repeat ("Save", a page's name as its heading); a sentence is said once.
+  it("keep one key per sentence: a text of 30 characters or more is under one key only (Task 2 m3)", () => {
+    for (const dictionary of [en, th] as Dictionary[]) {
+      const seen = new Map<string, string>();
+      const repeats: string[] = [];
+      for (const [key, text] of Object.entries(dictionary)) {
+        if (Array.from(text).length < 30) continue;
+        const first = seen.get(text);
+        if (first) repeats.push(`${first} = ${key}`);
+        else seen.set(text, key);
+      }
+      expect(repeats).toEqual([]);
+    }
+  });
+
+  it("say that it is Windows Terminal that was never opened, not CMD Studio (Task 2 m4)", () => {
+    expect(th["wizard.check.wtNeverOpened"]).toBe("มี Windows Terminal แต่ยังไม่เคยเปิดใช้ เมื่อใช้ธีม CMD Studio จะตั้งค่าให้เอง");
+  });
+
   it("name what there is none of yet, and say that cmd windows get the theme, not Windows (item 7)", () => {
     expect(th["home.restore.none"]).toBe("ยังไม่มีจุดย้อนกลับ CMD Studio จะสร้างให้ทุกครั้งที่ใช้ธีม");
     expect(en["wizard.where.allHint"]).toMatch(/^cmd windows opened from the Start menu, Win\+R or Windows Terminal /);

@@ -112,7 +112,7 @@ function expectNothingToType() {
 /** The wizard from page 1 to page 5's plan with every default: Next four times. */
 async function toPage5(user: User, dictionary: Dictionary = en) {
   await user.click(await screen.findByRole("button", { name: dictionary["common.next"] }));
-  await screen.findByRole("heading", { name: dictionary["wizard.check.title"] });
+  await screen.findByText(dictionary["wizard.step"].replace("{n}", "2"));
   await user.click(screen.getByRole("button", { name: dictionary["common.next"] }));
   await screen.findByRole("heading", { name: dictionary["wizard.choose.title"] });
   await user.click(screen.getByRole("button", { name: dictionary["common.next"] }));
@@ -411,7 +411,7 @@ describe("the first run", () => {
     expect(await screen.findByRole("heading", { name: "Home" })).toBeTruthy();
   });
 
-  it("says a choice that could not be saved, and stays until it is", async () => {
+  it("goes home when the choice could not be saved, and says the setup comes back next time (I1)", async () => {
     let refuse = true;
     const { ipc, user } = await mount({}, (m) => {
       const set = m.settingsSet.bind(m);
@@ -425,13 +425,87 @@ describe("the first run", () => {
     expect(await screen.findByRole("heading", { name: th["wizard.welcome.title"] })).toBeTruthy();
     expect(await screen.findByText("settings.json is read-only")).toBeTruthy();
     await user.click(screen.getByRole("button", { name: th["wizard.skip"] }));
-    await settle();
-    expect(screen.getByRole("heading", { name: th["wizard.welcome.title"] })).toBeTruthy();
-    expect(ipc.state.settings.wizardDone).toBe(false);
-    refuse = false;
-    await user.click(screen.getByRole("button", { name: th["wizard.skip"] }));
+    // Home all the same, in the chosen language, saying what the failed save means.
     expect(await screen.findByRole("heading", { name: th["home.title"] })).toBeTruthy();
-    expect(ipc.state.settings).toMatchObject({ wizardDone: true, language: "th" });
+    expect(screen.getByText(th["wizard.notSaved"])).toBeTruthy();
+    expect(screen.getByText("settings.json is read-only")).toBeTruthy();
+    expect(ipc.state.settings.wizardDone).toBe(false);
+    // The notice stays on the other pages until a save goes through, and that save keeps the
+    // wizard done and the language chosen.
+    await open(user, th["nav.settings"]);
+    await screen.findByRole("heading", { name: th["settings.title"] });
+    expect(screen.getByText(th["wizard.notSaved"])).toBeTruthy();
+    refuse = false;
+    await user.click(screen.getByLabelText(th["settings.updates.notify"]));
+    await waitFor(() => expect(ipc.state.settings).toMatchObject({ updates: "notify", wizardDone: true, language: "th" }));
+    expect(screen.queryByText(th["wizard.notSaved"])).toBeNull();
+  });
+
+  it("goes home after an apply whose settings could not be saved, with the bar's Undo there (I1)", async () => {
+    const { ipc, user } = await mount({}, (m) => {
+      vi.spyOn(m, "settingsSet").mockRejectedValue(ipcError("E_DATA_WRITE", "settings.json is read-only"));
+    });
+    await toPage5(user);
+    await screen.findByText("What will change");
+    await user.click(screen.getByRole("button", { name: "Apply" }));
+    await screen.findByRole("heading", { name: "Done" });
+    expect(await screen.findByText("settings.json is read-only")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Go to the home page" }));
+    expect(await screen.findByRole("heading", { name: "Home" })).toBeTruthy();
+    expect(screen.getByText("CMD Studio could not save your settings, so this setup shows again next time")).toBeTruthy();
+    // Page 5's "You can undo at any time" holds: the bar's Undo is there.
+    expect(screen.getByText(/Theme "Terracotta" applied/)).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Undo" }));
+    await waitFor(() => expect(ipc.state.applied).toBeNull());
+  });
+
+  it("words page 6 by where the theme went (m1)", async () => {
+    for (const target of ["all", "wt"] as const) {
+      const { user, view } = await mount();
+      await user.click(await screen.findByRole("button", { name: "Next" }));
+      await user.click(await screen.findByRole("button", { name: "Next" }));
+      await user.click(await screen.findByRole("button", { name: "Next" }));
+      await screen.findByRole("heading", { name: "Where should the theme go?" });
+      if (target === "wt") await user.click(screen.getByLabelText(/^Only in Windows Terminal/));
+      await user.click(screen.getByRole("button", { name: "Next" }));
+      await screen.findByText("What will change");
+      await user.click(screen.getByRole("button", { name: "Apply" }));
+      await screen.findByRole("heading", { name: "Done" });
+      const [says, not] = target === "wt" ? [en["wizard.done.textWt"], en["wizard.done.text"]] : [en["wizard.done.text"], en["wizard.done.textWt"]];
+      expect(screen.getByText(says), target).toBeTruthy();
+      expect(screen.queryByText(not), target).toBeNull();
+      if (target === "wt") expect(screen.queryByText(/Open a new cmd window/)).toBeNull();
+      view.unmount();
+    }
+  });
+
+  it("names page 2 by the finished check once its results are there, in both languages (V6)", async () => {
+    let release: () => void = () => {};
+    const { user, view } = await mount({}, (m) => {
+      const detect = m.systemDetect.bind(m);
+      vi.spyOn(m, "systemDetect").mockImplementation(async () => {
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        return detect();
+      });
+    });
+    await user.click(await screen.findByRole("button", { name: "Next" }));
+    const heading = await screen.findByRole("heading", { name: "Checking this computer" });
+    await waitFor(() => expect(document.activeElement).toBe(heading));
+    await act(async () => {
+      release();
+    });
+    await screen.findByText("Windows build 26100");
+    expect(screen.getByRole("heading", { name: "Your computer" })).toBe(heading);
+    expect(screen.queryByRole("heading", { name: "Checking this computer" })).toBeNull();
+    // The heading is the same element, so it keeps the focus it took.
+    expect(document.activeElement).toBe(heading);
+    view.unmount();
+    const thai = await mount({ settings: { language: "th" } });
+    await thai.user.click(await screen.findByRole("button", { name: th["common.next"] }));
+    await screen.findByText(th["wizard.check.windows"].replace("{build}", "26100"));
+    expect(screen.getByRole("heading", { name: "เครื่องของคุณ" })).toBeTruthy();
   });
 });
 
@@ -449,8 +523,10 @@ describe("the home page", () => {
     expect(within(active).getByText("Terracotta")).toBeTruthy();
     expect(await within(active).findByRole("img", { name: "Preview of the cmd window" })).toBeTruthy();
     expect(within(card("Latest restore point")).getByText(/^Terracotta · /)).toBeTruthy();
-    // The quick switch names what it does; the theme in use is not offered again.
-    expect((within(card("Switch quickly")).getByRole("button", { name: "Use Terracotta" }) as HTMLButtonElement).disabled).toBe(true);
+    // The theme in use is not offered again (V5): with no other one used, the quick switch says
+    // where its themes come from.
+    expect(within(card("Switch quickly")).queryAllByRole("button")).toEqual([]);
+    expect(within(card("Switch quickly")).getByText("Themes you apply show up here.")).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "See the checks" }));
     await screen.findByRole("heading", { name: "Help" });
     expect(screen.getByRole("button", { name: "Health check", pressed: true })).toBeTruthy();
@@ -476,6 +552,18 @@ describe("the home page", () => {
     expect(await screen.findByText("This computer's details could not be read, so the preview uses sample values.")).toBeTruthy();
     await waitFor(() => expect(failed.ipc.previewRender).toHaveBeenCalled());
     expect(vi.mocked(failed.ipc.previewRender).mock.calls.at(-1)?.[1].user).toBe("you");
+  });
+
+  it("says when no restore point can be gone back to, rather than that there is none (m2)", async () => {
+    await home({}, async (m) => {
+      await applyIn(m, "Terracotta");
+      // Undo everything leaves points that can no longer be restored.
+      await m.revertAll();
+    });
+    const latest = screen.getByRole("heading", { name: "Latest restore point" }).closest(".card") as HTMLElement;
+    expect(await within(latest).findByText(en["home.restore.noneRestorable"])).toBeTruthy();
+    expect(within(latest).queryByText(en["home.restore.none"])).toBeNull();
+    expect(within(latest).queryByText(/·/)).toBeNull();
   });
 
   it("says when state.json could not be read, never that no theme is applied", async () => {
@@ -511,8 +599,15 @@ describe("the home page", () => {
       // An apply that rolled back was never used: it is not offered (a24).
       m.state.points.unshift({ id: "1791694709999-rolled", kind: "apply", createdMs: 1791694709999, theme: { id: presetId("Paper"), name: "Paper" }, target: "all", summary: [], undoes: null, undoneBy: null, restorable: false });
     });
-    expect((await screen.findByRole("button", { name: "Use Dracula" }) as HTMLButtonElement).disabled).toBe(true);
+    // The theme in use (Dracula) is left out (V5), and so is the apply that rolled back.
+    expect(await screen.findByRole("button", { name: "Use Terracotta" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Use Dracula" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Use Paper" })).toBeNull();
+    expect(screen.queryByText("Themes you apply show up here.")).toBeNull();
+    // The latest restore point is the newest that can be gone back to, not the rolled-back one (m2).
+    const latest = screen.getByRole("heading", { name: "Latest restore point" }).closest(".card") as HTMLElement;
+    expect(within(latest).getByText(/^Dracula · /)).toBeTruthy();
+    expect(within(latest).queryByText(/^Paper · /)).toBeNull();
     const release = holdApply(ipc);
     await user.click(screen.getByRole("button", { name: "Use Terracotta" }));
     const dialog = await screen.findByRole("dialog");
@@ -657,20 +752,33 @@ describe("accessibility", () => {
   }
 
   it(
-    "names every button of every wizard page, page, Help tab and plan dialog, in English and in Thai",
+    "names every button of every wizard page, page, Help tab and dialog, in English and in Thai",
     async () => {
       for (const language of ["en", "th"] as Language[]) {
         const d = language === "th" ? th : en;
-        const { user, view } = await mount({ otherClink: [OTHER_CLINK], settings: { language } });
+        // No Windows Terminal, so page 2 offers the Store; another add-on, so the plans ask
+        // first; Dracula applied before, so Home has a theme to switch back to.
+        const { user, view } = await mount({ otherClink: [OTHER_CLINK], noWindowsTerminal: true, settings: { language } }, (m) =>
+          applyIn(m, "Dracula", true),
+        );
         const page = async (n: number) => {
           await screen.findByText(d["wizard.step"].replace("{n}", String(n)));
           await settle();
           expectNamedButtons(`${language}: wizard page ${n}`);
         };
+        /** Opens a dialog with `opener`, checks its buttons once `ready` is there, and closes it. */
+        const inDialog = async (where: string, opener: HTMLElement, ready: string, close: string) => {
+          await user.click(opener);
+          const dialog = await screen.findByRole("dialog");
+          await within(dialog).findByRole("button", { name: ready });
+          expectNamedButtons(`${language}: ${where}`);
+          await user.click(within(dialog).getByRole("button", { name: close }));
+          await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+        };
         await screen.findByRole("heading", { name: d["wizard.welcome.title"] });
         await page(1);
         await user.click(screen.getByRole("button", { name: d["common.next"] }));
-        await screen.findByText(d["wizard.check.windows"].replace("{build}", "26100"));
+        await screen.findByRole("button", { name: d["wizard.check.wtInstall"] });
         await page(2);
         await user.click(screen.getByRole("button", { name: d["common.next"] }));
         await screen.findByRole("button", { name: "Terracotta", pressed: true });
@@ -700,21 +808,34 @@ describe("accessibility", () => {
           await settle();
           expectNamedButtons(`${language}: ${name}`);
         }
+        // Home's quick-switch dialog.
+        await open(user, d["nav.home"]);
+        const switchBack = await screen.findByRole("button", { name: d["home.quick.use"].replace("{name}", "Dracula") });
+        await inDialog("Home's quick-switch dialog", switchBack, d["apply.otherClink.replace"], d["common.cancel"]);
         // Settings' plan dialog.
         await open(user, d["nav.settings"]);
-        await user.click(await screen.findByRole("button", { name: d["settings.target.applyAgain"] }));
-        const dialog = await screen.findByRole("dialog");
-        await within(dialog).findByRole("button", { name: d["apply.otherClink.replace"] });
-        expectNamedButtons(`${language}: Settings' plan dialog`);
-        await user.click(within(dialog).getByRole("button", { name: d["common.cancel"] }));
-        await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-        // Every Help tab.
+        const again = await screen.findByRole("button", { name: d["settings.target.applyAgain"] });
+        await inDialog("Settings' plan dialog", again, d["apply.otherClink.replace"], d["common.cancel"]);
+        // Every Help tab, with its fix and confirm dialogs.
         await open(user, d["nav.help"]);
         await screen.findByRole("heading", { name: d["help.title"] });
+        const tabButton = (tab: string) => within(screen.getByRole("group", { name: d["help.tabs.label"] })).getByRole("button", { name: tab });
         for (const tab of ["doctor", "restore", "revert", "report", "guide", "credits"] as const) {
-          await user.click(within(screen.getByRole("group", { name: d["help.tabs.label"] })).getByRole("button", { name: d[`help.tabs.${tab}`] }));
+          await user.click(tabButton(d[`help.tabs.${tab}`]));
           await settle();
           expectNamedButtons(`${language}: Help, ${tab}`);
+          if (tab === "doctor") {
+            const fix = await screen.findByRole("button", { name: d["help.doctor.fix.replaceOtherClink"] });
+            await inDialog("Help's fix dialog", fix, d["apply.start"], d["a11y.closeDialog"]);
+          }
+          if (tab === "restore") {
+            const [goBack] = await screen.findAllByRole("button", { name: d["help.restore.restore"] });
+            await inDialog("Help's restore confirm", goBack!, d["help.restore.restore"], d["a11y.closeDialog"]);
+          }
+          if (tab === "revert") {
+            const action = screen.getAllByRole("button", { name: d["help.revert.button"] }).find((b) => !b.closest('[role="group"]'))!;
+            await inDialog("Help's undo-everything confirm", action, d["help.revert.button"], d["a11y.closeDialog"]);
+          }
         }
         // The editor of a copy.
         await open(user, d["nav.home"]);
