@@ -72,7 +72,7 @@ export const th: Dictionary = {
   "wizard.choose.seeFewer": "แสดง 6 แบบที่แนะนำ",
   "wizard.where.title": "ใช้ธีมที่ไหน",
   "wizard.where.all": "cmd ทุกหน้าต่าง",
-  "wizard.where.allHint": "แนะนำ cmd ที่เปิดจากเมนู Start, Win+R หรือ Windows Terminal จะได้ธีมนี้ทุกหน้าต่าง",
+  "wizard.where.allHint": "หน้าต่าง cmd ที่เปิดจากเมนู Start, Win+R หรือ Windows Terminal ได้ธีมนี้ทั้งหมด (แนะนำ)",
   "wizard.where.wt": "เฉพาะใน Windows Terminal",
   "wizard.where.wtHint": "หน้าต่าง cmd นอก Windows Terminal เป็นแบบเดิม",
   "wizard.where.setDefault": "ให้ Windows Terminal เปิดมาเป็น cmd ทุกครั้ง",
@@ -142,7 +142,7 @@ export const th: Dictionary = {
   "home.quick.title": "สลับธีมเร็ว",
   "home.quick.none": "ธีมที่เพิ่งใช้จะมาอยู่ตรงนี้",
   "home.restore.title": "จุดย้อนกลับล่าสุด",
-  "home.restore.none": "ยังไม่มี CMD Studio จะสร้างให้ทุกครั้งที่ใช้ธีม",
+  "home.restore.none": "ยังไม่มีจุดย้อนกลับ CMD Studio จะสร้างให้ทุกครั้งที่ใช้ธีม",
   "home.restore.latest": "{name} · {time}",
   "home.restore.all": "ดูจุดย้อนกลับทั้งหมด",
 

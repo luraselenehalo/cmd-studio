@@ -68,7 +68,7 @@ export const en = {
   "wizard.choose.seeFewer": "Show the recommended 6",
   "wizard.where.title": "Where should the theme go?",
   "wizard.where.all": "Every cmd window",
-  "wizard.where.allHint": "Recommended. Windows run from the Start menu, Win+R or Windows Terminal all get it.",
+  "wizard.where.allHint": "cmd windows opened from the Start menu, Win+R or Windows Terminal all get this theme (recommended).",
   "wizard.where.wt": "Only in Windows Terminal",
   "wizard.where.wtHint": "cmd windows outside Windows Terminal stay as they are.",
   "wizard.where.setDefault": "Make Windows Terminal open cmd by default",

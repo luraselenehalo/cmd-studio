@@ -70,6 +70,12 @@ describe("the two dictionaries", () => {
     expect(offenders).toEqual([]);
   });
 
+  it("name what there is none of yet, and say that cmd windows get the theme, not Windows (item 7)", () => {
+    expect(th["home.restore.none"]).toBe("ยังไม่มีจุดย้อนกลับ CMD Studio จะสร้างให้ทุกครั้งที่ใช้ธีม");
+    expect(en["wizard.where.allHint"]).toMatch(/^cmd windows opened from the Start menu, Win\+R or Windows Terminal /);
+    expect(th["wizard.where.allHint"]).toMatch(/^หน้าต่าง cmd ที่เปิดจากเมนู Start, Win\+R หรือ Windows Terminal /);
+  });
+
   // Spot checks of buttons, not a proof for every text: these buttons start with a verb.
   it("have these buttons start with a verb, as spec §4.5 asks", () => {
     expect(en["apply.start"]).toBe("Apply");
