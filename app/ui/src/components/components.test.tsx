@@ -22,6 +22,7 @@ import { AppStateContext, DEFAULT_SETTINGS, type AppState, type LastApply } from
 import { AfterApplyBar } from "./AfterApplyBar";
 import { ApplyFlow, ProgressView } from "./ApplyFlow";
 import { Dialog } from "./Dialog";
+import { ErrorBoundary } from "./ErrorBoundary";
 import { ErrorNotice, NotesList } from "./Notices";
 import { TerminalPreview } from "./TerminalPreview";
 import { ThemeCard } from "./ThemeCard";
@@ -470,6 +471,45 @@ describe("ApplyFlow", () => {
     await user.click(await screen.findByRole("button", { name: "Apply" }));
     await screen.findByText(/Theme "Nord" applied/);
     expect(events).toEqual(["busy true", "apply starts", "apply ends", "busy false"]);
+  });
+});
+
+describe("ErrorBoundary", () => {
+  it("shows the E_INTERNAL notice, never a blank window, when a component inside it throws (item 8)", () => {
+    function Broken(): ReactNode {
+      throw new Error("Cannot read properties of undefined (reading 'themes')");
+    }
+    // React reports the error it caught on the console; the test keeps that quiet.
+    const quiet = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      // No provider around it: main.tsx puts it outside App, which holds the language.
+      render(
+        <ErrorBoundary>
+          <Broken />
+        </ErrorBoundary>,
+      );
+      const notice = screen.getByRole("alert");
+      expect(within(notice).getByText("Something went wrong")).toBeTruthy();
+      expect(
+        within(notice).getByText(
+          "CMD Studio itself ran into a problem; the details say where. Try again, and if it stays, report it with the diagnostics",
+        ),
+      ).toBeTruthy();
+      expect(within(notice).getByText(/Code E_INTERNAL/)).toBeTruthy();
+      expect(within(notice).getByText("Cannot read properties of undefined (reading 'themes')")).toBeTruthy();
+    } finally {
+      quiet.mockRestore();
+    }
+  });
+
+  it("shows its children while nothing throws", () => {
+    render(
+      <ErrorBoundary>
+        <p>The library</p>
+      </ErrorBoundary>,
+    );
+    expect(screen.getByText("The library")).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 });
 
