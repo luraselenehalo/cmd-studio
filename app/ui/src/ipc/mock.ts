@@ -54,6 +54,11 @@ function presetNamed(name: string): Theme {
   return found;
 }
 
+/** Code-unit order, as Rust compares strings (UTF-8 byte order gives the same below U+E000). */
+function order(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
 const NAMED_SLOTS = ["background", "foreground", "cursor", "selection", "accent", "muted", "frame"] as const;
 
 /** The same 23 color texts: how the mock finds a preset's palette among the colors it is given. */
@@ -218,6 +223,25 @@ export function createMockIpc(options: MockOptions = {}): Ipc & { state: MockSta
   let nextMs = 1791694709000;
   const now = () => nextMs++;
 
+  // The file each theme of mine has in `themes\`, named as library.rs names it when the theme
+  // is first saved: its name, then " (2)", " (3)"… while a file of that name (ASCII letter case
+  // aside) is there; `safe_file_stem`'s replacement of characters a file name cannot hold is
+  // left out. The listing orders two themes of one name by it, as Rust's stable sort does over
+  // `themes\` in file-name order. A rename keeps the file.
+  const files = new Map<string, string>();
+  const fileOf = (t: Theme) => files.get(t.id) ?? `${t.name}.cmdtheme`;
+  const asciiLower = (s: string) => s.replace(/[A-Z]/g, (c) => c.toLowerCase());
+  const newThemeFile = (name: string): string => {
+    const taken = (file: string) => state.mine.some((t) => asciiLower(fileOf(t)) === asciiLower(file));
+    for (let n = 1; ; n++) {
+      const file = n === 1 ? `${name}.cmdtheme` : `${name} (${n}).cmdtheme`;
+      if (!taken(file)) return file;
+    }
+  };
+  /** Rust's order for the listing: by `name.to_lowercase()`, a tie by file name. */
+  const listed = (themes: Theme[], file: (t: Theme) => string): Theme[] =>
+    [...themes].sort((a, b) => order(a.name.toLowerCase(), b.name.toLowerCase()) || order(file(a), file(b)));
+
   const all = (): Theme[] => [...presets, ...state.mine];
   const find = (id: string): [Theme, ThemeSource] => {
     const preset = presets.find((t) => t.id === id);
@@ -379,9 +403,13 @@ export function createMockIpc(options: MockOptions = {}): Ipc & { state: MockSta
     },
     async themesList(): Promise<Library> {
       state.calls.push("themesList");
-      const mine = [...state.mine].sort((a, b) => a.name.localeCompare(b.name));
+      const mine = listed(state.mine, fileOf);
       const known = new Set(all().map((t) => t.id));
-      const drafts = state.drafts.filter((d) => !known.has(d.id));
+      // A draft's file is `drafts\<id>.cmdtheme`.
+      const drafts = listed(
+        state.drafts.filter((d) => !known.has(d.id)),
+        (d) => `${d.id}.cmdtheme`,
+      );
       return {
         themes: [
           ...presets.map((t) => summary(t, "preset")),
@@ -411,15 +439,22 @@ export function createMockIpc(options: MockOptions = {}): Ipc & { state: MockSta
       if (presets.some((p) => p.id === theme.id)) {
         throw error("E_THEME_INVALID", `"${theme.name}" is a built-in preset`);
       }
-      if (theme.name.trim().length === 0) throw error("E_THEME_INVALID", "invalid name: must be 1–64 characters");
+      // Kept as written, as the backend writes it: the name trimmed (the backend also cleans
+      // out control characters and escape sequences).
       const copy = structuredClone(theme);
+      copy.name = theme.name.trim();
+      if (copy.name.length === 0) throw error("E_THEME_INVALID", "invalid name: must be 1–64 characters");
       if (draft) {
         state.drafts = [...state.drafts.filter((d) => d.id !== theme.id), copy];
         return summary(copy, state.mine.some((t) => t.id === theme.id) ? "mine" : "draft");
       }
       const i = state.mine.findIndex((t) => t.id === theme.id);
-      if (i >= 0) state.mine[i] = copy;
-      else state.mine.push(copy);
+      if (i >= 0) {
+        state.mine[i] = copy;
+      } else {
+        files.set(copy.id, newThemeFile(copy.name));
+        state.mine.push(copy);
+      }
       state.drafts = state.drafts.filter((d) => d.id !== theme.id);
       return summary(copy, "mine");
     },
@@ -440,6 +475,7 @@ export function createMockIpc(options: MockOptions = {}): Ipc & { state: MockSta
       state.drafts = state.drafts.filter((d) => d.id !== id);
       if (draftOnly) return;
       state.mine = state.mine.filter((t) => t.id !== id);
+      files.delete(id);
     },
     async themeImportPreview(): Promise<ImportPreview | null> {
       state.calls.push("themeImportPreview");
@@ -465,6 +501,9 @@ export function createMockIpc(options: MockOptions = {}): Ipc & { state: MockSta
     async paletteGenerate(tone, accent): Promise<Colors> {
       if (!/^#[0-9a-fA-F]{6}$/.test(accent)) throw error("E_THEME_INVALID", `accent: not a #rrggbb color: "${accent}"`);
       const colors = structuredClone(presetNamed(SIMPLE_BASE[tone]).colors);
+      // An echo (ruling R6), unlike the backend: the real palette_generate moves an accent
+      // whose contrast is too low (and the cursor with it) and writes lowercase hex. So a UI
+      // test must not assert the accent that comes back from here.
       colors.accent = accent;
       colors.cursor = accent;
       return colors;

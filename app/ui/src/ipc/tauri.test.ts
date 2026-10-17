@@ -7,8 +7,9 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 
 const invoke = vi.hoisted(() => vi.fn());
+const listen = vi.hoisted(() => vi.fn(async () => () => {}));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
-vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
+vi.mock("@tauri-apps/api/event", () => ({ listen }));
 
 import { tauriIpc } from "./tauri";
 import { IpcError, toIpcError } from "./types";
@@ -62,5 +63,40 @@ describe("Tauri's IPC", () => {
     expect(passed.toAppError()).toEqual(appError);
     expect(passed.message).toBe(appError.messageEn);
     expect(toIpcError(passed)).toBe(passed);
+  });
+
+  it("says a listen that fails as an IpcError and applies nothing; an unlisten that fails loses no outcome", async () => {
+    const request = { themeId: "7d3c5f0e-2b1a-4c8e-9f6d-1a2b3c4d5e6f", target: "all" as const, setWtDefaultProfile: true, replaceOtherClink: false };
+    invoke.mockClear();
+    listen.mockRejectedValueOnce("event.listen not allowed. Permissions associated with this command: core:event:allow-listen");
+    const refused = await rejectionOf(tauriIpc.apply(request, "digest-1", () => {}));
+    expect(refused.code).toBe("E_INTERNAL");
+    expect(refused.details).toContain("event.listen not allowed");
+    expect(invoke).not.toHaveBeenCalled();
+    // `UnlistenFn` is typed `() => void`, but in @tauri-apps/api 2.12.4 it is async: its
+    // rejection must neither replace the apply's outcome nor go unhandled.
+    const unhandled: unknown[] = [];
+    const watch = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", watch);
+    try {
+      const outcome = { status: "committed", themeName: "Terracotta", snapshotId: "1791694709000-ab12cd34", error: null, unrestored: [], notes: [], plan: null };
+      // A plain function, not vi.fn: a spy handles the promises its function returns (to record
+      // how they settled), which would hide an unhandled one.
+      let unlistened = 0;
+      const unlisten = () => {
+        unlistened += 1;
+        return Promise.reject(new Error("plugin:event|unlisten failed"));
+      };
+      listen.mockResolvedValueOnce(unlisten);
+      invoke.mockResolvedValueOnce(outcome);
+      await expect(tauriIpc.apply(request, "digest-1", () => {})).resolves.toEqual(outcome);
+      expect(invoke).toHaveBeenCalledWith("apply", { request, digest: "digest-1" });
+      expect(unlistened).toBe(1);
+      // Node reports an unhandled rejection before the next macrotask.
+      await new Promise((done) => setTimeout(done, 0));
+    } finally {
+      process.off("unhandledRejection", watch);
+    }
+    expect(unhandled).toEqual([]);
   });
 });

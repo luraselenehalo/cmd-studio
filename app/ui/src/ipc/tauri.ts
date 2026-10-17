@@ -2,7 +2,7 @@
 // `apply-progress` event while `apply` runs. Command names are app/src-tauri/src/command_names.rs;
 // argument names are the Rust parameters of ipc.rs in camelCase, as Tauri expects them.
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { ApplyProgress } from "../bindings/ApplyProgress";
 import { toIpcError, type Ipc } from "./types";
 
@@ -13,6 +13,20 @@ async function call<T>(command: string, args?: Record<string, unknown>): Promise
     return await invoke<T>(command, args);
   } catch (thrown) {
     throw toIpcError(thrown);
+  }
+}
+
+/**
+ * Ends the `apply-progress` listener without letting it change what `apply` answers.
+ * `UnlistenFn` is typed `() => void`, but in @tauri-apps/api 2.12.4 it is async (it invokes
+ * `plugin:event|unlisten`), so a failure is a rejection, which is dropped here. It would
+ * otherwise go unhandled. Nothing is left to do about it: the listener goes with the window.
+ */
+function stopListening(unlisten: UnlistenFn): void {
+  try {
+    void Promise.resolve(unlisten()).catch(() => {});
+  } catch {
+    // A synchronous failure, which 2.12.4 does not have; dropped for the same reason.
   }
 }
 
@@ -32,13 +46,19 @@ export const tauriIpc: Ipc = {
   previewRender: (theme, context) => call("preview_render", { theme, context }),
   planApply: (request) => call("plan_apply", { request }),
   apply: async (request, digest, onProgress) => {
-    const unlisten = await listen<ApplyProgress>(APPLY_PROGRESS_EVENT, (event) => {
-      onProgress(event.payload);
-    });
+    let unlisten: UnlistenFn;
+    try {
+      unlisten = await listen<ApplyProgress>(APPLY_PROGRESS_EVENT, (event) => {
+        onProgress(event.payload);
+      });
+    } catch (thrown) {
+      // Nothing was applied: the listener comes first.
+      throw toIpcError(thrown);
+    }
     try {
       return await call("apply", { request, digest });
     } finally {
-      unlisten();
+      stopListening(unlisten);
     }
   },
   undoLast: () => call("undo_last"),

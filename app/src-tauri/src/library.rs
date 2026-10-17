@@ -39,9 +39,10 @@ pub struct ThemeSummary {
     pub name: String,
     pub tone: Tone,
     pub layout: Layout,
-    /// The theme's 23 colors, for the swatches of its card: one `themes_list` draws every
-    /// card, with no `theme_get` (and no log line) per card. For a theme of mine with a draft,
-    /// the saved theme's.
+    /// The 23 colors of the theme this summary is of, for the swatches of its card: one
+    /// `themes_list` draws every card, with no `theme_get` (and no log line) per card. In the
+    /// listing, a theme of mine that has a draft shows the saved theme's colors; the answer of
+    /// `theme_save` with `draft: true` is of the draft, so it has the draft's colors.
     pub colors: Colors,
     pub source: ThemeSource,
     /// The theme state.json says is applied (spec §3.1 "ใช้อยู่").

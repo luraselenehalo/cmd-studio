@@ -77,6 +77,44 @@ describe("the mock IPC", () => {
     await expect(ipc.themeDelete(fresh.id, false)).rejects.toMatchObject({ code: "E_THEME_INVALID" });
   });
 
+  it("stores and lists themes as the backend does: trimmed names, by lowercase name, ties by file", async () => {
+    const ipc = createMockIpc();
+    const terracotta = (await ipc.themesList()).themes[0]!.id;
+    // The name is trimmed when the theme is written, in the answer and in what is kept.
+    const padded = await ipc.themeDuplicate(terracotta, "  Padded  ");
+    expect(padded.name).toBe("Padded");
+    expect(ipc.state.mine.map((t) => t.name)).toEqual(["Padded"]);
+    const drafted = await ipc.themeSave({ ...(await ipc.themeGet(padded.id)).theme, name: " Padded, drafted " }, true);
+    expect(drafted.name).toBe("Padded, drafted");
+    // Mine by the lowercase name in code-unit order (Rust's `to_lowercase` key, not the
+    // locale's), and two of one name in the order of their files: the second copy's file,
+    // "My Terracotta (2).cmdtheme", comes before "My Terracotta.cmdtheme".
+    const first = await ipc.themeDuplicate(terracotta, "My Terracotta");
+    const second = await ipc.themeDuplicate(terracotta, "My Terracotta");
+    await ipc.themeDuplicate(terracotta, "Éclair");
+    await ipc.themeDuplicate(terracotta, "fudge");
+    const mine = (await ipc.themesList()).themes.filter((t) => t.source === "mine");
+    expect(mine.map((t) => t.name)).toEqual(["fudge", "My Terracotta", "My Terracotta", "Padded", "Éclair"]);
+    expect(mine.filter((t) => t.name === "My Terracotta").map((t) => t.id)).toEqual([second.id, first.id]);
+    // Drafts of themes never saved: the same key, and ties in the order of their files
+    // (`<id>.cmdtheme`).
+    const base = (await ipc.themeGet(terracotta)).theme;
+    await ipc.themeSave({ ...base, id: "1aaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", name: "Same" }, true);
+    await ipc.themeSave({ ...base, id: "0bbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", name: "Same" }, true);
+    await ipc.themeSave({ ...base, id: "2ccccccc-cccc-4ccc-8ccc-cccccccccccc", name: "alpha" }, true);
+    const drafts = (await ipc.themesList()).themes.filter((t) => t.source === "draft");
+    expect(drafts.map((t) => t.id)).toEqual([
+      "2ccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      "0bbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      "1aaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    ]);
+    // A deleted theme's file name is free again.
+    await ipc.themeDelete(first.id, false);
+    const third = await ipc.themeDuplicate(terracotta, "My Terracotta");
+    const again = (await ipc.themesList()).themes.filter((t) => t.name === "My Terracotta").map((t) => t.id);
+    expect(again).toEqual([second.id, third.id]);
+  });
+
   it("answers the colors, readability and preview from fixed data, computing nothing", async () => {
     const ipc = createMockIpc();
     // Each card's colors come with the listing: the preset files' own.
