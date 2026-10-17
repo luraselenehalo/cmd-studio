@@ -50,8 +50,9 @@ export function Themes() {
   const [filter, setFilter] = useState<Filter>("all");
   /** What the last action on the page said went wrong (a dialog shows its own). */
   const [error, setError] = useState<unknown>(null);
-  /** A rename went through but the theme's draft could not be kept (ruling R8). */
-  const [draftError, setDraftError] = useState<unknown>(null);
+  /** A rename went through but the theme's draft could not be saved again (ruling R8): its
+   * content is kept here until Try again saves it (fix 2). */
+  const [lostDraft, setLostDraft] = useState<{ draft: Theme; error: unknown } | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [applying, setApplying] = useState<{ key: number; request: ApplyRequest } | null>(null);
   const [applyBusy, setApplyBusy] = useState(false);
@@ -61,6 +62,8 @@ export function Themes() {
   const [importing, setImporting] = useState<ImportPreview | null>(null);
   const [importPreview, setImportPreview] = useState<PreviewResult | null>(null);
   const [importPreviewError, setImportPreviewError] = useState<unknown>(null);
+  /** `system_detect` failed for the import's preview, which then uses the core's sample. */
+  const [importDetectError, setImportDetectError] = useState<unknown>(null);
   const [dialogError, setDialogError] = useState<unknown>(null);
   const loads = useRef(0);
   const applies = useRef(0);
@@ -86,7 +89,6 @@ export function Themes() {
   /** An action of the page: its failure is shown, and the library is listed again. */
   const act = async (action: () => Promise<void>, reload = true) => {
     setError(null);
-    setDraftError(null);
     setMessage(null);
     try {
       await action();
@@ -147,15 +149,19 @@ export function Themes() {
       if (path) setMessage(t("themes.exported", { path }));
     }, false);
 
-  /** This computer's user, host and home for the import's preview (ruling R1), asked once. */
-  const sampleIdentity = async (): Promise<SampleIdentity> => {
-    if (!identity.current) {
-      identity.current = await ipc.systemDetect().then(
-        (report) => report.previewSample,
-        () => CORE_SAMPLE_IDENTITY,
-      );
+  /**
+   * This computer's user, host and home for the import's preview (ruling R1). An answer is kept
+   * for the page; a failure is not, so the next import asks again (fix 3), and meanwhile the
+   * preview uses the core's sample and says so.
+   */
+  const sampleIdentity = async (): Promise<{ identity: SampleIdentity; error: unknown }> => {
+    if (identity.current) return { identity: identity.current, error: null };
+    try {
+      identity.current = (await ipc.systemDetect()).previewSample;
+      return { identity: identity.current, error: null };
+    } catch (error) {
+      return { identity: CORE_SAMPLE_IDENTITY, error };
     }
-    return identity.current;
   };
 
   const startImport = () =>
@@ -168,9 +174,12 @@ export function Themes() {
       setDialogError(null);
       setImportPreview(null);
       setImportPreviewError(null);
+      setImportDetectError(null);
       setImporting(preview);
+      const sample = await sampleIdentity();
+      setImportDetectError(sample.error);
       try {
-        setImportPreview(await ipc.previewRender(preview.theme, sampleContext(await sampleIdentity())));
+        setImportPreview(await ipc.previewRender(preview.theme, sampleContext(sample.identity)));
       } catch (e) {
         setImportPreviewError(e);
       }
@@ -199,13 +208,25 @@ export function Themes() {
       await ipc.themeSave({ ...theme, name: newName }, false);
       setRenaming(null);
       if (draft) {
+        const renamed: Theme = { ...draft, name: newName };
         try {
-          await ipc.themeSave({ ...draft, name: newName }, true);
+          await ipc.themeSave(renamed, true);
         } catch (e) {
-          setDraftError(e);
+          setLostDraft({ draft: renamed, error: e });
         }
       }
     });
+
+  const retryDraft = async () => {
+    if (!lostDraft) return;
+    try {
+      await ipc.themeSave(lostDraft.draft, true);
+      setLostDraft(null);
+    } catch (e) {
+      setLostDraft({ draft: lostDraft.draft, error: e });
+    }
+    await load();
+  };
 
   const openRename = (s: ThemeSummary) => {
     setDialogError(null);
@@ -248,7 +269,19 @@ export function Themes() {
       <h1 tabIndex={-1}>{t("themes.title")}</h1>
       {listError !== null && <ErrorNotice error={listError} />}
       {error !== null && <ErrorNotice error={error} />}
-      {draftError !== null && <ErrorNotice error={draftError} title={t("editor.draftNotSaved")} />}
+      {lostDraft && (
+        <>
+          <ErrorNotice error={lostDraft.error} title={t("editor.draftNotSaved")} />
+          <div className="row-actions">
+            <button type="button" onClick={() => void retryDraft()}>
+              {t("common.retry")}
+            </button>
+            <button type="button" className="link" onClick={() => setLostDraft(null)}>
+              {t("common.dismiss")}
+            </button>
+          </div>
+        </>
+      )}
       {message && <Notice kind="ok">{message}</Notice>}
       {library?.stateProblem && <ErrorNotice error={library.stateProblem} />}
       {library && library.problems.length > 0 && (
@@ -299,9 +332,19 @@ export function Themes() {
                 <ThemeCard key={s.id} summary={s}>
                   {/* Named by the theme, so a screen reader says whose Apply this is. */}
                   <div className="row-actions" role="group" aria-label={s.name}>
-                    <button type="button" className="primary" onClick={() => startApply(s)}>
-                      {t("themes.apply")}
-                    </button>
+                    {/* A draft was never saved: Edit is how it gets saved and applied, since only
+                        Save and apply changes the machine for it (spec §3.4). A theme of mine
+                        with a draft applies its saved version, and says so (fix 4). */}
+                    {s.source !== "draft" && (
+                      <button
+                        type="button"
+                        className="primary"
+                        aria-label={s.source === "mine" && s.hasDraft ? t("themes.applySaved") : undefined}
+                        onClick={() => startApply(s)}
+                      >
+                        {t("themes.apply")}
+                      </button>
+                    )}
                     {s.source === "preset" && (
                       <button type="button" onClick={() => void customize(s)}>
                         {t("common.customize")}
@@ -399,6 +442,7 @@ export function Themes() {
           {importing.idTaken && <p>{t("themes.import.idTaken")}</p>}
           {importing.nameTaken && <p>{t("themes.import.nameTaken")}</p>}
           <TerminalPreview theme={importing.theme} result={importPreview} />
+          {importDetectError !== null && <ErrorNotice error={importDetectError} title={t("themes.import.systemUnknown")} />}
           {importPreviewError !== null && <ErrorNotice error={importPreviewError} />}
           {dialogError !== null && <ErrorNotice error={dialogError} />}
           <div className="row-actions">

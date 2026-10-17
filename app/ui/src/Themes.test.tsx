@@ -218,6 +218,71 @@ describe("the theme library", () => {
     expect(ipc.state.drafts.map((d) => [d.name, d.author])).toEqual([["Fjord", "from the draft"]]);
   });
 
+  it("keeps a draft that could not be saved again after a rename, and saves it on Try again (fix 2)", async () => {
+    let refuse = true;
+    const { ipc, user } = await mountWith(async (m) => {
+      await mineFrom(m, "Nord", "My Nord", { author: "from the draft" });
+      const save = m.themeSave.bind(m);
+      vi.spyOn(m, "themeSave").mockImplementation(async (theme, draft) => {
+        if (draft && refuse) throw ipcError("E_DATA_WRITE", "drafts folder is read-only");
+        return save(theme, draft);
+      });
+    });
+    await openThemes(user);
+    await user.click(within(await card("My Nord")).getByRole("button", { name: "Rename" }));
+    const dialog = await screen.findByRole("dialog");
+    const field = within(dialog).getByLabelText("New name");
+    await user.clear(field);
+    await user.type(field, "Fjord");
+    await user.click(within(dialog).getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("Draft not saved")).toBeTruthy();
+    expect(screen.getByText(/Code E_DATA_WRITE/)).toBeTruthy();
+    expect(ipc.state.mine.map((t) => t.name)).toEqual(["Fjord"]);
+    expect(ipc.state.drafts).toEqual([]);
+    refuse = false;
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(ipc.state.drafts.map((d) => [d.name, d.author])).toEqual([["Fjord", "from the draft"]]));
+    expect(screen.queryByText("Draft not saved")).toBeNull();
+  });
+
+  it("offers no Apply on a draft, and Apply of the saved version on a theme with unsaved changes (fix 4)", async () => {
+    const { user } = await mountWith(async (m) => {
+      await mineFrom(m, "Nord", "My Nord", { author: "from the draft" });
+      const base = (await m.themeGet(presetId("Paper"))).theme;
+      await m.themeSave({ ...base, id: "0b4a9a3c-6f0e-4c1e-9d7a-2f5b8e1c3d4a", name: "Never saved" }, true);
+    });
+    await openThemes(user);
+    const draft = await card("Never saved");
+    expect(within(draft).getByText("Draft")).toBeTruthy();
+    expect(within(draft).queryByRole("button", { name: /Apply/ })).toBeNull();
+    expect(within(draft).getByRole("button", { name: "Edit" })).toBeTruthy();
+    const mine = await card("My Nord");
+    expect(within(mine).getByText("Unsaved changes")).toBeTruthy();
+    expect(within(mine).getByRole("button", { name: "Apply the saved version" })).toBeTruthy();
+    expect(within(await card("Nord")).getByRole("button", { name: "Apply" })).toBeTruthy();
+  });
+
+  it("says when the import's preview could not use this computer's details, and asks again next time (fix 3)", async () => {
+    const { ipc, user } = await mountWith((m) => {
+      const detect = m.systemDetect.bind(m);
+      vi.spyOn(m, "systemDetect")
+        .mockRejectedValueOnce(ipcError("E_MACHINE_READ", "the registry could not be read"))
+        .mockImplementation(detect);
+      vi.spyOn(m, "previewRender");
+    });
+    const render = vi.mocked(ipc.previewRender);
+    await openThemes(user);
+    await user.click(screen.getByRole("button", { name: "Import a theme file" }));
+    let dialog = await screen.findByRole("dialog");
+    expect(await within(dialog).findByText("This computer's details could not be read, so the preview uses sample values.")).toBeTruthy();
+    expect(render.mock.calls.at(-1)?.[1].user).toBe("you");
+    await user.click(within(dialog).getByRole("button", { name: "Close" }));
+    await user.click(screen.getByRole("button", { name: "Import a theme file" }));
+    dialog = await screen.findByRole("dialog");
+    await waitFor(() => expect(render.mock.calls.at(-1)?.[1].user).toBe("tester"));
+    expect(within(dialog).queryByText("This computer's details could not be read, so the preview uses sample values.")).toBeNull();
+  });
+
   it("shows a library problem in the chosen language, after opening in English", async () => {
     const { view } = await mountWith(
       (m) => {

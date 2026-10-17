@@ -170,6 +170,8 @@ export const en = {
   "themes.import.cancelled": "No file was chosen.",
   "themes.import.systemUnknown": "This computer's details could not be read, so the preview uses sample values.",
   "themes.apply": "Apply",
+  "themes.applySaved": "Apply the saved version",
+  "themes.hasDraft": "Unsaved changes",
 
   "editor.title": "Edit theme",
   "editor.name": "Theme name",

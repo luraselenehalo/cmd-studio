@@ -174,6 +174,8 @@ export const th: Dictionary = {
   "themes.import.cancelled": "ยังไม่ได้เลือกไฟล์",
   "themes.import.systemUnknown": "อ่านข้อมูลของเครื่องนี้ไม่ได้ พรีวิวจึงใช้ค่าตัวอย่าง",
   "themes.apply": "ใช้ธีม",
+  "themes.applySaved": "ใช้ธีมฉบับที่บันทึกไว้",
+  "themes.hasDraft": "มีส่วนที่แก้แล้วยังไม่ได้บันทึก",
 
   "editor.title": "แก้ธีม",
   "editor.name": "ชื่อธีม",

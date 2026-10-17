@@ -34,6 +34,7 @@ export function ThemeCard({
       {summary.inUse && <span className="badge in-use">{t("themes.inUse")}</span>}
       {summary.source === "preset" && <span className="badge">{t("themes.preset")}</span>}
       {summary.source === "draft" && <span className="badge">{t("themes.draft")}</span>}
+      {summary.source === "mine" && summary.hasDraft && <span className="badge">{t("themes.hasDraft")}</span>}
       <div className="badge">{t(summary.tone === "dark" ? "themes.filter.dark" : "themes.filter.light")}</div>
       <div className="swatches" aria-hidden="true" style={{ background: colors.background, padding: "0.3rem", borderRadius: "0.3rem" }}>
         {colors.ansi.slice(0, 8).map((c, i) => (
