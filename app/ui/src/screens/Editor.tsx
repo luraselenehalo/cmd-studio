@@ -24,7 +24,7 @@ import { useI18n, type Key } from "../i18n";
 import { useIpc } from "../ipc/context";
 import { useNav } from "../router";
 import { CORE_SAMPLE_IDENTITY, sampleContext } from "../sample";
-import { useAppState, type DraftProblem } from "../state";
+import { useAppState, type DraftProblemReport } from "../state";
 import { getSlot, initialState, reduce, type ColorSlot, type EditorAction, type EditorState } from "./editor/reducer";
 import { clamp, NumberField } from "./editor/fields";
 import { useDebounced } from "./editor/hooks";
@@ -51,7 +51,9 @@ export function Editor({ id }: { id: string }) {
   const ipc = useIpc();
   const { t } = useI18n();
   const { go } = useNav();
-  const { settings, setLastApply, setDraftProblem, bump } = useAppState();
+  const { settings, setLastApply, draftProblems, bump } = useAppState();
+  // Both never change: the unmount below may call them.
+  const { report: reportDraftProblem, clear: clearDraftProblem } = draftProblems;
   const [state, dispatch] = useReducer(reduceNullable, null);
   const [loadError, setLoadError] = useState<unknown>(null);
   const [error, setError] = useState<unknown>(null);
@@ -112,12 +114,16 @@ export function Editor({ id }: { id: string }) {
   const wantsDraft = (s: EditorState, theme: Theme): boolean =>
     theme !== storedTheme(s) || (draftOnly.current && lastSaved.current === null);
 
-  /** Writes `draft` after any draft write or removal still running, so they land in order. */
+  /** Writes `draft` after any draft write or removal still running, so they land in order. A
+   * problem said about this theme's draft before is over once a newer draft is written (round
+   * 2, fix 2): its Try again would write an older one over it. So is it after a removal or a
+   * save, below. */
   const writeDraft = (draft: Theme): Promise<void> => {
     const write = pendingDraft.current
       .then(() => ipc.themeSave(draft, true))
       .then(() => {
         lastDraft.current = draft;
+        clearDraftProblem(id);
       });
     pendingDraft.current = write.catch(() => {});
     return write;
@@ -134,6 +140,7 @@ export function Editor({ id }: { id: string }) {
       if (lastDraft.current === null || (draftOnly.current && lastSaved.current === null)) return false;
       await ipc.themeDelete(id, true);
       lastDraft.current = null;
+      clearDraftProblem(id);
       return true;
     });
     pendingDraft.current = drop.then(
@@ -149,7 +156,7 @@ export function Editor({ id }: { id: string }) {
    * was not written yet, or takes the page's draft away when it is the stored theme again (item
    * 1). Says whether the library changed, or what could not be done.
    */
-  const settleDraft = async (last: EditorState): Promise<{ changed: boolean; problem: DraftProblem | null }> => {
+  const settleDraft = async (last: EditorState): Promise<{ changed: boolean; problem: DraftProblemReport | null }> => {
     await saveRun.current;
     const write = wantsDraft(last, last.theme);
     try {
@@ -158,7 +165,11 @@ export function Editor({ id }: { id: string }) {
       await writeDraft(last.theme);
       return { changed: true, problem: null };
     } catch (error) {
-      const problem: DraftProblem = write ? { kind: "write", draft: last.theme, error } : { kind: "remove", id, error };
+      // Named as the library lists it: the stored theme's name.
+      const name = storedTheme(last).name;
+      const problem: DraftProblemReport = write
+        ? { kind: "write", id, name, draft: last.theme, error }
+        : { kind: "remove", id, name, error };
       return { changed: false, problem };
     }
   };
@@ -173,12 +184,12 @@ export function Editor({ id }: { id: string }) {
       const { state: last, draftOffer: offer } = latest.current;
       if (!last || offer || abandoned.current) return;
       void settleDraft(last).then(({ changed, problem }) => {
-        if (problem) setDraftProblem(problem);
+        if (problem) reportDraftProblem(problem);
         else if (changed) bump();
       });
     },
     // Once, on unmount: the helpers read only refs, `id` and the IPC; the app state's
-    // `setDraftProblem` and `bump` never change.
+    // `reportDraftProblem`, `clearDraftProblem` and `bump` never change.
     [ipc],
   );
 
@@ -385,6 +396,7 @@ export function Editor({ id }: { id: string }) {
       // the draft away (library.rs), so the next edit writes a new one.
       lastSaved.current = sent;
       lastDraft.current = null;
+      clearDraftProblem(id);
     })();
     const ended = run.then(
       () => {},
@@ -458,6 +470,7 @@ export function Editor({ id }: { id: string }) {
     setOfferError(null);
     try {
       await ipc.themeDelete(id, true);
+      clearDraftProblem(id);
       setDraftOffer(null);
     } catch (e) {
       setOfferError(e);

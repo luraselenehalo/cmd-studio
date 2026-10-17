@@ -53,7 +53,7 @@ export function Themes() {
   const ipc = useIpc();
   const { t, language } = useI18n();
   const { go } = useNav();
-  const { settings, version, bump, setLastApply, setDraftProblem } = useAppState();
+  const { settings, version, bump, setLastApply, draftProblems } = useAppState();
   const [library, setLibrary] = useState<Library | null>(null);
   const [listError, setListError] = useState<unknown>(null);
   const [filter, setFilter] = useState<Filter>("all");
@@ -230,7 +230,7 @@ export function Themes() {
         try {
           await ipc.themeSave(renamed, true);
         } catch (e) {
-          setDraftProblem({ kind: "write", draft: renamed, error: e });
+          draftProblems.report({ kind: "write", id: renamed.id, name: newName, draft: renamed, error: e });
         }
       }
     });

@@ -18,7 +18,7 @@ import { IpcProvider } from "../ipc/context";
 import { createMockIpc } from "../ipc/mock";
 import { PRESETS } from "../ipc/presets";
 import type { Ipc } from "../ipc/types";
-import { AppStateContext, DEFAULT_SETTINGS, type AppState, type LastApply } from "../state";
+import { AppStateContext, DEFAULT_SETTINGS, useDraftProblems, type AppState, type LastApply } from "../state";
 import { AfterApplyBar } from "./AfterApplyBar";
 import { ApplyFlow, ProgressView } from "./ApplyFlow";
 import { Dialog } from "./Dialog";
@@ -519,13 +519,13 @@ describe("AfterApplyBar", () => {
     // only, while the settings say every cmd window.
     function Host() {
       const [lastApply, setLastApply] = useState<LastApply | null>(null);
+      const draftProblems = useDraftProblems();
       const state: AppState = {
         settings: { ...DEFAULT_SETTINGS, target: "all" },
         saveSettings: async () => {},
         lastApply,
         setLastApply,
-        draftProblem: null,
-        setDraftProblem: () => {},
+        draftProblems,
         version: 0,
         bump: () => {},
       };

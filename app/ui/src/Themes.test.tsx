@@ -104,6 +104,45 @@ async function mountHoldingPalette() {
   return { ...mounted, held };
 }
 
+/**
+ * A mount whose draft writes are refused while `control.refuse` is set, with `control.details`
+ * as the reason. With `control.holdNext` set, the next draft write waits until
+ * `control.release(refuse)`, and `control.held` tells it is waiting.
+ */
+async function mountRefusingDrafts() {
+  const control = {
+    refuse: true,
+    details: "drafts folder is read-only",
+    holdNext: false,
+    held: false,
+    release: (_refuse: boolean) => {},
+  };
+  const mounted = await mountWith((m) => {
+    const save = m.themeSave.bind(m);
+    vi.spyOn(m, "themeSave").mockImplementation(async (theme, draft) => {
+      let refuse = control.refuse;
+      if (draft && control.holdNext) {
+        control.holdNext = false;
+        control.held = true;
+        refuse = await new Promise<boolean>((resolve) => {
+          control.release = resolve;
+        });
+      }
+      if (draft && refuse) throw ipcError("E_DATA_WRITE", control.details);
+      return save(theme, draft);
+    });
+  });
+  return { ...mounted, control };
+}
+
+/** Customizes `preset`, types into Author, and leaves by the sidebar at once. */
+async function editAndLeave(user: ReturnType<typeof userEvent.setup>, preset: string) {
+  await customize(user, preset);
+  await user.type(screen.getByLabelText("Author"), "Q");
+  await user.click(screen.getByRole("button", { name: "Themes" }));
+  await screen.findByRole("heading", { name: "Themes" });
+}
+
 /** Opens the editor on a copy of `preset` made by Customize. */
 async function customize(user: ReturnType<typeof userEvent.setup>, preset: string) {
   await openThemes(user);
@@ -285,14 +324,14 @@ describe("the theme library", () => {
     await user.clear(field);
     await user.type(field, "Fjord");
     await user.click(within(dialog).getByRole("button", { name: "Save" }));
-    expect(await screen.findByText("Draft not saved")).toBeTruthy();
+    expect(await screen.findByText('The draft of "Fjord" could not be saved')).toBeTruthy();
     expect(screen.getByText(/Code E_DATA_WRITE/)).toBeTruthy();
     expect(ipc.state.mine.map((t) => t.name)).toEqual(["Fjord"]);
     expect(ipc.state.drafts).toEqual([]);
     refuse = false;
     await user.click(screen.getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(ipc.state.drafts.map((d) => [d.name, d.author])).toEqual([["Fjord", "from the draft"]]));
-    expect(screen.queryByText("Draft not saved")).toBeNull();
+    expect(screen.queryByText('The draft of "Fjord" could not be saved')).toBeNull();
   });
 
   it("offers no Apply on a draft, and Apply of the saved version on a theme with unsaved changes (fix 4)", async () => {
@@ -827,12 +866,12 @@ describe("the editor", () => {
     expect(screen.queryByRole("button", { name: "Go back without saving the draft" })).toBeNull();
     await user.click(screen.getByRole("button", { name: "Themes" }));
     await screen.findByRole("heading", { name: "Themes" });
-    expect(await screen.findByText("The old draft could not be removed")).toBeTruthy();
+    expect(await screen.findByText('The old draft of "My Terracotta" could not be removed')).toBeTruthy();
     expect(screen.getByText(/Code E_DATA_WRITE/)).toBeTruthy();
     refuse = false;
     await user.click(screen.getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(ipc.state.drafts).toEqual([]));
-    expect(screen.queryByText("The old draft could not be removed")).toBeNull();
+    expect(screen.queryByText('The old draft of "My Terracotta" could not be removed')).toBeNull();
     await waitFor(async () => expect(within(await card("My Terracotta")).queryByText("Unsaved changes")).toBeNull());
   });
 
@@ -891,14 +930,14 @@ describe("the editor", () => {
     await user.type(screen.getByLabelText("Author"), "Q");
     await user.click(screen.getByRole("button", { name: "Themes" }));
     await screen.findByRole("heading", { name: "Themes" });
-    expect(await screen.findByText("Draft not saved")).toBeTruthy();
+    expect(await screen.findByText('The draft of "My Terracotta" could not be saved')).toBeTruthy();
     expect(screen.getByText(/Code E_DATA_WRITE/)).toBeTruthy();
     expect(ipc.state.drafts).toEqual([]);
     // The edit is kept meanwhile: Try again writes it.
     refuse = false;
     await user.click(screen.getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(ipc.state.drafts.map((d) => d.author.endsWith("Q"))).toEqual([true]));
-    expect(screen.queryByText("Draft not saved")).toBeNull();
+    expect(screen.queryByText('The draft of "My Terracotta" could not be saved')).toBeNull();
     expect(await within(await card("My Terracotta")).findByText("Unsaved changes")).toBeTruthy();
   });
 
@@ -1009,5 +1048,86 @@ describe("the editor", () => {
     release();
     await within(dialog).findByText(/Theme "My Terracotta" applied/);
     expect(within(dialog).getByRole("button", { name: "Close" })).toBeTruthy();
+  });
+});
+
+describe("a draft problem said on the next screen (round 2, fix 2)", () => {
+  it("is taken away once the editor of that theme writes a newer draft, so Try again cannot overwrite it", async () => {
+    const { ipc, user, control } = await mountRefusingDrafts();
+    await editAndLeave(user, "Terracotta");
+    await screen.findByRole("button", { name: "Try again" });
+    const stored = ipc.state.mine[0]!.author;
+    control.refuse = false;
+    await user.click(within(await card("My Terracotta")).getByRole("button", { name: "Edit" }));
+    await screen.findByRole("heading", { name: "Edit theme" });
+    await user.type(screen.getByLabelText("Author"), "Z");
+    await waitFor(() => expect(ipc.state.drafts.map((d) => d.author)).toEqual([`${stored}Z`]), { timeout: 3000 });
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+    expect(screen.queryByText(/Code E_DATA_WRITE/)).toBeNull();
+  });
+
+  it("stays dismissed when the Try again that ran meanwhile fails", async () => {
+    const { user, control } = await mountRefusingDrafts();
+    await editAndLeave(user, "Terracotta");
+    const retry = await screen.findByRole("button", { name: "Try again" });
+    control.holdNext = true;
+    await user.click(retry);
+    await waitFor(() => expect(control.held).toBe(true));
+    await user.click(screen.getByRole("button", { name: "Dismiss" }));
+    await act(async () => {
+      control.release(true);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+    expect(screen.queryByText(/Code E_DATA_WRITE/)).toBeNull();
+  });
+
+  it("keeps a newer problem of the same theme when an older Try again succeeds late", async () => {
+    const { user, control } = await mountRefusingDrafts();
+    await editAndLeave(user, "Terracotta");
+    control.holdNext = true;
+    await user.click(await screen.findByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(control.held).toBe(true));
+    // Meanwhile the theme is opened again, edited and left, and that draft fails too.
+    control.details = "the disk is full";
+    await user.click(within(await card("My Terracotta")).getByRole("button", { name: "Edit" }));
+    await screen.findByRole("heading", { name: "Edit theme" });
+    await user.type(screen.getByLabelText("Author"), "Z");
+    await user.click(screen.getByRole("button", { name: "Themes" }));
+    await screen.findByRole("heading", { name: "Themes" });
+    expect(await screen.findByText("the disk is full")).toBeTruthy();
+    await act(async () => {
+      control.release(false);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(screen.getByText("the disk is full")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
+  });
+
+  it("keeps one problem per theme, each named, and Try again of one leaves the other", async () => {
+    const { ipc, user, control } = await mountRefusingDrafts();
+    await editAndLeave(user, "Terracotta");
+    await editAndLeave(user, "Nord");
+    const terracotta = await screen.findByRole("group", { name: 'The draft of "My Terracotta" could not be saved' });
+    const nord = screen.getByRole("group", { name: 'The draft of "My Nord" could not be saved' });
+    expect(screen.getAllByRole("button", { name: "Try again" })).toHaveLength(2);
+    control.refuse = false;
+    await user.click(within(nord).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(ipc.state.drafts.map((d) => d.name)).toEqual(["My Nord"]));
+    expect(screen.queryByRole("group", { name: 'The draft of "My Nord" could not be saved' })).toBeNull();
+    expect(terracotta.isConnected).toBe(true);
+  });
+
+  it("does not make a theme deleted since again on Try again", async () => {
+    const { ipc, user, control } = await mountRefusingDrafts();
+    await editAndLeave(user, "Terracotta");
+    const retry = await screen.findByRole("button", { name: "Try again" });
+    control.refuse = false;
+    // The theme goes away meanwhile, as from another window.
+    await ipc.themeDelete(ipc.state.mine[0]!.id, false);
+    await user.click(retry);
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Try again" })).toBeNull());
+    expect(ipc.state.drafts).toEqual([]);
+    expect(ipc.state.mine).toEqual([]);
   });
 });

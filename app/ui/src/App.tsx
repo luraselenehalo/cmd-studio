@@ -14,7 +14,7 @@ import { useIpc } from "./ipc/context";
 import { NavContext, useNav, type Nav, type Route } from "./router";
 import { Editor } from "./screens/Editor";
 import { Themes } from "./screens/Themes";
-import { AppStateContext, DEFAULT_SETTINGS, type AppState, type DraftProblem, type LastApply } from "./state";
+import { AppStateContext, DEFAULT_SETTINGS, useDraftProblems, type AppState, type LastApply } from "./state";
 import { useRouteFocus } from "./useRouteFocus";
 
 export function App() {
@@ -25,7 +25,7 @@ export function App() {
   const [route, setRoute] = useState<Route | null>(null);
   /** The last committed apply, with the target of the request that made it (item 12). */
   const [lastApply, setLastApply] = useState<LastApply | null>(null);
-  const [draftProblem, setDraftProblem] = useState<DraftProblem | null>(null);
+  const draftProblems = useDraftProblems();
   const [version, setVersion] = useState(0);
   const [startError, setStartError] = useState<unknown>(null);
   const [resetFrom, setResetFrom] = useState<string | null>(null);
@@ -62,8 +62,8 @@ export function App() {
 
   const bump = useCallback(() => setVersion((v) => v + 1), []);
   const appState = useMemo<AppState>(
-    () => ({ settings, saveSettings, lastApply, setLastApply, draftProblem, setDraftProblem, version, bump }),
-    [settings, saveSettings, lastApply, draftProblem, version, bump],
+    () => ({ settings, saveSettings, lastApply, setLastApply, draftProblems, version, bump }),
+    [settings, saveSettings, lastApply, draftProblems, version, bump],
   );
   const nav = useMemo<Nav>(() => ({ route: route ?? { name: "themes" }, go: (r: Route) => setRoute(r) }), [route]);
 
