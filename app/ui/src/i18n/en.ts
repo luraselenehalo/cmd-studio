@@ -263,6 +263,7 @@ export const en = {
   "editor.saved": "Saved.",
   "editor.draftSaved": "Draft saved",
   "editor.draftNotSaved": "Draft not saved",
+  "editor.draftNotRemoved": "The old draft could not be removed",
   "editor.leaveWithoutDraft": "Go back without saving the draft",
   "editor.systemUnknown": "This computer's details could not be read, so the preview uses sample values and the list of installed fonts is not available.",
   "editor.draftFound": "You have unsaved changes from before.",

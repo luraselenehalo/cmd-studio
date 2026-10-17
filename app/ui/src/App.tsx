@@ -1,18 +1,20 @@
 // The shell as the themes plan leaves it: the settings loaded once, English unless the saved
 // language is Thai, the Themes page and the editor behind the sidebar, and the after-apply bar
 // (spec §4.4). The wizard, the home page, Settings, Help and Advanced come with the next plan,
-// which replaces this file. Everything sits in an element whose `lang` is the UI's language, so a
+// which replaces this file and keeps what lives elsewhere: the bar, DraftProblemNotice above the
+// screen, useRouteFocus. Everything sits in an element whose `lang` is the UI's language, so a
 // screen reader reads Thai as Thai and the `:lang(th)` styles apply.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AppSettings } from "./bindings/AppSettings";
 import { AfterApplyBar } from "./components/AfterApplyBar";
+import { DraftProblemNotice } from "./components/DraftProblemNotice";
 import { ErrorNotice, Notice } from "./components/Notices";
 import { I18nProvider, useI18n, type Language } from "./i18n";
 import { useIpc } from "./ipc/context";
 import { NavContext, useNav, type Nav, type Route } from "./router";
 import { Editor } from "./screens/Editor";
 import { Themes } from "./screens/Themes";
-import { AppStateContext, DEFAULT_SETTINGS, type AppState, type LastApply } from "./state";
+import { AppStateContext, DEFAULT_SETTINGS, type AppState, type DraftProblem, type LastApply } from "./state";
 import { useRouteFocus } from "./useRouteFocus";
 
 export function App() {
@@ -23,6 +25,7 @@ export function App() {
   const [route, setRoute] = useState<Route | null>(null);
   /** The last committed apply, with the target of the request that made it (item 12). */
   const [lastApply, setLastApply] = useState<LastApply | null>(null);
+  const [draftProblem, setDraftProblem] = useState<DraftProblem | null>(null);
   const [version, setVersion] = useState(0);
   const [startError, setStartError] = useState<unknown>(null);
   const [resetFrom, setResetFrom] = useState<string | null>(null);
@@ -59,8 +62,8 @@ export function App() {
 
   const bump = useCallback(() => setVersion((v) => v + 1), []);
   const appState = useMemo<AppState>(
-    () => ({ settings, saveSettings, lastApply, setLastApply, version, bump }),
-    [settings, saveSettings, lastApply, version, bump],
+    () => ({ settings, saveSettings, lastApply, setLastApply, draftProblem, setDraftProblem, version, bump }),
+    [settings, saveSettings, lastApply, draftProblem, version, bump],
   );
   const nav = useMemo<Nav>(() => ({ route: route ?? { name: "themes" }, go: (r: Route) => setRoute(r) }), [route]);
 
@@ -107,6 +110,7 @@ function Shell({ startError, resetFrom }: { startError: unknown; resetFrom: stri
         <main id="content" ref={main}>
           {startError !== null && <ErrorNotice error={startError} />}
           {resetFrom && <Notice kind="warn">{t("settings.reset", { file: resetFrom })}</Notice>}
+          <DraftProblemNotice />
           {route.name === "editor" ? <Editor key={route.id} id={route.id} /> : <Themes />}
         </main>
       </div>

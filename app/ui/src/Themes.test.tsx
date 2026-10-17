@@ -736,6 +736,133 @@ describe("the editor", () => {
     await waitFor(() => expect(ipc.state.drafts.map((d) => d.author)).toEqual(["Q"]));
   });
 
+  it("offers no draft back after the edit that made it was undone, and leaves no badge (item 1)", async () => {
+    const { ipc, user } = mount();
+    await customize(user, "Terracotta");
+    await user.type(screen.getByLabelText("Author"), "Q");
+    await waitFor(() => expect(ipc.state.drafts).toHaveLength(1), { timeout: 3000 });
+    // Ctrl+Z outside the text field takes the editor back to the saved theme; then the user
+    // leaves at once, before the draft second.
+    await user.click(screen.getByRole("heading", { name: "Edit theme" }));
+    await user.keyboard("{Control>}z{/Control}");
+    await user.click(screen.getByRole("button", { name: "Back to themes" }));
+    await screen.findByRole("heading", { name: "Themes" });
+    await waitFor(() => expect(ipc.state.drafts).toEqual([]));
+    const mine = await card("My Terracotta");
+    await waitFor(() => expect(within(mine).queryByText("Unsaved changes")).toBeNull());
+    // Opening it again offers nothing.
+    await user.click(within(mine).getByRole("button", { name: "Edit" }));
+    await screen.findByRole("heading", { name: "Edit theme" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("takes the draft away a second after its edit was undone, and writes it again on redo (item 1)", async () => {
+    const { ipc, user } = mount();
+    await customize(user, "Terracotta");
+    await user.type(screen.getByLabelText("Author"), "Q");
+    await waitFor(() => expect(ipc.state.drafts).toHaveLength(1), { timeout: 3000 });
+    await user.click(screen.getByRole("heading", { name: "Edit theme" }));
+    await user.keyboard("{Control>}z{/Control}");
+    await waitFor(() => expect(ipc.state.drafts).toEqual([]), { timeout: 3000 });
+    expect(screen.queryByText("Draft saved")).toBeNull();
+    await user.keyboard("{Control>}y{/Control}");
+    await waitFor(() => expect(ipc.state.drafts.map((d) => d.author.endsWith("Q"))).toEqual([true]), { timeout: 3000 });
+  });
+
+  it("says a draft that could not be taken away, on the page and on the next screen, and takes it on Try again", async () => {
+    let refuse = true;
+    const { ipc, user } = await mountWith((m) => {
+      const remove = m.themeDelete.bind(m);
+      vi.spyOn(m, "themeDelete").mockImplementation(async (id, draftOnly) => {
+        if (refuse) throw ipcError("E_DATA_WRITE", "drafts folder is read-only");
+        return remove(id, draftOnly);
+      });
+    });
+    await customize(user, "Terracotta");
+    await user.type(screen.getByLabelText("Author"), "Q");
+    await waitFor(() => expect(ipc.state.drafts).toHaveLength(1), { timeout: 3000 });
+    await user.click(screen.getByRole("heading", { name: "Edit theme" }));
+    await user.keyboard("{Control>}z{/Control}");
+    expect(await screen.findByText("The old draft could not be removed", undefined, { timeout: 3000 })).toBeTruthy();
+    // Nothing is lost by leaving: no "go back without the draft" here.
+    expect(screen.queryByRole("button", { name: "Go back without saving the draft" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Themes" }));
+    await screen.findByRole("heading", { name: "Themes" });
+    expect(await screen.findByText("The old draft could not be removed")).toBeTruthy();
+    expect(screen.getByText(/Code E_DATA_WRITE/)).toBeTruthy();
+    refuse = false;
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(ipc.state.drafts).toEqual([]));
+    expect(screen.queryByText("The old draft could not be removed")).toBeNull();
+    await waitFor(async () => expect(within(await card("My Terracotta")).queryByText("Unsaved changes")).toBeNull());
+  });
+
+  it("writes no draft over a save that is still running, whichever way the editor is left (item 2)", async () => {
+    for (const way of ["Back to themes", "Themes"] as const) {
+      let hold = false;
+      let release: () => void = () => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const { ipc, user, view } = await mountWith((m) => {
+        const save = m.themeSave.bind(m);
+        // A slow disk, and one command at a time in the order they came, as the backend.
+        let queue: Promise<unknown> = Promise.resolve();
+        vi.spyOn(m, "themeSave").mockImplementation((theme, draft) => {
+          if (!hold) return save(theme, draft);
+          const run = queue.then(() => gate).then(() => save(theme, draft));
+          queue = run.catch(() => {});
+          return run;
+        });
+      });
+      await customize(user, "Terracotta");
+      await user.type(screen.getByLabelText("Author"), "Q");
+      hold = true;
+      await user.click(screen.getByRole("button", { name: "Save" }));
+      await user.click(screen.getByRole("button", { name: way }));
+      release();
+      await screen.findByRole("heading", { name: "Themes" });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(ipc.state.mine[0]?.author.endsWith("Q"), way).toBe(true);
+      expect(ipc.state.drafts, way).toEqual([]);
+      view.unmount();
+    }
+  });
+
+  it("refreshes the library once the draft written on a sidebar leave has landed (item 3)", async () => {
+    const { ipc, user } = mount();
+    await customize(user, "Terracotta");
+    await user.type(screen.getByLabelText("Author"), "Q");
+    await user.click(screen.getByRole("button", { name: "Themes" }));
+    await screen.findByRole("heading", { name: "Themes" });
+    await waitFor(() => expect(ipc.state.drafts).toHaveLength(1));
+    expect(await within(await card("My Terracotta")).findByText("Unsaved changes")).toBeTruthy();
+  });
+
+  it("says on the next screen that a sidebar leave's draft could not be written, and writes it on Try again (item 4)", async () => {
+    let refuse = true;
+    const { ipc, user } = await mountWith((m) => {
+      const save = m.themeSave.bind(m);
+      vi.spyOn(m, "themeSave").mockImplementation(async (theme, draft) => {
+        if (draft && refuse) throw ipcError("E_DATA_WRITE", "drafts folder is read-only");
+        return save(theme, draft);
+      });
+    });
+    await customize(user, "Terracotta");
+    await user.type(screen.getByLabelText("Author"), "Q");
+    await user.click(screen.getByRole("button", { name: "Themes" }));
+    await screen.findByRole("heading", { name: "Themes" });
+    expect(await screen.findByText("Draft not saved")).toBeTruthy();
+    expect(screen.getByText(/Code E_DATA_WRITE/)).toBeTruthy();
+    expect(ipc.state.drafts).toEqual([]);
+    // The edit is kept meanwhile: Try again writes it.
+    refuse = false;
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(ipc.state.drafts.map((d) => d.author.endsWith("Q"))).toEqual([true]));
+    expect(screen.queryByText("Draft not saved")).toBeNull();
+    expect(await within(await card("My Terracotta")).findByText("Unsaved changes")).toBeTruthy();
+  });
+
   it("writes no draft after the user chose to go back without it", async () => {
     const { ipc, user } = await mountWith((m) => {
       const save = m.themeSave.bind(m);

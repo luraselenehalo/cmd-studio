@@ -24,7 +24,7 @@ import { useI18n, type Key } from "../i18n";
 import { useIpc } from "../ipc/context";
 import { useNav } from "../router";
 import { CORE_SAMPLE_IDENTITY, sampleContext } from "../sample";
-import { useAppState } from "../state";
+import { useAppState, type DraftProblem } from "../state";
 import { getSlot, initialState, reduce, type ColorSlot, type EditorAction, type EditorState } from "./editor/reducer";
 import { clamp, NumberField } from "./editor/fields";
 import { useDebounced } from "./editor/hooks";
@@ -51,15 +51,16 @@ export function Editor({ id }: { id: string }) {
   const ipc = useIpc();
   const { t } = useI18n();
   const { go } = useNav();
-  const { settings, setLastApply, bump } = useAppState();
+  const { settings, setLastApply, setDraftProblem, bump } = useAppState();
   const [state, dispatch] = useReducer(reduceNullable, null);
   const [loadError, setLoadError] = useState<unknown>(null);
   const [error, setError] = useState<unknown>(null);
   /** A draft left from before, offered when the theme opens (spec §3.4). */
   const [draftOffer, setDraftOffer] = useState<{ draft: Theme; stored: Theme } | null>(null);
   const [offerError, setOfferError] = useState<unknown>(null);
-  /** The last draft save failed: said, never swallowed. */
-  const [draftError, setDraftError] = useState<unknown>(null);
+  /** The last draft write, or the last removal of a draft an undo made needless (item 1),
+   * failed: said, never swallowed. */
+  const [draftError, setDraftError] = useState<{ error: unknown; removal: boolean } | null>(null);
   const [preview, setPreview] = useState<PreviewResult | null>(null);
   const [previewError, setPreviewError] = useState<unknown>(null);
   const [issues, setIssues] = useState<ContrastIssue[]>([]);
@@ -73,26 +74,34 @@ export function Editor({ id }: { id: string }) {
   const [status, setStatus] = useState<Key | null>(null);
   const [applying, setApplying] = useState<{ key: number; request: ApplyRequest } | null>(null);
   const [applyBusy, setApplyBusy] = useState(false);
-  /** The theme the last draft save wrote (or the draft that was taken up): not written again. */
+  /** The theme the last draft write wrote (or the draft that was taken up): not written again.
+   * Null while no draft of this page's is stored (none yet, or a save or removal took it). */
   const lastDraft = useRef<Theme | null>(null);
   const applies = useRef(0);
   /** Counts the regenerates of simple mode: only the newest one's answer is used (item 5). */
   const regenerations = useRef(0);
   const heading = useRef<HTMLHeadingElement>(null);
   const offered = useRef(false);
-  /** Every draft write, one after the other; a save waits for the last (fix 5). */
+  /** Every draft write and removal, one after the other; a save waits for the last (fix 5). */
   const pendingDraft = useRef<Promise<void>>(Promise.resolve());
-  /** A save of the theme is running: no draft is started meanwhile (it would land after it). */
-  const saving = useRef(false);
+  /** The save of the theme that is running, if any (it never rejects): no draft is started
+   * meanwhile, since it would land after the save, and leaving waits for it (item 2). */
+  const saveRun = useRef<Promise<void> | null>(null);
+  /** The theme the last save stored, set the moment the save lands: the page may go before it
+   * draws that save, so leaving compares with this, not with the last render (item 2). */
+  const lastSaved = useRef<Theme | null>(null);
   /** The user chose to go back without the draft: leaving writes none. */
   const abandoned = useRef(false);
-  /** What the page holds as of its last render, for the write on leaving (fix 1). */
+  /** What the page holds as of its last render, for leaving (fix 1). */
   const latest = useRef<{ state: EditorState | null; draftOffer: unknown }>({ state: null, draftOffer: null });
   useLayoutEffect(() => {
     latest.current = { state, draftOffer };
   });
 
-  /** Writes `draft` after any draft write still running, so they land in order. */
+  /** The theme as it is stored: the last save's, else the one the page was loaded with. */
+  const storedTheme = (s: EditorState): Theme => lastSaved.current ?? s.savedTheme;
+
+  /** Writes `draft` after any draft write or removal still running, so they land in order. */
   const writeDraft = (draft: Theme): Promise<void> => {
     const write = pendingDraft.current
       .then(() => ipc.themeSave(draft, true))
@@ -103,17 +112,61 @@ export function Editor({ id }: { id: string }) {
     return write;
   };
 
-  // Leaving by any way (the sidebar, another theme, a later screen) unmounts the page before
-  // the draft second has passed: the edit still waiting is written then (spec §3.4). The page
-  // that could say a failure is gone; the theme then opens without that draft. In StrictMode's
-  // trial unmount nothing is loaded yet, so nothing is written.
+  /**
+   * Takes the theme's draft away, after any draft write still running, when this page wrote one:
+   * an undo brought the stored theme back, so the draft would be offered for nothing (item 1).
+   * Resolves to whether it took one away.
+   */
+  const dropDraft = (): Promise<boolean> => {
+    const drop = pendingDraft.current.then(async () => {
+      if (lastDraft.current === null) return false;
+      await ipc.themeDelete(id, true);
+      lastDraft.current = null;
+      return true;
+    });
+    pendingDraft.current = drop.then(
+      () => {},
+      () => {},
+    );
+    return drop;
+  };
+
+  /**
+   * Brings the stored draft in line with `last` as the page goes, once any save still running
+   * has ended (item 2): writes `last.theme` when it differs from the stored theme and was not
+   * written yet, or takes the page's draft away when it is the stored theme again (item 1).
+   * Says whether the library changed, or what could not be done.
+   */
+  const settleDraft = async (last: EditorState): Promise<{ changed: boolean; problem: DraftProblem | null }> => {
+    await saveRun.current;
+    const dirty = last.theme !== storedTheme(last);
+    try {
+      if (!dirty) return { changed: await dropDraft(), problem: null };
+      if (last.theme === lastDraft.current) return { changed: false, problem: null };
+      await writeDraft(last.theme);
+      return { changed: true, problem: null };
+    } catch (error) {
+      const problem: DraftProblem = dirty ? { kind: "write", draft: last.theme, error } : { kind: "remove", id, error };
+      return { changed: false, problem };
+    }
+  };
+
+  // Leaving by any way (the sidebar, another theme, a later screen) unmounts the page, maybe
+  // before the draft second has passed or a save has landed: the draft is settled then (spec
+  // §3.4). Once that lands the library is listed again, so its badges follow (item 3); a failure
+  // is kept in the app state, and the next screen says it with Try again (item 4). In
+  // StrictMode's trial unmount nothing is loaded yet, so nothing is done.
   useEffect(
     () => () => {
       const { state: last, draftOffer: offer } = latest.current;
-      if (!last || offer || abandoned.current || !last.dirty || last.theme === lastDraft.current) return;
-      writeDraft(last.theme).catch(() => {});
+      if (!last || offer || abandoned.current) return;
+      void settleDraft(last).then(({ changed, problem }) => {
+        if (problem) setDraftProblem(problem);
+        else if (changed) bump();
+      });
     },
-    // Once, on unmount; `writeDraft` reads only refs and the IPC.
+    // Once, on unmount: the helpers read only refs, `id` and the IPC; the app state's
+    // `setDraftProblem` and `bump` never change.
     [ipc],
   );
 
@@ -185,22 +238,25 @@ export function Editor({ id }: { id: string }) {
     };
   }, [ipc, previewTheme, sample]);
 
-  // The draft, a second after the last edit (spec §3.4): only while the theme on screen is that
-  // settled one, differs from the stored theme, and was not written already, and while no save
-  // of the theme runs. A failure is said.
+  // The draft, a second after the last edit (spec §3.4), while the theme on screen is that
+  // settled one and no save of it runs: written when it differs from the stored theme and was
+  // not written already; taken away when an undo brought the stored theme back (item 1). A
+  // failure is said.
   useEffect(() => {
     if (!draftTheme || !state || draftTheme !== state.theme) return;
-    if (!state.dirty || draftOffer || saving.current || draftTheme === lastDraft.current) return;
+    if (draftOffer || saveRun.current) return;
+    const dirty = draftTheme !== storedTheme(state);
+    if (dirty && draftTheme === lastDraft.current) return;
     let alive = true;
-    writeDraft(draftTheme).then(
-      () => {
+    (dirty ? writeDraft(draftTheme).then(() => true) : dropDraft()).then(
+      (changed) => {
         if (!alive) return;
         setDraftError(null);
-        setStatus("editor.draftSaved");
+        if (changed) setStatus(dirty ? "editor.draftSaved" : null);
       },
       (e: unknown) => {
         if (!alive) return;
-        setDraftError(e);
+        setDraftError({ error: e, removal: !dirty });
         setStatus(null);
       },
     );
@@ -306,14 +362,23 @@ export function Editor({ id }: { id: string }) {
     setError(null);
     // The very object sent: `dirty` compares the stored theme by identity.
     const sent = theme;
-    saving.current = true;
-    try {
+    const run = (async () => {
       // A draft write still running would land after the save and be offered again (fix 5).
       await pendingDraft.current;
       await ipc.themeSave(sent, false);
-      dispatch({ type: "saved", theme: sent });
-      // The save took the draft away (library.rs), so the next edit writes a new one.
+      // At once, not at the next render: the page may be left first (item 2). The save took
+      // the draft away (library.rs), so the next edit writes a new one.
+      lastSaved.current = sent;
       lastDraft.current = null;
+    })();
+    const ended = run.then(
+      () => {},
+      () => {},
+    );
+    saveRun.current = ended;
+    try {
+      await run;
+      dispatch({ type: "saved", theme: sent });
       setDraftError(null);
       setStatus("editor.saved");
       return sent;
@@ -321,7 +386,7 @@ export function Editor({ id }: { id: string }) {
       setError(e);
       return null;
     } finally {
-      saving.current = false;
+      if (saveRun.current === ended) saveRun.current = null;
     }
   };
 
@@ -347,14 +412,18 @@ export function Editor({ id }: { id: string }) {
     setApplyBusy(false);
   };
 
-  // Back to the library: an edit still waiting for its draft second is written first, so
-  // leaving loses nothing; when that fails, the page says so and stays.
+  // Back to the library, once any save still running has ended (item 2): an edit still waiting
+  // for its draft second is written first, so leaving loses nothing; when that fails, the page
+  // says so and stays. A draft an undo made needless is taken away as the page goes (the
+  // unmount above), and a failure of that is said on the next screen: leaving loses nothing.
   const leave = async () => {
-    if (state.dirty && !draftOffer && theme !== lastDraft.current) {
+    await saveRun.current;
+    const { state: last, draftOffer: offer } = latest.current;
+    if (last && !offer && last.theme !== storedTheme(last) && last.theme !== lastDraft.current) {
       try {
-        await writeDraft(theme);
+        await writeDraft(last.theme);
       } catch (e) {
-        setDraftError(e);
+        setDraftError({ error: e, removal: false });
         setStatus(null);
         return;
       }
@@ -411,19 +480,22 @@ export function Editor({ id }: { id: string }) {
       {detectError !== null && <ErrorNotice error={detectError} title={t("editor.systemUnknown")} />}
       {draftError !== null && (
         <>
-          <ErrorNotice error={draftError} title={t("editor.draftNotSaved")} />
-          <div className="row-actions">
-            <button
-              type="button"
-              className="link"
-              onClick={() => {
-                abandoned.current = true;
-                go({ name: "themes" });
-              }}
-            >
-              {t("editor.leaveWithoutDraft")}
-            </button>
-          </div>
+          <ErrorNotice error={draftError.error} title={t(draftError.removal ? "editor.draftNotRemoved" : "editor.draftNotSaved")} />
+          {/* An old draft that could not be taken away loses nothing by leaving: no way out to offer. */}
+          {!draftError.removal && (
+            <div className="row-actions">
+              <button
+                type="button"
+                className="link"
+                onClick={() => {
+                  abandoned.current = true;
+                  go({ name: "themes" });
+                }}
+              >
+                {t("editor.leaveWithoutDraft")}
+              </button>
+            </div>
+          )}
         </>
       )}
       <div className="editor">

@@ -524,6 +524,8 @@ describe("AfterApplyBar", () => {
         saveSettings: async () => {},
         lastApply,
         setLastApply,
+        draftProblem: null,
+        setDraftProblem: () => {},
         version: 0,
         bump: () => {},
       };

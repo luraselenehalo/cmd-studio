@@ -53,15 +53,12 @@ export function Themes() {
   const ipc = useIpc();
   const { t, language } = useI18n();
   const { go } = useNav();
-  const { settings, version, bump, setLastApply } = useAppState();
+  const { settings, version, bump, setLastApply, setDraftProblem } = useAppState();
   const [library, setLibrary] = useState<Library | null>(null);
   const [listError, setListError] = useState<unknown>(null);
   const [filter, setFilter] = useState<Filter>("all");
   /** What the last action on the page said went wrong (a dialog shows its own). */
   const [error, setError] = useState<unknown>(null);
-  /** A rename went through but the theme's draft could not be saved again (ruling R8): its
-   * content is kept here until Try again saves it (fix 2). */
-  const [lostDraft, setLostDraft] = useState<{ draft: Theme; error: unknown } | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [applying, setApplying] = useState<{ key: number; request: ApplyRequest } | null>(null);
   const [applyBusy, setApplyBusy] = useState(false);
@@ -220,6 +217,8 @@ export function Themes() {
 
   // A rename saves the theme, which takes its draft away (library.rs `save_locked`); a draft
   // that was waiting is saved again under the new name, so no unsaved edit is lost (ruling R8).
+  // When that fails, the draft is kept in the app state, which says so with Try again (fix 2):
+  // the same notice as for a draft the editor could not write as it went (item 4).
   const confirmRename = () =>
     actInDialog(async () => {
       if (!renaming) return;
@@ -231,21 +230,10 @@ export function Themes() {
         try {
           await ipc.themeSave(renamed, true);
         } catch (e) {
-          setLostDraft({ draft: renamed, error: e });
+          setDraftProblem({ kind: "write", draft: renamed, error: e });
         }
       }
     });
-
-  const retryDraft = async () => {
-    if (!lostDraft) return;
-    try {
-      await ipc.themeSave(lostDraft.draft, true);
-      setLostDraft(null);
-    } catch (e) {
-      setLostDraft({ draft: lostDraft.draft, error: e });
-    }
-    await load();
-  };
 
   const openRename = (s: ThemeSummary) => {
     setDialogError(null);
@@ -288,19 +276,6 @@ export function Themes() {
       <h1 tabIndex={-1}>{t("themes.title")}</h1>
       {listError !== null && <ErrorNotice error={listError} />}
       {error !== null && <ErrorNotice error={error} />}
-      {lostDraft && (
-        <>
-          <ErrorNotice error={lostDraft.error} title={t("editor.draftNotSaved")} />
-          <div className="row-actions">
-            <button type="button" onClick={() => void retryDraft()}>
-              {t("common.retry")}
-            </button>
-            <button type="button" className="link" onClick={() => setLostDraft(null)}>
-              {t("common.dismiss")}
-            </button>
-          </div>
-        </>
-      )}
       {message && <Notice kind="ok">{message}</Notice>}
       {library?.stateProblem && <ErrorNotice error={library.stateProblem} />}
       {library && library.problems.length > 0 && (

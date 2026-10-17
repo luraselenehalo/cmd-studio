@@ -267,6 +267,7 @@ export const th: Dictionary = {
   "editor.saved": "บันทึกแล้ว",
   "editor.draftSaved": "บันทึกฉบับร่างแล้ว",
   "editor.draftNotSaved": "บันทึกฉบับร่างไม่สำเร็จ",
+  "editor.draftNotRemoved": "ลบฉบับร่างเดิมไม่สำเร็จ",
   "editor.leaveWithoutDraft": "กลับไปโดยไม่บันทึกฉบับร่าง",
   "editor.systemUnknown": "อ่านข้อมูลของเครื่องนี้ไม่ได้ พรีวิวจึงใช้ค่าตัวอย่าง และแสดงรายการฟอนต์ที่ติดตั้งไว้ไม่ได้",
   "editor.draftFound": "คุณมีสิ่งที่แก้ค้างไว้จากคราวก่อน",
