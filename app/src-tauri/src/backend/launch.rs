@@ -19,8 +19,9 @@ impl<M: Machine> Backend<M> {
     /// loads Clink itself and a plain cmd window would show no theme at all (spec §5.4). The
     /// wizard's default, "open Windows Terminal as cmd", has the user living in Windows
     /// Terminal anyway. The profile is there when a Windows Terminal is installed and has a
-    /// `settings.json`: the planner writes the profile into the files that exist, and one that
-    /// was never opened has none (doctor D6).
+    /// `settings.json`: the planner writes the profile into the file of every installed
+    /// Terminal, and makes the file of one that was never opened (founder 2026-10-17). One
+    /// installed after the apply, or whose file is gone since, has none (doctor D6).
     ///
     /// Nothing here can stop the button: a `state.json` that cannot be used (the Home page and
     /// the doctor tell the user about it) means no theme is known, so the window is a plain cmd.
@@ -102,15 +103,16 @@ mod tests {
     }
 
     /// The profile is there when the Terminal is installed and its settings.json exists: the
-    /// planner writes the cmd profile into the settings files that exist, and a Terminal that
-    /// was never opened has none (D6).
+    /// planner writes the cmd profile into the settings file of every installed Terminal, and
+    /// makes the file of one that was never opened (founder 2026-10-17).
     #[test]
     fn the_profile_needs_an_installed_terminal_with_a_settings_file() {
-        // (installed, settings.json exists, the profile opens)
+        // (installed, settings.json exists before the apply, the profile opens)
         let table = [
             (true, true, true),
-            // Installed but never opened: no settings.json, so no profile was written.
-            (true, false, false),
+            // Installed but never opened: the apply made its settings.json, with the profile.
+            // Until the founder's decision of 2026-10-17 it made none, and a plain cmd opened.
+            (true, false, true),
             // A folder left behind: the Terminal itself is not there.
             (false, true, false),
             (false, false, false),

@@ -60,7 +60,9 @@ pub struct WtInfo {
     pub kind: WtKind,
     /// Its folder exists.
     pub installed: bool,
-    /// Its settings.json exists (one that was never opened has none, D6).
+    /// Its settings.json exists. One that is installed but was never opened has none yet (D6),
+    /// and an apply sets it up from CMD Studio's template, colours included (founder 2026-10-17,
+    /// spec §5.4): `installed` without `hasSettings` is such a one.
     pub has_settings: bool,
 }
 
@@ -337,6 +339,31 @@ mod tests {
                 has_settings: false
             }]
         );
+    }
+
+    /// A Windows Terminal that is installed but was never opened is told apart: installed, no
+    /// settings.json yet. An apply sets it up (founder 2026-10-17), and then it has one.
+    #[test]
+    fn a_terminal_installed_but_never_opened_is_told_apart_and_has_settings_after_an_apply() {
+        let b = backend();
+        b.sys()
+            .fs
+            .remove_file(std::path::Path::new(crate::backend::testing::WT))
+            .unwrap();
+        let r = b.system_detect().unwrap();
+        assert!(r.wt_installed);
+        assert_eq!(
+            r.windows_terminal,
+            [WtInfo {
+                kind: WtKind::Store,
+                installed: true,
+                has_settings: false
+            }]
+        );
+        let (done, _) = crate::backend::testing::apply_terracotta(&b);
+        assert_eq!(done.status, crate::backend::apply::ApplyStatus::Committed);
+        let r = b.system_detect().unwrap();
+        assert!(r.windows_terminal[0].installed && r.windows_terminal[0].has_settings);
     }
 
     /// Our own entry is not "another program's command" and not "another Clink", though it starts

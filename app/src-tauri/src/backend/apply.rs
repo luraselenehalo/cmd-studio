@@ -1283,6 +1283,64 @@ mod tests {
         assert_eq!(b.snapshots_list().unwrap().points.len(), 1);
     }
 
+    /// Founder 2026-10-17: a Windows Terminal that was never opened gets the theme too. The plan
+    /// says it sets Terminal up; the apply makes its settings.json; an undo, and a revert of
+    /// everything, take it out again.
+    #[test]
+    fn a_terminal_that_was_never_opened_is_set_up_by_the_apply_and_taken_out_again() {
+        let set_up = "Set up Windows Terminal's settings so cmd gets this theme";
+        for undo_with_revert_all in [false, true] {
+            let b = backend();
+            b.sys().fs.remove_file(Path::new(WT)).unwrap();
+            let plan = ready(b.plan_apply(terracotta_request()).unwrap());
+            assert!(plan.summary_en.iter().any(|s| s == set_up), "{plan:?}");
+            assert!(plan
+                .summary_th
+                .iter()
+                .any(|s| s == "ตั้งค่า Windows Terminal ให้ cmd ได้ธีมนี้"));
+            assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
+            assert!(plan
+                .steps
+                .iter()
+                .any(|s| s.kind == StepKind::WindowsTerminal && s.detail == WT));
+            let done = b
+                .apply(terracotta_request(), &plan.digest, &mut |_| {})
+                .unwrap();
+            assert_eq!(done.status, ApplyStatus::Committed);
+            assert!(b.sys().fs.exists(Path::new(WT)));
+            if undo_with_revert_all {
+                let reverted = b.revert_all().unwrap();
+                assert!(reverted.ok, "{:?}", reverted.steps);
+            } else {
+                assert_eq!(b.undo_last().unwrap().status, UndoStatus::Committed);
+            }
+            assert!(!b.sys().fs.exists(Path::new(WT)), "{undo_with_revert_all}");
+        }
+    }
+
+    /// The plan the user saw set Terminal up; Terminal was opened before Apply, so the plan
+    /// edits its file now and says nothing of setting it up: the plan changed, and nothing is
+    /// done until the user has seen the new one.
+    #[test]
+    fn a_terminal_opened_after_the_plan_was_shown_changes_the_plan() {
+        let b = backend();
+        let opened = b.sys().fs.read(Path::new(WT)).unwrap().unwrap();
+        b.sys().fs.remove_file(Path::new(WT)).unwrap();
+        let plan = ready(b.plan_apply(terracotta_request()).unwrap());
+        fake_fs(&b).put(WT, &opened);
+        let done = b
+            .apply(terracotta_request(), &plan.digest, &mut |_| {})
+            .unwrap();
+        assert_eq!(done.status, ApplyStatus::PlanChanged);
+        let new_plan = done.plan.unwrap();
+        assert!(!new_plan.summary_en.iter().any(|s| s.starts_with("Set up")));
+        assert_eq!(b.sys().fs.read(Path::new(WT)).unwrap(), Some(opened));
+        assert!(
+            !b.sys().fs.exists(&b.paths().state_file()),
+            "nothing was applied"
+        );
+    }
+
     #[test]
     fn revert_all_takes_every_change_out() {
         let b = backend();

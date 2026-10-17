@@ -7,6 +7,8 @@ export type WtInfo = { kind: WtKind,
  */
 installed: boolean, 
 /**
- * Its settings.json exists (one that was never opened has none, D6).
+ * Its settings.json exists. One that is installed but was never opened has none yet (D6),
+ * and an apply sets it up from CMD Studio's template, colours included (founder 2026-10-17,
+ * spec §5.4): `installed` without `hasSettings` is such a one.
  */
 hasSettings: boolean, };
