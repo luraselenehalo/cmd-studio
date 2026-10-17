@@ -27,6 +27,7 @@ use cmdstudio_core::model::{parse_theme, Target};
 use cmdstudio_core::plan::{
     Op, Paths, PlanError, Request, Warning, AUTORUN_NOT_TEXT, NERD_FONT_FAMILY,
 };
+use cmdstudio_core::recovery::clear_pause;
 use cmdstudio_core::resources::Resources;
 use cmdstudio_core::snapshot::{Incomplete, SetAside, SnapshotStore, Unrestored};
 use cmdstudio_core::txn::{Failure, Outcome};
@@ -569,7 +570,19 @@ impl<'s, 'a> Say<'s, 'a> {
                  and the welcome box."
             ),
         };
-        self.finish(sys, ctx, &outcome, &ops, done)
+        let code = self.finish(sys, ctx, &outcome, &ops, done);
+        // A theme applied is the theme on again (recovery spec §4.1): its pause goes, and with
+        // it every start tag of the theme before. The apply stands either way.
+        if outcome == Outcome::Committed {
+            if let Err(e) = clear_pause(sys.fs, &ctx.paths) {
+                self.err(format!(
+                    "E_DATA_WRITE: the theme was applied, but its pause could not be lifted ({e}); \
+                     cmd windows open without the theme until {} is deleted",
+                    ctx.paths.paused_file().display()
+                ));
+            }
+        }
+        code
     }
 
     fn undo(&mut self, sys: System<'_>, ctx: &Ctx) -> i32 {
@@ -937,8 +950,9 @@ fn same_name(a: &Path, b: &Path) -> bool {
 /// Whether an entry directly in the data folder is one CMD Studio itself puts there, of the
 /// kind it writes, as the core's `Paths` and its writers make them:
 /// - the folders `generated\`, `clink-profile\`, `runtime\`, `snapshots\`, `themes\`, and the
-///   app's `drafts\` (autosaved drafts), `logs\` (its log) and `webview\` (WebView2's own data,
-///   put there by the app on purpose; spec §5.3);
+///   app's `drafts\` (autosaved drafts), `logs\` (its log), `webview\` (WebView2's own data,
+///   put there by the app on purpose; spec §5.3), and `health\` (init.lua's start tags and the
+///   theme's pause, recovery spec §7);
 /// - the files `state.json`, `settings.json` (the app's settings) and `cmdstudio.lock` (made by
 ///   `Fs::try_lock`);
 /// - `state.json.damaged-<ms>` and `settings.json.damaged-<ms>`: a damaged file that Revert
@@ -947,7 +961,7 @@ fn same_name(a: &Path, b: &Path) -> bool {
 ///   file `WinFs::write_atomic` writes beside the file, left behind when a run is cut off in
 ///   that write. state.json and settings.json are the only files CMD Studio writes directly in
 ///   the data folder: the generated files, Clink's profile, the runtimes, the restore points, the
-///   drafts and the log, with their own temp files, are in the folders above.
+///   drafts, the log and the pause, with their own temp files, are in the folders above.
 ///
 /// Names compare without regard to ASCII letter case, as Windows does.
 fn put_there_by_cmd_studio(paths: &Paths, entry: &DirEntry) -> bool {
@@ -965,6 +979,7 @@ fn put_there_by_cmd_studio(paths: &Paths, entry: &DirEntry) -> bool {
             paths.drafts(),
             paths.logs(),
             paths.webview(),
+            paths.health(),
         ]
         .into_iter()
         .any(named);
@@ -1773,8 +1788,10 @@ mod tests {
                 "\"state.json\\\"",
             ),
             (r"C:\x\b", r"C:\x\b\runtime", "\"runtime\""),
-            // The app's names too: a file called drafts, a folder called settings.json.
+            // The app's names too: a file called drafts, a folder called settings.json, and a
+            // file called health (the folder of the start tags and the pause).
             (r"C:\x\d", r"C:\x\d\drafts", "\"drafts\""),
+            (r"C:\x\f", r"C:\x\f\health", "\"health\""),
             (
                 r"C:\x\e",
                 r"C:\x\e\settings.json\inside.txt",
@@ -2446,6 +2463,8 @@ mod tests {
             r"logs\cmdstudio.log",
             r"logs\cmdstudio.log.1",
             r"webview\EBWebView\Default\Cache\data_0",
+            r"health\start-4242",
+            r"health\paused.json",
             "settings.json",
             "settings.json.damaged-1791694709000",
             ".settings.json.0123456789abcdef0123456789abcdef.cmdstudio-tmp",
@@ -2482,5 +2501,84 @@ mod tests {
         assert_eq!(code, EXIT_INVALID, "{err}");
         assert!(err.contains("\"webview.txt\""), "{err}");
         assert_eq!(m.fs.snapshot(), before);
+    }
+
+    /// The theme paused in cmd, as init.lua leaves it: `paused.json` and two start tags.
+    fn paused_in_cmd(m: &FakeMachine, d: &Defaults) -> Paths {
+        let paths = Paths {
+            data: d.data_dir.clone(),
+        };
+        m.fs.put(
+            paths.paused_file(),
+            br#"{"version":1,"reason":"cmdStarts","at":1791694709000,"count":3,"by":"clink"}"#,
+        );
+        for pid in [11, 12] {
+            m.fs.put(
+                paths.health().join(format!("start-{pid}")),
+                b"v1 1791694709\n",
+            );
+        }
+        paths
+    }
+
+    #[test]
+    fn an_apply_lifts_the_pause_and_every_tag() {
+        // Review Focus 5: a theme applied from the command line is the theme on again; a pause
+        // left behind would keep every cmd window plain under the new theme.
+        let (m, d) = machine();
+        let paths = paused_in_cmd(&m, &d);
+        let (code, out, err) = cli(&m, &d, &["apply", THEME]);
+        assert_eq!((code, err.as_str()), (EXIT_OK, ""), "{out}");
+        assert!(!m.fs.exists(&paths.paused_file()));
+        assert!(m.fs.list_dir(&paths.health()).unwrap().is_empty());
+        assert!(
+            m.fs.is_dir(&paths.health()),
+            "init.lua writes its tags there"
+        );
+        // An apply that rolls back (here its check: Oh My Posh draws nothing) leaves the pause.
+        let paths = paused_in_cmd(&m, &d);
+        m.process.answer("oh-my-posh.exe", "print", 1, "");
+        let (code, _, err) = cli(&m, &later(&d, 1), &["apply", THEME]);
+        assert_eq!(code, EXIT_FAILED, "{err}");
+        assert!(m.fs.exists(&paths.paused_file()));
+    }
+
+    #[test]
+    fn a_pause_that_cannot_be_lifted_is_said_and_the_apply_stands() {
+        let (m, d) = machine();
+        let paths = paused_in_cmd(&m, &d);
+        m.fs.fail_removes_of(paths.paused_file());
+        let (code, out, err) = cli(&m, &d, &["apply", THEME]);
+        assert_eq!(code, EXIT_OK, "{out}{err}");
+        assert!(out.contains("Applied \"Terracotta\""), "{out}");
+        assert!(
+            err.starts_with(
+                "E_DATA_WRITE: the theme was applied, but its pause could not be lifted"
+            ),
+            "{err}"
+        );
+        assert!(err.is_ascii(), "English only in cmd: {err}");
+        assert!(m.fs.exists(&paths.paused_file()));
+    }
+
+    #[test]
+    fn a_tag_that_cannot_be_deleted_is_said_the_same_way_and_the_pause_stays() {
+        // A virus scanner holds a tag: `clear_pause` stops before the pause, which stays, so the
+        // next window does not pause the theme again at once on three stale tags.
+        let (m, d) = machine();
+        let paths = paused_in_cmd(&m, &d);
+        m.fs.fail_removes_of(paths.health().join("start-12"));
+        let (code, out, err) = cli(&m, &d, &["apply", THEME]);
+        assert_eq!(code, EXIT_OK, "{out}{err}");
+        assert!(out.contains("Applied \"Terracotta\""), "{out}");
+        assert_eq!(err.lines().count(), 1, "said once: {err}");
+        assert!(
+            err.starts_with(
+                "E_DATA_WRITE: the theme was applied, but its pause could not be lifted"
+            ),
+            "{err}"
+        );
+        assert!(err.is_ascii(), "English only in cmd: {err}");
+        assert!(m.fs.exists(&paths.paused_file()));
     }
 }
