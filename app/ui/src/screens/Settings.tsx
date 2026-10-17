@@ -102,14 +102,18 @@ export function Settings() {
             </span>
           </label>
         ))}
-        <label className="row">
-          <input
-            type="checkbox"
-            checked={settings.setWtDefaultProfile}
-            onChange={(e) => void change({ setWtDefaultProfile: e.target.checked })}
-          />
-          {t("wizard.where.setDefault")}
-        </label>
+        {/* On a line of its own below the two choices, as on the wizard's page 4: it belongs to
+            neither of them (V3). */}
+        <div>
+          <label className="row">
+            <input
+              type="checkbox"
+              checked={settings.setWtDefaultProfile}
+              onChange={(e) => void change({ setWtDefaultProfile: e.target.checked })}
+            />
+            {t("wizard.where.setDefault")}
+          </label>
+        </div>
         {libraryError !== null && <ErrorNotice error={libraryError} />}
         {applied && (
           <div className="row-actions">
