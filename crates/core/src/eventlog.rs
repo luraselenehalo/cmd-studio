@@ -319,7 +319,7 @@ mod tests {
     }
 
     #[test]
-    fn the_query_is_the_one_the_spike_ran() {
+    fn the_query_asks_for_application_error_1000_since_the_time() {
         assert_eq!(
             crash_query(604_800_000),
             "*[System[Provider[@Name='Application Error'] and (EventID=1000) and \

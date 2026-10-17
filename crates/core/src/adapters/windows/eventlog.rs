@@ -1,16 +1,18 @@
 //! The Application event log through Windows' Event Log API (recovery spec §4.3): the
 //! "Application Error" events 1000 (`EvtQuery` with an XPath query, `EvtNext`, `EvtRender` as
-//! XML). Read only. The read runs on a thread of its own and is given up after five seconds: a
-//! log that is off, that this user may not read, or that does not answer in time is an error,
-//! which the callers take for "could not be read" and never for "no crash".
+//! XML). Read only. The read runs on a thread of its own, one at a time, and is given up after five
+//! seconds in all (each wait of `EvtNext` is what is left of them): a log that is off, that this
+//! user may not read, or that does not answer in time is an error, which the callers take for
+//! "could not be read" and never for "no crash".
 use super::{last_error, wide};
 use crate::adapters::{AdapterError, AppCrash, EventLog};
 use crate::eventlog::{crash_query, parse_crash};
 use std::ffi::OsStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::{
-    GetLastError, ERROR_INSUFFICIENT_BUFFER, ERROR_NO_MORE_ITEMS,
+    GetLastError, ERROR_INSUFFICIENT_BUFFER, ERROR_NO_MORE_ITEMS, ERROR_TIMEOUT,
 };
 use windows_sys::Win32::System::EventLog::{
     EvtClose, EvtNext, EvtQuery, EvtQueryChannelPath, EvtQueryReverseDirection, EvtRender,
@@ -23,6 +25,9 @@ pub const READ_TIMEOUT: Duration = Duration::from_secs(5);
 pub const MOST_EVENTS: usize = 200;
 /// How many handles `EvtNext` gives at a time.
 const BATCH: usize = 16;
+
+/// Set while a reader thread of this process runs, also one whose caller gave up waiting.
+static READING: AtomicBool = AtomicBool::new(false);
 
 /// This computer's Application log.
 pub struct WinEventLog {
@@ -41,35 +46,118 @@ impl WinEventLog {
 impl EventLog for WinEventLog {
     fn app_crashes(&self, since_ms: u64, now_ms: u64) -> Result<Vec<AppCrash>, AdapterError> {
         let within = now_ms.saturating_sub(since_ms);
-        let events = within_time(self.timeout, move || read_events(within))?;
-        Ok(events
-            .iter()
-            .filter_map(|xml| parse_crash(xml, since_ms))
-            .collect())
+        let timeout = self.timeout;
+        let events = within_time(timeout, &READING, move || {
+            read_events(&crash_query(within), MOST_EVENTS, timeout)
+        })?;
+        Ok(crashes_in(&events, since_ms, now_ms))
+    }
+}
+
+/// The crashes among `xmls` (events as XML) that happened from `since_ms` to `now_ms`, both
+/// ends in: the trait's contract. The query counts back from the clock at the moment it runs,
+/// which is a little after the caller's `now_ms`. An event that is no crash report is dropped.
+fn crashes_in(xmls: &[String], since_ms: u64, now_ms: u64) -> Vec<AppCrash> {
+    xmls.iter()
+        .filter_map(|xml| parse_crash(xml, since_ms))
+        .filter(|c| (since_ms..=now_ms).contains(&c.at_ms))
+        .collect()
+}
+
+/// The milliseconds of a read's time that are left at `now`, for `EvtNext`'s wait: at least 1
+/// (0 would mean "do not wait"), at most what a `u32` holds. `None` once `deadline` has come.
+fn ms_left(deadline: Instant, now: Instant) -> Option<u32> {
+    let left = deadline
+        .checked_duration_since(now)
+        .filter(|left| !left.is_zero())?;
+    Some(u32::try_from(left.as_millis()).unwrap_or(u32::MAX).max(1))
+}
+
+/// The error of a read that used up its time.
+fn timed_out(timeout: Duration) -> AdapterError {
+    AdapterError::new(
+        "read the Application event log",
+        format!("it did not answer within {timeout:?}"),
+    )
+}
+
+/// Takes events from `next_batch` and turns each into text with `render`, until `next_batch`
+/// gives an empty batch (the end of the log; `EvtNext` answering with no events is one too) or
+/// `most` are taken. The whole read has until `deadline`: each call of `next_batch` is told the
+/// milliseconds left, and a read whose time is used up is an error, with `timeout` named in
+/// it. The events of a batch are dropped, which closes their handles, when the batch is done
+/// with, also on an error.
+fn drain<B, T>(
+    deadline: Instant,
+    timeout: Duration,
+    most: usize,
+    mut next_batch: impl FnMut(u32) -> Result<Vec<B>, AdapterError>,
+    mut render: impl FnMut(&B) -> Result<T, AdapterError>,
+) -> Result<Vec<T>, AdapterError> {
+    let mut taken = Vec::new();
+    while taken.len() < most {
+        let wait = ms_left(deadline, Instant::now()).ok_or_else(|| timed_out(timeout))?;
+        let batch = next_batch(wait)?;
+        if batch.is_empty() {
+            break;
+        }
+        for event in &batch {
+            taken.push(render(event)?);
+            if taken.len() >= most {
+                return Ok(taken);
+            }
+        }
+    }
+    Ok(taken)
+}
+
+/// The claim on one read at a time: it is freed when dropped, also when the reader panics.
+struct Slot(&'static AtomicBool);
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
     }
 }
 
 /// Runs `work` on a thread of its own and waits `timeout` for its answer. One that does not
 /// come in time is an error; the thread is left to end by itself.
+///
+/// Only one reader runs at a time (`busy`): while an earlier one is still running, also one
+/// whose caller gave up, a new read is an error at once and starts no thread. The reader frees
+/// its place before it sends its answer, so a caller's next read always finds it free.
 fn within_time<T: Send + 'static>(
     timeout: Duration,
+    busy: &'static AtomicBool,
     work: impl FnOnce() -> Result<T, AdapterError> + Send + 'static,
 ) -> Result<T, AdapterError> {
     let fail = |message: String| AdapterError::new("read the Application event log", message);
+    if busy
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Err(fail(
+            "the Application log is still being read by an earlier read".to_string(),
+        ));
+    }
+    let slot = Slot(busy);
     let (tx, rx) = mpsc::channel();
     std::thread::Builder::new()
         .name("event-log".to_string())
         .spawn(move || {
+            // Locals drop in reverse order, also when `work` panics: the place is freed first,
+            // and only then does the caller hear that the reader is gone.
+            let tx = tx;
+            let slot = slot;
+            let answer = work();
+            drop(slot);
             // The receiver may have given up already; then nobody waits for the answer.
-            let _ = tx.send(work());
+            let _ = tx.send(answer);
         })
         .map_err(|e| fail(format!("could not start the reader: {e}")))?;
     match rx.recv_timeout(timeout) {
         Ok(answer) => answer,
-        Err(mpsc::RecvTimeoutError::Timeout) => Err(fail(format!(
-            "it did not answer within {} seconds",
-            timeout.as_secs()
-        ))),
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(timed_out(timeout)),
         Err(mpsc::RecvTimeoutError::Disconnected) => {
             Err(fail("the reader stopped without an answer".to_string()))
         }
@@ -88,11 +176,12 @@ impl Drop for Handle {
     }
 }
 
-/// The XML of the "Application Error" events 1000 of the last `within_ms` milliseconds, newest
-/// first, at most [`MOST_EVENTS`].
-fn read_events(within_ms: u64) -> Result<Vec<String>, AdapterError> {
+/// The XML of the events of the Application log that match `query`, newest first, at most
+/// `most`, within `timeout` of now.
+fn read_events(query: &str, most: usize, timeout: Duration) -> Result<Vec<String>, AdapterError> {
+    let deadline = Instant::now() + timeout;
     let path = wide(OsStr::new("Application"));
-    let query = wide(OsStr::new(&crash_query(within_ms)));
+    let query = wide(OsStr::new(query));
     // SAFETY: both strings are NUL-terminated UTF-16 that outlive the call; session 0 is this
     // computer.
     let results = Handle(unsafe {
@@ -106,40 +195,39 @@ fn read_events(within_ms: u64) -> Result<Vec<String>, AdapterError> {
     if results.0 == 0 {
         return Err(last_error("EvtQuery Application"));
     }
-    let mut xmls = Vec::new();
-    loop {
+    let next_batch = |wait_ms: u32| -> Result<Vec<Handle>, AdapterError> {
         let mut batch = [0 as EVT_HANDLE; BATCH];
         let mut returned = 0u32;
         // SAFETY: `batch` holds BATCH handles, the count given; the call writes at most that
-        // many, and their number into `returned`. 1000 ms is the wait for each batch.
+        // many, and their number into `returned`. `wait_ms` is the time the whole read has
+        // left, at least 1.
         let ok = unsafe {
             EvtNext(
                 results.0,
                 BATCH as u32,
                 batch.as_mut_ptr(),
-                1000,
+                wait_ms,
                 0,
                 &mut returned,
             )
         };
         if ok == 0 {
             // SAFETY: GetLastError only reads this thread's last error, which EvtNext set.
-            if unsafe { GetLastError() } == ERROR_NO_MORE_ITEMS {
-                break;
+            let code = unsafe { GetLastError() };
+            if code == ERROR_NO_MORE_ITEMS {
+                return Ok(Vec::new());
+            }
+            // The wait given ran out: the time of the whole read, which is used up.
+            if code == ERROR_TIMEOUT {
+                return Err(timed_out(timeout));
             }
             return Err(last_error("EvtNext Application"));
         }
         let count = usize::try_from(returned).unwrap_or(0).min(BATCH);
         // Each handle is closed when its `Handle` goes, also when a render fails.
-        let events: Vec<Handle> = batch.iter().take(count).map(|h| Handle(*h)).collect();
-        for event in &events {
-            xmls.push(render(event)?);
-            if xmls.len() >= MOST_EVENTS {
-                return Ok(xmls);
-            }
-        }
-    }
-    Ok(xmls)
+        Ok(batch.iter().take(count).map(|h| Handle(*h)).collect())
+    };
+    drain(deadline, timeout, most, next_batch, render)
 }
 
 /// One event as XML (`EvtRenderEventXml`): its size first, then its text.
@@ -188,24 +276,284 @@ fn render(event: &Handle) -> Result<String, AdapterError> {
 mod tests {
     use super::*;
     use crate::recovery::CRASH_WINDOW_MS;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::Arc;
 
     #[test]
     fn an_answer_in_time_is_the_answer_and_a_late_one_an_error() {
+        static BUSY: AtomicBool = AtomicBool::new(false);
         // Review Focus 4: a log that does not answer is "could not be read", never "no crash".
-        assert_eq!(within_time(Duration::from_secs(5), || Ok(7)), Ok(7));
-        let late = within_time(Duration::from_millis(50), || {
+        assert_eq!(within_time(Duration::from_secs(5), &BUSY, || Ok(7)), Ok(7));
+        let late = within_time(Duration::from_millis(50), &BUSY, || {
             std::thread::sleep(Duration::from_millis(500));
             Ok(7)
         });
         let e = late.unwrap_err();
-        assert!(e.message.contains("did not answer within"), "{e:?}");
-        let failed: Result<u8, _> = within_time(Duration::from_secs(5), || {
+        // The time is said as it is: 50 ms is not "0 seconds".
+        assert!(e.message.contains("did not answer within 50ms"), "{e:?}");
+        // The late reader still holds the slot; wait for it before the next read.
+        wait_until_free(&BUSY);
+        let failed: Result<u8, _> = within_time(Duration::from_secs(5), &BUSY, || {
             Err(AdapterError::new(
                 "EvtQuery Application",
                 "Access is denied.",
             ))
         });
         assert_eq!(failed.unwrap_err().message, "Access is denied.");
+    }
+
+    /// Waits (two seconds at most) for the reader thread of an earlier read to end.
+    fn wait_until_free(busy: &AtomicBool) {
+        let started = Instant::now();
+        while busy.load(Ordering::SeqCst) && started.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!busy.load(Ordering::SeqCst), "the reader did not end");
+    }
+
+    #[test]
+    fn a_reader_that_panics_is_an_error_never_an_answer_and_frees_the_slot() {
+        static BUSY: AtomicBool = AtomicBool::new(false);
+        let crashed: Result<u8, _> =
+            within_time(Duration::from_secs(5), &BUSY, || panic!("the reader broke"));
+        let e = crashed.unwrap_err();
+        assert!(e.message.contains("stopped without an answer"), "{e:?}");
+        // The slot is free by the time the caller hears it.
+        assert!(!BUSY.load(Ordering::SeqCst));
+        assert_eq!(within_time(Duration::from_secs(5), &BUSY, || Ok(7)), Ok(7));
+    }
+
+    #[test]
+    fn while_a_reader_still_runs_a_new_read_is_an_error_at_once() {
+        static BUSY: AtomicBool = AtomicBool::new(false);
+        let slow = within_time(Duration::from_millis(20), &BUSY, || {
+            std::thread::sleep(Duration::from_millis(400));
+            Ok(1)
+        });
+        assert!(slow.is_err());
+        let started = Instant::now();
+        let ran = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&ran);
+        let second = within_time(Duration::from_secs(5), &BUSY, move || {
+            flag.store(true, Ordering::SeqCst);
+            Ok(2)
+        });
+        let e = second.unwrap_err();
+        assert!(e.message.contains("still being read"), "{e:?}");
+        assert!(
+            started.elapsed() < Duration::from_millis(200),
+            "not at once"
+        );
+        assert!(!ran.load(Ordering::SeqCst), "a second reader was started");
+        // The first reader ends; the slot is free again.
+        wait_until_free(&BUSY);
+        assert_eq!(within_time(Duration::from_secs(5), &BUSY, || Ok(3)), Ok(3));
+    }
+
+    #[test]
+    fn a_read_that_ended_leaves_the_slot_free_for_the_next_one_at_once() {
+        static BUSY: AtomicBool = AtomicBool::new(false);
+        for i in 0..5000u32 {
+            let answer = within_time(Duration::from_secs(5), &BUSY, move || Ok(i));
+            assert_eq!(answer, Ok(i), "read {i}");
+        }
+    }
+
+    #[test]
+    fn a_reader_that_answers_with_an_error_frees_the_slot() {
+        static BUSY: AtomicBool = AtomicBool::new(false);
+        let failed: Result<u8, _> = within_time(Duration::from_secs(5), &BUSY, || {
+            Err(AdapterError::new(
+                "EvtNext Application",
+                "Access is denied.",
+            ))
+        });
+        assert!(failed.is_err());
+        assert!(!BUSY.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn the_time_left_counts_down_and_is_never_zero_before_the_deadline() {
+        let t = Instant::now();
+        let deadline = t + Duration::from_secs(5);
+        assert_eq!(ms_left(deadline, t), Some(5000));
+        assert_eq!(ms_left(deadline, t + Duration::from_secs(2)), Some(3000));
+        // Under a millisecond left is still one, never 0 (which would mean "do not wait").
+        assert_eq!(
+            ms_left(deadline, deadline - Duration::from_micros(400)),
+            Some(1)
+        );
+        assert_eq!(
+            ms_left(deadline, deadline - Duration::from_micros(4400)),
+            Some(4)
+        );
+        // Used up at the deadline and after it.
+        assert_eq!(ms_left(deadline, deadline), None);
+        assert_eq!(ms_left(deadline, deadline + Duration::from_secs(1)), None);
+        // More than a u32 can hold is the most it can.
+        let far = t + Duration::from_secs(10_000_000);
+        assert_eq!(ms_left(far, t), Some(u32::MAX));
+    }
+
+    /// Batches of numbers as `EvtNext` would give them; every call is noted with its wait.
+    fn batches(
+        mut all: Vec<Vec<u32>>,
+        waits: &mut Vec<u32>,
+    ) -> impl FnMut(u32) -> Result<Vec<u32>, AdapterError> + '_ {
+        all.reverse();
+        move |wait| {
+            waits.push(wait);
+            Ok(all.pop().unwrap_or_default())
+        }
+    }
+
+    fn text(n: &u32) -> Result<String, AdapterError> {
+        Ok(format!("e{n}"))
+    }
+
+    #[test]
+    fn a_read_takes_batches_until_an_empty_one_and_keeps_their_order() {
+        let (deadline, timeout) = (Instant::now() + Duration::from_secs(5), READ_TIMEOUT);
+        let mut waits = Vec::new();
+        let got = drain(
+            deadline,
+            timeout,
+            100,
+            batches(vec![vec![1, 2], vec![3], vec![], vec![4]], &mut waits),
+            text,
+        );
+        // An empty batch is the end (also one `EvtNext` answered with no error), so 4 is
+        // never asked for.
+        assert_eq!(got.unwrap(), ["e1", "e2", "e3"]);
+        assert_eq!(waits.len(), 3);
+        // Each wait is what is left of the five seconds: between 1 ms and all of it.
+        assert!(waits.iter().all(|w| (1..=5000).contains(w)), "{waits:?}");
+    }
+
+    #[test]
+    fn a_read_stops_at_its_cap_without_asking_for_more() {
+        let (deadline, timeout) = (Instant::now() + Duration::from_secs(5), READ_TIMEOUT);
+        let mut waits = Vec::new();
+        let got = drain(
+            deadline,
+            timeout,
+            3,
+            batches(vec![vec![1, 2], vec![3, 4], vec![5]], &mut waits),
+            text,
+        );
+        assert_eq!(got.unwrap(), ["e1", "e2", "e3"]);
+        assert_eq!(waits.len(), 2, "no third batch was asked for");
+        // A cap of 0 reads nothing at all.
+        let mut waits = Vec::new();
+        let got = drain(
+            deadline,
+            timeout,
+            0,
+            batches(vec![vec![1]], &mut waits),
+            text,
+        );
+        assert_eq!(got.unwrap(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_read_whose_time_is_used_up_is_an_error_and_asks_for_nothing_more() {
+        // Used up before the first batch: nothing is asked for.
+        let mut waits = Vec::new();
+        let timeout = Duration::from_millis(40);
+        let got = drain(
+            Instant::now() - Duration::from_millis(1),
+            timeout,
+            100,
+            batches(vec![vec![1]], &mut waits),
+            text,
+        );
+        let e = got.unwrap_err();
+        assert!(e.message.contains("did not answer within 40ms"), "{e:?}");
+        assert!(waits.is_empty());
+        // Used up by a batch that took its time: that batch counts, the next is not asked for.
+        let calls = std::cell::Cell::new(0);
+        let got = drain(
+            Instant::now() + Duration::from_millis(40),
+            timeout,
+            100,
+            |_wait| {
+                calls.set(calls.get() + 1);
+                std::thread::sleep(Duration::from_millis(80));
+                Ok(vec![calls.get()])
+            },
+            text,
+        );
+        assert!(got.unwrap_err().message.contains("did not answer within"));
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn a_batch_or_an_event_that_cannot_be_read_is_the_error_of_the_read() {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let denied = || AdapterError::new("EvtNext Application", "Access is denied.");
+        let got = drain(
+            deadline,
+            READ_TIMEOUT,
+            100,
+            |_| Err::<Vec<u32>, _>(denied()),
+            text,
+        );
+        assert_eq!(got.unwrap_err().message, "Access is denied.");
+        let renders = AtomicUsize::new(0);
+        let got = drain(
+            deadline,
+            READ_TIMEOUT,
+            100,
+            |_| Ok(vec![1u32, 2, 3]),
+            |n| {
+                renders.fetch_add(1, Ordering::SeqCst);
+                if *n == 2 {
+                    Err(AdapterError::new("EvtRender", "The data is invalid."))
+                } else {
+                    text(n)
+                }
+            },
+        );
+        assert_eq!(got.unwrap_err().message, "The data is invalid.");
+        assert_eq!(
+            renders.load(Ordering::SeqCst),
+            2,
+            "no event after the bad one"
+        );
+    }
+
+    /// A crash report of cmd.exe in Clink's DLL at `ms` (whole seconds), as the log renders it.
+    fn crash_xml(ms: u64) -> String {
+        format!(
+            "<Event><System><TimeCreated SystemTime='{}'/></System><EventData>\
+             <Data Name='AppName'>cmd.exe</Data><Data Name='ModuleName'>clink_dll_x64.dll</Data>\
+             </EventData></Event>",
+            crate::utc::iso(ms)
+        )
+    }
+
+    #[test]
+    fn only_the_events_from_since_to_now_both_ends_in_are_kept() {
+        let (since, now) = (1_791_694_700_000, 1_791_694_710_000);
+        let xmls = vec![
+            crash_xml(now + 1000),
+            crash_xml(now),
+            crash_xml(since + 5000),
+            crash_xml(since),
+            crash_xml(since - 1000),
+            "<Event><System/></Event>".to_string(),
+        ];
+        let at: Vec<u64> = crashes_in(&xmls, since, now)
+            .iter()
+            .map(|c| c.at_ms)
+            .collect();
+        // Newest first, as the log gave them; the event after `now`, the one before `since`
+        // and the one that is no crash report are gone.
+        assert_eq!(at, [now, since + 5000, since]);
+        // An event whose time can't be read is given the start of the span, and so is kept.
+        let unreadable = crash_xml(now).replace(&crate::utc::iso(now), "not a time");
+        let kept = crashes_in(&[unreadable], since, now);
+        assert_eq!(kept.iter().map(|c| c.at_ms).collect::<Vec<_>>(), [since]);
     }
 
     #[test]
@@ -220,9 +568,24 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| u64::try_from(d.as_millis()).unwrap())
             .unwrap();
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         let crashes = WinEventLog::real().app_crashes(now - CRASH_WINDOW_MS, now);
         assert!(crashes.is_ok(), "{crashes:?}");
         assert!(started.elapsed() < READ_TIMEOUT + Duration::from_secs(1));
+        // A runner may have had no crash in seven days, and then the read above never renders
+        // an event. The newest five events of any kind do reach EvtRender.
+        let events = read_events("*", 5, READ_TIMEOUT).unwrap();
+        assert!(
+            !events.is_empty(),
+            "the Application log holds no event at all"
+        );
+        assert!(events.len() <= 5, "{} events", events.len());
+        for xml in &events {
+            assert!(xml.starts_with("<Event"), "{xml}");
+            assert!(xml.trim_end().ends_with("</Event>"), "{xml}");
+            assert!(!xml.contains('\0'), "a NUL was kept: {xml:?}");
+            // Whatever the event is, reading it as a crash report must not panic.
+            let _ = parse_crash(xml, 0);
+        }
     }
 }
