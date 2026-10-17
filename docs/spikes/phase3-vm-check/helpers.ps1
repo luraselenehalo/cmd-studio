@@ -502,6 +502,10 @@ if ($f) { '{0} | "{1}" | pid {2}' -f $f.Current.ControlType.ProgrammaticName, $f
 # Presses the control with this name in the app's window through UI Automation's Invoke, which is
 # one activation, as a click is. Best effort, like Get-GuestFocus. The name is the button's text
 # in the dictionaries (app/ui/src/i18n/en.ts, th.ts). A desktop reading.
+# The window is found by its process and by its name, "CMD Studio": after a second start (check 11)
+# the process has three top-level windows ("CMD Studio", the single-instance plugin's
+# `ai.resincore.cmdstudio-siw` and "Tao Thread Event Target"), and the process alone can pick one of
+# the other two, which has no button.
 function Invoke-GuestButton($Vm, [string] $Name, [string] $User = 'tester') {
   $code = @'
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
@@ -509,8 +513,10 @@ $ae = [System.Windows.Automation.AutomationElement]
 $scope = [System.Windows.Automation.TreeScope]
 $app = Get-Process cmdstudio -ErrorAction SilentlyContinue | Select-Object -First 1
 if (-not $app) { 'cmdstudio.exe is not running'; return }
-$win = $ae::RootElement.FindFirst($scope::Children, (New-Object System.Windows.Automation.PropertyCondition($ae::ProcessIdProperty, [int]$app.Id)))
-if (-not $win) { 'no top-level window of cmdstudio.exe'; return }
+$ofApp = New-Object System.Windows.Automation.PropertyCondition($ae::ProcessIdProperty, [int]$app.Id)
+$titled = New-Object System.Windows.Automation.PropertyCondition($ae::NameProperty, 'CMD Studio')
+$win = $ae::RootElement.FindFirst($scope::Children, (New-Object System.Windows.Automation.AndCondition($ofApp, $titled)))
+if (-not $win) { 'no top-level window "CMD Studio" of cmdstudio.exe'; return }
 $canInvoke = New-Object System.Windows.Automation.PropertyCondition($ae::IsInvokePatternAvailableProperty, $true)
 $named = New-Object System.Windows.Automation.PropertyCondition($ae::NameProperty, '__NAME__')
 $hits = $win.FindAll($scope::Descendants, (New-Object System.Windows.Automation.AndCondition($canInvoke, $named)))

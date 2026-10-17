@@ -3,10 +3,11 @@
 # Terminal's first start, starts Terminal, and reports whether the first start used the file
 # (the pixels of the scheme's background, #1F1E1D) and what the file holds afterwards.
 # The scheme is written without opacity or acrylic on purpose, so the exact count is meaningful.
-# Run it in Windows PowerShell 5.1 on the host, in an unlocked session and outside any sandbox,
-# because it powers a VM off and on with VBoxManage:
-#   powershell -NoProfile -ExecutionPolicy Bypass -File .\docs\spikes\phase3-vm-check\run.ps1
-# It works from any folder: the repo root is found from this file's place.
+# Do not start this file: the run rules forbid -ExecutionPolicy Bypass, which running it as a file
+# needed, and it restores "clean", which removes a user made on the boot. protocol.md, Run 4, has
+# these steps to run inline in the session of its Setup (Windows PowerShell 5.1 on the host, in an
+# unlocked session and outside any sandbox, because a restore powers the VM off and on with
+# VBoxManage). This file is kept as the reference of what those steps are.
 # Do step 0 of protocol.md first. Its facts belong to the snapshot, so they hold for every
 # restore, and this run starts Terminal, which ends the never-opened state of this boot.
 $ErrorActionPreference = 'Continue'

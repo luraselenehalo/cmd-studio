@@ -52,8 +52,17 @@ body,
   color: var(--text);
 }
 
-:lang(th) {
+/* The Thai UI's font goes on the element that carries `lang` (the shell's `<div lang>`, and the
+   language buttons), and everything inside inherits it. It is not `:lang(th)`: that matches every
+   descendant too, the terminal preview's spans among them, and beats the monospace font the
+   preview's `<pre>` sets, so the welcome box's right edge went ragged in the Thai UI. A part of the
+   preview that is marked Thai (for a screen reader) keeps the preview's font; the browser falls
+   back per glyph for Thai letters the font lacks. */
+[lang|="th"] {
   font-family: "Leelawadee UI", "Segoe UI Variable Text", "Segoe UI", "Noto Sans Thai", system-ui, sans-serif;
+}
+.terminal-text [lang] {
+  font-family: inherit;
 }
 
 :focus-visible {
@@ -74,9 +83,13 @@ body,
   z-index: 10;
 }
 
+/* `minmax(0, 1fr)`, not `1fr`: a `1fr` track never gets narrower than its content's minimum, so a
+   preview or a path wider than the window widened the whole column past the window (Windows' Text
+   size 150 %, F2). With a 0 minimum the column is the window's width and what is wider scrolls or
+   wraps inside its own box. The page itself scrolls down: nothing here has a fixed height. */
 .shell {
   display: grid;
-  grid-template-columns: 13rem 1fr;
+  grid-template-columns: 13rem minmax(0, 1fr);
   min-height: 100vh;
 }
 
@@ -124,6 +137,22 @@ h3 {
 }
 p {
   margin: 0.25rem 0 0.75rem;
+}
+
+/* Text that cannot break by itself (a path, a command line, a code, a theme name without spaces)
+   wraps inside its own box instead of running across the page (F2). The preview's text layer is
+   the exception, below: it scrolls inside its frame, as a terminal's line does. */
+pre {
+  white-space: pre-wrap;
+}
+pre,
+code,
+.card,
+.theme-card,
+.notice,
+.check-list li,
+.plain-list li {
+  overflow-wrap: anywhere;
 }
 
 button,
@@ -278,6 +307,7 @@ legend {
   padding: 0.75rem 1rem;
   overflow-x: auto;
   white-space: pre;
+  overflow-wrap: normal;
   font-size: 0.85rem;
   line-height: 1.35;
 }
@@ -379,6 +409,21 @@ legend {
   border-bottom: 1px solid var(--border);
 }
 
+/* The editor's form and its preview side by side, the preview 28rem wide when there is room (22rem
+   at least) and the form what is left. Where the form would get less than 20rem they stack
+   instead, the preview ABOVE the form so the colors are in sight while the first fields are
+   edited: that is where the box is narrower than 20 + 1.5 (the gap) + 28 = 49.5rem. At Text size
+   100 % the 1100 px default window leaves the box 50.7rem (the form is 21.2rem) and keeps the two
+   columns; the 900 px minimum leaves 38.2rem (the form would be 8.7rem) and stacks, as does a
+   1024 px screen at Text size 150 % (the box is then 25rem). The room is measured on
+   `.editor-box`, which holds only the two columns: a container's contents cannot be positioned
+   against the window (`position: fixed`), and the dialogs are outside it. The preview is the
+   later in the page, so it is lifted with `order`, which moves it on the screen and leaves the
+   Tab order as it is. */
+.editor-box {
+  container-name: editor;
+  container-type: inline-size;
+}
 .editor {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(22rem, 28rem);
@@ -388,6 +433,15 @@ legend {
 .editor .preview-column {
   position: sticky;
   top: 4rem;
+}
+@container editor (width < 49.5rem) {
+  .editor {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .editor .preview-column {
+    position: static;
+    order: -1;
+  }
 }
 .color-grid {
   display: grid;

@@ -208,6 +208,11 @@ describe("the theme library", () => {
     await waitFor(() => expect(document.activeElement).toBe(heading));
     expect(ipc.state.mine.map((t) => t.name)).toEqual(["My Terracotta"]);
     expect((screen.getByLabelText("Theme name") as HTMLInputElement).value).toBe("My Terracotta");
+    // The form and the preview are the two columns of `.editor`, which sits in the box the
+    // stylesheet measures to stack them in a narrow window (F2); the dialogs are outside it.
+    const box = screen.getByLabelText("Theme name").closest(".editor")?.parentElement;
+    expect(box?.className).toBe("editor-box");
+    expect(screen.getByRole("img", { name: "Preview of the cmd window" }).closest(".editor-box")).toBe(box);
     // Advanced mode shows the 23 colors; a hand edit makes the recipe null. The modes are two
     // toggle buttons in a named group, not tabs (item 9).
     const modes = screen.getByRole("group", { name: "Color mode" });

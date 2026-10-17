@@ -22,10 +22,12 @@
 
 ## Before you start
 
-### Two lessons from this phase
+### Lessons from this phase
 
 1. **A console program started in the guest opens Windows Terminal.** On Windows 11 the default terminal is Windows Terminal. A console program started on the desktop (`cmd`, `powershell`, a Run line that opens one) opens it, and that ends the never-opened state that Step 0 and Run 2 must see. So from the restore of `clean` until Terminal is meant to open (Run 2 step 6, "Try cmd"), start nothing that has a console. Use guestcontrol (`Invoke-Guest`, `Invoke-GuestPs`, `Copy-ToGuest`), `wscript.exe` with a `.vbs` file, and the app itself. The functions of `helpers.ps1` say which kind they are; the ones built on `Invoke-GuestSnippet` start a hidden PowerShell on the desktop and are not console-free. (`Wait-GuestReady` itself runs `cmd.exe /c echo` through guestcontrol. That is allowed: guestcontrol starts a program outside the user's desktop, where no terminal hand-off happens. If Step 0 nevertheless finds a Terminal that is opened on a snapshot that was never-opened when it was taken, suspect the tooling first.)
 2. **guestcontrol needs an unlocked host session and an unsandboxed shell.** "Error starting guest session (current status is: terminated)" or an HGCM `VERR_ACCESS_DENIED` means: stop and fix the host (unlock Windows, run PowerShell outside the sandbox). It does not mean the VM failed, and it is not recorded as a failure of the app. In this phase both errors left VM-A aborted-saved; restore `clean` and start again.
+3. **"No `msedgewebview2`" never holds on Windows 11.** `SearchHost.exe` and `Widgets.exe` keep WebView2 processes of their own, so a wait for none ends only by its timeout. Wait for the app's: the `msedgewebview2.exe` processes whose command line holds `--webview-exe-name=cmdstudio.exe` (on the guest, `Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'"`, through `Invoke-GuestPs`, then `CommandLine -like '*--webview-exe-name=cmdstudio.exe*'`). The `msedgewebview2` lines of `Get-GuestProcesses` are all of them, the app's and the others.
+4. **VM-C's guestcontrol needs a restart inside the guest after a resume.** After a restore of VM-C's `clean` saved state the guest session can fail, and `Wait-GuestReady` times out although the VM runs; VBox.log says `Failed to accept session N (client ID 1): VERR_NOT_FOUND`. It is an intermittent Guest Additions fault after a resume (3 of 4 resumes in this phase), not the app and not the host's lock of lesson 2. Restart Windows inside the guest (Ctrl+Alt+Del on the VM's window, then Power, then Restart: the ACPI power button does nothing); guestcontrol then answers within about 80 seconds. A screenshot that fails with `E_FAIL` at the same time is the guest's display turned off: one Shift key wakes it. Record in `results.md` that the restart was made.
 
 ### Rules
 
@@ -205,7 +207,7 @@ Terminal's state does not matter here, so desktop readings are allowed. This run
    - **Replay.** The first window's "nothing" rests on `Runtime.enable` and `Log.enable` replaying what the page logged before the connection, and the live controls do not test that. So the function then reconnects once, sends both again, and requires that the earlier probe line (`control 3 … True`) and the earlier refused `<style>` (`control 4 … True`) come back as replayed entries, and that both domains answered the second time. The line `replay proven … True` says all of it.
 
    If a control says `False`, or the line says `replay proven … False` (and `REPLAY NOT PROVEN` follows), the read proves nothing: **the PASS cannot be given**. Record "replay not proven" (or the control that failed), keep `console.txt`, and use the visible proxies instead. The same fallback applies if the debug port or the read cannot be had at all: the colors are painted (`Measure-Color` of the app's surface color in the screenshots of every screen is not zero) and no area of any screenshot is blank. The debug port exists only on this VM and only for this run; no devtools feature is added to the app. `Get-GuestConsoleLog` has been parsed, not run: this is its first run.
-8. **Close.** `Send-Key $vm AltF4`, and wait until `Get-GuestProcesses $vm $u` lists no `cmdstudio` and no `msedgewebview2`.
+8. **Close.** `Send-Key $vm AltF4`, and wait until `Get-GuestProcesses $vm $u` lists no `cmdstudio` and no `msedgewebview2` of the app (lesson 3).
 
 Record in `results.md`: the Tab counts that held, the console result with its four controls (or "replay not proven"), and the page-6 text.
 
@@ -503,8 +505,8 @@ Restore `clean`. The Terminal is in the state Step 0 recorded. On a never-opened
       ```
 
       PASS: no welcome box and no themed prompt (`r2-plain` shows Windows' own header and a plain `C:\…>` prompt); `Get-GuestCmdWindows` lists exactly one `cmd.exe` with `Clink loaded: no`; the frame and accent counts rise by less than the floors of step 7 (500 and 200); the near count of `#1F1E1D` rises by less than 5000. Close the window (`Send-Key $vm AltF4`) before the next key for the app.
-17. **The language is remembered.** Settings → ไทย (Tab 3 now that no theme is applied, Down). Close the app (Alt+F4), wait for no `msedgewebview2`, start it with `Send-Run` as in step 2. PASS: it opens in Thai ("หน้าแรก"). Settings → English (Tab 3, Up), close, start: it opens in English.
-18. **Close and clean up (checks 2 and 8).** Close the app (Alt+F4), wait for no `msedgewebview2.exe` (`Get-GuestProcesses`), then run `--cleanup` as the uninstaller would:
+17. **The language is remembered.** Settings → ไทย (Tab 3 now that no theme is applied, Down). Close the app (Alt+F4), wait for no `msedgewebview2` of the app (lesson 3), start it with `Send-Run` as in step 2. PASS: it opens in Thai ("หน้าแรก"). Settings → English (Tab 3, Up), close, start: it opens in English.
+18. **Close and clean up (checks 2 and 8).** Close the app (Alt+F4), wait for no `msedgewebview2.exe` of the app (lesson 3; `Get-GuestProcesses`), then run `--cleanup` as the uninstaller would:
 
     ```powershell
     Get-ExitCode $vm 'cleanup' '--cleanup --data-dir @LOCALAPPDATA@\ai.resincore.cmdstudio' $u
@@ -550,11 +552,28 @@ Only if Step 0 said `neverOpened`. The point is the undo of a file that CMD Stud
 
 Only if Step 0 said `neverOpened`. This is the question that spec §5.4 still marks as unconfirmed on a VM, answered with a hand-written file so that it does not depend on CMD Studio. It tells a failure of Run 2 step 6 that is Terminal's from one that is CMD Studio's.
 
+**Do not start `run.ps1`.** Its own header says to run it as `powershell -NoProfile -ExecutionPolicy Bypass -File`, and the run rules forbid bypassing the execution policy; it also restores `clean`, which removes any user made on the boot (the runner of this phase made new users for Runs 3 and 4). Run its steps inline, in the session of Setup, where `vm.ps1` and `helpers.ps1` are already dot-sourced. `wt-precreate.ps1` and `run-on-desktop.ps1` are in the VM already after `Install-Phase3App`. `Start-CleanVm` is the restore of `run.ps1`: leave it out when the VM is already on a never-opened Terminal that you want to keep (a new user, or the boot after a restore), and say so in `results.md`.
+
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\docs\spikes\phase3-vm-check\run.ps1
+$vm = 'cmdstudio-win11'; $u = 'tester'
+Start-CleanVm $vm $u                       # leave out on a boot to keep; then Install-Phase3App $vm $u $artifact
+$g = "$($P3.Check)\wt-precreate.ps1"
+New-Item -ItemType Directory -Force $Shots | Out-Null
+$log = Join-Path $Shots 'wt-precreate.log'
+& {
+  '## state'; Invoke-GuestDesktop $vm $g '-Step state' $u
+  '## write'; Invoke-GuestDesktop $vm $g '-Step write' $u
+  '## start'; Invoke-GuestDesktop $vm $g '-Step start' $u
+  Start-Sleep -Seconds 12
+  $shot = Save-Shot $vm 'wt-precreate'
+  "screenshot: $shot"
+  "background #1F1E1D pixels: $(Measure-Color $shot '#1F1E1D')"
+  '## read'; Invoke-GuestDesktop $vm $g '-Step read' $u
+  '## close'; Invoke-GuestDesktop $vm $g '-Step close' $u
+} *>&1 | Tee-Object -FilePath $log
 ```
 
-`run.ps1` restores `clean`, writes a `settings.json` with a "CMD Studio" scheme (background `#1F1E1D`, no opacity, no acrylic) on the cmd profile, starts Terminal, takes a screenshot, prints the exact count of `#1F1E1D`, prints the file as Terminal left it, and closes Terminal. The log is `spikes\vm\tmp\wt-precreate.log`. Its first lines (`state`) are read on the desktop; they must show the same facts as Step 0 (the package folder and `LocalState` as Step 0 had them, no `settings.json`). If they show more, the desktop task itself opened Terminal, and the never-opened results of that boot are void.
+The steps write a `settings.json` with a "CMD Studio" scheme (background `#1F1E1D`, no opacity, no acrylic) on the cmd profile, start Terminal, take a screenshot, print the exact count of `#1F1E1D`, print the file as Terminal left it, and close Terminal. The log is `spikes\vm\tmp\wt-precreate.log`. Its first lines (`state`) are read on the desktop; they must show the same facts as Step 0 (the package folder and `LocalState` as Step 0 had them, no `settings.json`). If they show more, the desktop task itself opened Terminal, and the never-opened results of that boot are void.
 
 PASS: the exact count of `#1F1E1D` is of the order of G7's 556,097 (record it), and the file after the start still holds the scheme "CMD Studio". Record whether Terminal added profiles to it.
 
