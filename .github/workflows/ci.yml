@@ -124,7 +124,8 @@ jobs:
           rustup --version
           rustup toolchain install
           cargo --version
-      # Node 24.21.0, the version app/.nvmrc names (the same pin as `engines` in package.json).
+      # The exact Node version is the one app/.nvmrc holds; `engines` in package.json is only a
+      # range around it.
       - name: Install the Node pinned in app/.nvmrc
         uses: actions/setup-node@v4
         with:
@@ -146,47 +147,12 @@ jobs:
       - name: Build the UI
         working-directory: app
         run: npm run build
-      # The mock IPC and the preset files serve the tests and the visual check only. main.tsx
-      # imports the mock behind VITE_MOCK_IPC, which is unset in this job, so the production build
-      # drops it. Search what `vite build` wrote for what only the mock or a preset file holds:
-      # the mock's sample machine and user, and the id of the Terracotta preset (read from its
-      # file). Any hit fails the job. The positive control runs first: `CaskaydiaCove NF` is in
-      # the UI's own texts, so a dist that does not hold it (an empty or misplaced build, a
-      # wrong path) fails here instead of passing with "nothing found". The sample home is
-      # searched with two backslashes, as a JavaScript string writes it, and with one, as a
-      # raw string would.
+      # The mock IPC and the preset files serve the tests and the visual check only; the production
+      # build drops them (see the script). The search lives in one script so that this run and the
+      # one after `tauri build` below cannot drift apart.
       - name: The built UI holds no mock data and no preset file
         shell: bash
-        run: |
-          shopt -s nullglob
-          files=(app/ui/dist/assets/*.js)
-          if [ "${#files[@]}" -eq 0 ]; then
-            echo "::error::app/ui/dist/assets holds no .js file: the UI build wrote nothing to check"
-            exit 1
-          fi
-          if ! grep -q -a -F -e 'CaskaydiaCove NF' "${files[@]}"; then
-            echo "::error::positive control failed: 'CaskaydiaCove NF' is not in app/ui/dist/assets/*.js, so this search would find nothing even if the mock were bundled"
-            exit 1
-          fi
-          # An id that is missing or short would match unrelated text (or nothing), so node
-          # prints it only when it is a string of at least 8 characters.
-          if ! preset_id="$(node -e "const id = JSON.parse(require('fs').readFileSync('presets/terracotta.cmdtheme', 'utf8')).id; if (typeof id === 'string' && id.length >= 8) console.log(id); else process.exit(1)")"; then
-            echo "::error::presets/terracotta.cmdtheme has no usable id to search for"
-            exit 1
-          fi
-          leaked=0
-          for needle in 'TESTPC' 'C:\\Users\\tester' 'C:\Users\tester' "$preset_id"; do
-            # -o -b prints each hit as file:offset:text; a bundle is one huge line, so -n would
-            # print all of it.
-            if grep -a -o -b -F -e "$needle" "${files[@]}"; then
-              echo "::error::the built UI contains '$needle': the mock IPC or a preset file was bundled"
-              leaked=1
-            fi
-          done
-          if [ "$leaked" -ne 0 ]; then
-            exit 1
-          fi
-          echo "no mock data or preset id in ${#files[@]} bundled .js file(s)"
+        run: bash ./scripts/check-dist.sh
       - name: Cache the pinned runtimes and font
         uses: actions/cache@v4
         with:
@@ -223,20 +189,30 @@ jobs:
       # a separate `cargo build --release` would compile the same crates twice and write a
       # second, different cmdstudio.exe to the same path. No bundle: Phase 4 turns it on.
       # The exe lands in the workspace's target/, not in app/.
+      # `npm run tauri --` runs the Tauri CLI that package-lock.json locks (node_modules/.bin) and
+      # nothing else: npm run never downloads a package, while `npx` fetches a missing one (a try
+      # with npm 11: `npx --no-install <unknown package>` still asked the registry). bash, so
+      # that the `--` reaches npm as written.
       - name: Tauri build (no bundle)
-        working-directory: app
-        run: npx tauri build --no-bundle
-      # `if-no-files-found: error` below fails only when NONE of the paths match, and resources/
-      # always does, so a missing exe would pass it. Fail here instead, naming the file.
-      - name: The exe is where the artifact expects it
         shell: bash
-        run: ls -l target/release/cmdstudio.exe
-      # For the VM check of spec §1 criterion 1 (phase 3 plan, Task 4): the exe and the
-      # resources it expects next to it (it reads them from `resources/` beside itself).
+        working-directory: app
+        run: npm run tauri -- build --no-bundle
+      # The same search again, now that `tauri build` has built the UI once more: the exe embeds
+      # the dist as this build left it, so this is the gate on what ships.
+      - name: The UI the exe embeds holds no mock data and no preset file
+        shell: bash
+        run: bash ./scripts/check-dist.sh
+      # The app reads its runtimes from `resources\` next to its exe (machine.rs), so the artifact
+      # is one folder with both. `cp` fails when the exe is missing (bash runs with -e).
+      - name: Stage the exe with its resources, as the app finds them
+        shell: bash
+        run: |
+          mkdir -p stage/cmdstudio
+          cp target/release/cmdstudio.exe stage/cmdstudio/
+          cp -r resources stage/cmdstudio/resources
+      # For the VM check of spec §1 criterion 1 (phase 3 plan, Task 4).
       - uses: actions/upload-artifact@v4
         with:
           name: cmdstudio-exe
-          path: |
-            target/release/cmdstudio.exe
-            resources/
+          path: stage/cmdstudio
           if-no-files-found: error
