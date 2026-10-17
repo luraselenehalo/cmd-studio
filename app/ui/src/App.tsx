@@ -7,6 +7,7 @@
 // language, so a screen reader reads Thai as Thai and the `:lang(th)` styles apply.
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import type { AppSettings } from "./bindings/AppSettings";
+import type { SettingsLoad } from "./bindings/SettingsLoad";
 import { AfterApplyBar } from "./components/AfterApplyBar";
 import { DraftProblemNotice } from "./components/DraftProblemNotice";
 import { ErrorNotice, Notice } from "./components/Notices";
@@ -22,6 +23,16 @@ import { Themes } from "./screens/Themes";
 import { Wizard } from "./screens/Wizard";
 import { AppStateContext, DEFAULT_SETTINGS, useDraftProblems, type AppState, type LastApply } from "./state";
 import { useRouteFocus } from "./useRouteFocus";
+
+/** `loaded` with what `next` changes put on top. `base` is what the caller built `next` from, so
+ * a key is a change only where `next` differs from it. */
+function withChanges(loaded: AppSettings, base: AppSettings, next: AppSettings): AppSettings {
+  const merged: AppSettings = { ...loaded };
+  for (const key of Object.keys(next) as (keyof AppSettings)[]) {
+    if (next[key] !== base[key]) Object.assign(merged, { [key]: next[key] });
+  }
+  return merged;
+}
 
 export function App() {
   const ipc = useIpc();
@@ -39,19 +50,27 @@ export function App() {
    * next save that goes through writes them, and the shell says so until then (fix I1). */
   const [unsaved, setUnsaved] = useState<unknown>(null);
 
+  /** What one read of settings.json gives, held as the app's settings: the language, the notice
+   * of a file that was set aside, and no start problem any more. */
+  const adopt = useCallback((loaded: SettingsLoad) => {
+    setSettings(loaded.settings);
+    setLanguage(loaded.settings.language);
+    setResetFrom(loaded.resetFrom);
+    setStartError(null);
+  }, []);
+
   useEffect(() => {
     let alive = true;
     ipc.settingsGet().then(
       (loaded) => {
         if (!alive) return;
-        setSettings(loaded.settings);
-        setLanguage(loaded.settings.language);
-        setResetFrom(loaded.resetFrom);
+        adopt(loaded);
         setRoute(loaded.settings.wizardDone ? { name: "home" } : { name: "wizard" });
       },
       (e: unknown) => {
         if (!alive) return;
         // Said on the home page; the wizard is not shown over settings that could not be read.
+        // The settings held meanwhile are the defaults, not the file's: see `saveSettings`.
         setStartError(e);
         setRoute({ name: "home" });
       },
@@ -59,17 +78,53 @@ export function App() {
     return () => {
       alive = false;
     };
-  }, [ipc]);
+  }, [ipc, adopt]);
+
+  /** Reads settings.json again after the start read failed. A read that works replaces the
+   * defaults held in memory with what the file holds and ends the problem; one that fails keeps
+   * the problem, with the newest reason, and throws it. */
+  const readAgain = useCallback(async (): Promise<SettingsLoad> => {
+    try {
+      const loaded = await ipc.settingsGet();
+      adopt(loaded);
+      return loaded;
+    } catch (e) {
+      setStartError(e);
+      throw e;
+    }
+  }, [ipc, adopt]);
+
+  /** Try again on the start problem: reads once more, and goes on as a start would have, which is
+   * to the wizard for a first run (when the user is still on the home page). */
+  const tryAgain = useCallback(async () => {
+    try {
+      const loaded = await readAgain();
+      if (!loaded.settings.wizardDone) setRoute((r) => (r?.name === "home" ? { name: "wizard" } : r));
+    } catch {
+      // `readAgain` kept the problem, and the notice shows it.
+    }
+  }, [readAgain]);
 
   const saveSettings = useCallback(
     async (next: AppSettings) => {
-      const saved = await ipc.settingsSet(next);
+      let toSave = next;
+      if (startError !== null) {
+        // settings.json could not be read as the app started, so what is held is the defaults and
+        // `next` was built on them. Writing it as it is would put the defaults over a file that
+        // may only have been held for a moment (an antivirus), losing the user's choices and
+        // bringing the wizard back. So read it again first: if that fails nothing is written
+        // (the error is thrown, and the shell's notice offers Try again); if it works, only what
+        // `next` changes is put on top of what the file holds.
+        const loaded = await readAgain();
+        toSave = withChanges(loaded.settings, settings, next);
+      }
+      const saved = await ipc.settingsSet(toSave);
       setSettings(saved);
       setLanguage(saved.language);
       // Everything in memory is saved now, the wizard's choices included.
       setUnsaved(null);
     },
-    [ipc],
+    [ipc, settings, startError, readAgain],
   );
 
   const keepUnsaved = useCallback((next: AppSettings, error: unknown) => {
@@ -95,7 +150,13 @@ export function App() {
                 …
               </p>
             ) : (
-              <Screens startError={startError} resetFrom={resetFrom} unsaved={unsaved} onUnsaved={keepUnsaved} />
+              <Screens
+                startError={startError}
+                onRetry={tryAgain}
+                resetFrom={resetFrom}
+                unsaved={unsaved}
+                onUnsaved={keepUnsaved}
+              />
             )}
           </div>
         </NavContext.Provider>
@@ -106,8 +167,11 @@ export function App() {
 
 /** What the shell says above every screen about the settings themselves. */
 interface StartProblems {
-  /** settings.json could not be read as the app started. */
+  /** settings.json could not be read as the app started: nothing is saved over it until a read
+   * goes through. */
   startError: unknown;
+  /** Try again on that problem: reads settings.json once more. */
+  onRetry: () => Promise<void>;
   /** settings.json was reset, and the old one kept as this file. */
   resetFrom: string | null;
   /** The wizard's settings could not be saved (fix I1). */
@@ -136,11 +200,29 @@ function Screens({ onUnsaved, ...problems }: StartProblems & { onUnsaved: (setti
 
 /** The settings could not be read as the app started, were reset, or could not be saved by the
  * wizard: then the wizard shows again at the next start, as the notice says. */
-function StartNotices({ startError, resetFrom, unsaved }: StartProblems) {
+function StartNotices({ startError, onRetry, resetFrom, unsaved }: StartProblems) {
   const { t } = useI18n();
+  const [reading, setReading] = useState(false);
+  const retry = async () => {
+    setReading(true);
+    try {
+      await onRetry();
+    } finally {
+      setReading(false);
+    }
+  };
   return (
     <>
-      {startError !== null && <ErrorNotice error={startError} />}
+      {startError !== null && (
+        <>
+          <ErrorNotice error={startError} title={t("settings.startFailed")} />
+          <div className="row-actions">
+            <button type="button" disabled={reading} onClick={() => void retry()}>
+              {t("common.retry")}
+            </button>
+          </div>
+        </>
+      )}
       {resetFrom && <Notice kind="warn">{t("settings.reset", { file: resetFrom })}</Notice>}
       {unsaved !== null && <ErrorNotice error={unsaved} title={t("wizard.notSaved")} />}
     </>

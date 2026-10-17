@@ -12,6 +12,7 @@
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
+import type { AppSettings } from "./bindings/AppSettings";
 import type { ApplyOutcome } from "./bindings/ApplyOutcome";
 import type { ApplyRequest } from "./bindings/ApplyRequest";
 import type { SystemReport } from "./bindings/SystemReport";
@@ -715,6 +716,104 @@ describe("Settings", () => {
     await user.click(within(dialog).getByRole("button", { name: "Close" }));
     // The bar is worded by the request's own target (2c item 12).
     expect(await screen.findByText(/Theme "Terracotta" applied · open a new cmd tab in Windows Terminal/)).toBeTruthy();
+  });
+});
+
+// The final review (A): when the start read of settings.json failed, the shell holds the defaults,
+// and the first save used to write them over a file that was only unreadable for a moment (an
+// antivirus held it). Approach (a): the first save reads the file again; if that works the change
+// is put on top of what was read, if not nothing is written.
+describe("a settings file that could not be read at the start", () => {
+  const HELD = "settings.json is held by a scan";
+
+  it("saves a Settings change on top of what the file holds, never the defaults over it", async () => {
+    const onDisk: AppSettings = { language: "th", target: "wt", setWtDefaultProfile: true, updates: "auto", wizardDone: true };
+    const { ipc, user } = await mount({}, (m) => {
+      vi.spyOn(m, "settingsGet")
+        .mockRejectedValueOnce(ipcError("E_MACHINE_READ", HELD))
+        .mockResolvedValueOnce({ settings: onDisk, resetFrom: null });
+    });
+    // Home, in English, with the problem said: the wizard is not shown over settings not read.
+    expect(await screen.findByRole("heading", { name: "Home" })).toBeTruthy();
+    expect(screen.getByText(HELD)).toBeTruthy();
+    await open(user, "Settings");
+    await user.click(await screen.findByLabelText("Tell me first"));
+    await waitFor(() => expect(ipc.state.calls).toContain("settingsSet"));
+    expect(ipc.state.calls.filter((c) => c === "settingsSet")).toHaveLength(1);
+    expect(ipc.state.settings).toEqual({ ...onDisk, updates: "notify" });
+    // What the file holds is on screen now: Thai, and the problem is over.
+    expect(await screen.findByRole("heading", { name: th["settings.title"] })).toBeTruthy();
+    expect(screen.queryByText(HELD)).toBeNull();
+    expect((screen.getByLabelText(th["settings.updates.notify"]) as HTMLInputElement).checked).toBe(true);
+  });
+
+  it("writes nothing while the file still cannot be read, and says so with Try again", async () => {
+    const { ipc, user } = await mount({}, (m) => {
+      vi.spyOn(m, "settingsGet")
+        .mockRejectedValueOnce(ipcError("E_MACHINE_READ", HELD))
+        .mockRejectedValueOnce(ipcError("E_MACHINE_READ", "settings.json is still held"));
+    });
+    await screen.findByRole("heading", { name: "Home" });
+    await open(user, "Settings");
+    await user.click(await screen.findByLabelText("Tell me first"));
+    await settle();
+    // Nothing is written: not the change, and not the defaults over a file that is only held.
+    expect(ipc.state.calls).not.toContain("settingsSet");
+    expect(ipc.state.settings).toEqual(createMockIpc().state.settings);
+    // The second read's reason, on the page and in the shell's notice; the shell's has Try again.
+    await waitFor(() => expect(screen.getAllByText("settings.json is still held").length).toBeGreaterThan(0));
+    expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
+    expect(screen.getByText(en["settings.startFailed"])).toBeTruthy();
+    expect((screen.getByLabelText("Automatic (recommended)") as HTMLInputElement).checked).toBe(true);
+  });
+
+  it("reads again on Try again, shows what the file holds and drops the problem, writing nothing", async () => {
+    const { ipc, user } = await mount({ settings: { language: "th", target: "wt", wizardDone: true } }, (m) => {
+      vi.spyOn(m, "settingsGet").mockRejectedValueOnce(ipcError("E_MACHINE_READ", HELD));
+    });
+    await screen.findByRole("heading", { name: "Home" });
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByRole("heading", { name: th["home.title"] })).toBeTruthy();
+    expect(screen.queryByText(HELD)).toBeNull();
+    expect(screen.queryByRole("button", { name: th["common.retry"] })).toBeNull();
+    await open(user, th["nav.settings"]);
+    const wt = (await screen.findByLabelText(new RegExp(`^${th["wizard.where.wt"]}`))) as HTMLInputElement;
+    expect(wt.checked).toBe(true);
+    expect(ipc.state.calls).not.toContain("settingsSet");
+  });
+
+  it("starts the wizard when Try again finds no settings yet, as a start would", async () => {
+    const { user } = await mount({}, (m) => {
+      vi.spyOn(m, "settingsGet").mockRejectedValueOnce(ipcError("E_MACHINE_READ", HELD));
+    });
+    await screen.findByRole("heading", { name: "Home" });
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByRole("heading", { name: "Make your cmd window beautiful and easy to read" })).toBeTruthy();
+    expect(screen.queryByText(HELD)).toBeNull();
+  });
+
+  it("says a damaged file that the second read set aside, as a start would", async () => {
+    const { user } = await mount({}, (m) => {
+      vi.spyOn(m, "settingsGet")
+        .mockRejectedValueOnce(ipcError("E_MACHINE_READ", HELD))
+        .mockResolvedValueOnce({ settings: { ...m.state.settings, wizardDone: true }, resetFrom: "settings.json.damaged-7" });
+    });
+    await screen.findByRole("heading", { name: "Home" });
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByText(/The old file is kept as settings\.json\.damaged-7/)).toBeTruthy();
+    expect(screen.queryByText(HELD)).toBeNull();
+  });
+
+  it("is not triggered by a missing settings file: that is a first run, and its saves write at once", async () => {
+    const { ipc, user } = await mount({}, (m) => {
+      vi.spyOn(m, "settingsGet");
+    });
+    expect(await screen.findByRole("heading", { name: "Make your cmd window beautiful and easy to read" })).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "ไทย" }));
+    await waitFor(() => expect(ipc.state.settings.language).toBe("th"));
+    expect(ipc.settingsGet).toHaveBeenCalledTimes(1);
+    expect(ipc.state.calls.filter((c) => c === "settingsSet")).toHaveLength(1);
   });
 });
 

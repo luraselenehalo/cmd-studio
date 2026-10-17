@@ -293,6 +293,7 @@ export const en = {
   "settings.updates.note": "Updates come with new versions of CMD Studio, checked each time it starts. Your choice is saved now and is used once updates are available.",
   "settings.saved": "Saved.",
   "settings.reset": "Your settings could not be read and were reset. The old file is kept as {file}.",
+  "settings.startFailed": "Your saved settings could not be read, so CMD Studio will not save over them until it can",
 
   "help.title": "Help",
   "help.tabs.doctor": "Health check",
