@@ -312,6 +312,19 @@ describe("ApplyFlow", () => {
     expect(screen.queryByText("Copied")).toBeNull();
   });
 
+  it("says Copied in a status region that is there before the copy, not mounted with its text (item 10)", async () => {
+    const ipc = createMockIpc({ failApplyWith: "E_VERIFY_OMP" });
+    const user = userEvent.setup();
+    mount(<ApplyFlow request={REQUEST} />, { ipc });
+    await user.click(await screen.findByRole("button", { name: "Apply" }));
+    const copy = await screen.findByRole("button", { name: "Copy details for a problem report" });
+    const region = screen.getByRole("status");
+    expect(region.textContent).toBe("");
+    await user.click(copy);
+    await waitFor(() => expect(region.textContent).toBe("Copied"));
+    expect(screen.getByRole("status")).toBe(region);
+  });
+
   it("tries again with the request it was mounted with, not a later prop", async () => {
     const ipc = createMockIpc({ failApplyWith: "E_VERIFY_OMP" });
     const planApply = ipc.planApply.bind(ipc);

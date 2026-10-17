@@ -161,7 +161,9 @@ function Failed({ outcome, onRetry }: { outcome: ApplyOutcome; onRetry: () => vo
         <button type="button" onClick={onRetry}>
           {t("common.retry")}
         </button>
-        {copied === "yes" && <span role="status">{t("common.copied")}</span>}
+        {/* Always there, its text toggled (item 10): a region mounted with its text is not
+            reliably announced. */}
+        <span role="status">{copied === "yes" ? t("common.copied") : ""}</span>
       </div>
       {copied instanceof IpcError && <ErrorNotice error={copied} title={t("apply.copyFailed")} />}
     </div>
