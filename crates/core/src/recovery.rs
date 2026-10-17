@@ -152,22 +152,31 @@ pub fn read_pause(fs: &dyn Fs, paths: &Paths) -> Result<Option<Paused>, AdapterE
 /// missing).
 pub fn write_pause(fs: &dyn Fs, paths: &Paths, record: &PauseRecord) -> Result<(), AdapterError> {
     let file = paths.paused_file();
-    let mut bytes = serde_json::to_vec_pretty(record)
+    // Always this build's version, whatever the caller holds: a record this build wrote must be
+    // one it reads back (`read_pause`), not a pause with no reason, time or theme.
+    let record = PauseRecord {
+        version: PAUSED_VERSION,
+        ..record.clone()
+    };
+    let mut bytes = serde_json::to_vec_pretty(&record)
         .map_err(|e| AdapterError::new(format!("write {}", file.display()), e.to_string()))?;
     bytes.push(b'\n');
     fs.write_atomic(&file, &bytes)
 }
 
-/// Lifts the pause: deletes `paused.json`, then every start tag (a window that comes after counts
-/// from nothing), and makes sure `health\` is there for init.lua to write its tags in. Files that
-/// are gone already are fine; nothing else in the folder is touched.
+/// Lifts the pause: deletes every start tag (a window that comes after counts from nothing), then
+/// `paused.json`, and makes sure `health\` is there for init.lua to write its tags in. The tags go
+/// first so that a tag which cannot be deleted (a virus scanner holds it) is an error with the
+/// pause still in place, to try again: a pause lifted with three stale tags left would pause the
+/// next window at once. While `paused.json` is there no window writes a tag, so the order has no
+/// race. Files that are gone already are fine; nothing else in the folder is touched.
 pub fn clear_pause(fs: &dyn Fs, paths: &Paths) -> Result<(), AdapterError> {
-    fs.remove_file(&paths.paused_file())?;
     for entry in fs.list_dir(&paths.health())? {
         if !entry.is_dir && is_tag(&entry.path) {
             fs.remove_file(&entry.path)?;
         }
     }
+    fs.remove_file(&paths.paused_file())?;
     fs.create_dir_all(&paths.health())
 }
 
@@ -296,6 +305,9 @@ mod tests {
             fs.put(p.health().join(name), b"v1 1791694709\n");
         }
         fs.create_dir_all(&p.health().join("start-7")).unwrap();
+        // A folder named like a tag is left alone: removing it as a file would fail, so this
+        // pins the `is_dir` guard in `clear_pause`.
+        fs.fail_removes_of(p.health().join("start-7"));
         clear_pause(&fs, &p).unwrap();
         let left: Vec<String> = fs
             .list_dir(&p.health())
@@ -308,6 +320,57 @@ mod tests {
         let (fs, p) = (FakeFs::new(), paths());
         clear_pause(&fs, &p).unwrap();
         assert!(fs.is_dir(&p.health()));
+    }
+
+    #[test]
+    fn a_tag_that_cannot_be_deleted_leaves_the_pause_in_place_to_try_again() {
+        // The tags go first and the pause last: with a pause lifted and three stale tags left,
+        // the next cmd window would pause the theme again at once. While `paused.json` is
+        // there no window writes a tag, so the order has no race.
+        let (fs, p) = (FakeFs::new(), paths());
+        fs.put(p.paused_file(), FROM_LUA);
+        for name in ["start-1", "start-2", "start-3"] {
+            fs.put(p.health().join(name), b"v1 1791694709\n");
+        }
+        fs.fail_removes_of(p.health().join("start-2"));
+        assert!(clear_pause(&fs, &p).is_err());
+        assert!(
+            fs.file(p.paused_file()).is_some(),
+            "the pause is still there"
+        );
+        // Once the tag lets go, the same call lifts everything.
+        fs.stop_failing(p.health().join("start-2"));
+        clear_pause(&fs, &p).unwrap();
+        assert!(fs.file(p.paused_file()).is_none());
+        assert!(fs.list_dir(&p.health()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_record_is_written_as_this_version_whatever_the_caller_passes() {
+        // A record that read back as unreadable would be a pause with no reason, no time and
+        // no theme to turn back on.
+        for version in [0, 2, 7] {
+            let (fs, p) = (FakeFs::new(), paths());
+            let record = PauseRecord {
+                version,
+                reason: PauseReason::User,
+                at: 1_791_694_709_000,
+                count: 0,
+                by: PausedBy::App,
+                resume: None,
+            };
+            write_pause(&fs, &p, &record).unwrap();
+            let text = String::from_utf8(fs.file(p.paused_file()).unwrap()).unwrap();
+            assert!(text.contains("\"version\": 1"), "{text}");
+            assert_eq!(
+                read_pause(&fs, &p).unwrap(),
+                Some(Paused::from(PauseRecord {
+                    version: PAUSED_VERSION,
+                    ..record
+                })),
+                "version {version}"
+            );
+        }
     }
 
     #[test]
