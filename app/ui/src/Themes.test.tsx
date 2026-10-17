@@ -204,6 +204,33 @@ describe("the theme library", () => {
     expect(ipc.state.drafts[0]?.prompt.layout).toBe("powerline");
   });
 
+  it("keeps a copy's name within 64 characters, counted as code points (item 6)", async () => {
+    // 64 code points, 128 UTF-16 units: a cut by units would split a pair, and the core counts
+    // code points (model.rs validate).
+    const long = "👋".repeat(64);
+    const cases = [
+      { language: "en", heading: "Themes", duplicate: "Duplicate", sent: `My ${"👋".repeat(61)}` },
+      // The name is shortened, not the words around it: a cut at the end would leave "… ของ".
+      { language: "th", heading: "ธีม", duplicate: "ทำสำเนา", sent: `${"👋".repeat(57)} ของฉัน` },
+    ] as const;
+    for (const c of cases) {
+      const { ipc, user, view } = await mountWith(
+        async (m) => {
+          await mineFrom(m, "Nord", long);
+          vi.spyOn(m, "themeDuplicate");
+        },
+        { settings: { language: c.language } },
+      );
+      await screen.findByRole("heading", { name: c.heading });
+      await user.click(within(await card(long)).getByRole("button", { name: c.duplicate }));
+      await waitFor(() => expect(ipc.themeDuplicate).toHaveBeenCalledTimes(1));
+      const sent = vi.mocked(ipc.themeDuplicate).mock.calls[0]?.[1] ?? "";
+      expect(sent, c.language).toBe(c.sent);
+      expect(Array.from(sent), c.language).toHaveLength(64);
+      view.unmount();
+    }
+  });
+
   it("imports after a preview", async () => {
     const { ipc, user } = mount();
     await openThemes(user);

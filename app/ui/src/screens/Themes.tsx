@@ -25,6 +25,15 @@ import { useAppState } from "../state";
 
 export const NEW_THEME_ACCENT = "#d97757";
 export const NEW_THEME_TINT = 0.1;
+/** The most characters a theme's name may have, counted as the core counts them: code points
+ * (spec §3.3, `Theme::validate`). */
+export const NAME_MAX_CHARS = 64;
+
+/** `text`'s first `max` code points: never a cut inside a UTF-16 surrogate pair. */
+function firstCodePoints(text: string, max: number): string {
+  const points = Array.from(text);
+  return points.length <= max ? text : points.slice(0, Math.max(max, 0)).join("");
+}
 
 /** A random version 4 UUID, 8-4-4-4-12 hexadecimal digits (the theme file's `id`). */
 function uuidV4(): string {
@@ -109,16 +118,26 @@ export function Themes() {
     await load();
   };
 
+  /**
+   * A copy's name, "My <name>" / "<name> ของฉัน", within NAME_MAX_CHARS code points (item 6): a
+   * name of 64 would otherwise be refused. The name inside is shortened, so the words around it
+   * stay whole (a cut at the end of the Thai one would leave "… ของ").
+   */
+  const copyName = (name: string): string => {
+    const room = NAME_MAX_CHARS - Array.from(t("themes.copyName", { name: "" })).length;
+    return t("themes.copyName", { name: firstCodePoints(name, room) });
+  };
+
   // Customize (spec §3.1): a copy named "My <name>" in my themes, opened in the editor.
   const customize = (s: ThemeSummary) =>
     act(async () => {
-      const copy = await ipc.themeDuplicate(s.id, t("themes.copyName", { name: s.name }));
+      const copy = await ipc.themeDuplicate(s.id, copyName(s.name));
       go({ name: "editor", id: copy.id });
     }, false);
 
   const duplicate = (s: ThemeSummary) =>
     act(async () => {
-      await ipc.themeDuplicate(s.id, t("themes.copyName", { name: s.name }));
+      await ipc.themeDuplicate(s.id, copyName(s.name));
     });
 
   // A new theme starts in simple mode: dark, #d97757, tint 0.10 (spec §3.1). Its colors come
