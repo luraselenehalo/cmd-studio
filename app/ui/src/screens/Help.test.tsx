@@ -12,11 +12,15 @@ import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useCallback, useMemo, useRef, useState } from "react";
 import { describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import type { AppError } from "../bindings/AppError";
 import type { ApplyOutcome } from "../bindings/ApplyOutcome";
 import type { ApplyRequest } from "../bindings/ApplyRequest";
 import type { CheckReport } from "../bindings/CheckReport";
 import type { RestoreOutcome } from "../bindings/RestoreOutcome";
 import type { RevertOutcome } from "../bindings/RevertOutcome";
+import type { UndoOutcome } from "../bindings/UndoOutcome";
 import { AfterApplyBar } from "../components/AfterApplyBar";
 import { I18nProvider, useT, type Dictionary, type Language } from "../i18n";
 import { en } from "../i18n/en";
@@ -46,6 +50,11 @@ function presetId(name: string): string {
 
 function ipcError(code: string, details: string): IpcError {
   return new IpcError({ code, messageTh: `(${code})`, messageEn: `(${code})`, details });
+}
+
+/** An `AppError` of `code` whose details are "why <code>". */
+function why(code: string): AppError {
+  return { code, messageTh: `(${code})`, messageEn: `(${code})`, details: `why ${code}` };
 }
 
 /** Applies a preset in the mock before the page mounts, as the Themes page would have. */
@@ -151,6 +160,12 @@ function bar(): string | null {
   return document.querySelector(".bar")?.textContent ?? null;
 }
 
+/** "Go back to this point" on the only point that has one, confirmed in its dialog. */
+async function goBack(user: User) {
+  await user.click(await screen.findByRole("button", { name: "Go back to this point" }));
+  await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Go back to this point" }));
+}
+
 /** Holds every `apply` of the mock until `release()` is called. */
 function holdApply(ipc: MockIpc): () => void {
   let release: () => void = () => {};
@@ -250,6 +265,68 @@ describe("the health check", () => {
     expect(bar()).toMatch(/Theme "Nord" applied · open a new cmd window/);
     await user.click(within(dialog).getByRole("button", { name: "Close" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    // The finding is still there (the other add-on stays in the mock): focus is back on its fix.
+    expect(document.activeElement).toBe(within(d5).getByRole("button", { name: "Replace the other add-on" }));
+  });
+
+  it("puts focus on the health check's heading when the fix's button went with its finding", async () => {
+    const ipc = createMockIpc();
+    const finding: CheckReport = {
+      id: "D9",
+      status: "fail",
+      code: "E_GENERATED_CHANGED",
+      messageTh: "ไฟล์ที่ CMD Studio สร้างถูกแก้",
+      messageEn: "A file CMD Studio wrote was changed",
+      details: "init.lua differs from what was written",
+      detailsTh: null,
+      fix: "reapply",
+    };
+    const fixed: CheckReport = { ...finding, status: "ok", code: null, messageEn: "The generated files are as written", details: "", fix: null };
+    vi.spyOn(ipc, "doctorRun")
+      .mockResolvedValueOnce({ checks: [finding], checkedAtMs: 1791694709000 })
+      .mockResolvedValue({ checks: [fixed], checkedAtMs: 1791694710000 });
+    vi.spyOn(ipc, "doctorFix").mockResolvedValue({
+      kind: "reapply",
+      request: { themeId: presetId("Paper"), target: "all", setWtDefaultProfile: true, replaceOtherClink: false },
+      plan: null,
+    });
+    const { user } = mount(ipc);
+    await user.click(within(await check("A file CMD Studio wrote was changed")).getByRole("button", { name: "Apply the theme again" }));
+    const dialog = await screen.findByRole("dialog", { name: "What will change" });
+    await user.click(await within(dialog).findByRole("button", { name: "Apply" }));
+    await within(dialog).findByText(/Theme "Paper" applied/);
+    // The checks ran again after the apply: the finding is fixed, and its button is gone.
+    await screen.findByText("The generated files are as written");
+    expect(screen.queryByRole("button", { name: "Apply the theme again" })).toBeNull();
+    await user.click(within(dialog).getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("heading", { level: 2, name: "Health check" })));
+  });
+
+  it("says it is checking while a check runs, and a failed check without the old list under it", async () => {
+    const ipc = createMockIpc();
+    const { user } = mount(ipc);
+    await check("Oh My Posh 31.5.0 runs");
+    // The status region is there before the check is pressed, its text toggled (2c item 10).
+    const regions = Array.from(document.querySelectorAll('[role="status"]'));
+    let fail: (e: unknown) => void = () => {};
+    vi.spyOn(ipc, "doctorRun").mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          fail = reject;
+        }),
+    );
+    await user.click(screen.getByRole("button", { name: "Check now" }));
+    const checking = await screen.findByText(en["help.doctor.checking"]);
+    expect(regions).toContain(checking);
+    fail(ipcError("E_MACHINE_READ", "the registry could not be read"));
+    expect(await screen.findByText("the registry could not be read")).toBeTruthy();
+    expect(screen.queryByText(en["help.doctor.checking"])).toBeNull();
+    // No list from the check before under the failure: it would read as this check's.
+    expect(screen.queryByText("Oh My Posh 31.5.0 runs")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Check now" }));
+    expect(await screen.findByText("Oh My Posh 31.5.0 runs")).toBeTruthy();
+    expect(screen.queryByText("the registry could not be read")).toBeNull();
   });
 
   it("applies the theme again through the plan, with the request's own target and no yes carried over", async () => {
@@ -347,12 +424,14 @@ describe("the health check", () => {
     expect(within(d1).queryAllByRole("button")).toEqual([]);
     expect(within(d1).getByText(th["help.doctor.fix.reinstall"])).toBeTruthy();
     expect(within(d1).getByText(th["help.whatToDo"])).toBeTruthy();
-    // No Thai details: the English ones.
-    expect(within(d1).getByText("runtime\\clink-1.9.34\\clink_x64.exe: the bundled file differs")).toBeTruthy();
+    // No Thai details: the English ones, marked as English for a screen reader (§4.5).
+    const english = within(d1).getByText("runtime\\clink-1.9.34\\clink_x64.exe: the bundled file differs");
+    expect(english.closest("[lang]")?.getAttribute("lang")).toBe("en");
     const d6 = await check("มี Windows Terminal แต่ยังไม่เคยเปิด");
     expect(within(d6).queryAllByRole("button")).toEqual([]);
     expect(within(d6).getByText(th["help.doctor.fix.openWindowsTerminalOnce"])).toBeTruthy();
-    expect(within(d6).getByText("ยังไม่มีไฟล์ settings.json ของ Windows Terminal")).toBeTruthy();
+    const thai = within(d6).getByText("ยังไม่มีไฟล์ settings.json ของ Windows Terminal");
+    expect(thai.closest("[lang]")?.getAttribute("lang")).toBe("th");
     expect(within(d6).queryByText("Windows Terminal's settings.json is not there yet")).toBeNull();
     // A finding with no fix is its message only.
     const d2 = await check("Oh My Posh รันไม่ได้");
@@ -432,7 +511,7 @@ describe("restore points", () => {
 
   it("says what the restore's start found with its details, why it stopped, and a font it left", async () => {
     const ipc = createMockIpc();
-    await applyIn(ipc, "Nord");
+    const applied = await applyIn(ipc, "Nord");
     const stopped: RestoreOutcome = {
       status: "stopped",
       undone: [],
@@ -485,22 +564,84 @@ describe("restore points", () => {
       notes: [],
     };
     vi.spyOn(ipc, "snapshotRestore").mockResolvedValueOnce(stopped).mockResolvedValueOnce(done);
-    const { user } = mount(ipc, { start: { name: "help", tab: "restore" } });
-    const goBack = async () => {
-      await user.click(await screen.findByRole("button", { name: "Go back to this point" }));
-      await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Go back to this point" }));
-    };
-    await goBack();
-    expect(await screen.findByText("Stopped part-way; see the message.")).toBeTruthy();
+    const { user } = mount(ipc, { start: { name: "help", tab: "restore" }, applied });
+    await goBack(user);
+    // The first undo rolled back: nothing was undone, and the restore says so (2c fix 8).
+    expect(await screen.findByText(en["help.restore.nothingChanged"])).toBeTruthy();
+    expect(screen.queryByText(en["help.restore.stopped"])).toBeNull();
     const note = screen.getByText("A restore point could not be read").closest("li") as HTMLElement;
     expect(within(note).getByText("E_SNAPSHOT_READ")).toBeTruthy();
     expect(within(note).getByText("manifest.json of 1791694700000-0badc0de is not JSON")).toBeTruthy();
     expect(screen.getByText("A record of an earlier apply could not be read")).toBeTruthy();
     expect(screen.getByText("Windows Terminal's settings.json could not be written")).toBeTruthy();
-    await goBack();
+    // Its apply was not undone, so the after-apply bar stays.
+    await settle();
+    expect(bar()).toMatch(/Theme "Nord" applied/);
+    await goBack(user);
     expect(await screen.findByText("Done: everything is back to that point.")).toBeTruthy();
     expect(screen.getByText("CaskaydiaCove NF stays installed: you installed a font of that name since")).toBeTruthy();
-    expect(screen.queryByText("Stopped part-way; see the message.")).toBeNull();
+    expect(screen.queryByText(en["help.restore.nothingChanged"])).toBeNull();
+  });
+
+  it("words a stopped restore by what it did: nothing, part-way, or things to fix by hand (2c fix 8)", async () => {
+    const ipc = createMockIpc();
+    const nord = (await applyIn(ipc, "Nord")).outcome.snapshotId as string;
+    const undo =(status: UndoOutcome["status"], extra: Partial<UndoOutcome> = {}): UndoOutcome => ({
+      status,
+      undid: null,
+      error: why("E_WT_WRITE"),
+      unrestored: [],
+      notes: [],
+      fontsLeft: [],
+      ...extra,
+    });
+    const refusal = { code: "E_JOURNAL_INCOMPLETE", messageTh: "(refused)", messageEn: "The next undo was refused", details: "an earlier rollback did not finish" };
+    const unrestored = { opIndex: 2, target: "Windows Terminal's settings", code: "E_WT_WRITE", message: "access is denied", fix: "Open settings.json and take out CMD Studio's profile", fixTh: "เปิด settings.json แล้วเอาโปรไฟล์ของ CMD Studio ออก" };
+    const cases: { outcome: RestoreOutcome; headline: string; check: () => void }[] = [
+      {
+        // The first undo was refused: nothing ran.
+        outcome: { status: "stopped", undone: [], last: null, notes: [refusal] },
+        headline: en["help.restore.nothingChanged"],
+        check: () => expect(screen.getByText("The next undo was refused")).toBeTruthy(),
+      },
+      {
+        // The first undo rolled back: everything is as it was.
+        outcome: { status: "stopped", undone: [], last: undo("rolledBack"), notes: [] },
+        headline: en["help.restore.nothingChanged"],
+        check: () => expect(screen.getByText("why E_WT_WRITE")).toBeTruthy(),
+      },
+      {
+        // One apply was undone, then the next undo rolled back: part-way, and which one.
+        outcome: { status: "stopped", undone: [nord], last: undo("rolledBack"), notes: [] },
+        headline: en["help.restore.stopped"],
+        check: () => {
+          const list = screen.getByText(en["help.restore.undoneTitle"]).parentElement as HTMLElement;
+          expect(within(list).getByText(/^Nord · /)).toBeTruthy();
+        },
+      },
+      {
+        // An undo's rollback did not finish: what to fix by hand comes right after the header,
+        // before the list of what was undone.
+        outcome: { status: "stopped", undone: [nord], last: undo("rollbackIncomplete", { unrestored: [unrestored] }), notes: [] },
+        headline: en["help.restore.incomplete"],
+        check: () => {
+          const header = screen.getByText(en["help.restore.incomplete"]);
+          const list = header.nextElementSibling as HTMLElement;
+          expect(within(list).getByText("Windows Terminal's settings")).toBeTruthy();
+          expect(within(list).getByText("Open settings.json and take out CMD Studio's profile")).toBeTruthy();
+        },
+      },
+    ];
+    const spy = vi.spyOn(ipc, "snapshotRestore");
+    for (const c of cases) spy.mockResolvedValueOnce(c.outcome);
+    const { user } = mount(ipc, { start: { name: "help", tab: "restore" } });
+    const headlines = [en["help.restore.nothingChanged"], en["help.restore.stopped"], en["help.restore.incomplete"]];
+    for (const c of cases) {
+      await goBack(user);
+      expect(await screen.findByText(c.headline)).toBeTruthy();
+      for (const other of headlines.filter((h) => h !== c.headline)) expect(screen.queryByText(other)).toBeNull();
+      c.check();
+    }
   });
 
   it("says the restore points that could not be read, with their details", async () => {
@@ -576,7 +717,9 @@ describe("undo everything", () => {
     await screen.findByRole("heading", { level: 2, name: th["help.revert.title"] });
     await user.click(pageButton(th["help.revert.button"], th["help.tabs.label"]));
     await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: th["help.revert.button"] }));
-    expect(await screen.findByText(th["help.revert.notOk"])).toBeTruthy();
+    // Rolled back: everything was put back, so nothing changed (not "not everything was undone").
+    expect(await screen.findByText(th["help.revert.rolledBack"])).toBeTruthy();
+    expect(screen.queryByText(th["help.revert.notOk"])).toBeNull();
     expect(screen.getByText("ขั้นที่ 1: เสร็จแล้ว")).toBeTruthy();
     const step = screen.getByText("ขั้นที่ 2: ไม่สำเร็จ").closest("li") as HTMLElement;
     expect(within(step).getByText("อ่านข้อมูลบางอย่างในเครื่องนี้ไม่ได้")).toBeTruthy();
@@ -587,9 +730,50 @@ describe("undo everything", () => {
     // What and how, in the core's English, wait behind ดูรายละเอียด.
     const what = within(step).getByText("Windows Terminal's settings: E_MACHINE_READ: it could not be read: access is denied");
     expect((what.closest("details") as HTMLDetailsElement).open).toBe(false);
+    // The core's English is marked as English, so a screen reader reads it in that voice (§4.5).
+    expect(what.closest("[lang]")?.getAttribute("lang")).toBe("en");
     // Rolled back: the theme is still applied, so its bar stays.
     await settle();
     expect(bar()).not.toBeNull();
+  });
+
+  it("words the headline by how the revert ended: nothing changed, things to fix by hand, or not every step", async () => {
+    const ipc = createMockIpc();
+    const applied = await applyIn(ipc, "Terracotta");
+    const step = (ok: boolean) => ({
+      what: "Fonts",
+      ok,
+      detail: ok ? "nothing to uninstall" : "E_FONT_UNINSTALL: the font file is in use",
+      code: ok ? null : "E_FONT_UNINSTALL",
+      fixEn: null,
+      fixTh: null,
+      error: ok ? null : { code: "E_FONT_UNINSTALL", messageTh: "(E_FONT_UNINSTALL)", messageEn: "(E_FONT_UNINSTALL)", details: "the font file is in use" },
+    });
+    const unrestored = { opIndex: 1, target: "AutoRun", code: "E_AUTORUN_WRITE", message: "access is denied", fix: "Put AutoRun back by hand", fixTh: "คืนค่า AutoRun เอง" };
+    const base: RevertOutcome = { ok: false, steps: [step(true)], notes: [], status: "rolledBack", error: why("E_VERIFY_OMP"), unrestored: [] };
+    const cases: { outcome: RevertOutcome; headline: string; barStays: boolean }[] = [
+      { outcome: base, headline: en["help.revert.rolledBack"], barStays: true },
+      { outcome: { ...base, status: "rollbackIncomplete", unrestored: [unrestored] }, headline: en["help.revert.incomplete"], barStays: true },
+      { outcome: { ...base, status: "committed", error: null, steps: [step(true), step(false)] }, headline: en["help.revert.notOk"], barStays: false },
+    ];
+    const spy = vi.spyOn(ipc, "revertAll");
+    for (const c of cases) spy.mockResolvedValueOnce(c.outcome);
+    const { user } = mount(ipc, { start: { name: "help", tab: "revert" }, applied });
+    await screen.findByRole("heading", { level: 2, name: "Undo everything" });
+    const headlines = cases.map((c) => c.headline);
+    for (const c of cases) {
+      await user.click(pageButton("Undo everything"));
+      await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Undo everything" }));
+      const header = await screen.findByText(c.headline);
+      for (const other of headlines.filter((h) => h !== c.headline)) expect(screen.queryByText(other)).toBeNull();
+      if (c.outcome.unrestored.length > 0) {
+        // "Fix these by hand:" points at the list right after it.
+        expect(within(header.nextElementSibling as HTMLElement).getByText("Put AutoRun back by hand")).toBeTruthy();
+      }
+      await settle();
+      if (c.barStays) expect(bar()).toMatch(/Theme "Terracotta" applied/);
+      else expect(bar()).toBeNull();
+    }
   });
 });
 
@@ -608,6 +792,21 @@ describe("report a problem", () => {
     expect(ipc.state.calls).toContain("diagnosticsCopy");
     await user.click(screen.getByRole("button", { name: "Open GitHub Issues" }));
     await waitFor(() => expect(ipc.state.calls).toContain("openExternal:gitHubIssues"));
+  });
+
+  it("shows exactly the text that went to the clipboard", async () => {
+    const ipc = createMockIpc();
+    const { user } = mount(ipc, { start: { name: "help", tab: "report" } });
+    await screen.findByText(/^CMD Studio diagnostics/);
+    // The diagnostics changed since the page read them (a new log line, say).
+    const newer = "CMD Studio diagnostics\napp 0.1.0\n2026-10-17T09:00:00Z cmd=doctor_run ms=41 ok";
+    vi.spyOn(ipc, "diagnosticsCopy").mockResolvedValue(newer);
+    await user.click(screen.getByRole("button", { name: "Copy details" }));
+    await screen.findByText(en["help.report.copied"]);
+    expect(await navigator.clipboard.readText()).toBe(newer);
+    const shown = document.querySelector("pre.log") as HTMLElement;
+    expect(shown.textContent).toBe(newer);
+    expect(shown.getAttribute("lang")).toBe("en");
   });
 
   it("says when the details could not be copied, or GitHub Issues could not be opened", async () => {
@@ -662,6 +861,38 @@ describe("the guide and the credits", () => {
     }
     expect(screen.queryByText(/SignPath/)).toBeNull();
   });
+
+  it("names the versions the app bundles, Clink's source of that exact release, and docs/credits.md's lines", () => {
+    // The repository's own pins, all committed (resources\ is fetched later and not in git): the
+    // core's constants that the backend's `versions()` reports and checks resources\manifest.json
+    // against, and the source notice fetch-resources.ps1 writes as LICENSES\clink-SOURCE.txt.
+    const repo = join(import.meta.dirname, "..", "..", "..", "..");
+    const read = (path: string) => readFileSync(join(repo, path), "utf8");
+    const pin = (path: string, name: string): string => {
+      const found = read(path).match(new RegExp(`pub const ${name}: &str = "([^"]+)";`));
+      if (!found?.[1]) throw new Error(`no ${name} in ${path}`);
+      return found[1];
+    };
+    const omp = pin("crates/core/src/plan.rs", "OMP_VERSION");
+    const clink = pin("crates/core/src/plan.rs", "CLINK_VERSION");
+    const nerdFonts = pin("crates/core/src/resources.rs", "NERD_FONTS_VERSION");
+    const byName = (name: string) => BUNDLED.find((c) => c.name === name);
+    expect(byName("Clink")?.version).toBe(clink);
+    expect(byName("Oh My Posh")?.version).toBe(omp);
+    expect(byName("CaskaydiaCove Nerd Font")?.version).toBe(`Nerd Fonts ${nerdFonts}`);
+    const notice = read("scripts/fetch-resources.ps1").match(
+      /\$ClinkSource = "Clink ([\d.]+) is GPL-3\.0\. Its source code for this exact release:`n(\S+?)`n"/,
+    );
+    expect(notice?.[1]).toBe(clink);
+    expect(byName("Clink")?.license).toBe("GPL-3.0");
+    expect(byName("Clink")?.source).toBe(notice?.[2]);
+    // Every license and copyright line as docs/credits.md writes it.
+    const doc = read("docs/credits.md");
+    for (const c of [...BUNDLED, ...SCHEMES]) {
+      expect(doc, c.name).toContain(c.copyright);
+      expect(doc, c.name).toContain(c.license);
+    }
+  });
 });
 
 describe("Advanced", () => {
@@ -676,7 +907,7 @@ describe("Advanced", () => {
     expect((await row("Clink")).getByText("1.9.34")).toBeTruthy();
     expect((await row("CaskaydiaCove NF (Nerd Fonts)")).getByText("3.5.1")).toBeTruthy();
     expect(screen.getByText("C:\\Users\\tester\\AppData\\Local\\ai.resincore.cmdstudio")).toBeTruthy();
-    expect(screen.getByText("2026-10-16T12:00:00Z cmd=themes_list ms=3 ok")).toBeTruthy();
+    expect(screen.getByText("2026-10-16T12:00:00Z cmd=themes_list ms=3 ok").getAttribute("lang")).toBe("en");
     // The generated files behind toggles, closed.
     for (const name of ["theme.omp.json", "init.lua", "banner.lua", "clink_settings"]) {
       expect((screen.getByText(name).closest("details") as HTMLDetailsElement).open).toBe(false);

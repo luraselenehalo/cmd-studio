@@ -98,7 +98,10 @@ export function Advanced() {
       {info && (
         <>
           <h2>{t("advanced.log")}</h2>
-          <pre className="log">{info.logTail}</pre>
+          {/* The log and the files are English (or code) in both UIs: marked so (spec §4.5). */}
+          <pre className="log" lang="en">
+            {info.logTail}
+          </pre>
           <h2>{t("advanced.generated")}</h2>
           {info.generated.length === 0 && <p>{t("advanced.none")}</p>}
           {info.generated.map((file) => (
@@ -106,7 +109,9 @@ export function Advanced() {
               <summary>
                 <code>{file.name}</code>
               </summary>
-              <pre className="log">{file.text}</pre>
+              <pre className="log" lang="en">
+                {file.text}
+              </pre>
             </details>
           ))}
         </>

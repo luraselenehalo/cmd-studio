@@ -125,18 +125,21 @@ export function ProgressView({ progress }: { progress: ApplyProgress | null }) {
 }
 
 /** "Copy details for a problem report", saying whether the details reached the clipboard. Help's
- * "Report a problem" copies through it too, so both say it the same way. */
+ * "Report a problem" copies through it too, so both say it the same way. `copy` gives back the
+ * text that reached the clipboard (`null` when none did), for a page that shows it. */
 export function useCopyDiagnostics() {
   const ipc = useIpc();
   const [copied, setCopied] = useState<"yes" | IpcError | null>(null);
-  const copy = async () => {
+  const copy = async (): Promise<string | null> => {
     setCopied(null);
     try {
       const text = await ipc.diagnosticsCopy();
       await navigator.clipboard.writeText(text);
       setCopied("yes");
+      return text;
     } catch (thrown) {
       setCopied(toIpcError(thrown));
+      return null;
     }
   };
   return { copied, copy };

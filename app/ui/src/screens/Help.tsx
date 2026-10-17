@@ -18,7 +18,7 @@ import type { RevertOutcome } from "../bindings/RevertOutcome";
 import { ApplyFlow, useCopyDiagnostics } from "../components/ApplyFlow";
 import { Dialog } from "../components/Dialog";
 import { ErrorNotice, Notice, NotesList, UnrestoredList } from "../components/Notices";
-import { formatTime, pick, useI18n, type Language, type Translate } from "../i18n";
+import { formatTime, pick, useI18n, type Key, type Language, type Translate } from "../i18n";
 import { useIpc } from "../ipc/context";
 import { IpcError } from "../ipc/types";
 import { useNav, type HelpTab } from "../router";
@@ -65,6 +65,8 @@ function Doctor() {
   const { version, bump, setLastApply } = useAppState();
   const [report, setReport] = useState<DoctorReport | null>(null);
   const [loadError, setLoadError] = useState<unknown>(null);
+  /** A check is running: said in a status region that is always there (2c item 10). */
+  const [checking, setChecking] = useState(true);
   /** What the last fix said went wrong: a window that could not be opened, a failed proposal. */
   const [fixError, setFixError] = useState<unknown>(null);
   /** A proposal no longer fitted its check: the computer changed, so the checks ran again. */
@@ -73,22 +75,41 @@ function Doctor() {
   const [applyBusy, setApplyBusy] = useState(false);
   const [tick, setTick] = useState(0);
   const applies = useRef(0);
+  const heading = useRef<HTMLHeadingElement>(null);
+  /** The fix's dialog was just closed: where focus lands is checked once it is gone. */
+  const closing = useRef(false);
 
   useEffect(() => {
     let alive = true;
+    setChecking(true);
     setLoadError(null);
     ipc.doctorRun().then(
       (r) => {
-        if (alive) setReport(r);
+        if (!alive) return;
+        setReport(r);
+        setChecking(false);
       },
       (e: unknown) => {
-        if (alive) setLoadError(e);
+        if (!alive) return;
+        // No list from an earlier check under this failure: it would read as this check's.
+        setReport(null);
+        setLoadError(e);
+        setChecking(false);
       },
     );
     return () => {
       alive = false;
     };
   }, [ipc, version, tick]);
+
+  // The dialog gives focus back to the fix's button; when that button went with its finding
+  // (the apply fixed it), focus goes to this tab's heading rather than to the page's body.
+  useEffect(() => {
+    if (applying !== null || !closing.current) return;
+    closing.current = false;
+    const active = document.activeElement;
+    if (active === null || active === document.body || !active.isConnected) heading.current?.focus();
+  }, [applying]);
 
   const checkAgain = () => {
     setChanged(false);
@@ -109,6 +130,7 @@ function Doctor() {
     setApplying({ key: applies.current, request });
   };
   const closeApply = () => {
+    closing.current = true;
     setApplying(null);
     setApplyBusy(false);
   };
@@ -144,18 +166,20 @@ function Doctor() {
 
   return (
     <div>
-      <h2>{t("help.tabs.doctor")}</h2>
+      <h2 ref={heading} tabIndex={-1}>
+        {t("help.tabs.doctor")}
+      </h2>
       <div className="row-actions">
         <button type="button" onClick={checkAgain}>
           {t("help.doctor.run")}
         </button>
         {report && <span>{t("help.doctor.checkedAt", { time: formatTime(report.checkedAtMs, language) })}</span>}
-        {/* Always there, its text toggled (2c item 10). */}
+        {/* Always there, their text toggled (2c item 10). */}
+        <span role="status">{checking ? t("help.doctor.checking") : ""}</span>
         <span role="status">{changed ? t("help.doctor.fixChanged") : ""}</span>
       </div>
       {loadError !== null && <ErrorNotice error={loadError} />}
       {fixError !== null && <ErrorNotice error={fixError} />}
-      {!report && loadError === null && <p role="status">{t("common.loading")}</p>}
       {report && (
         <ul className="check-list">
           {report.checks.map((c) => (
@@ -185,10 +209,12 @@ function Doctor() {
 }
 
 /** One check: its id and status, its message in the UI's language, its code, the details (Thai
- * when there are Thai ones and the UI is Thai), and its fix as a button or in words. */
+ * when there are Thai ones and the UI is Thai, else the core's English, marked as English so a
+ * screen reader reads it in that voice, spec §4.5), and its fix as a button or in words. */
 function CheckItem({ check: c, onFix }: { check: CheckReport; onFix: () => void }) {
   const { t, language } = useI18n();
-  const details = language === "th" && c.detailsTh ? c.detailsTh : c.details;
+  const thai = language === "th" && c.detailsTh ? c.detailsTh : null;
+  const details = thai ?? c.details;
   return (
     <li>
       <div>
@@ -206,7 +232,7 @@ function CheckItem({ check: c, onFix }: { check: CheckReport; onFix: () => void 
       {details && (
         <details>
           <summary>{t("common.details")}</summary>
-          <pre>{details}</pre>
+          <pre lang={thai ? undefined : "en"}>{details}</pre>
         </details>
       )}
       {c.fix &&
@@ -357,20 +383,34 @@ function RestorePointsTab() {
 }
 
 /**
+ * A restore's headline, by what it did, as the bar's undo words it (2c fix 8): a stop whose
+ * rollback did not finish has things to fix by hand; one that undid nothing changed nothing (the
+ * first undo refused or rolled back); "part-way" only once something was undone.
+ */
+function restoreHeadline(outcome: RestoreOutcome): { tone: "ok" | "warn" | "error"; key: Key } {
+  if (outcome.status === "done") return { tone: "ok", key: "help.restore.done" };
+  if (outcome.status === "notRestorable") return { tone: "warn", key: "help.restore.notRestorable" };
+  if (outcome.last?.status === "rollbackIncomplete") return { tone: "error", key: "help.restore.incomplete" };
+  if (outcome.undone.length === 0) return { tone: "warn", key: "help.restore.nothingChanged" };
+  return { tone: "warn", key: "help.restore.stopped" };
+}
+
+/**
  * How a restore went, worded for this page, with what the bar's undo shows as well (2c carry):
- * the fonts it left, the applies it undid, what a rollback could not put back, why it stopped,
- * and the notes of its start and of its last undo with their details. No live region: the box
- * around it takes focus, which reads it (item 11).
+ * the fonts it left, what a rollback could not put back (right after the headline, whose "Fix
+ * these by hand:" points at it), the applies it undid, why it stopped, and the notes of its start
+ * and of its last undo with their details. No live region: the box around it takes focus, which
+ * reads it (item 11).
  */
 function RestoreResultView({ outcome, before }: { outcome: RestoreOutcome; before: RestorePoint[] }) {
   const { t, language } = useI18n();
   const last = outcome.last;
   const notes = [...outcome.notes, ...(last?.notes ?? [])];
-  const tone = outcome.status === "done" ? "ok" : outcome.status === "notRestorable" ? "warn" : "error";
+  const { tone, key } = restoreHeadline(outcome);
   return (
     <>
       <div className={`notice ${tone}`}>
-        {t(`help.restore.${outcome.status}`)}
+        {t(key)}
         {last && last.fontsLeft.length > 0 && (
           <ul className="plain-list">
             {last.fontsLeft.map((f, i) => (
@@ -379,6 +419,7 @@ function RestoreResultView({ outcome, before }: { outcome: RestoreOutcome; befor
           </ul>
         )}
       </div>
+      {last && <UnrestoredList steps={last.unrestored} live={false} />}
       {outcome.undone.length > 0 && (
         <div>
           <p>{t("help.restore.undoneTitle")}</p>
@@ -390,7 +431,6 @@ function RestoreResultView({ outcome, before }: { outcome: RestoreOutcome; befor
           </ul>
         </div>
       )}
-      {last && <UnrestoredList steps={last.unrestored} live={false} />}
       {last?.error && <ErrorNotice error={last.error} live={false} />}
       <NotesList notes={notes} />
     </>
@@ -468,15 +508,29 @@ function Revert() {
 }
 
 /**
+ * A revert's headline, by how it ended: a rolled-back one put everything back, so nothing
+ * changed and the theme stays; one whose rollback did not finish has things to fix by hand; one
+ * that committed with a step that failed did not undo everything.
+ */
+function revertHeadline(outcome: RevertOutcome): { tone: "ok" | "warn" | "error"; key: Key } {
+  if (outcome.ok) return { tone: "ok", key: "help.revert.done" };
+  if (outcome.status === "rolledBack") return { tone: "error", key: "help.revert.rolledBack" };
+  if (outcome.status === "rollbackIncomplete") return { tone: "error", key: "help.revert.incomplete" };
+  return { tone: "warn", key: "help.revert.notOk" };
+}
+
+/**
  * Each step done or not in the UI's language; a failed one says why through its error (its
  * code's row of spec §5.9 in Thai or English) and what to do. What the step was about and what
- * happened are the core's English, behind "Show details" (ruling Q5).
+ * happened are the core's English, behind "Show details" (ruling Q5) and marked as English.
  */
 function RevertResultView({ outcome }: { outcome: RevertOutcome }) {
   const { t, language } = useI18n();
+  const { tone, key } = revertHeadline(outcome);
   return (
     <>
-      <div className={outcome.ok ? "notice ok" : "notice warn"}>{outcome.ok ? t("help.revert.done") : t("help.revert.notOk")}</div>
+      <div className={`notice ${tone}`}>{t(key)}</div>
+      {/* Right after the headline, whose "Fix these by hand:" points at it. */}
       <UnrestoredList steps={outcome.unrestored} live={false} />
       {outcome.error && <ErrorNotice error={outcome.error} live={false} />}
       <ol className="check-list">
@@ -493,7 +547,7 @@ function RevertResultView({ outcome }: { outcome: RevertOutcome }) {
             )}
             <details>
               <summary>{t("common.details")}</summary>
-              <pre>{`${s.what}: ${s.detail}`}</pre>
+              <pre lang="en">{`${s.what}: ${s.detail}`}</pre>
             </details>
           </li>
         ))}
@@ -536,12 +590,20 @@ function Report() {
     }
   };
 
+  // The page then shows exactly what went to the clipboard, newer than what it read at first.
+  const copyShown = async () => {
+    const sent = await copy();
+    if (sent === null) return;
+    setText(sent);
+    setLoadError(null);
+  };
+
   return (
     <div>
       <h2>{t("help.report.title")}</h2>
       <p>{t("help.report.text")}</p>
       <div className="row-actions">
-        <button type="button" className="primary" onClick={() => void copy()}>
+        <button type="button" className="primary" onClick={() => void copyShown()}>
           {t("help.report.copy")}
         </button>
         <button type="button" onClick={() => void openIssues()}>
@@ -554,7 +616,11 @@ function Report() {
       {openError !== null && <ErrorNotice error={openError} />}
       {loadError !== null && <ErrorNotice error={loadError} />}
       {text === null && loadError === null && <p role="status">{t("common.loading")}</p>}
-      {text !== null && <pre className="log">{text}</pre>}
+      {text !== null && (
+        <pre className="log" lang="en">
+          {text}
+        </pre>
+      )}
     </div>
   );
 }
