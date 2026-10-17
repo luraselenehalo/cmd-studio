@@ -1,0 +1,14 @@
+[package]
+name = "crash-dll"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Not a member of CMD Studio's workspace: a test-only DLL for the VMs.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+panic = "abort"

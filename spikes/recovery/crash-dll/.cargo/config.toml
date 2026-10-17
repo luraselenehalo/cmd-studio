@@ -1,0 +1,6 @@
+# The test VMs' clean snapshots have no Visual C++ runtime: without this the DLL imports
+# VCRUNTIME140.dll, Windows cannot load it (error 126) and Clink never gets as far as running it,
+# so spike S11 would fail for a reason that is not Clink's. With the C runtime linked in, the DLL
+# imports kernel32 only, and DllMain is reached.
+[build]
+rustflags = ["-C", "target-feature=+crt-static"]
