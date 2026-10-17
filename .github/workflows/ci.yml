@@ -1,6 +1,7 @@
 # CI on a throwaway Windows runner: format, four clippy runs, the pinned runtimes,
 # the normal tests, then the system tests that change this runner's real AutoRun and fonts.
-# The `app` job checks the desktop app crate and its TypeScript bindings on a runner of its own.
+# The `app` job checks the UI (types, tests, build), the desktop app crate and its TypeScript
+# bindings, and builds the app's exe with `tauri build`, on a runner of its own.
 name: ci
 on:
   push:
@@ -106,8 +107,9 @@ jobs:
           name: system-tests-log
           path: system-tests.txt
           if-no-files-found: ignore
-  # The app (Phase 2b): the app crate, its tests over the in-memory machine, and the bindings'
-  # freshness. Separate from the Rust job so a UI failure and a Rust failure read apart. (The
+  # The app (Phases 2b and 2c): the UI's type-check, tests and build, a check that the built UI
+  # holds no mock or preset data, the bindings' freshness, the app crate, and the Tauri build that
+  # makes the exe. Separate from the Rust job so a UI failure and a Rust failure read apart. (The
   # `windows` job's workspace runs cover the app crate too: its clippy and its tests.)
   app:
     runs-on: windows-latest
@@ -122,6 +124,35 @@ jobs:
           rustup --version
           rustup toolchain install
           cargo --version
+      # The exact Node version is the one app/.nvmrc holds; `engines` in package.json is only a
+      # range around it.
+      - name: Install the Node pinned in app/.nvmrc
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: app/.nvmrc
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      # `npm ci`, never `npm install`: it installs exactly what app/package-lock.json says and
+      # fails when package.json and the lockfile disagree.
+      - name: Install the UI's packages exactly as locked
+        working-directory: app
+        run: npm ci
+      - name: Type-check the UI
+        working-directory: app
+        run: npm run typecheck
+      - name: UI tests (vitest, against the mocked IPC)
+        working-directory: app
+        run: npm test
+      # Before the Rust steps below: the app crate embeds app/ui/dist when it compiles.
+      - name: Build the UI
+        working-directory: app
+        run: npm run build
+      # The mock IPC and the preset files serve the tests and the visual check only; the production
+      # build drops them (see the script). The search lives in one script so that this run and the
+      # one after `tauri build` below cannot drift apart.
+      - name: The built UI holds no mock data and no preset file
+        shell: bash
+        run: bash ./scripts/check-dist.sh
       - name: Cache the pinned runtimes and font
         uses: actions/cache@v4
         with:
@@ -149,10 +180,39 @@ jobs:
         run: cargo clippy -p cmdstudio-app --all-targets -- -D warnings
       - name: Tests of the app crate (backend over the in-memory machine)
         run: cargo test -p cmdstudio-app
-      # A compile check only: this exe is never shipped and never run, here or in a VM. No cargo
-      # build enables `tauri/custom-protocol`, so to Tauri it is a "dev build"; with no `devUrl`
-      # in tauri.conf.json (pinned by config_guard.rs) it embeds the UI rather than loading a dev
-      # server, but it is still not the app. The real exe is made by `npx tauri build` (the 2c
-      # plan's Task 7).
-      - name: Release build of the exe (a compile check, not run)
-        run: cargo build -p cmdstudio-app --release
+      # The exe, made by the Tauri CLI and by nothing else. `tauri build` runs `beforeBuildCommand`
+      # (`npm run build`, the same command as the UI step above, with the same environment),
+      # then a release cargo build with `tauri/custom-protocol`, which is what makes the exe the
+      # app: a plain `cargo build --release` exe is a Tauri "dev build" (it embeds the UI too,
+      # as tauri.conf.json has no `devUrl`, pinned by config_guard.rs, but it is not the app) and
+      # is neither built here nor uploaded. So this one step is also the release compile check;
+      # a separate `cargo build --release` would compile the same crates twice and write a
+      # second, different cmdstudio.exe to the same path. No bundle: Phase 4 turns it on.
+      # The exe lands in the workspace's target/, not in app/.
+      # `npm run tauri --` runs the Tauri CLI that package-lock.json locks (node_modules/.bin) and
+      # nothing else: npm run never downloads a package, while `npx` fetches a missing one (a try
+      # with npm 11: `npx --no-install <unknown package>` still asked the registry). bash, so
+      # that the `--` reaches npm as written.
+      - name: Tauri build (no bundle)
+        shell: bash
+        working-directory: app
+        run: npm run tauri -- build --no-bundle
+      # The same search again, now that `tauri build` has built the UI once more: the exe embeds
+      # the dist as this build left it, so this is the gate on what ships.
+      - name: The UI the exe embeds holds no mock data and no preset file
+        shell: bash
+        run: bash ./scripts/check-dist.sh
+      # The app reads its runtimes from `resources\` next to its exe (machine.rs), so the artifact
+      # is one folder with both. `cp` fails when the exe is missing (bash runs with -e).
+      - name: Stage the exe with its resources, as the app finds them
+        shell: bash
+        run: |
+          mkdir -p stage/cmdstudio
+          cp target/release/cmdstudio.exe stage/cmdstudio/
+          cp -r resources stage/cmdstudio/resources
+      # For the VM check of spec §1 criterion 1 (phase 3 plan, Task 4).
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cmdstudio-exe
+          path: stage/cmdstudio
+          if-no-files-found: error

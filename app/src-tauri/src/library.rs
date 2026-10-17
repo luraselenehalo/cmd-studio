@@ -7,7 +7,7 @@ use crate::backend::{Backend, Machine, PendingImport};
 use crate::error::AppError;
 use cmdstudio_core::adapters::AdapterError;
 use cmdstudio_core::model::{parse_theme, Layout, Target, Theme};
-use cmdstudio_core::palette::Tone;
+use cmdstudio_core::palette::{Colors, Tone};
 use cmdstudio_core::presets;
 use cmdstudio_core::state::State;
 use cmdstudio_core::text::safe_file_stem;
@@ -39,6 +39,11 @@ pub struct ThemeSummary {
     pub name: String,
     pub tone: Tone,
     pub layout: Layout,
+    /// The 23 colors of the theme this summary is of, for the swatches of its card: one
+    /// `themes_list` draws every card, with no `theme_get` (and no log line) per card. In the
+    /// listing, a theme of mine that has a draft shows the saved theme's colors; the answer of
+    /// `theme_save` with `draft: true` is of the draft, so it has the draft's colors.
+    pub colors: Colors,
     pub source: ThemeSource,
     /// The theme state.json says is applied (spec §3.1 "ใช้อยู่").
     pub in_use: bool,
@@ -300,6 +305,7 @@ impl<M: Machine> Backend<M> {
             name: theme.name.clone(),
             tone: theme.tone,
             layout: theme.prompt.layout,
+            colors: theme.colors.clone(),
             source,
             in_use: in_use == Some(theme.id),
             has_draft: self.sys().fs.exists(&self.draft_path(theme.id)),
@@ -1214,6 +1220,48 @@ mod tests {
         assert_eq!(drafted.name, "Drafted");
         draft.name = "\u{1b}[31mRed\u{1b}[0m".to_string();
         assert_eq!(b.theme_save(draft, true).unwrap().name, "Red");
+    }
+
+    #[test]
+    fn each_summary_carries_its_themes_colors_for_the_swatches_of_its_card() {
+        let b = backend();
+        // The presets' as the core embeds them, in the listing's order.
+        let lib = b.themes_list().unwrap();
+        let builtin = presets::builtin().unwrap();
+        assert_eq!(lib.themes.len(), builtin.len());
+        for (summary, (key, preset)) in lib.themes.iter().zip(&builtin) {
+            assert_eq!(
+                (summary.id, &summary.colors),
+                (preset.id, &preset.colors),
+                "{key}"
+            );
+        }
+        // One of mine: the colors as written, in the save's answer and in the listing, where a
+        // draft of it does not change them (the card shows the saved theme).
+        let mut theme = new_theme(&b, "Mine");
+        theme.colors.accent = "#123456".parse().unwrap();
+        let saved = b.theme_save(theme.clone(), false).unwrap();
+        assert_eq!(saved.colors, theme.colors);
+        let mut draft = theme.clone();
+        draft.colors.background = "#000000".parse().unwrap();
+        let drafted = b.theme_save(draft.clone(), true).unwrap();
+        assert_eq!(drafted.colors, draft.colors);
+        let listed = |id: Uuid| {
+            b.themes_list()
+                .unwrap()
+                .themes
+                .into_iter()
+                .find(|t| t.id == id)
+                .unwrap()
+        };
+        let mine = listed(theme.id);
+        assert!(mine.has_draft);
+        assert_eq!(mine.colors, theme.colors);
+        // A theme that is only a draft: the draft's colors.
+        let mut fresh = new_theme(&b, "Brand new");
+        fresh.colors.frame = "#abcdef".parse().unwrap();
+        b.theme_save(fresh.clone(), true).unwrap();
+        assert_eq!(listed(fresh.id).colors, fresh.colors);
     }
 
     #[test]
