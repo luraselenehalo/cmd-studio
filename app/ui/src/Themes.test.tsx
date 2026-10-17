@@ -120,6 +120,27 @@ async function mountHoldingFix() {
   return { ...mounted, held };
 }
 
+/** A mount whose `contrastFix` and `paletteGenerate` both answer only when their gate is opened,
+ * once the `on` of each is set: each held call adds its gate to `gates`, in the order the calls
+ * came. */
+async function mountHoldingFixAndPalette() {
+  const fix = { on: false, gates: [] as (() => void)[] };
+  const palette = { on: false, gates: [] as (() => void)[] };
+  const mounted = await mountWith((m) => {
+    const fixIt = m.contrastFix.bind(m);
+    vi.spyOn(m, "contrastFix").mockImplementation(async (colors) => {
+      if (fix.on) await new Promise<void>((resolve) => fix.gates.push(resolve));
+      return fixIt(colors);
+    });
+    const generate = m.paletteGenerate.bind(m);
+    vi.spyOn(m, "paletteGenerate").mockImplementation(async (tone, accent, tint) => {
+      if (palette.on) await new Promise<void>((resolve) => palette.gates.push(resolve));
+      return generate(tone, accent, tint);
+    });
+  });
+  return { ...mounted, fix, palette };
+}
+
 /**
  * A mount whose draft writes are refused while `control.refuse` is set, with `control.details`
  * as the reason. With `control.holdNext` set, the next draft write waits until
@@ -764,8 +785,41 @@ describe("the editor", () => {
       held.gates[0]?.();
       await new Promise((resolve) => setTimeout(resolve, 20));
     });
-    // The late fix would put the tone it was asked for (dark) back.
+    // The late fix did not put its tone (dark) back. This holds whichever guard drops it: the
+    // theme on screen is no longer the one it was asked about. The counter alone is pinned by
+    // the test below, where the fix answers first.
     expect((screen.getByRole("radio", { name: "Light" }) as HTMLInputElement).checked).toBe(true);
+  });
+
+  it("lets a palette request made after a readability fix win, though the fix answers first", async () => {
+    // The theme on screen is still the fix's `from` when its answer lands, so only the counter
+    // can drop it: without it the fix would be applied, and the palette's answer, asked about
+    // the theme before the fix, would then be dropped as stale.
+    const { user, fix, palette } = await mountHoldingFixAndPalette();
+    await openThemes(user);
+    await user.click(within(await card("Gruvbox")).getByRole("button", { name: "Customize" }));
+    await screen.findByRole("heading", { name: "Edit theme" });
+    await screen.findByText("Red is hard to read (2.7:1, needs 3.0:1)");
+    await user.click(within(screen.getByRole("group", { name: "Color mode" })).getByRole("button", { name: "Simple" }));
+    fix.on = true;
+    palette.on = true;
+    await user.click(screen.getByRole("button", { name: "Fix automatically" }));
+    await user.click(screen.getByRole("radio", { name: "Light" }));
+    await waitFor(() => expect([fix.gates.length, palette.gates.length]).toEqual([1, 1]));
+    // The fix answers first, then the palette.
+    await act(async () => {
+      fix.gates[0]?.();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    await act(async () => {
+      palette.gates[0]?.();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect((screen.getByRole("radio", { name: "Light" }) as HTMLInputElement).checked).toBe(true);
+    // The palette's answer is the one undo step: the fix's was dropped, not applied before it.
+    await user.click(screen.getByRole("button", { name: "Undo" }));
+    expect((screen.getByRole("radio", { name: "Dark" }) as HTMLInputElement).checked).toBe(true);
+    expect((screen.getByRole("button", { name: "Undo" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it("lets the newest readability fix win, whichever answer comes first", async () => {
