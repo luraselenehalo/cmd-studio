@@ -42,6 +42,7 @@ export const en = {
 
   "error.title": "Something went wrong",
   "error.code": "Code {code}",
+  "error.reload": "Reload",
 
   "wizard.step": "Step {n} of 6",
   "wizard.skip": "Skip, set up myself",

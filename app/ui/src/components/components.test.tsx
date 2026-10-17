@@ -475,30 +475,43 @@ describe("ApplyFlow", () => {
 });
 
 describe("ErrorBoundary", () => {
-  it("shows the E_INTERNAL notice, never a blank window, when a component inside it throws (item 8)", () => {
+  it("shows the E_INTERNAL notice in English and Thai with a way out, never a blank window, when a component inside it throws (item 8, round 2 fix 3)", async () => {
+    const thrown = new Error("Cannot read properties of undefined (reading 'themes')");
     function Broken(): ReactNode {
-      throw new Error("Cannot read properties of undefined (reading 'themes')");
+      throw thrown;
     }
-    // React reports the error it caught on the console; the test keeps that quiet.
-    const quiet = vi.spyOn(console, "error").mockImplementation(() => {});
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const reload = vi.fn();
     try {
-      // No provider around it: main.tsx puts it outside App, which holds the language.
+      // No provider around it: main.tsx puts it outside App, which holds the language, so the
+      // language is not known there: both are shown.
       render(
-        <ErrorBoundary>
+        <ErrorBoundary reload={reload}>
           <Broken />
         </ErrorBoundary>,
       );
       const notice = screen.getByRole("alert");
       expect(within(notice).getByText("Something went wrong")).toBeTruthy();
+      expect(within(notice).getByText("มีบางอย่างผิดพลาด")).toBeTruthy();
       expect(
         within(notice).getByText(
           "CMD Studio itself ran into a problem; the details say where. Try again, and if it stays, report it with the diagnostics",
         ),
       ).toBeTruthy();
+      expect(
+        within(notice).getByText(
+          "CMD Studio เองมีปัญหา รายละเอียดบอกว่าตรงไหน ลองใหม่อีกครั้ง ถ้ายังเป็นอยู่ให้แจ้งปัญหาพร้อมข้อมูลวินิจฉัย",
+        ),
+      ).toBeTruthy();
       expect(within(notice).getByText(/Code E_INTERNAL/)).toBeTruthy();
       expect(within(notice).getByText("Cannot read properties of undefined (reading 'themes')")).toBeTruthy();
+      // What went wrong is on the console as well, with where it happened.
+      expect(logged).toHaveBeenCalledWith("CMD Studio: a screen could not be drawn", thrown, expect.any(String));
+      // The way out: Reload, in both languages.
+      await userEvent.setup().click(screen.getByRole("button", { name: "Reload · โหลดใหม่" }));
+      expect(reload).toHaveBeenCalledTimes(1);
     } finally {
-      quiet.mockRestore();
+      logged.mockRestore();
     }
   });
 

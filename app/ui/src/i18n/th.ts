@@ -46,6 +46,7 @@ export const th: Dictionary = {
 
   "error.title": "มีบางอย่างผิดพลาด",
   "error.code": "รหัส {code}",
+  "error.reload": "โหลดใหม่",
 
   "wizard.step": "ขั้นที่ {n} จาก 6",
   "wizard.skip": "ข้าม แล้วตั้งค่าเอง",
