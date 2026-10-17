@@ -143,9 +143,19 @@ describe("the mock IPC", () => {
     expect([fixed.foreground, fixed.muted]).toEqual(["#5e747c", "#829090"]);
     expect(await ipc.contrastCheck(fixed)).toEqual([]);
     expect(await ipc.contrastFix(preset("Terracotta").colors)).toEqual(preset("Terracotta").colors);
-    // The preview's welcome box shows the title as written: no variable is filled in.
+    // The preview's welcome box is a fixed row drawn for the sample user tester (fixed data, not
+    // a rendering): no variable is left in it, and its right border lines up with the frame.
     const preview = await ipc.previewRender(preset("Terracotta"), SAMPLE);
-    expect(preview.banner.flat().map((s) => s.text).join("")).toContain("Welcome back, {user}!");
+    const rows = preview.banner.map((line) => line.map((s) => s.text).join(""));
+    expect(rows.join("\n")).toContain("Welcome back, tester!");
+    expect(rows.join("\n")).not.toMatch(/\{\w+\}/);
+    const box = rows.slice(0, 3);
+    expect(box.map((row) => [Array.from(row)[0], Array.from(row).at(-1)])).toEqual([
+      ["╭", "╮"],
+      ["│", "│"],
+      ["╰", "╯"],
+    ]);
+    expect(new Set(box.map((row) => Array.from(row).length)).size).toBe(1);
   });
 
   it("answers in the shipped shapes: the sample's identity and what a plan turns off", async () => {

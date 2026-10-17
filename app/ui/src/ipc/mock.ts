@@ -180,14 +180,16 @@ export interface MockState {
 
 /**
  * A frame-and-text preview in the theme's own colors: fixed data, not a rendering. The welcome
- * box's title is shown as written, its variables (`{user}`…) left as they are.
+ * box's middle row is written out as the core draws the presets' title ("Welcome back, {user}!")
+ * for the sample user tester, padded to the frame's 44 columns so its right border lines up; the
+ * theme's own title is not read (the mock fills in no variable).
  */
 function fakeLines(theme: Theme): PreviewResult {
   const c = theme.colors;
   const span = (text: string, fg: string, bold = false) => ({ text, fg, bg: null, bold });
   const banner: Line[] = [
     [span("╭──────────────────────────────────────────╮", c.accent)],
-    [span("│ ", c.accent), span(`✻ ${theme.banner.title}`, c.foreground), span(" │", c.accent)],
+    [span("│ ", c.accent), span("✻ Welcome back, tester!", c.foreground), span("                  │", c.accent)],
     [span("╰──────────────────────────────────────────╯", c.accent)],
     [span(" Tips: help for commands · cls to clear · ↑ for history", c.muted)],
     [span(" ", c.foreground)],
