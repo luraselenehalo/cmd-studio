@@ -151,7 +151,7 @@ export const th: Dictionary = {
   "home.quick.use": "ใช้ธีม {name}",
   "home.restore.title": "จุดย้อนกลับล่าสุด",
   "home.restore.none": "ยังไม่มีจุดย้อนกลับ CMD Studio จะสร้างให้ทุกครั้งที่ใช้ธีม",
-  "home.restore.noneRestorable": "ตอนนี้ไม่มีจุดย้อนกลับที่ย้อนไปได้",
+  "home.restore.noneRestorable": "ตอนนี้ไม่มีจุดย้อนกลับที่กลับไปได้",
   "home.restore.latest": "{name} · {time}",
   "home.restore.all": "ดูจุดย้อนกลับทั้งหมด",
 

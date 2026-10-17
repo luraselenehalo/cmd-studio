@@ -16,6 +16,7 @@ import type { ApplyOutcome } from "./bindings/ApplyOutcome";
 import type { ApplyRequest } from "./bindings/ApplyRequest";
 import type { SystemReport } from "./bindings/SystemReport";
 import { App } from "./App";
+import { Wizard } from "./screens/Wizard";
 import { en } from "./i18n/en";
 import { th } from "./i18n/th";
 import type { Dictionary, Language } from "./i18n";
@@ -564,6 +565,25 @@ describe("the home page", () => {
     expect(await within(latest).findByText(en["home.restore.noneRestorable"])).toBeTruthy();
     expect(within(latest).queryByText(en["home.restore.none"])).toBeNull();
     expect(within(latest).queryByText(/·/)).toBeNull();
+  });
+
+  it("says that in Thai as Help words going back to a point (Task 2 re-review)", async () => {
+    await home({ settings: { language: "th" } }, async (m) => {
+      await applyIn(m, "Terracotta");
+      await m.revertAll();
+    });
+    const latest = screen.getByRole("heading", { name: th["home.restore.title"] }).closest(".card") as HTMLElement;
+    expect(await within(latest).findByText("ตอนนี้ไม่มีจุดย้อนกลับที่กลับไปได้")).toBeTruthy();
+    // Help's verb for going back to a point is the same.
+    expect(th["help.restore.restore"]).toBe("กลับไปที่จุดนี้");
+    expect(th["home.restore.noneRestorable"]).toContain("กลับไป");
+  });
+
+  it("needs the wizard's onUnsaved: without it a failed save would be swallowed (Task 2 re-review)", () => {
+    // A type test: `npm run typecheck` fails on an unused directive, so it fails if the prop is optional.
+    // @ts-expect-error onUnsaved is required
+    const without = <Wizard />;
+    expect(without.type).toBe(Wizard);
   });
 
   it("says when state.json could not be read, never that no theme is applied", async () => {

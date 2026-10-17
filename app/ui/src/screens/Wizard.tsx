@@ -35,7 +35,7 @@ export function Wizard({
 }: {
   /** The wizard went home with `settings` that could not be saved: the app keeps them in memory,
    * and its shell says that the wizard shows again at the next start (fix I1). */
-  onUnsaved?: (settings: AppSettings, error: unknown) => void;
+  onUnsaved: (settings: AppSettings, error: unknown) => void;
 }) {
   const ipc = useIpc();
   const { t, language, setLanguage } = useI18n();
@@ -168,7 +168,7 @@ export function Wizard({
       try {
         await saveSettings(next);
       } catch (e) {
-        onUnsaved?.(next, e);
+        onUnsaved(next, e);
       }
     }
     go({ name: "home" });
