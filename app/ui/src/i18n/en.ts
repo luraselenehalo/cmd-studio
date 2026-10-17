@@ -110,6 +110,7 @@ export const en = {
   "apply.undoFailed": "The undo did not go through, so nothing changed: the theme is still applied.",
   "apply.undoIncomplete": "The undo did not go through, and not everything could be put back. Fix these by hand:",
   "apply.undoStopped": "The undo stopped part-way. See why below.",
+  "apply.undoRefused": "Nothing was undone: the undo was refused. See why below.",
   "apply.undoNotRestorable": "This apply can no longer be undone.",
   "apply.failed": "The theme could not be applied. Everything was put back as it was.",
   "apply.failedIncomplete": "The theme could not be applied, and not everything could be put back. Fix these by hand:",

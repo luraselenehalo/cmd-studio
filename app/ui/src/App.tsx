@@ -6,15 +6,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AppSettings } from "./bindings/AppSettings";
 import type { ApplyOutcome } from "./bindings/ApplyOutcome";
-import type { RestoreOutcome } from "./bindings/RestoreOutcome";
 import type { Target } from "./bindings/Target";
-import { ErrorNotice, Notice, NotesList, UnrestoredList } from "./components/Notices";
-import { I18nProvider, pick, useI18n, type Language } from "./i18n";
+import { AfterApplyBar } from "./components/AfterApplyBar";
+import { ErrorNotice, Notice } from "./components/Notices";
+import { I18nProvider, useI18n, type Language } from "./i18n";
 import { useIpc } from "./ipc/context";
 import { NavContext, useNav, type Nav, type Route } from "./router";
 import { Editor } from "./screens/Editor";
 import { Themes } from "./screens/Themes";
-import { AppStateContext, DEFAULT_SETTINGS, useAppState, type AppState } from "./state";
+import { AppStateContext, DEFAULT_SETTINGS, type AppState } from "./state";
 
 export function App() {
   const ipc = useIpc();
@@ -143,142 +143,6 @@ function Shell({ startError, resetFrom, appliedTarget }: { startError: unknown; 
           {route.name === "editor" ? <Editor key={route.id} id={route.id} /> : <Themes />}
         </main>
       </div>
-    </>
-  );
-}
-
-type UndoResult = { kind: "restore"; outcome: RestoreOutcome } | { kind: "error"; error: unknown };
-
-/**
- * Spec §4.4: after every apply, "Theme X applied · open a new cmd window…" (a new cmd tab in
- * Windows Terminal when that is where the theme went) with Undo, which goes back to that apply's
- * own restore point (ruling R3). Undo is offered for a committed apply only: a rolled-back one
- * carries a restore point too, but nothing of it is left to undo. What the undo did stays on the
- * bar after the apply it undid is gone from it (ruling R4).
- */
-function AfterApplyBar({ target }: { target: Target }) {
-  const ipc = useIpc();
-  const { t } = useI18n();
-  const { lastApply, setLastApply, bump } = useAppState();
-  const [result, setResult] = useState<UndoResult | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  // A new apply replaces what the last undo said.
-  useEffect(() => {
-    if (lastApply) setResult(null);
-  }, [lastApply]);
-
-  const offer = lastApply && lastApply.status === "committed" && lastApply.snapshotId ? lastApply : null;
-  if (!offer && !result) return null;
-
-  const undo = async () => {
-    const snapshotId = offer?.snapshotId;
-    if (!snapshotId) return;
-    setBusy(true);
-    setResult(null);
-    try {
-      const outcome = await ipc.snapshotRestore(snapshotId);
-      setResult({ kind: "restore", outcome });
-      // The apply is gone from the bar once it is undone, or can no longer be.
-      if (outcome.status === "notRestorable" || outcome.undone.includes(snapshotId)) setLastApply(null);
-      bump();
-    } catch (e) {
-      setResult({ kind: "error", error: e });
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div className="bar">
-      <div style={{ flex: 1 }}>
-        {offer && <span role="status">{t(target === "wt" ? "apply.doneWt" : "apply.done", { name: offer.themeName })}</span>}
-        {result && <UndoResultView result={result} />}
-      </div>
-      {offer && (
-        <button type="button" disabled={busy} onClick={() => void undo()}>
-          {t("apply.undo")}
-        </button>
-      )}
-      <button
-        type="button"
-        className="link"
-        onClick={() => {
-          setLastApply(null);
-          setResult(null);
-        }}
-      >
-        {t("common.dismiss")}
-      </button>
-    </div>
-  );
-}
-
-/** How the bar's Undo went, in its own words for each outcome (ruling R4). */
-function UndoResultView({ result }: { result: UndoResult }) {
-  const { t, language } = useI18n();
-  if (result.kind === "error") return <ErrorNotice error={result.error} />;
-  const { outcome } = result;
-  const last = outcome.last;
-  const notes = [...outcome.notes, ...(last?.notes ?? [])];
-  if (outcome.status === "done") {
-    return (
-      <>
-        <div className="notice ok" role="status">
-          {t("apply.undone")}
-          {last && last.fontsLeft.length > 0 && (
-            <ul className="plain-list">
-              {last.fontsLeft.map((f, i) => (
-                <li key={i}>{pick(language, f.messageTh, f.messageEn)}</li>
-              ))}
-            </ul>
-          )}
-        </div>
-        <NotesList notes={notes} />
-      </>
-    );
-  }
-  if (outcome.status === "notRestorable") {
-    return (
-      <>
-        <div className="notice warn" role="alert">
-          {t("apply.undoNotRestorable")}
-        </div>
-        <NotesList notes={notes} />
-      </>
-    );
-  }
-  // Stopped: the undo that ran last says why.
-  if (last?.status === "rolledBack") {
-    return (
-      <>
-        <div className="notice error" role="alert">
-          {t("apply.undoFailed")}
-        </div>
-        {last.error && <ErrorNotice error={last.error} />}
-        <NotesList notes={notes} />
-      </>
-    );
-  }
-  if (last?.status === "rollbackIncomplete") {
-    return (
-      <>
-        <div className="notice error" role="alert">
-          {t("apply.undoIncomplete")}
-        </div>
-        <UnrestoredList steps={last.unrestored} />
-        {last.error && <ErrorNotice error={last.error} />}
-        <NotesList notes={notes} />
-      </>
-    );
-  }
-  return (
-    <>
-      <div className="notice warn" role="alert">
-        {t("apply.undoStopped")}
-      </div>
-      {last?.error && <ErrorNotice error={last.error} />}
-      <NotesList notes={notes} />
     </>
   );
 }

@@ -324,8 +324,11 @@ describe("the after-apply bar", () => {
     expect(snapshotId).toBeTruthy();
     expect(screen.getByText(/open a new cmd window/)).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Undo" }));
-    expect(await screen.findByText("Undone: everything is as it was before.")).toBeTruthy();
+    const undone = await screen.findByText("Undone: everything is as it was before.");
     expect(restore).toHaveBeenCalledWith(snapshotId);
+    // The Undo button is gone with the apply: focus goes to what the undo said (fix 9).
+    await waitFor(() => expect(document.activeElement).not.toBe(document.body));
+    expect(document.activeElement?.contains(undone)).toBe(true);
     expect(ipc.state.applied).toBeNull();
     expect(screen.queryByRole("button", { name: "Undo" })).toBeNull();
     await waitFor(() => expect(screen.queryByText("In use")).toBeNull());
@@ -384,6 +387,46 @@ describe("the after-apply bar", () => {
     await user.click(screen.getByRole("button", { name: "Undo" }));
     expect(await screen.findByText("The undo did not go through, and not everything could be put back. Fix these by hand:")).toBeTruthy();
     expect(screen.getByText("Close Windows Terminal and copy settings.json back from the restore point.")).toBeTruthy();
+  });
+
+  it("says nothing was undone when the very first undo was refused (fix 8)", async () => {
+    const { ipc, user } = mount();
+    await openThemes(user);
+    await applyFromCard(user, "Nord");
+    vi.spyOn(ipc, "snapshotRestore").mockResolvedValue({
+      status: "stopped",
+      undone: [],
+      last: null,
+      notes: [
+        {
+          code: "E_BUSY",
+          messageTh: "(E_BUSY)",
+          messageEn: "(E_BUSY)",
+          details: "the next undo was refused, so the restore stopped there: another command is running",
+        },
+      ],
+    });
+    await user.click(screen.getByRole("button", { name: "Undo" }));
+    expect(await screen.findByText("Nothing was undone: the undo was refused. See why below.")).toBeTruthy();
+    expect(screen.queryByText("The undo stopped part-way. See why below.")).toBeNull();
+    expect(screen.getByText("(E_BUSY)")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Undo" })).toBeTruthy();
+  });
+
+  it("announces an apply in one live region only (fix 12)", async () => {
+    const { user } = mount();
+    await openThemes(user);
+    await user.click(within(await card("Paper")).getByRole("button", { name: "Apply" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(await within(dialog).findByRole("button", { name: "Apply" }));
+    await within(dialog).findByText(/Theme "Paper" applied/);
+    // The bar is there too, with the same words, but only the dialog's outcome is live.
+    expect(screen.getAllByText(/Theme "Paper" applied/)).toHaveLength(2);
+    const live = Array.from(document.querySelectorAll('[role="status"], [role="alert"], [aria-live]')).filter((el) =>
+      /Theme "Paper" applied/.test(el.textContent ?? ""),
+    );
+    expect(live).toHaveLength(1);
+    expect(dialog.contains(live[0]!)).toBe(true);
   });
 
   it("says to open a new cmd tab in Windows Terminal when the target is Windows Terminal", async () => {
