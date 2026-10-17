@@ -1,6 +1,10 @@
-# The test VMs' clean snapshots have no Visual C++ runtime: without this the DLL imports
+# The test VMs' clean snapshots may have no Visual C++ runtime: without this the DLL imports
 # VCRUNTIME140.dll, Windows cannot load it (error 126) and Clink never gets as far as running it,
 # so spike S11 would fail for a reason that is not Clink's. With the C runtime linked in, the DLL
 # imports kernel32 only, and DllMain is reached.
+#
+# This file applies only when cargo runs from this crate's folder (cargo reads .cargo\config.toml
+# from the working directory upwards, not from --manifest-path). After a build,
+# `dumpbin /dependents clink_dll_x64.dll` must list KERNEL32.dll and nothing else.
 [build]
 rustflags = ["-C", "target-feature=+crt-static"]

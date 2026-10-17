@@ -69,13 +69,19 @@ if ($exe -notmatch '^[\x00-\x7F]*$') {
   $short = (New-Object -ComObject Scripting.FileSystemObject).GetFolder($data).ShortPath
   $launch = Join-Path $short 'runtime\clink-1.9.34\clink_x64.exe'
 }
-& $launch --profile $profileDir set clink.path $gen | Out-Null
-& $launch --profile $profileDir set clink.logo none | Out-Null
-& $launch --profile $profileDir set clink.autoupdate off | Out-Null
-& $launch --profile $profileDir set prompt.transient off | Out-Null
-# S4, S5: Clink's own program loads the scripts too; what the probe printed there.
+# Clink prints a Lua run-time error with puts, on stdout, and a native program's stderr line would
+# end this script under 'Stop': so every line comes back as a string, with 'Continue' inside.
+function Clink-Set([string[]] $Words) {
+  $ErrorActionPreference = 'Continue'
+  & $launch --profile $profileDir set @Words 2>&1 | ForEach-Object { "$_" }
+}
+# The four settings: their own chatter is hidden, a Lua error (...lua:<n>: ...) never is.
+foreach ($setting in @('clink.path', $gen), @('clink.logo', 'none'), @('clink.autoupdate', 'off'), @('prompt.transient', 'off')) {
+  Clink-Set $setting | Where-Object { $_ -match '\.lua:\d+:' }
+}
+# S4, S5: Clink's own program loads the scripts too; everything it printed there, as it printed it.
 "clink set said:"
-& $launch --profile $profileDir set clink.logo 2>&1 | Select-String '^p3b '
+Clink-Set @('clink.logo')
 Set-ItemProperty $key AutoRun "(if exist `"$launch`" `"$launch`" inject --autorun --quiet --profile `"$profileDir`")"
 "AutoRun: $((Get-ItemProperty $key).AutoRun)"
 "data: $data"
