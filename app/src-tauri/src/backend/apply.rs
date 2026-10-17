@@ -885,7 +885,7 @@ mod tests {
             ]
         );
         assert_eq!(plan.summary_en[0], "Update the prompt and the welcome box");
-        assert_eq!(plan.summary_th[0], "ปรับ prompt และกล่องต้อนรับตามธีม");
+        assert_eq!(plan.summary_th[0], "ปรับพร้อมท์และกล่องต้อนรับตามธีม");
         assert!(plan.warnings.is_empty() && plan.notes.is_empty() && plan.unrestored.is_empty());
         assert!(plan.replaces_other_clink.is_empty());
         assert_eq!(plan.digest.len(), 64);

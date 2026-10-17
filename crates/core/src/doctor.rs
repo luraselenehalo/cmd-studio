@@ -259,7 +259,7 @@ fn d2(sys: System<'_>, ctx: &Ctx, state: &Result<State, StateError>) -> Check {
             "D2",
             Status::Ok,
             None,
-            "ตัวสร้าง prompt ทำงานได้",
+            "ตัวสร้างพร้อมท์ทำงานได้",
             "The prompt add-on runs",
             format!("oh-my-posh version: {OMP_VERSION}"),
         ),
@@ -267,7 +267,7 @@ fn d2(sys: System<'_>, ctx: &Ctx, state: &Result<State, StateError>) -> Check {
             "D2",
             Status::Fail,
             Some("E_RUNTIME_MISSING"),
-            format!("ตัวสร้าง prompt ไม่ใช่รุ่นที่แนบมา {SEE_D1_TH}"),
+            format!("ตัวสร้างพร้อมท์ไม่ใช่เวอร์ชันที่แนบมา {SEE_D1_TH}"),
             format!("The prompt add-on is not the bundled version. {SEE_D1_EN}"),
             format!(
                 "oh-my-posh version printed \"{}\" (exit {})",
@@ -279,7 +279,7 @@ fn d2(sys: System<'_>, ctx: &Ctx, state: &Result<State, StateError>) -> Check {
             "D2",
             Status::Fail,
             Some("E_RUNTIME_MISSING"),
-            format!("ตัวสร้าง prompt ทำงานไม่ได้ {SEE_D1_TH}"),
+            format!("ตัวสร้างพร้อมท์ทำงานไม่ได้ {SEE_D1_TH}"),
             format!("The prompt add-on does not run. {SEE_D1_EN}"),
             e.to_string(),
         ),
@@ -522,7 +522,7 @@ fn d4(sys: System<'_>, ctx: &Ctx, state: &Result<State, StateError>) -> Check {
             "D4",
             Status::Fail,
             Some("E_AUTORUN_WRITE"),
-            "การตั้งค่าที่เปิดธีมไม่ได้อยู่หน้าสุด หรือเป็นของรุ่นเก่า ให้ใช้ธีมซ้ำ",
+            "การตั้งค่าที่เปิดธีมไม่ได้อยู่หน้าสุด หรือเป็นของเวอร์ชันเก่า ให้ใช้ธีมซ้ำ",
             "The setting that loads the theme is not first, or is an older one. Apply the theme \
              again",
             current,
@@ -609,7 +609,7 @@ fn d5(sys: System<'_>, ctx: &Ctx) -> Check {
             "D5",
             Status::Warn,
             Some("E_AUTORUN_FOREIGN_CLINK"),
-            "มีส่วนเสริมของ cmd ตัวอื่นตั้งไว้ prompt ของธีมอาจไม่ขึ้น \
+            "มีส่วนเสริมของ cmd ตัวอื่นตั้งไว้ พร้อมท์ของธีมอาจไม่ขึ้น \
              ให้ใช้ธีมซ้ำแล้วเลือก \"ใช้ของ CMD Studio แทน\"",
             "Another cmd add-on is set up; the theme's prompt may not show. Apply the theme again \
              and choose to use CMD Studio's instead",
@@ -621,7 +621,7 @@ fn d5(sys: System<'_>, ctx: &Ctx) -> Check {
             "D5",
             Status::Warn,
             Some("E_AUTORUN_FOREIGN_CLINK"),
-            "มีส่วนเสริมของ cmd ที่ติดตั้งไว้ทั้งเครื่อง prompt ของธีมอาจไม่ทำงาน \
+            "มีส่วนเสริมของ cmd ที่ติดตั้งไว้ทั้งเครื่อง พร้อมท์ของธีมอาจไม่ทำงาน \
              แต่สีใน Windows Terminal ยังใช้ได้",
             "A cmd add-on is set up for the whole machine; the theme's prompt may not work, but \
              the colors in Windows Terminal still do",
@@ -896,8 +896,8 @@ fn d9(sys: System<'_>, state: &Result<State, StateError>) -> Check {
                      moment",
                 ),
                 StateError::Newer { .. } => (
-                    "บันทึกของ CMD Studio (state.json) มาจาก CMD Studio รุ่นที่ใหม่กว่า \
-                     ให้ใช้รุ่นนั้น หรืออัปเดต CMD Studio",
+                    "บันทึกของ CMD Studio (state.json) มาจาก CMD Studio เวอร์ชันที่ใหม่กว่า \
+                     ให้ใช้เวอร์ชันนั้น หรืออัปเดต CMD Studio",
                     "CMD Studio's record (state.json) was written by a newer CMD Studio. Use that \
                      version, or update CMD Studio",
                 ),
@@ -1009,7 +1009,7 @@ fn d11(sys: System<'_>) -> Check {
             "D11",
             Status::Skipped,
             None,
-            format!("ตรวจข้อนี้ไม่ได้ เพราะอ่านรุ่นของ Windows ไม่ได้: {why}"),
+            format!("ตรวจข้อนี้ไม่ได้ เพราะอ่านเวอร์ชันของ Windows ไม่ได้: {why}"),
             format!("Not checked: could not read the Windows build: {why}"),
             "",
         );
@@ -1583,6 +1583,14 @@ mod tests {
         let thai = |s: &str| s.chars().any(|c| ('\u{0e00}'..='\u{0e7f}').contains(&c));
         for c in &checks {
             assert!(thai(&c.message_th), "no Thai text: {c:?}");
+            // The UI shows this text, so it keeps th.ts's words (V4): พร้อมท์ for the prompt,
+            // เวอร์ชัน for a version, "ส่วนของ CMD Studio", and จุดย้อนกลับ, never สำรอง.
+            for word in ["prompt", "รุ่น", "เรา", "สำรอง"] {
+                assert!(
+                    !c.message_th.to_lowercase().contains(word),
+                    "{word:?} in the Thai text: {c:?}"
+                );
+            }
             assert!(!c.message_en.is_empty() && !thai(&c.message_en), "{c:?}");
             match c.status {
                 Status::Ok => assert_eq!(c.code, None, "{c:?}"),

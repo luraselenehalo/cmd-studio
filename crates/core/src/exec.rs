@@ -519,7 +519,7 @@ impl<'a> SystemExecutor<'a> {
                 "{file} now holds another build of the font than the one CMD Studio installed \
                  (it was installed again over it)"
             ),
-            format!("ไฟล์ {file} ตอนนี้เป็นฟอนต์คนละรุ่นกับที่ CMD Studio ติดตั้ง (มีการติดตั้งทับภายหลัง)"),
+            format!("ไฟล์ {file} ตอนนี้เป็นฟอนต์คนละเวอร์ชันกับที่ CMD Studio ติดตั้ง (มีการติดตั้งทับภายหลัง)"),
         ))
     }
 
@@ -2241,6 +2241,14 @@ mod tests {
         assert_eq!((m.fs.snapshot(), m.fonts.snapshot()), themed);
         let [left] = ex.fonts_left().try_into().unwrap();
         assert_eq!(left.family, NERD_FONT_FAMILY);
+        // The Thai reason is shown in the UI: a version is เวอร์ชัน there, never รุ่น (V4).
+        assert_eq!(
+            left.why_th,
+            format!(
+                "ไฟล์ {} ตอนนี้เป็นฟอนต์คนละเวอร์ชันกับที่ CMD Studio ติดตั้ง (มีการติดตั้งทับภายหลัง)",
+                dest.display()
+            )
+        );
     }
 
     #[test]

@@ -411,7 +411,7 @@ pub fn plan(
             contents: clink::settings(theme.prompt.transient, &paths.generated()),
         },
     ];
-    let mut th = vec!["ปรับ prompt และกล่องต้อนรับตามธีม"];
+    let mut th = vec!["ปรับพร้อมท์และกล่องต้อนรับตามธีม"];
     let mut en = vec!["Update the prompt and the welcome box"];
     let mut warnings = Vec::new();
 
@@ -711,6 +711,9 @@ mod tests {
         );
         assert!(p.summary_th.contains(&"ให้ cmd ทุกหน้าต่างใช้ธีมนี้"));
         assert!(p.summary_en.contains(&"Use this theme in every cmd window"));
+        // The UI shows these lines: the prompt is พร้อมท์ there, as in th.ts (V4).
+        assert_eq!(p.summary_th[0], "ปรับพร้อมท์และกล่องต้อนรับตามธีม");
+        assert_eq!(p.summary_en[0], "Update the prompt and the welcome box");
         assert!(p.warnings.is_empty());
     }
 

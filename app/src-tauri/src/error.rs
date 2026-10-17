@@ -54,7 +54,7 @@ const MEANINGS: &[(&str, &str, &str)] = &[
     ),
     (
         "E_AUTORUN_WRITE",
-        r#"เขียน AutoRun ไม่ได้ หรือแก้อย่างปลอดภัยไม่ได้จึงต้องแก้ด้วยมือ หรือ (D4) ส่วนของเราหายไปหรือไม่อยู่หน้าสุด"#,
+        r#"เขียน AutoRun ไม่ได้ หรือแก้อย่างปลอดภัยไม่ได้จึงต้องแก้ด้วยมือ หรือ (D4) ส่วนของ CMD Studio หายไปหรือไม่อยู่หน้าสุด"#,
         r#"AutoRun could not be written, or can't be changed safely and needs a hand edit, or (D4) CMD Studio's part is gone or not first"#,
     ),
     (
@@ -99,7 +99,7 @@ const MEANINGS: &[(&str, &str, &str)] = &[
     ),
     (
         "E_THEME_NEWER_SCHEMA",
-        r#"ไฟล์ธีมมาจากโปรแกรมรุ่นใหม่กว่า"#,
+        r#"ไฟล์ธีมมาจากโปรแกรมเวอร์ชันใหม่กว่า"#,
         r#"The theme file comes from a newer version"#,
     ),
     (
@@ -114,7 +114,7 @@ const MEANINGS: &[(&str, &str, &str)] = &[
     ),
     (
         "E_UNSUPPORTED_PLATFORM",
-        r#"เครื่องนี้ไม่ใช่ Windows แบบ x64 (เช่น ARM64) ส่วนเสริมที่แนบมากับ v1 มีแต่รุ่น x64"#,
+        r#"เครื่องนี้ไม่ใช่ Windows แบบ x64 (เช่น ARM64) ส่วนเสริมที่แนบมากับ v1 มีแต่แบบ x64"#,
         r#"This machine is not x64 Windows (for example ARM64); the add-ons bundled with v1 are x64 only"#,
     ),
     (
@@ -124,7 +124,7 @@ const MEANINGS: &[(&str, &str, &str)] = &[
     ),
     (
         "E_STATE_INVALID",
-        r#"ใช้ `state.json` ไม่ได้ เพราะไฟล์เสีย ถูกแก้ เปิดไม่ได้ หรือเขียนโดย CMD Studio รุ่นที่ใหม่กว่า · ไฟล์ที่เปิดไม่ได้หรือมาจากรุ่นใหม่กว่าจะไม่ถูกเขียนทับ ส่วนไฟล์ที่เสีย "ย้อนกลับ" จะเอา `state.json` ก่อนใช้ธีมครั้งนั้นมาแทน และ "ย้อนทุกอย่าง" กับ `--cleanup` จะเปลี่ยนชื่อเป็น `state.json.damaged-<ms>` เก็บไว้ให้ดู"#,
+        r#"ใช้ `state.json` ไม่ได้ เพราะไฟล์เสีย ถูกแก้ เปิดไม่ได้ หรือเขียนโดย CMD Studio เวอร์ชันที่ใหม่กว่า · ไฟล์ที่เปิดไม่ได้หรือมาจากเวอร์ชันใหม่กว่าจะไม่ถูกเขียนทับ ส่วนไฟล์ที่เสีย "ย้อนกลับ" จะเอา `state.json` ก่อนใช้ธีมครั้งนั้นมาแทน และ "ย้อนทุกอย่าง" กับ `--cleanup` จะเปลี่ยนชื่อเป็น `state.json.damaged-<ms>` เก็บไว้ให้ดู"#,
         r#"state.json can't be used: it is damaged, was edited, could not be opened, or was written by a newer CMD Studio. One that could not be opened or is from a newer CMD Studio is never written over; a damaged one is replaced by undo with the state.json from before that apply, and renamed state.json.damaged-<ms> by Revert everything and --cleanup"#,
     ),
     (
@@ -139,7 +139,7 @@ const MEANINGS: &[(&str, &str, &str)] = &[
     ),
     (
         "E_THEME_NOT_LOADED",
-        r#"ใช้ธีมแล้วแต่ยังไม่มีหน้าต่าง cmd ไหนโหลดธีม ให้เปิดหน้าต่างใหม่ ในโหมด "cmd ทุกหน้าต่าง" ถ้าเปิดแล้วยังเป็นแบบนี้ แปลว่า cmd หยุดก่อนถึงส่วนของเราใน AutoRun ต้องแก้ค่า AutoRun ด้วยมือ ส่วนโหมด "เฉพาะใน Windows Terminal" ให้เปิดแท็บ cmd ใหม่ใน WT และถ้ายังเป็นแบบนี้ให้ใช้ธีมซ้ำ (D3)"#,
+        r#"ใช้ธีมแล้วแต่ยังไม่มีหน้าต่าง cmd ไหนโหลดธีม ให้เปิดหน้าต่างใหม่ ในโหมด "cmd ทุกหน้าต่าง" ถ้าเปิดแล้วยังเป็นแบบนี้ แปลว่า cmd หยุดก่อนถึงส่วนของ CMD Studio ใน AutoRun ต้องแก้ค่า AutoRun ด้วยมือ ส่วนโหมด "เฉพาะใน Windows Terminal" ให้เปิดแท็บ cmd ใหม่ใน WT และถ้ายังเป็นแบบนี้ให้ใช้ธีมซ้ำ (D3)"#,
         r#"The theme is applied, but no cmd window has loaded it yet: open a new one. For every cmd window, if a new window does not load it either, cmd stops before CMD Studio's part of AutoRun, and AutoRun needs a hand edit; for Windows Terminal only, open a new cmd tab there, and if that does not load it either, apply the theme again (D3)"#,
     ),
     (
@@ -299,6 +299,32 @@ mod tests {
         rows
     }
 
+    /// The Thai text these rows of spec §5.9 still hold, though `MEANINGS` has V4's words now
+    /// (the Thai of the UI follows th.ts: "version" is เวอร์ชัน, never รุ่น; the part of
+    /// AutoRun is "ส่วนของ CMD Studio", never "ส่วนของเรา"). Task 3 of phase 3 edits the spec's
+    /// rows; until then each of these must still read exactly so. Once a row says what
+    /// `MEANINGS` says, the test fails and asks for its entry here to be deleted; with the last
+    /// one gone, delete this list and the match in `the_meanings_are_exactly_the_rows_of_spec_5_9`.
+    const SPEC_NOT_YET_AT_V4: &[(&str, &str)] = &[
+        (
+            "E_AUTORUN_WRITE",
+            r#"เขียน AutoRun ไม่ได้ หรือแก้อย่างปลอดภัยไม่ได้จึงต้องแก้ด้วยมือ หรือ (D4) ส่วนของเราหายไปหรือไม่อยู่หน้าสุด"#,
+        ),
+        ("E_THEME_NEWER_SCHEMA", r#"ไฟล์ธีมมาจากโปรแกรมรุ่นใหม่กว่า"#),
+        (
+            "E_UNSUPPORTED_PLATFORM",
+            r#"เครื่องนี้ไม่ใช่ Windows แบบ x64 (เช่น ARM64) ส่วนเสริมที่แนบมากับ v1 มีแต่รุ่น x64"#,
+        ),
+        (
+            "E_STATE_INVALID",
+            r#"ใช้ `state.json` ไม่ได้ เพราะไฟล์เสีย ถูกแก้ เปิดไม่ได้ หรือเขียนโดย CMD Studio รุ่นที่ใหม่กว่า · ไฟล์ที่เปิดไม่ได้หรือมาจากรุ่นใหม่กว่าจะไม่ถูกเขียนทับ ส่วนไฟล์ที่เสีย "ย้อนกลับ" จะเอา `state.json` ก่อนใช้ธีมครั้งนั้นมาแทน และ "ย้อนทุกอย่าง" กับ `--cleanup` จะเปลี่ยนชื่อเป็น `state.json.damaged-<ms>` เก็บไว้ให้ดู"#,
+        ),
+        (
+            "E_THEME_NOT_LOADED",
+            r#"ใช้ธีมแล้วแต่ยังไม่มีหน้าต่าง cmd ไหนโหลดธีม ให้เปิดหน้าต่างใหม่ ในโหมด "cmd ทุกหน้าต่าง" ถ้าเปิดแล้วยังเป็นแบบนี้ แปลว่า cmd หยุดก่อนถึงส่วนของเราใน AutoRun ต้องแก้ค่า AutoRun ด้วยมือ ส่วนโหมด "เฉพาะใน Windows Terminal" ให้เปิดแท็บ cmd ใหม่ใน WT และถ้ายังเป็นแบบนี้ให้ใช้ธีมซ้ำ (D3)"#,
+        ),
+    ];
+
     #[test]
     fn the_meanings_are_exactly_the_rows_of_spec_5_9() {
         let spec = spec_rows();
@@ -315,7 +341,14 @@ mod tests {
         );
         for (code, (th, en)) in &here {
             let (spec_th, spec_en) = &spec[code];
-            assert_eq!(th, spec_th, "{code}: the Thai text differs from spec §5.9");
+            match SPEC_NOT_YET_AT_V4.iter().find(|(c, _)| *c == code.as_str()) {
+                // Still the words before V4; the entry goes once the spec has caught up.
+                Some((_, old)) => assert_eq!(
+                    spec_th, old,
+                    "{code}: spec §5.9 no longer holds the old Thai text: delete its entry in SPEC_NOT_YET_AT_V4"
+                ),
+                None => assert_eq!(th, spec_th, "{code}: the Thai text differs from spec §5.9"),
+            }
             assert_eq!(
                 en, spec_en,
                 "{code}: the English text differs from spec §5.9"
@@ -332,6 +365,35 @@ mod tests {
     }
 
     #[test]
+    fn the_listed_spec_rows_are_the_ones_whose_words_changed() {
+        // Each entry of SPEC_NOT_YET_AT_V4 is a row of MEANINGS whose Thai text is not the
+        // spec's, and no other row differs: nothing hides in the list.
+        let spec = spec_rows();
+        for (code, th, _) in MEANINGS {
+            let listed = SPEC_NOT_YET_AT_V4.iter().any(|(c, _)| c == code);
+            let differs = spec[*code].0 != *th;
+            assert_eq!(
+                listed, differs,
+                "{code}: listed in SPEC_NOT_YET_AT_V4 = {listed}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_thai_text_of_the_table_says_prompt_we_or_backup() {
+        // th.ts's conventions (V4): the prompt is พร้อมท์, never the English word; CMD Studio's
+        // part is "ส่วนของ CMD Studio", never "เรา"; the app says จุดย้อนกลับ, never สำรอง.
+        for (code, th, _) in MEANINGS {
+            for word in ["prompt", "เรา", "สำรอง"] {
+                assert!(
+                    !th.to_lowercase().contains(word),
+                    "{code}: the Thai text says {word:?}: {th}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_core_error_keeps_its_code_and_its_own_words() {
         let e = AppError::from(ActionError::Busy);
         assert_eq!(e.code, "E_BUSY");
@@ -341,7 +403,7 @@ mod tests {
         // One passed on from another module: the row's texts, the core's English as detail.
         let e = AppError::from(ThemeError::NewerSchema(7));
         assert_eq!(e.code, "E_THEME_NEWER_SCHEMA");
-        assert_eq!(e.message_th, "ไฟล์ธีมมาจากโปรแกรมรุ่นใหม่กว่า");
+        assert_eq!(e.message_th, "ไฟล์ธีมมาจากโปรแกรมเวอร์ชันใหม่กว่า");
         assert_eq!(e.message_en, "The theme file comes from a newer version");
         assert!(e.details.contains("schemaVersion 7"), "{}", e.details);
         // The codes are the rows of spec §5.9 and no other: a code that is not a row becomes

@@ -287,7 +287,7 @@ export function createMockIpc(options: MockOptions = {}): Ipc & { state: MockSta
       { kind: "writeGenerated", detail: "clink_settings" },
     ];
     const summaryEn = ["Update the prompt and the welcome box"];
-    const summaryTh = ["ปรับ prompt และกล่องต้อนรับตามธีม"];
+    const summaryTh = ["ปรับพร้อมท์และกล่องต้อนรับตามธีม"];
     const warnings: ApplyPlan["warnings"] = [];
     if (options.noWindowsTerminal) {
       warnings.push({ kind: "noWindowsTerminal" });
@@ -359,7 +359,7 @@ export function createMockIpc(options: MockOptions = {}): Ipc & { state: MockSta
             fix: "openNewCmdWindow",
           }
         : skip("D3"),
-      applied ? ok("D4", "AutoRun holds CMD Studio's entry first", "AutoRun มีส่วนของเราอยู่หน้าสุด") : skip("D4"),
+      applied ? ok("D4", "AutoRun holds CMD Studio's entry first", "AutoRun มีส่วนของ CMD Studio อยู่หน้าสุด") : skip("D4"),
       options.otherClink?.length
         ? {
             id: "D5",

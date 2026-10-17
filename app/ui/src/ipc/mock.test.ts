@@ -180,6 +180,23 @@ describe("the mock IPC", () => {
     expect(reverted.steps.map((s) => s.error)).toEqual([null, null]);
   });
 
+  it("words its Thai as the Rust side does: พร้อมท์ for the prompt, ส่วนของ CMD Studio, never เรา (V4)", async () => {
+    const ipc = createMockIpc();
+    const themeId = (await ipc.themesList()).themes[0]!.id;
+    const request = { themeId, target: "all" as const, setWtDefaultProfile: true, replaceOtherClink: false };
+    const planned = await ipc.planApply(request);
+    if (planned.kind !== "ready") throw new Error("not ready");
+    expect(planned.plan.summaryTh[0]).toBe("ปรับพร้อมท์และกล่องต้อนรับตามธีม");
+    expect((await ipc.apply(request, planned.plan.digest, () => {})).status).toBe("committed");
+    const d4 = (await ipc.doctorRun()).checks.find((c) => c.id === "D4")!;
+    expect(d4.messageTh).toBe("AutoRun มีส่วนของ CMD Studio อยู่หน้าสุด");
+    // None of the Thai it gives says the English word, "we" or a backup (the guard over the app's
+    // error table, error.rs, is the same).
+    for (const text of [...planned.plan.summaryTh, d4.messageTh]) {
+      for (const word of ["prompt", "เรา", "สำรอง", "รุ่น"]) expect(text, word).not.toContain(word);
+    }
+  });
+
   it("reports the build, the Store and Windows Terminal as it is told, working nothing out (Q3)", async () => {
     let report = await createMockIpc().systemDetect();
     expect([report.build, report.storeAvailable, report.wtInstalled]).toEqual([26100, true, true]);
