@@ -117,8 +117,16 @@ describe("the theme library", () => {
     await waitFor(() => expect(document.activeElement).toBe(heading));
     expect(ipc.state.mine.map((t) => t.name)).toEqual(["My Terracotta"]);
     expect((screen.getByLabelText("Theme name") as HTMLInputElement).value).toBe("My Terracotta");
-    // Advanced mode shows the 23 colors; a hand edit makes the recipe null.
-    await user.click(screen.getByRole("tab", { name: "Advanced" }));
+    // Advanced mode shows the 23 colors; a hand edit makes the recipe null. The modes are two
+    // toggle buttons in a named group, not tabs (item 9).
+    const modes = screen.getByRole("group", { name: "Color mode" });
+    expect(screen.queryAllByRole("tab")).toEqual([]);
+    await user.click(within(modes).getByRole("button", { name: "Simple" }));
+    expect(within(modes).getByRole("button", { name: "Simple", pressed: true })).toBeTruthy();
+    expect(within(modes).getByRole("button", { name: "Advanced", pressed: false })).toBeTruthy();
+    await user.click(within(modes).getByRole("button", { name: "Advanced" }));
+    expect(within(modes).getByRole("button", { name: "Advanced", pressed: true })).toBeTruthy();
+    expect(within(modes).getByRole("button", { name: "Simple", pressed: false })).toBeTruthy();
     expect(screen.getByLabelText("Frame")).toBeTruthy();
     expect(screen.getByLabelText("Bright white")).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Save" }));
@@ -182,7 +190,7 @@ describe("the theme library", () => {
     // The dictionary's button starts with a verb (spec §4.5): "Create a theme".
     await user.click(screen.getByRole("button", { name: "Create a theme" }));
     await screen.findByRole("heading", { name: "Edit theme" });
-    expect(screen.getByRole("tab", { name: "Simple", selected: true })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Simple", pressed: true })).toBeTruthy();
     expect(ipc.state.drafts).toHaveLength(1);
     expect(ipc.state.drafts[0]?.simple).toEqual({ accent: "#d97757", tint: 0.1 });
     // Powerline switches the font to the Nerd Font and says so.

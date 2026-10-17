@@ -432,11 +432,13 @@ export function Editor({ id }: { id: string }) {
             </label>
           </fieldset>
 
-          <div className="tabs" role="tablist" aria-label={t("editor.colors.title")}>
-            <button type="button" role="tab" aria-selected={state.mode === "simple"} onClick={() => dispatch({ type: "setMode", mode: "simple" })}>
+          {/* Two toggle buttons in a named group, as the library's filter is (item 9): the tab
+              pattern would need arrow keys and tab panels, which this switch does not have. */}
+          <div className="tabs" role="group" aria-label={t("editor.mode.label")}>
+            <button type="button" aria-pressed={state.mode === "simple"} onClick={() => dispatch({ type: "setMode", mode: "simple" })}>
               {t("editor.mode.simple")}
             </button>
-            <button type="button" role="tab" aria-selected={state.mode === "advanced"} onClick={() => dispatch({ type: "setMode", mode: "advanced" })}>
+            <button type="button" aria-pressed={state.mode === "advanced"} onClick={() => dispatch({ type: "setMode", mode: "advanced" })}>
               {t("editor.mode.advanced")}
             </button>
           </div>

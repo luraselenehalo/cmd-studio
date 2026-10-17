@@ -177,6 +177,7 @@ export const en = {
   "editor.title": "Edit theme",
   "editor.name": "Theme name",
   "editor.author": "Author",
+  "editor.mode.label": "Color mode",
   "editor.mode.simple": "Simple",
   "editor.mode.advanced": "Advanced",
   "editor.simple.tone": "Tone",

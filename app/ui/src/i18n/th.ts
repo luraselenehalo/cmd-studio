@@ -181,6 +181,7 @@ export const th: Dictionary = {
   "editor.title": "แก้ธีม",
   "editor.name": "ชื่อธีม",
   "editor.author": "ผู้สร้าง",
+  "editor.mode.label": "โหมดตั้งสี",
   "editor.mode.simple": "โหมดง่าย",
   "editor.mode.advanced": "โหมดละเอียด",
   "editor.simple.tone": "โทน",

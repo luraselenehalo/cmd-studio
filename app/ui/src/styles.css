@@ -411,7 +411,8 @@ legend {
   border-bottom: 1px solid var(--border);
   margin-bottom: 1rem;
 }
-.tabs button[aria-selected="true"] {
+.tabs button[aria-selected="true"],
+.tabs button[aria-pressed="true"] {
   border-bottom: 0.1875rem solid var(--accent);
   border-radius: var(--radius) var(--radius) 0 0;
 }
