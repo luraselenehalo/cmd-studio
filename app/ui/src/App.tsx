@@ -15,6 +15,7 @@ import { NavContext, useNav, type Nav, type Route } from "./router";
 import { Editor } from "./screens/Editor";
 import { Themes } from "./screens/Themes";
 import { AppStateContext, DEFAULT_SETTINGS, type AppState } from "./state";
+import { useRouteFocus } from "./useRouteFocus";
 
 export function App() {
   const ipc = useIpc();
@@ -94,33 +95,7 @@ function Shell({ startError, resetFrom, appliedTarget }: { startError: unknown; 
   const { t } = useI18n();
   const { route, go } = useNav();
   const main = useRef<HTMLElement>(null);
-  const started = useRef(false);
-
-  // A route change puts focus on the new screen's heading (spec §4.5), so a keyboard or
-  // screen-reader user lands on its title. A screen that is still loading gets it once its
-  // heading appears; an open dialog keeps the focus it took. The first screen leaves focus at
-  // the top of the page.
-  useEffect(() => {
-    if (!started.current) {
-      started.current = true;
-      return;
-    }
-    const box = main.current;
-    if (!box) return;
-    const focusHeading = (): boolean => {
-      if (box.querySelector('[role="dialog"]')) return true;
-      const heading = box.querySelector<HTMLElement>("h1");
-      if (!heading) return false;
-      heading.focus();
-      return true;
-    };
-    if (focusHeading()) return;
-    const observer = new MutationObserver(() => {
-      if (focusHeading()) observer.disconnect();
-    });
-    observer.observe(box, { childList: true, subtree: true });
-    return () => observer.disconnect();
-  }, [route]);
+  useRouteFocus(route, main);
 
   const onThemes = route.name === "themes" || route.name === "editor";
 
