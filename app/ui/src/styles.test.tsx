@@ -113,11 +113,44 @@ describe("pages that fit and scroll at Windows' Text size 150 % (F2)", () => {
     }
   });
 
-  it("stacks the editor's form and preview where less than 36rem is left, measured on the box that holds only them", () => {
+  /** The `@container editor (...)` rule of the stylesheet: its condition and what is inside it. */
+  function editorContainerRule(css: string): { condition: string; body: string } {
+    const start = css.indexOf("@container editor (");
+    expect(start, "an @container editor rule").toBeGreaterThanOrEqual(0);
+    const open = css.indexOf("{", start);
+    let depth = 0;
+    let end = open;
+    for (; end < css.length; end++) {
+      if (css[end] === "{") depth++;
+      if (css[end] === "}" && --depth === 0) break;
+    }
+    return { condition: css.slice(start + "@container editor ".length, open).trim(), body: css.slice(open + 1, end) };
+  }
+
+  it("stacks the editor, the preview on top, exactly where its form would get less than 20rem", () => {
     expect(declared(".editor-box", "container-type")).toBe("inline-size");
     const css = readFileSync(join(import.meta.dirname, "styles.css"), "utf8");
-    expect(css).toMatch(/@container editor \(max-width: 36rem\)\s*\{\s*\.editor\s*\{\s*grid-template-columns: minmax\(0, 1fr\);/);
-    // The editor's own track list is unchanged above that: the form, and a 22 to 28rem preview.
-    expect(declared(".editor", "grid-template-columns")).toBe("minmax(0, 1fr) minmax(22rem, 28rem)");
+    const { condition, body } = editorContainerRule(css);
+    // Side by side the preview takes its 28rem before the form gets anything, so the form is what
+    // the box leaves after the preview and the gap. It is 20rem where the box is 20 + gap + 28.
+    const tracks = declared(".editor", "grid-template-columns");
+    expect(tracks).toBe("minmax(0, 1fr) minmax(22rem, 28rem)");
+    const previewMax = Number(/minmax\(22rem, ([\d.]+)rem\)/.exec(tracks ?? "")?.[1]);
+    const gap = Number(/^([\d.]+)rem$/.exec(declared(".editor", "gap") ?? "")?.[1]);
+    expect(condition).toBe(`(width < ${20 + gap + previewMax}rem)`);
+    // Under it: one column, the preview above the form (it is the later in the page, so `order`),
+    // and not stuck to the top of the window.
+    expect(body).toMatch(/\.editor\s*\{\s*grid-template-columns: minmax\(0, 1fr\);\s*\}/);
+    expect(body).toMatch(/\.editor \.preview-column\s*\{[^}]*\border: -1;/);
+    expect(body).toMatch(/\.editor \.preview-column\s*\{[^}]*\bposition: static;/);
+    // What that leaves of the windows of the spec at Text size 100 % (16 px a rem): the box is the
+    // window less the sidebar, the page's side padding and a 17 px scrollbar. The 1100 px default
+    // keeps two columns and a form of at least 20rem; the 900 px minimum stacks.
+    const sidebar = Number(/^([\d.]+)rem /.exec(declared(".shell", "grid-template-columns") ?? "")?.[1]);
+    const sidePadding = Number(/^[\d.]+rem ([\d.]+)rem /.exec(declared("main", "padding") ?? "")?.[1]);
+    const box = (windowWidth: number) => (windowWidth - (sidebar + 2 * sidePadding) * 16 - 17) / 16;
+    expect(box(1100) - gap - previewMax).toBeGreaterThanOrEqual(20);
+    expect(box(1100)).toBeGreaterThanOrEqual(20 + gap + previewMax);
+    expect(box(900)).toBeLessThan(20 + gap + previewMax);
   });
 });

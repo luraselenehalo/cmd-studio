@@ -409,12 +409,17 @@ legend {
   border-bottom: 1px solid var(--border);
 }
 
-/* The editor's form and its preview side by side. Where the room is narrower than 36rem (Windows'
-   Text size 150 % on a 1024 px screen leaves about 25rem: the form would be a sliver beside a
-   22rem preview), they stack, the preview below the form, so nothing is squeezed or cut off. The
-   room is measured on `.editor-box`, which holds only the two columns: a container's contents
-   cannot be positioned against the window (`position: fixed`), and the dialogs are outside it.
-   At 100 % the narrowest window (900 px) leaves 38rem, so it keeps the two columns it has. */
+/* The editor's form and its preview side by side, the preview 28rem wide when there is room (22rem
+   at least) and the form what is left. Where the form would get less than 20rem they stack
+   instead, the preview ABOVE the form so the colors are in sight while the first fields are
+   edited: that is where the box is narrower than 20 + 1.5 (the gap) + 28 = 49.5rem. At Text size
+   100 % the 1100 px default window leaves the box 50.7rem (the form is 21.2rem) and keeps the two
+   columns; the 900 px minimum leaves 38.2rem (the form would be 8.7rem) and stacks, as does a
+   1024 px screen at Text size 150 % (the box is then 25rem). The room is measured on
+   `.editor-box`, which holds only the two columns: a container's contents cannot be positioned
+   against the window (`position: fixed`), and the dialogs are outside it. The preview is the
+   later in the page, so it is lifted with `order`, which moves it on the screen and leaves the
+   Tab order as it is. */
 .editor-box {
   container-name: editor;
   container-type: inline-size;
@@ -429,12 +434,13 @@ legend {
   position: sticky;
   top: 4rem;
 }
-@container editor (max-width: 36rem) {
+@container editor (width < 49.5rem) {
   .editor {
     grid-template-columns: minmax(0, 1fr);
   }
   .editor .preview-column {
     position: static;
+    order: -1;
   }
 }
 .color-grid {
