@@ -9,7 +9,9 @@ import { CrashNotice, ErrorBoundary } from "./components/ErrorBoundary";
 import { IpcProvider } from "./ipc/context";
 import type { Ipc } from "./ipc/types";
 
-/** Never rejects. `reload` is for tests. */
+/** Resolves with the root once the app, or the notice of why it could not start, is given to it
+ * to render. A failure to pick the IPC is shown, never thrown; `createRoot` is outside the try
+ * because without a root there is nowhere to show anything. `reload` is for tests. */
 export async function start(container: HTMLElement, pickIpc: () => Promise<Ipc>, reload?: () => void): Promise<Root> {
   const root = createRoot(container);
   let ipc: Ipc;
