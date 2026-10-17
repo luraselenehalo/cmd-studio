@@ -60,9 +60,11 @@ pub struct WtInfo {
     pub kind: WtKind,
     /// Its folder exists.
     pub installed: bool,
-    /// Its settings.json exists. One that is installed but was never opened has none yet (D6),
-    /// and an apply sets it up from CMD Studio's template, colours included (founder 2026-10-17,
-    /// spec §5.4): `installed` without `hasSettings` is such a one.
+    /// Its settings.json exists. A Store or Preview one that is installed but was never opened
+    /// has none yet (D6), and an apply sets it up from CMD Studio's template, colours included
+    /// (founder 2026-10-17, spec §5.4). Two are left alone: a Preview while the Store one has a
+    /// settings.json (it copies that one when it first starts), and an unpackaged folder without
+    /// one, which is a leftover, not a Terminal.
     pub has_settings: bool,
 }
 
