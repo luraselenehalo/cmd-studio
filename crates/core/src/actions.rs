@@ -1404,6 +1404,21 @@ pub(crate) mod testing {
     use crate::resources::NERD_FONT_FILE;
     use std::path::Path;
 
+    /// The words the Thai texts the UI shows must not use (V4, th.ts's conventions): the prompt
+    /// is พร้อมท์, a version is เวอร์ชัน (never รุ่น), CMD Studio's part is "ส่วนของ CMD Studio"
+    /// (never เรา), and the app says จุดย้อนกลับ (never สำรอง).
+    pub(crate) const BANNED_THAI_WORDS: [&str; 4] = ["prompt", "รุ่น", "เรา", "สำรอง"];
+
+    /// Fails when `th`, a Thai text the UI shows, uses a word of [`BANNED_THAI_WORDS`]; `what`
+    /// says whose text it is. "Command Prompt" is the name Windows Terminal gives cmd's profile,
+    /// which the user finds in its settings file as it is, so that name is not the word.
+    pub(crate) fn assert_thai_words(th: &str, what: &dyn std::fmt::Debug) {
+        let text = th.replace("Command Prompt", "").to_lowercase();
+        for word in BANNED_THAI_WORDS {
+            assert!(!text.contains(word), "{word:?} in the Thai text: {what:?}");
+        }
+    }
+
     pub(crate) const WT: &str = r"C:\Users\tester\AppData\Local\Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\settings.json";
     pub(crate) const SETTINGS: &str = include_str!("../tests/fixtures/wt/default.json");
 

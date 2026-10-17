@@ -1583,14 +1583,8 @@ mod tests {
         let thai = |s: &str| s.chars().any(|c| ('\u{0e00}'..='\u{0e7f}').contains(&c));
         for c in &checks {
             assert!(thai(&c.message_th), "no Thai text: {c:?}");
-            // The UI shows this text, so it keeps th.ts's words (V4): พร้อมท์ for the prompt,
-            // เวอร์ชัน for a version, "ส่วนของ CMD Studio", and จุดย้อนกลับ, never สำรอง.
-            for word in ["prompt", "รุ่น", "เรา", "สำรอง"] {
-                assert!(
-                    !c.message_th.to_lowercase().contains(word),
-                    "{word:?} in the Thai text: {c:?}"
-                );
-            }
+            // The UI shows this text, so it keeps th.ts's words (V4).
+            crate::actions::testing::assert_thai_words(&c.message_th, c);
             assert!(!c.message_en.is_empty() && !thai(&c.message_en), "{c:?}");
             match c.status {
                 Status::Ok => assert_eq!(c.code, None, "{c:?}"),

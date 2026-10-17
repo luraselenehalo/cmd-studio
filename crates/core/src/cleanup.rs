@@ -1953,7 +1953,7 @@ fn newer_state_by_hand(data: &Path) -> FixByHand {
              changes with it; or, if you do not need what it recorded, delete {data} by hand."
         ),
         th: format!(
-            "ติดตั้ง CMD Studio รุ่นใหม่กว่าที่เขียนไฟล์ state.json นี้ แล้วใช้รุ่นนั้นเอาสิ่งที่ CMD Studio \
+            "ติดตั้ง CMD Studio เวอร์ชันใหม่กว่าที่เขียนไฟล์ state.json นี้ แล้วใช้เวอร์ชันนั้นเอาสิ่งที่ CMD Studio \
              เปลี่ยนออก หรือถ้าไม่ต้องการค่าที่บันทึกไว้แล้ว ให้ลบ {data} เอง"
         ),
     }
@@ -1962,6 +1962,7 @@ fn newer_state_by_hand(data: &Path) -> FixByHand {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::actions::testing::assert_thai_words;
     use crate::actions::testing::{machine, request, SETTINGS, WT};
     use crate::actions::{prepare_apply, run_apply, undo, UndoResult};
     use crate::adapters::{AutoRun, Fonts, Fs, RegValue, REG_EXPAND_SZ, REG_SZ};
@@ -1969,6 +1970,54 @@ mod tests {
     use crate::plan::{autorun_entry, ClinkLaunch, NERD_FONT_FAMILY};
     use crate::presets::terracotta;
     use std::path::PathBuf;
+
+    /// Every Thai way-out text of a report is shown by the UI (as `StepReport.fixTh`), so it
+    /// keeps th.ts's words (V4): the same banned words as the doctor's texts.
+    fn thai_fixes_keep_the_ui_words(report: &Report) {
+        for step in &report.steps {
+            if let Some(fix) = &step.fix {
+                assert_thai_words(&fix.th, step);
+            }
+        }
+    }
+
+    // These two stand in for the real ones in every test below, which all go through them: no
+    // test's report can hold a Thai fix text with a banned word.
+    fn revert_all(sys: System<'_>, ctx: &Ctx) -> Result<Report, ActionError> {
+        let report = super::revert_all(sys, ctx)?;
+        thai_fixes_keep_the_ui_words(&report);
+        Ok(report)
+    }
+
+    fn cleanup(sys: System<'_>, ctx: &Ctx, remove_themes: bool) -> Result<Report, ActionError> {
+        let report = super::cleanup(sys, ctx, remove_themes)?;
+        thai_fixes_keep_the_ui_words(&report);
+        Ok(report)
+    }
+
+    #[test]
+    fn every_way_out_text_keeps_the_ui_words() {
+        // The builders that need no machine, called directly, so a text no scenario above
+        // reaches is checked too (autorun_original_by_hand, settings_by_hand and the step fixes
+        // are reached by the scenarios).
+        let data = Path::new(r"C:Users	esterAppDataLocalCMD Studio");
+        let font = FontRecord {
+            family: NERD_FONT_FAMILY.to_string(),
+            file: PathBuf::from(r"C:Users	esteronts.ttf"),
+            value_name: "CaskaydiaCove NF (TrueType)".to_string(),
+        };
+        for fix in [
+            autorun_by_hand("cmd /d", r"C:dataclink-profile"),
+            autorun_not_text_by_hand(r"C:dataclink-profile"),
+            held_file_by_hand(&font.file),
+            font_by_hand(&font),
+            folder_by_hand(data),
+            records_by_hand(data),
+            newer_state_by_hand(data),
+        ] {
+            assert_thai_words(&fix.th, &fix);
+        }
+    }
 
     fn apply(m: &crate::adapters::fake::FakeMachine, ctx: &Ctx, target: Target) {
         let p = prepare_apply(m.system(), ctx, &terracotta(), &request(target)).unwrap();
