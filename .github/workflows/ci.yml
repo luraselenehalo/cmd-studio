@@ -1,6 +1,7 @@
 # CI on a throwaway Windows runner: format, four clippy runs, the pinned runtimes,
 # the normal tests, then the system tests that change this runner's real AutoRun and fonts.
-# The `app` job checks the desktop app crate and its TypeScript bindings on a runner of its own.
+# The `app` job checks the UI (types, tests, build), the desktop app crate and its TypeScript
+# bindings, and builds the app's exe with `tauri build`, on a runner of its own.
 name: ci
 on:
   push:
@@ -106,8 +107,9 @@ jobs:
           name: system-tests-log
           path: system-tests.txt
           if-no-files-found: ignore
-  # The app (Phase 2b): the app crate, its tests over the in-memory machine, and the bindings'
-  # freshness. Separate from the Rust job so a UI failure and a Rust failure read apart. (The
+  # The app (Phases 2b and 2c): the UI's type-check, tests and build, a check that the built UI
+  # holds no mock or preset data, the bindings' freshness, the app crate, and the Tauri build that
+  # makes the exe. Separate from the Rust job so a UI failure and a Rust failure read apart. (The
   # `windows` job's workspace runs cover the app crate too: its clippy and its tests.)
   app:
     runs-on: windows-latest
@@ -122,6 +124,69 @@ jobs:
           rustup --version
           rustup toolchain install
           cargo --version
+      # Node 24.21.0, the version app/.nvmrc names (the same pin as `engines` in package.json).
+      - name: Install the Node pinned in app/.nvmrc
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: app/.nvmrc
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      # `npm ci`, never `npm install`: it installs exactly what app/package-lock.json says and
+      # fails when package.json and the lockfile disagree.
+      - name: Install the UI's packages exactly as locked
+        working-directory: app
+        run: npm ci
+      - name: Type-check the UI
+        working-directory: app
+        run: npm run typecheck
+      - name: UI tests (vitest, against the mocked IPC)
+        working-directory: app
+        run: npm test
+      # Before the Rust steps below: the app crate embeds app/ui/dist when it compiles.
+      - name: Build the UI
+        working-directory: app
+        run: npm run build
+      # The mock IPC and the preset files serve the tests and the visual check only. main.tsx
+      # imports the mock behind VITE_MOCK_IPC, which is unset in this job, so the production build
+      # drops it. Search what `vite build` wrote for what only the mock or a preset file holds:
+      # the mock's sample machine and user, and the id of the Terracotta preset (read from its
+      # file). Any hit fails the job. The positive control runs first: `CaskaydiaCove NF` is in
+      # the UI's own texts, so a dist that does not hold it (an empty or misplaced build, a
+      # wrong path) fails here instead of passing with "nothing found". The sample home is
+      # searched with two backslashes, as a JavaScript string writes it, and with one, as a
+      # raw string would.
+      - name: The built UI holds no mock data and no preset file
+        shell: bash
+        run: |
+          shopt -s nullglob
+          files=(app/ui/dist/assets/*.js)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::app/ui/dist/assets holds no .js file: the UI build wrote nothing to check"
+            exit 1
+          fi
+          if ! grep -q -a -F -e 'CaskaydiaCove NF' "${files[@]}"; then
+            echo "::error::positive control failed: 'CaskaydiaCove NF' is not in app/ui/dist/assets/*.js, so this search would find nothing even if the mock were bundled"
+            exit 1
+          fi
+          # An id that is missing or short would match unrelated text (or nothing), so node
+          # prints it only when it is a string of at least 8 characters.
+          if ! preset_id="$(node -e "const id = JSON.parse(require('fs').readFileSync('presets/terracotta.cmdtheme', 'utf8')).id; if (typeof id === 'string' && id.length >= 8) console.log(id); else process.exit(1)")"; then
+            echo "::error::presets/terracotta.cmdtheme has no usable id to search for"
+            exit 1
+          fi
+          leaked=0
+          for needle in 'TESTPC' 'C:\\Users\\tester' 'C:\Users\tester' "$preset_id"; do
+            # -o -b prints each hit as file:offset:text; a bundle is one huge line, so -n would
+            # print all of it.
+            if grep -a -o -b -F -e "$needle" "${files[@]}"; then
+              echo "::error::the built UI contains '$needle': the mock IPC or a preset file was bundled"
+              leaked=1
+            fi
+          done
+          if [ "$leaked" -ne 0 ]; then
+            exit 1
+          fi
+          echo "no mock data or preset id in ${#files[@]} bundled .js file(s)"
       - name: Cache the pinned runtimes and font
         uses: actions/cache@v4
         with:
@@ -149,10 +214,29 @@ jobs:
         run: cargo clippy -p cmdstudio-app --all-targets -- -D warnings
       - name: Tests of the app crate (backend over the in-memory machine)
         run: cargo test -p cmdstudio-app
-      # A compile check only: this exe is never shipped and never run, here or in a VM. No cargo
-      # build enables `tauri/custom-protocol`, so to Tauri it is a "dev build"; with no `devUrl`
-      # in tauri.conf.json (pinned by config_guard.rs) it embeds the UI rather than loading a dev
-      # server, but it is still not the app. The real exe is made by `npx tauri build` (the 2c
-      # plan's Task 7).
-      - name: Release build of the exe (a compile check, not run)
-        run: cargo build -p cmdstudio-app --release
+      # The exe, made by the Tauri CLI and by nothing else. `tauri build` runs `beforeBuildCommand`
+      # (`npm run build`, the same command as the UI step above, with the same environment),
+      # then a release cargo build with `tauri/custom-protocol`, which is what makes the exe the
+      # app: a plain `cargo build --release` exe is a Tauri "dev build" (it embeds the UI too,
+      # as tauri.conf.json has no `devUrl`, pinned by config_guard.rs, but it is not the app) and
+      # is neither built here nor uploaded. So this one step is also the release compile check;
+      # a separate `cargo build --release` would compile the same crates twice and write a
+      # second, different cmdstudio.exe to the same path. No bundle: Phase 4 turns it on.
+      # The exe lands in the workspace's target/, not in app/.
+      - name: Tauri build (no bundle)
+        working-directory: app
+        run: npx tauri build --no-bundle
+      # `if-no-files-found: error` below fails only when NONE of the paths match, and resources/
+      # always does, so a missing exe would pass it. Fail here instead, naming the file.
+      - name: The exe is where the artifact expects it
+        shell: bash
+        run: ls -l target/release/cmdstudio.exe
+      # For the VM check of spec §1 criterion 1 (phase 3 plan, Task 4): the exe and the
+      # resources it expects next to it (it reads them from `resources/` beside itself).
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cmdstudio-exe
+          path: |
+            target/release/cmdstudio.exe
+            resources/
+          if-no-files-found: error
