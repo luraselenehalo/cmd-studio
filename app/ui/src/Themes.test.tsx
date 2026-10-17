@@ -769,6 +769,45 @@ describe("the editor", () => {
     await waitFor(() => expect(ipc.state.drafts.map((d) => d.author.endsWith("Q"))).toEqual([true]), { timeout: 3000 });
   });
 
+  it("keeps a new theme never saved when its edit is undone, with the content it was made with (round 2, fix 1)", async () => {
+    const { ipc, user } = mount();
+    await openThemes(user);
+    await user.click(screen.getByRole("button", { name: "Create a theme" }));
+    await screen.findByRole("heading", { name: "Edit theme" });
+    // The draft is the theme: there is no other copy of it.
+    const created = structuredClone(ipc.state.drafts[0]!);
+    await user.type(screen.getByLabelText("Author"), "Q");
+    await waitFor(() => expect(ipc.state.drafts[0]?.author).toBe("Q"), { timeout: 3000 });
+    await user.click(screen.getByRole("heading", { name: "Edit theme" }));
+    await user.keyboard("{Control>}z{/Control}");
+    await user.click(screen.getByRole("button", { name: "Back to themes" }));
+    await screen.findByRole("heading", { name: "Themes" });
+    await waitFor(() => expect(ipc.state.drafts).toEqual([created]));
+    expect(within(await card(created.name)).getByText("Draft")).toBeTruthy();
+  });
+
+  it("keeps a reopened theme never saved as it was reopened, when its edit is undone (round 2, fix 1)", async () => {
+    const { ipc, user } = await mountWith(async (m) => {
+      const base = (await m.themeGet(presetId("Paper"))).theme;
+      await m.themeSave({ ...base, id: "0b4a9a3c-6f0e-4c1e-9d7a-2f5b8e1c3d4a", name: "Never saved", author: "as reopened" }, true);
+    });
+    const reopened = structuredClone(ipc.state.drafts[0]!);
+    await openThemes(user);
+    await user.click(within(await card("Never saved")).getByRole("button", { name: "Edit" }));
+    await screen.findByRole("heading", { name: "Edit theme" });
+    await user.type(screen.getByLabelText("Author"), "Q");
+    await waitFor(() => expect(ipc.state.drafts[0]?.author).toBe("as reopenedQ"), { timeout: 3000 });
+    await user.click(screen.getByRole("heading", { name: "Edit theme" }));
+    await user.keyboard("{Control>}z{/Control}");
+    // A second later the draft is the theme as reopened again: written back, never removed.
+    await waitFor(() => expect(ipc.state.drafts).toEqual([reopened]), { timeout: 3000 });
+    await user.click(screen.getByRole("button", { name: "Back to themes" }));
+    await screen.findByRole("heading", { name: "Themes" });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(ipc.state.drafts).toEqual([reopened]);
+    expect(within(await card("Never saved")).getByText("Draft")).toBeTruthy();
+  });
+
   it("says a draft that could not be taken away, on the page and on the next screen, and takes it on Try again", async () => {
     let refuse = true;
     const { ipc, user } = await mountWith((m) => {

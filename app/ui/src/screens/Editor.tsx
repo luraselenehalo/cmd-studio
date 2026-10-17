@@ -90,6 +90,9 @@ export function Editor({ id }: { id: string }) {
   /** The theme the last save stored, set the moment the save lands: the page may go before it
    * draws that save, so leaving compares with this, not with the last render (item 2). */
   const lastSaved = useRef<Theme | null>(null);
+  /** The theme was loaded as an unsaved draft (source "draft"): its draft file IS the theme
+   * (library.rs `theme_get`), the only copy of it until a save (round 2, fix 1). */
+  const draftOnly = useRef(false);
   /** The user chose to go back without the draft: leaving writes none. */
   const abandoned = useRef(false);
   /** What the page holds as of its last render, for leaving (fix 1). */
@@ -100,6 +103,14 @@ export function Editor({ id }: { id: string }) {
 
   /** The theme as it is stored: the last save's, else the one the page was loaded with. */
   const storedTheme = (s: EditorState): Theme => lastSaved.current ?? s.savedTheme;
+
+  /**
+   * Whether `theme` belongs in the draft file: when it differs from the stored theme, and always
+   * while the theme is draft-only and never saved, since that file is then the theme itself.
+   * Back at the loaded theme it is written back, never taken away (round 2, fix 1).
+   */
+  const wantsDraft = (s: EditorState, theme: Theme): boolean =>
+    theme !== storedTheme(s) || (draftOnly.current && lastSaved.current === null);
 
   /** Writes `draft` after any draft write or removal still running, so they land in order. */
   const writeDraft = (draft: Theme): Promise<void> => {
@@ -119,7 +130,8 @@ export function Editor({ id }: { id: string }) {
    */
   const dropDraft = (): Promise<boolean> => {
     const drop = pendingDraft.current.then(async () => {
-      if (lastDraft.current === null) return false;
+      // A draft that is the theme is never taken away (round 2, fix 1).
+      if (lastDraft.current === null || (draftOnly.current && lastSaved.current === null)) return false;
       await ipc.themeDelete(id, true);
       lastDraft.current = null;
       return true;
@@ -133,20 +145,20 @@ export function Editor({ id }: { id: string }) {
 
   /**
    * Brings the stored draft in line with `last` as the page goes, once any save still running
-   * has ended (item 2): writes `last.theme` when it differs from the stored theme and was not
-   * written yet, or takes the page's draft away when it is the stored theme again (item 1).
-   * Says whether the library changed, or what could not be done.
+   * has ended (item 2): writes `last.theme` when it belongs in the draft file (`wantsDraft`) and
+   * was not written yet, or takes the page's draft away when it is the stored theme again (item
+   * 1). Says whether the library changed, or what could not be done.
    */
   const settleDraft = async (last: EditorState): Promise<{ changed: boolean; problem: DraftProblem | null }> => {
     await saveRun.current;
-    const dirty = last.theme !== storedTheme(last);
+    const write = wantsDraft(last, last.theme);
     try {
-      if (!dirty) return { changed: await dropDraft(), problem: null };
+      if (!write) return { changed: await dropDraft(), problem: null };
       if (last.theme === lastDraft.current) return { changed: false, problem: null };
       await writeDraft(last.theme);
       return { changed: true, problem: null };
     } catch (error) {
-      const problem: DraftProblem = dirty ? { kind: "write", draft: last.theme, error } : { kind: "remove", id, error };
+      const problem: DraftProblem = write ? { kind: "write", draft: last.theme, error } : { kind: "remove", id, error };
       return { changed: false, problem };
     }
   };
@@ -183,6 +195,9 @@ export function Editor({ id }: { id: string }) {
         setReport(sys.report);
         setDetectError(sys.error);
         setSample(sampleContext(sys.report?.previewSample ?? CORE_SAMPLE_IDENTITY));
+        // A draft-only theme's draft file holds the theme as loaded: that is the draft written.
+        draftOnly.current = detail.source === "draft";
+        if (draftOnly.current) lastDraft.current = detail.theme;
         dispatch({ type: "load", theme: detail.theme });
         if (detail.draft) setDraftOffer({ draft: detail.draft, stored: detail.theme });
       },
@@ -245,7 +260,7 @@ export function Editor({ id }: { id: string }) {
   useEffect(() => {
     if (!draftTheme || !state || draftTheme !== state.theme) return;
     if (draftOffer || saveRun.current) return;
-    const dirty = draftTheme !== storedTheme(state);
+    const dirty = wantsDraft(state, draftTheme);
     if (dirty && draftTheme === lastDraft.current) return;
     let alive = true;
     (dirty ? writeDraft(draftTheme).then(() => true) : dropDraft()).then(
@@ -419,7 +434,7 @@ export function Editor({ id }: { id: string }) {
   const leave = async () => {
     await saveRun.current;
     const { state: last, draftOffer: offer } = latest.current;
-    if (last && !offer && last.theme !== storedTheme(last) && last.theme !== lastDraft.current) {
+    if (last && !offer && wantsDraft(last, last.theme) && last.theme !== lastDraft.current) {
       try {
         await writeDraft(last.theme);
       } catch (e) {
