@@ -12,6 +12,7 @@ import { useState, type ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
 import type { ApplyRequest } from "../bindings/ApplyRequest";
 import type { PreviewResult } from "../bindings/PreviewResult";
+import type { Theme } from "../bindings/Theme";
 import type { ThemeSummary } from "../bindings/ThemeSummary";
 import { I18nProvider, type Language } from "../i18n";
 import { IpcProvider } from "../ipc/context";
@@ -150,6 +151,59 @@ describe("TerminalPreview", () => {
     expect(layer.style.opacity).toBe("0.3");
     expect(layer.style.backgroundColor).not.toBe("");
     expect(layer.contains(text)).toBe(false);
+  });
+
+  /** A result with this text on its prompt row, in one span of the theme's foreground color. */
+  function withText(...texts: string[]): { theme: Theme; result: PreviewResult } {
+    const theme = structuredClone(PRESETS.find((p) => p.name === "Nord")!);
+    const prompt = texts.map((text) => [{ text, fg: theme.colors.foreground, bg: null, bold: false }]);
+    return { theme, result: { banner: [], prompt } };
+  }
+
+  it("draws a glyph the font may lack in a box exactly one cell wide, and changes no text (V2)", () => {
+    // The welcome box's rows as the core draws them: the icon U+273B is one cell for the core,
+    // for conhost and for Windows Terminal, but Cascadia Mono has none, so a fallback font draws
+    // it wider than 1ch and pushes the frame's right edge out.
+    const { theme, result } = withText(
+      "╭──────────────────────────────────────────╮",
+      "│ ✻ Welcome back, tester!                  │",
+      "╰──────────────────────────────────────────╯",
+      " Tips: help for commands · cls to clear · ↑ for history",
+      "✗ 1 ❯ npm test \u{e0b0}",
+    );
+    mount(<TerminalPreview theme={theme} result={result} />);
+    const preview = screen.getByRole("img", { name: "Preview of the cmd window" });
+    const boxes = Array.from(preview.querySelectorAll<HTMLElement>(".cell"));
+    // Each of the glyphs is in a box of its own, one cell wide.
+    expect(boxes.map((b) => b.textContent)).toEqual(["✻", "↑", "✗", "❯", "\u{e0b0}"]);
+    for (const box of boxes) expect(box.style.width, box.textContent ?? "").toBe("1ch");
+    // The text is the core's, untouched: what is copied and what a screen reader would find in
+    // the preview's text is the same as without the boxes.
+    const pre = preview.querySelector("pre") as HTMLElement;
+    expect(pre.textContent).toBe(`${result.prompt.map((line) => line.map((span) => span.text).join("")).join("\n")}\n`);
+    // The preview is still one image to a screen reader, named by its label.
+    expect(preview.getAttribute("aria-label")).toBe("Preview of the cmd window");
+  });
+
+  it("leaves what a monospace font draws in one cell on its own, and what is two cells wide", () => {
+    const { theme, result } = withText(
+      "C:\\Users\\tester> dir ░▒▓█ ┌─┐ │ ╰╯ Ñ é · \u{a0}",
+      "中文 한글 ＡＢ 📁 ✅ \u{2764}\u{fe0f}",
+    );
+    mount(<TerminalPreview theme={theme} result={result} />);
+    const preview = screen.getByRole("img", { name: "Preview of the cmd window" });
+    // ASCII, Latin, the box-drawing and block blocks are in Cascadia Mono, and a wide character
+    // takes the two cells its font gives it: none of them is put in a one-cell box.
+    expect(preview.querySelectorAll(".cell")).toHaveLength(0);
+  });
+
+  it("keeps a letter together with its marks in one box, as the core counts them (Thai is 3 cells in ผู้ใช้)", () => {
+    // ผู้ใช้ : the core counts ผ, ใ and ช as one cell each and the vowel and tone marks as none.
+    const { theme, result } = withText("C:\\Users\\ผู้ใช้>");
+    mount(<TerminalPreview theme={theme} result={result} />);
+    const boxes = Array.from(screen.getByRole("img", { name: "Preview of the cmd window" }).querySelectorAll<HTMLElement>(".cell"));
+    expect(boxes.map((b) => b.textContent)).toEqual(["ผู้", "ใ", "ช้"]);
+    for (const box of boxes) expect(box.style.width).toBe("1ch");
   });
 });
 
