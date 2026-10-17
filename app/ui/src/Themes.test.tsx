@@ -7,7 +7,7 @@
 // undo step each (R9); the preview's sample is this computer's (R1); numbers are whole; a draft
 // that cannot be saved is said; a library problem is in the chosen language; a route change
 // puts focus on the screen's heading.
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { ApplyOutcome } from "./bindings/ApplyOutcome";
@@ -88,6 +88,20 @@ function holdApply(ipc: MockIpc): () => void {
     return apply(request, digest, onProgress);
   });
   return () => release();
+}
+
+/** A mount whose `paletteGenerate` answers only when its gate is opened, once `held.on` is set:
+ * each held call adds its gate to `held.gates`, in the order the calls came. */
+async function mountHoldingPalette() {
+  const held = { on: false, gates: [] as (() => void)[] };
+  const mounted = await mountWith((m) => {
+    const generate = m.paletteGenerate.bind(m);
+    vi.spyOn(m, "paletteGenerate").mockImplementation(async (tone, accent, tint) => {
+      if (held.on) await new Promise<void>((resolve) => held.gates.push(resolve));
+      return generate(tone, accent, tint);
+    });
+  });
+  return { ...mounted, held };
 }
 
 /** Opens the editor on a copy of `preset` made by Customize. */
@@ -599,6 +613,54 @@ describe("the editor", () => {
     await user.click(screen.getByRole("button", { name: "Undo" }));
     expect((screen.getByRole("radio", { name: "Dark" }) as HTMLInputElement).checked).toBe(true);
     expect((screen.getByRole("button", { name: "Undo" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("keeps a hand edit made while a palette answer was on its way (item 5)", async () => {
+    const { user, held } = await mountHoldingPalette();
+    await openThemes(user);
+    await user.click(screen.getByRole("button", { name: "Create a theme" }));
+    await screen.findByRole("heading", { name: "Edit theme" });
+    held.on = true;
+    await user.click(screen.getByRole("radio", { name: "Light" }));
+    await waitFor(() => expect(held.gates).toHaveLength(1));
+    // Meanwhile the user sets a color by hand.
+    await user.click(screen.getByRole("button", { name: "Advanced" }));
+    fireEvent.change(screen.getByLabelText("Background"), { target: { value: "#123456" } });
+    await act(async () => {
+      held.gates[0]?.();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect((screen.getByLabelText("Background") as HTMLInputElement).value).toBe("#123456");
+    await user.click(screen.getByRole("button", { name: "Simple" }));
+    expect((screen.getByRole("radio", { name: "Dark" }) as HTMLInputElement).checked).toBe(true);
+  });
+
+  it("lets the newest palette request win, whichever answer comes first (item 5)", async () => {
+    for (const order of [
+      [0, 1],
+      [1, 0],
+    ]) {
+      const { user, held, view } = await mountHoldingPalette();
+      await openThemes(user);
+      await user.click(screen.getByRole("button", { name: "Create a theme" }));
+      await screen.findByRole("heading", { name: "Edit theme" });
+      held.on = true;
+      // The label also holds the value shown beside the slider.
+      const tint = screen.getByLabelText(/^Background tint/);
+      fireEvent.change(tint, { target: { value: "0.2" } });
+      fireEvent.change(tint, { target: { value: "0.25" } });
+      await waitFor(() => expect(held.gates).toHaveLength(2));
+      // One answer at a time, the page drawn after each.
+      for (const i of order) {
+        await act(async () => {
+          held.gates[i]?.();
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        });
+      }
+      expect(screen.queryByText("0.25"), `answers in the order ${order.join(", ")}`).not.toBeNull();
+      expect(screen.queryByText("0.20"), `answers in the order ${order.join(", ")}`).toBeNull();
+      view.unmount();
+    }
   });
 
   it("undoes with Ctrl+Z and redoes with Ctrl+Y, on a Thai keyboard layout too", async () => {

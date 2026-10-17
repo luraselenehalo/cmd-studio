@@ -76,6 +76,8 @@ export function Editor({ id }: { id: string }) {
   /** The theme the last draft save wrote (or the draft that was taken up): not written again. */
   const lastDraft = useRef<Theme | null>(null);
   const applies = useRef(0);
+  /** Counts the regenerates of simple mode: only the newest one's answer is used (item 5). */
+  const regenerations = useRef(0);
   const heading = useRef<HTMLHeadingElement>(null);
   const offered = useRef(false);
   /** Every draft write, one after the other; a save waits for the last (fix 5). */
@@ -247,13 +249,19 @@ export function Editor({ id }: { id: string }) {
   };
 
   // Simple mode: every color from the Rust palette, the tone with them, as ONE undo step (R9).
+  // An answer that comes late is dropped when another regenerate started after it, or when the
+  // theme on screen changed meanwhile (a color set by hand above all): it would overwrite them
+  // (item 5).
   const regenerate = async (tone: Tone, accent: string, tint: number) => {
+    const n = ++regenerations.current;
+    const from = theme;
     setError(null);
     try {
       const colors = await ipc.paletteGenerate(tone, accent, tint);
+      if (n !== regenerations.current || latest.current.state?.theme !== from) return;
       dispatch({ type: "setColors", colors, simple: { accent, tint }, tone });
     } catch (e) {
-      setError(e);
+      if (n === regenerations.current) setError(e);
     }
   };
 
