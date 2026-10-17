@@ -172,6 +172,7 @@ export const th: Dictionary = {
   "themes.import.nameTaken": "มีธีมชื่อนี้อยู่แล้ว",
   "themes.import.confirm": "เพิ่มเข้าธีมของฉัน",
   "themes.import.cancelled": "ยังไม่ได้เลือกไฟล์",
+  "themes.import.systemUnknown": "อ่านข้อมูลของเครื่องนี้ไม่ได้ พรีวิวจึงใช้ค่าตัวอย่าง",
   "themes.apply": "ใช้ธีม",
 
   "editor.title": "แก้ธีม",
@@ -263,6 +264,7 @@ export const th: Dictionary = {
   "editor.draftSaved": "บันทึกฉบับร่างแล้ว",
   "editor.draftNotSaved": "บันทึกฉบับร่างไม่สำเร็จ",
   "editor.leaveWithoutDraft": "กลับไปโดยไม่บันทึกฉบับร่าง",
+  "editor.systemUnknown": "อ่านข้อมูลของเครื่องนี้ไม่ได้ พรีวิวจึงใช้ค่าตัวอย่าง และแสดงรายการฟอนต์ที่ติดตั้งไว้ไม่ได้",
   "editor.draftFound": "คุณมีสิ่งที่แก้ค้างไว้จากคราวก่อน",
   "editor.useDraft": "แก้ต่อ",
   "editor.discardDraft": "ทิ้งไป",

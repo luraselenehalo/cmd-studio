@@ -15,6 +15,7 @@ import { App } from "./App";
 import { IpcProvider } from "./ipc/context";
 import { createMockIpc, type MockOptions } from "./ipc/mock";
 import { PRESETS } from "./ipc/presets";
+import { IpcError } from "./ipc/types";
 
 type MockIpc = ReturnType<typeof createMockIpc>;
 
@@ -68,6 +69,31 @@ async function mineFrom(ipc: MockIpc, preset: string, name: string, draft?: { au
     await ipc.themeSave({ ...theme, author: draft.author }, true);
   }
   return copy;
+}
+
+function ipcError(code: string, details: string): IpcError {
+  return new IpcError({ code, messageTh: `(${code})`, messageEn: `(${code})`, details });
+}
+
+/** Holds every `apply` of the mock until `release()` is called. */
+function holdApply(ipc: MockIpc): () => void {
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const apply = ipc.apply.bind(ipc);
+  vi.spyOn(ipc, "apply").mockImplementation(async (request, digest, onProgress): Promise<ApplyOutcome> => {
+    await gate;
+    return apply(request, digest, onProgress);
+  });
+  return () => release();
+}
+
+/** Opens the editor on a copy of `preset` made by Customize. */
+async function customize(user: ReturnType<typeof userEvent.setup>, preset: string) {
+  await openThemes(user);
+  await user.click(within(await card(preset)).getByRole("button", { name: "Customize" }));
+  await screen.findByRole("heading", { name: "Edit theme" });
 }
 
 /** Applies a preset from its card and closes the dialog once it says the theme is applied. */
@@ -419,5 +445,139 @@ describe("the editor", () => {
     await screen.findByText("Saved.");
     expect(ipc.state.mine[0]?.author).toBe("from the draft");
     expect(ipc.state.drafts).toEqual([]);
+  });
+
+  it("discards the draft left from before when asked", async () => {
+    const { ipc, user } = await mountWith((m) => mineFrom(m, "Nord", "My Nord", { author: "from the draft" }).then(() => {}));
+    const stored = ipc.state.mine[0]!.author;
+    await openThemes(user);
+    await user.click(within(await card("My Nord")).getByRole("button", { name: "Edit" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Discard them" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(ipc.state.drafts).toEqual([]);
+    expect((screen.getByLabelText("Author") as HTMLInputElement).value).toBe(stored);
+    expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Edit theme" }));
+  });
+
+  it("writes the draft of an edit made just before leaving by the sidebar (fix 1)", async () => {
+    const { ipc, user } = mount();
+    await customize(user, "Terracotta");
+    const author = screen.getByLabelText("Author");
+    await user.clear(author);
+    await user.type(author, "Q");
+    // Well within the draft second: the editor goes away before its timer fires.
+    await user.click(screen.getByRole("button", { name: "Themes" }));
+    await screen.findByRole("heading", { name: "Themes" });
+    await waitFor(() => expect(ipc.state.drafts.map((d) => d.author)).toEqual(["Q"]));
+  });
+
+  it("writes no draft after the user chose to go back without it", async () => {
+    const { ipc, user } = await mountWith((m) => {
+      const save = m.themeSave.bind(m);
+      let refused = false;
+      vi.spyOn(m, "themeSave").mockImplementation(async (theme, draft) => {
+        // The first draft write fails; any later one would go through.
+        if (draft && !refused) {
+          refused = true;
+          throw ipcError("E_DATA_WRITE", "drafts folder is read-only");
+        }
+        return save(theme, draft);
+      });
+    });
+    await customize(user, "Terracotta");
+    await user.type(screen.getByLabelText("Author"), "Q");
+    expect(await screen.findByText("Draft not saved", undefined, { timeout: 3000 })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Go back without saving the draft" }));
+    await screen.findByRole("heading", { name: "Themes" });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(ipc.state.drafts).toEqual([]);
+  });
+
+  it("saves after a draft write that is still running, so no draft is left behind (fix 5)", async () => {
+    let writing = false;
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { ipc, user } = await mountWith((m) => {
+      const save = m.themeSave.bind(m);
+      // A slow disk: each draft write waits for the gate.
+      vi.spyOn(m, "themeSave").mockImplementation(async (theme, draft) => {
+        if (draft) {
+          writing = true;
+          await gate;
+        }
+        return save(theme, draft);
+      });
+    });
+    await customize(user, "Terracotta");
+    await user.clear(screen.getByLabelText("Author"));
+    await user.type(screen.getByLabelText("Author"), "Q");
+    await waitFor(() => expect(writing).toBe(true), { timeout: 3000 });
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    release();
+    await screen.findByText("Saved.");
+    expect(ipc.state.mine[0]?.author).toBe("Q");
+    expect(ipc.state.drafts).toEqual([]);
+  });
+
+  it("leaves the editor's history alone for Ctrl+Z and Ctrl+Y in a text or a number field", async () => {
+    const { user } = mount();
+    await customize(user, "Terracotta");
+    const author = screen.getByLabelText("Author") as HTMLInputElement;
+    await user.clear(author);
+    await user.type(author, "Q");
+    const redo = screen.getByRole("button", { name: "Redo" }) as HTMLButtonElement;
+    await user.keyboard("{Control>}z{/Control}");
+    expect(author.value).toBe("Q");
+    expect(redo.disabled).toBe(true);
+    await user.click(screen.getByLabelText("Size"));
+    await user.keyboard("{Control>}z{/Control}");
+    expect(author.value).toBe("Q");
+    expect(redo.disabled).toBe(true);
+    // Something to redo (the Undo button takes the "Q" back), then Ctrl+Y in each field.
+    await user.click(screen.getByRole("button", { name: "Undo" }));
+    expect(author.value).toBe("");
+    await user.click(screen.getByLabelText("Size"));
+    await user.keyboard("{Control>}y{/Control}");
+    expect(author.value).toBe("");
+    await user.click(author);
+    await user.keyboard("{Control>}y{/Control}");
+    expect(author.value).toBe("");
+    expect(redo.disabled).toBe(false);
+  });
+
+  it("says when this computer's details could not be read, and previews with sample values (fix 3)", async () => {
+    const { user } = await mountWith((m) => {
+      vi.spyOn(m, "systemDetect").mockRejectedValue(ipcError("E_MACHINE_READ", "the registry could not be read"));
+    });
+    await customize(user, "Terracotta");
+    expect(
+      screen.getByText(
+        "This computer's details could not be read, so the preview uses sample values and the list of installed fonts is not available.",
+      ),
+    ).toBeTruthy();
+    expect(screen.getByText(/Code E_MACHINE_READ/)).toBeTruthy();
+    expect((screen.getByLabelText("Sample user name") as HTMLInputElement).value).toBe("you");
+  });
+
+  it("saves the theme before planning in Save and apply, and keeps that dialog open while applying (R12, R7)", async () => {
+    const { ipc, user } = mount();
+    const release = holdApply(ipc);
+    await customize(user, "Terracotta");
+    const from = ipc.state.calls.length;
+    await user.click(screen.getByRole("button", { name: "Save and apply" }));
+    const dialog = await screen.findByRole("dialog");
+    await within(dialog).findByRole("button", { name: "Apply" });
+    expect(ipc.state.calls.slice(from).filter((c) => c === "themeSave" || c === "planApply")).toEqual(["themeSave", "planApply"]);
+    await user.click(within(dialog).getByRole("button", { name: "Apply" }));
+    await within(dialog).findByText("Applying…");
+    expect(within(dialog).queryByRole("button", { name: "Close" })).toBeNull();
+    await user.keyboard("{Escape}");
+    expect(screen.getByRole("dialog")).toBe(dialog);
+    release();
+    await within(dialog).findByText(/Theme "My Terracotta" applied/);
+    expect(within(dialog).getByRole("button", { name: "Close" })).toBeTruthy();
   });
 });

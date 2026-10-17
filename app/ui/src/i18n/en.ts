@@ -168,6 +168,7 @@ export const en = {
   "themes.import.nameTaken": "A theme with this name already exists.",
   "themes.import.confirm": "Add to my themes",
   "themes.import.cancelled": "No file was chosen.",
+  "themes.import.systemUnknown": "This computer's details could not be read, so the preview uses sample values.",
   "themes.apply": "Apply",
 
   "editor.title": "Edit theme",
@@ -259,6 +260,7 @@ export const en = {
   "editor.draftSaved": "Draft saved",
   "editor.draftNotSaved": "Draft not saved",
   "editor.leaveWithoutDraft": "Go back without saving the draft",
+  "editor.systemUnknown": "This computer's details could not be read, so the preview uses sample values and the list of installed fonts is not available.",
   "editor.draftFound": "You have unsaved changes from before.",
   "editor.useDraft": "Keep editing them",
   "editor.discardDraft": "Discard them",

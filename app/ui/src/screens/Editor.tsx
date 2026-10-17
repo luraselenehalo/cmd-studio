@@ -5,7 +5,7 @@
 // (ruling R1), drafts saved one second after an edit, Ctrl+Z / Ctrl+Y with 100 steps, and "Save
 // and apply" as the only action that changes the machine. Presets never open here: Customize
 // copies one first.
-import { useEffect, useReducer, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useLayoutEffect, useReducer, useRef, useState, type KeyboardEvent } from "react";
 import type { ApplyRequest } from "../bindings/ApplyRequest";
 import type { ContrastIssue } from "../bindings/ContrastIssue";
 import type { CursorShape } from "../bindings/CursorShape";
@@ -65,6 +65,8 @@ export function Editor({ id }: { id: string }) {
   const [issues, setIssues] = useState<ContrastIssue[]>([]);
   const [checkError, setCheckError] = useState<unknown>(null);
   const [report, setReport] = useState<SystemReport | null>(null);
+  /** `system_detect` failed: the sample is the core's and there is no font list (fix 3). */
+  const [detectError, setDetectError] = useState<unknown>(null);
   const [sample, setSample] = useState<PreviewContext | null>(null);
   const [customFont, setCustomFont] = useState(false);
   const [powerlineNotice, setPowerlineNotice] = useState(false);
@@ -76,15 +78,56 @@ export function Editor({ id }: { id: string }) {
   const applies = useRef(0);
   const heading = useRef<HTMLHeadingElement>(null);
   const offered = useRef(false);
+  /** Every draft write, one after the other; a save waits for the last (fix 5). */
+  const pendingDraft = useRef<Promise<void>>(Promise.resolve());
+  /** A save of the theme is running: no draft is started meanwhile (it would land after it). */
+  const saving = useRef(false);
+  /** The user chose to go back without the draft: leaving writes none. */
+  const abandoned = useRef(false);
+  /** What the page holds as of its last render, for the write on leaving (fix 1). */
+  const latest = useRef<{ state: EditorState | null; draftOffer: unknown }>({ state: null, draftOffer: null });
+  useLayoutEffect(() => {
+    latest.current = { state, draftOffer };
+  });
+
+  /** Writes `draft` after any draft write still running, so they land in order. */
+  const writeDraft = (draft: Theme): Promise<void> => {
+    const write = pendingDraft.current
+      .then(() => ipc.themeSave(draft, true))
+      .then(() => {
+        lastDraft.current = draft;
+      });
+    pendingDraft.current = write.catch(() => {});
+    return write;
+  };
+
+  // Leaving by any way (the sidebar, another theme, a later screen) unmounts the page before
+  // the draft second has passed: the edit still waiting is written then (spec §3.4). The page
+  // that could say a failure is gone; the theme then opens without that draft. In StrictMode's
+  // trial unmount nothing is loaded yet, so nothing is written.
+  useEffect(
+    () => () => {
+      const { state: last, draftOffer: offer } = latest.current;
+      if (!last || offer || abandoned.current || !last.dirty || last.theme === lastDraft.current) return;
+      writeDraft(last.theme).catch(() => {});
+    },
+    // Once, on unmount; `writeDraft` reads only refs and the IPC.
+    [ipc],
+  );
 
   // The theme, its draft if any, and this computer's facts (fonts, the preview's sample).
   useEffect(() => {
     let alive = true;
-    Promise.all([ipc.themeGet(id), ipc.systemDetect().catch(() => null)]).then(
+    const detect = ipc.systemDetect().then(
+      (report) => ({ report, error: null as unknown }),
+      (error: unknown) => ({ report: null, error }),
+    );
+    Promise.all([ipc.themeGet(id), detect]).then(
       ([detail, sys]) => {
         if (!alive) return;
-        setReport(sys);
-        setSample(sampleContext(sys?.previewSample ?? CORE_SAMPLE_IDENTITY));
+        setReport(sys.report);
+        setDetectError(sys.error);
+        setSample(sampleContext(sys.report?.previewSample ?? CORE_SAMPLE_IDENTITY));
         dispatch({ type: "load", theme: detail.theme });
         if (detail.draft) setDraftOffer({ draft: detail.draft, stored: detail.theme });
       },
@@ -141,14 +184,14 @@ export function Editor({ id }: { id: string }) {
   }, [ipc, previewTheme, sample]);
 
   // The draft, a second after the last edit (spec §3.4): only while the theme on screen is that
-  // settled one, differs from the stored theme, and was not written already. A failure is said.
+  // settled one, differs from the stored theme, and was not written already, and while no save
+  // of the theme runs. A failure is said.
   useEffect(() => {
     if (!draftTheme || !state || draftTheme !== state.theme) return;
-    if (!state.dirty || draftOffer || draftTheme === lastDraft.current) return;
+    if (!state.dirty || draftOffer || saving.current || draftTheme === lastDraft.current) return;
     let alive = true;
-    ipc.themeSave(draftTheme, true).then(
+    writeDraft(draftTheme).then(
       () => {
-        lastDraft.current = draftTheme;
         if (!alive) return;
         setDraftError(null);
         setStatus("editor.draftSaved");
@@ -255,7 +298,10 @@ export function Editor({ id }: { id: string }) {
     setError(null);
     // The very object sent: `dirty` compares the stored theme by identity.
     const sent = theme;
+    saving.current = true;
     try {
+      // A draft write still running would land after the save and be offered again (fix 5).
+      await pendingDraft.current;
       await ipc.themeSave(sent, false);
       dispatch({ type: "saved", theme: sent });
       // The save took the draft away (library.rs), so the next edit writes a new one.
@@ -266,6 +312,8 @@ export function Editor({ id }: { id: string }) {
     } catch (e) {
       setError(e);
       return null;
+    } finally {
+      saving.current = false;
     }
   };
 
@@ -296,8 +344,7 @@ export function Editor({ id }: { id: string }) {
   const leave = async () => {
     if (state.dirty && !draftOffer && theme !== lastDraft.current) {
       try {
-        await ipc.themeSave(theme, true);
-        lastDraft.current = theme;
+        await writeDraft(theme);
       } catch (e) {
         setDraftError(e);
         setStatus(null);
@@ -353,11 +400,19 @@ export function Editor({ id }: { id: string }) {
         <span role="status">{status ? t(status) : ""}</span>
       </div>
       {error !== null && <ErrorNotice error={error} />}
+      {detectError !== null && <ErrorNotice error={detectError} title={t("editor.systemUnknown")} />}
       {draftError !== null && (
         <>
           <ErrorNotice error={draftError} title={t("editor.draftNotSaved")} />
           <div className="row-actions">
-            <button type="button" className="link" onClick={() => go({ name: "themes" })}>
+            <button
+              type="button"
+              className="link"
+              onClick={() => {
+                abandoned.current = true;
+                go({ name: "themes" });
+              }}
+            >
               {t("editor.leaveWithoutDraft")}
             </button>
           </div>
