@@ -258,16 +258,28 @@ legend {
   border-color: var(--ok);
 }
 
+/* The preview's frame holds two layers: the window's background, which the theme's opacity
+   fades (as Windows Terminal's does), and the text above it, which stays opaque. The text
+   layer scrolls sideways; the background does not move with it. */
 .terminal {
-  margin: 0;
-  padding: 0.75rem 1rem;
+  position: relative;
   border-radius: var(--radius);
   border: 1px solid var(--border);
+  overflow: hidden;
+  min-height: 6rem;
+}
+.terminal-bg {
+  position: absolute;
+  inset: 0;
+}
+.terminal-text {
+  position: relative;
+  margin: 0;
+  padding: 0.75rem 1rem;
   overflow-x: auto;
   white-space: pre;
   font-size: 0.85rem;
   line-height: 1.35;
-  min-height: 6rem;
 }
 
 .notice {
@@ -348,6 +360,11 @@ legend {
   justify-content: space-between;
   gap: 0.5rem;
   margin-top: 1.5rem;
+}
+
+/* A stage of the apply flow takes focus so a screen reader reads it; it is no control. */
+.apply-stage:focus {
+  outline: none;
 }
 
 .check-list,

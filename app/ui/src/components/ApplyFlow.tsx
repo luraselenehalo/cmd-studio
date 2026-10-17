@@ -2,7 +2,7 @@
 // will change → the user presses Apply → progress step by step → the outcome. Used by the
 // wizard, the editor's "Save and apply", the home page's quick switch, the Settings page and
 // the doctor's fixes. A plan that changed while the user read it is shown again, never applied.
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import type { ApplyOutcome } from "../bindings/ApplyOutcome";
 import type { ApplyPlan } from "../bindings/ApplyPlan";
 import type { ApplyProgress } from "../bindings/ApplyProgress";
@@ -110,14 +110,16 @@ function progressOf(progress: ApplyProgress, t: Translate): { text: string; max?
   }
 }
 
+/** One status region from before the first event to the last, so a screen reader hears each
+ * change in place; the bar is named by the text above it. */
 export function ProgressView({ progress }: { progress: ApplyProgress | null }) {
   const t = useT();
-  if (!progress) return <p role="status">{t("apply.working")}</p>;
-  const { text, max, value } = progressOf(progress, t);
+  const textId = useId();
+  const { text, max, value } = progress ? progressOf(progress, t) : { text: t("apply.working"), max: undefined, value: undefined };
   return (
     <div role="status">
-      <p>{text}</p>
-      <progress aria-label={text} max={max} value={value} />
+      <p id={textId}>{text}</p>
+      <progress aria-labelledby={textId} max={max} value={value} />
     </div>
   );
 }
@@ -148,8 +150,9 @@ function Failed({ outcome, onRetry }: { outcome: ApplyOutcome; onRetry: () => vo
       <div className="notice error" role="alert">
         {outcome.status === "rollbackIncomplete" ? t("apply.failedIncomplete") : t("apply.failed")}
       </div>
-      {outcome.error && <ErrorNotice error={outcome.error} />}
+      {/* Right after the header, whose "…Fix these by hand:" points at it. */}
       <UnrestoredList steps={outcome.unrestored} />
+      {outcome.error && <ErrorNotice error={outcome.error} />}
       <NotesList notes={outcome.notes} />
       <div className="row-actions">
         <button type="button" onClick={() => void copy()}>
@@ -174,15 +177,19 @@ type Stage =
   | { kind: "error"; error: IpcError };
 
 /**
- * The flow plans for `request` when it mounts; to plan another request, mount a new flow
- * (a new `key`). The user's "Use CMD Studio's instead" holds for the plan it answers and that
- * plan's apply only: Try again plans from the start with `replaceOtherClink: false`, so the
- * question about the other add-on is asked again (ruling R5).
+ * The flow plans for `request` as it was when the flow mounted; to plan another request, mount
+ * a new flow (a new `key`). The user's "Use CMD Studio's instead" holds for the plan it answers
+ * and that plan's apply only: Try again plans from that first request with
+ * `replaceOtherClink: false`, so the question about the other add-on is asked again (ruling R5).
+ *
+ * Each stage is a new container that takes focus when the stage changes (the button pressed
+ * is gone with the old stage), unless focus is somewhere else the user moved it to.
  */
 export function ApplyFlow({
   request: initial,
   onApplied,
   onCancel,
+  onBusy,
   showBackup = false,
   titled = true,
 }: {
@@ -193,13 +200,20 @@ export function ApplyFlow({
    * an apply that rolled back, though its outcome carries a `snapshotId` too. */
   onApplied?: (outcome: ApplyOutcome) => void;
   onCancel?: () => void;
+  /** `true` just before the apply starts and `false` once it has ended, however it ended: a
+   * dialog around the flow cannot be closed in between (ruling R7). */
+  onBusy?: (busy: boolean) => void;
   /** The wizard's "we save a restore point first" line. */
   showBackup?: boolean;
 }) {
   const ipc = useIpc();
   const t = useT();
+  const first = useRef(initial);
   const [request, setRequest] = useState(initial);
   const [stage, setStage] = useState<Stage>({ kind: "planning" });
+  const busy = useRef(false);
+  const stageBox = useRef<HTMLDivElement>(null);
+  const shownKind = useRef(stage.kind);
 
   const plan = useCallback(
     async (req: ApplyRequest) => {
@@ -220,10 +234,24 @@ export function ApplyFlow({
     void plan(request);
   }, [plan, request]);
 
+  // The first stage leaves focus where it is (a dialog puts it on its box). A later one takes
+  // it when focus went with the old stage (to the page's body) or sits on what holds the flow.
+  useEffect(() => {
+    if (shownKind.current === stage.kind) return;
+    shownKind.current = stage.kind;
+    const box = stageBox.current;
+    const active = document.activeElement;
+    if (box && (active === null || active === document.body || active.contains(box))) box.focus();
+  }, [stage.kind]);
+
   const replace = () => setRequest({ ...request, replaceOtherClink: true });
-  const retry = () => setRequest({ ...initial, replaceOtherClink: false });
+  const retry = () => setRequest({ ...first.current, replaceOtherClink: false });
 
   const run = async (current: ApplyPlan) => {
+    // One apply at a time, even if Apply were pressed twice before the page changed.
+    if (busy.current) return;
+    busy.current = true;
+    onBusy?.(true);
     setStage({ kind: "applying", progress: null });
     try {
       const outcome = await ipc.apply(request, current.digest, (progress) =>
@@ -240,15 +268,20 @@ export function ApplyFlow({
       if (outcome.status === "committed") onApplied?.(outcome);
     } catch (thrown) {
       setStage({ kind: "error", error: toIpcError(thrown) });
+    } finally {
+      busy.current = false;
+      onBusy?.(false);
     }
   };
 
+  let body: ReactNode;
   switch (stage.kind) {
     case "planning":
-      return <p role="status">{t("common.loading")}</p>;
+      body = <p role="status">{t("common.loading")}</p>;
+      break;
     case "otherClink":
-      return (
-        <div>
+      body = (
+        <>
           <h3>{t("apply.otherClink.title")}</h3>
           <p>{t("apply.otherClink.text")}</p>
           <ul className="check-list">
@@ -268,20 +301,22 @@ export function ApplyFlow({
               </button>
             )}
           </div>
-        </div>
+        </>
       );
-    case "ready":
-      return (
-        <div>
+      break;
+    case "ready": {
+      const ready = stage.plan;
+      body = (
+        <>
           {stage.changed && (
             <div className="notice warn" role="alert">
               {t("apply.planChanged")}
             </div>
           )}
-          <PlanView plan={stage.plan} titled={titled} />
+          <PlanView plan={ready} titled={titled} />
           {showBackup && <p>{t("wizard.confirm.backup")}</p>}
           <div className="row-actions">
-            <button type="button" className="primary" onClick={() => void run(stage.plan)}>
+            <button type="button" className="primary" onClick={() => void run(ready)}>
               {t("apply.start")}
             </button>
             {onCancel && (
@@ -290,25 +325,29 @@ export function ApplyFlow({
               </button>
             )}
           </div>
-        </div>
+        </>
       );
+      break;
+    }
     case "applying":
-      return <ProgressView progress={stage.progress} />;
+      body = <ProgressView progress={stage.progress} />;
+      break;
     case "done": {
       const o = stage.outcome;
-      if (o.status === "committed") {
-        return (
+      body =
+        o.status === "committed" ? (
           <div className="notice ok" role="status">
             {t(request.target === "wt" ? "apply.doneWt" : "apply.done", { name: o.themeName })}
             <NotesList notes={o.notes} />
           </div>
+        ) : (
+          <Failed outcome={o} onRetry={retry} />
         );
-      }
-      return <Failed outcome={o} onRetry={retry} />;
+      break;
     }
     case "error":
-      return (
-        <div>
+      body = (
+        <>
           <ErrorNotice error={stage.error} />
           <div className="row-actions">
             <button type="button" onClick={retry}>
@@ -320,7 +359,15 @@ export function ApplyFlow({
               </button>
             )}
           </div>
-        </div>
+        </>
       );
+      break;
   }
+
+  // Keyed by the stage, so each stage is a new element: focusing it is announced.
+  return (
+    <div key={stage.kind} ref={stageBox} tabIndex={-1} className="apply-stage">
+      {body}
+    </div>
+  );
 }

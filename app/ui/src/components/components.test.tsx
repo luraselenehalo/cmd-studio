@@ -1,13 +1,17 @@
 // The shared components on their own, against the mock IPC: what the screens' tests
 // (Themes.test.tsx) do not pin. The dialog keeps every key typed into it and keeps focus
-// inside; notes show their details; one predicate tells an AppError; the rollback has no
-// step numbers; the plan lists the other add-on's commands it turns off; Try again asks about
-// that add-on again; "Copy details" says whether it copied.
+// inside, and Escape does nothing while it has no onClose; notes show their details; one
+// predicate tells an AppError; the preview fades only its background; the progress keeps one
+// status region and the rollback has no step numbers; the plan lists the other add-on's
+// commands it turns off; Try again asks about that add-on again; a plan that changed is shown
+// again, never applied; what a rollback left is listed under its header; focus follows the
+// stages; "busy" brackets the apply; "Copy details" says whether it copied.
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState, type ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
 import type { ApplyRequest } from "../bindings/ApplyRequest";
+import type { PreviewResult } from "../bindings/PreviewResult";
 import type { ThemeSummary } from "../bindings/ThemeSummary";
 import { I18nProvider, type Language } from "../i18n";
 import { IpcProvider } from "../ipc/context";
@@ -17,14 +21,17 @@ import type { Ipc } from "../ipc/types";
 import { ApplyFlow, ProgressView } from "./ApplyFlow";
 import { Dialog } from "./Dialog";
 import { ErrorNotice, NotesList } from "./Notices";
+import { TerminalPreview } from "./TerminalPreview";
 import { ThemeCard } from "./ThemeCard";
 
 function mount(children: ReactNode, { ipc = createMockIpc(), language = "en" }: { ipc?: Ipc; language?: Language } = {}) {
-  return render(
+  const wrap = (inner: ReactNode) => (
     <I18nProvider language={language} setLanguage={() => {}}>
-      <IpcProvider ipc={ipc}>{children}</IpcProvider>
-    </I18nProvider>,
+      <IpcProvider ipc={ipc}>{inner}</IpcProvider>
+    </I18nProvider>
   );
+  const view = render(wrap(children));
+  return { ...view, rerender: (inner: ReactNode) => view.rerender(wrap(inner)) };
 }
 
 function presetId(name: string): string {
@@ -93,6 +100,54 @@ describe("Dialog", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(document.activeElement).toBe(opener);
   });
+
+  it("does nothing on Escape while it has no onClose, and closes once it has one again", async () => {
+    // As the apply dialog does while an apply runs (ruling R7): no onClose, so no way out.
+    function Busy() {
+      const [busy, setBusy] = useState(true);
+      const [open, setOpen] = useState(true);
+      if (!open) return null;
+      return (
+        <Dialog title="Applying" onClose={busy ? undefined : () => setOpen(false)}>
+          <button type="button" onClick={() => setBusy(false)}>
+            Finish
+          </button>
+        </Dialog>
+      );
+    }
+    const user = userEvent.setup();
+    mount(<Busy />);
+    const dialog = screen.getByRole("dialog", { name: "Applying" });
+    expect(within(dialog).queryByRole("button", { name: "Close" })).toBeNull();
+    await user.keyboard("{Escape}");
+    expect(screen.getByRole("dialog", { name: "Applying" })).toBe(dialog);
+    await user.click(within(dialog).getByRole("button", { name: "Finish" }));
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+});
+
+describe("TerminalPreview", () => {
+  it("fades only the window's background, never the text, as Windows Terminal's opacity does", () => {
+    const theme = structuredClone(PRESETS.find((p) => p.name === "Nord")!);
+    theme.terminal.opacity = 30;
+    const result: PreviewResult = {
+      banner: [],
+      prompt: [[{ text: "C:\\Users\\tester>", fg: theme.colors.foreground, bg: null, bold: false }]],
+    };
+    mount(<TerminalPreview theme={theme} result={result} />);
+    const preview = screen.getByRole("img", { name: "Preview of the cmd window" });
+    const text = screen.getByText("C:\\Users\\tester>");
+    // Nothing between the text and the preview's frame, the frame included, fades it.
+    for (let el: HTMLElement | null = text; el !== null; el = el === preview ? null : el.parentElement) {
+      expect(Number(window.getComputedStyle(el).opacity || "1"), el.tagName).toBeGreaterThanOrEqual(1);
+    }
+    // The background is a layer of its own, at the theme's opacity.
+    const layer = preview.querySelector(".terminal-bg") as HTMLElement;
+    expect(layer.style.opacity).toBe("0.3");
+    expect(layer.style.backgroundColor).not.toBe("");
+    expect(layer.contains(text)).toBe(false);
+  });
 });
 
 describe("Notices", () => {
@@ -106,7 +161,7 @@ describe("Notices", () => {
             messageEn: "A restore point could not be read",
             details: "restore point 1791694709000-abcd1234: manifest.json is not valid JSON",
           },
-          { code: "E_RECOVERED", messageTh: "คืนค่าที่ค้างไว้แล้ว", messageEn: "An unfinished apply was put back", details: "" },
+          { code: "E_TXN_INTERRUPTED", messageTh: "คืนค่าที่ค้างไว้แล้ว", messageEn: "An unfinished apply was put back", details: "" },
         ]}
       />,
       { language: "th" },
@@ -143,12 +198,26 @@ describe("ProgressView", () => {
     const progress = { phase: "rollingBack", step: 2, total: 7, kind: null } as const;
     const en = mount(<ProgressView progress={progress} />);
     expect(screen.getByText("Putting things back…")).toBeTruthy();
-    expect(screen.queryByText(/2/)).toBeNull();
+    expect(screen.queryByText(/\d/)).toBeNull();
     expect(en.container.querySelector("progress")?.hasAttribute("value")).toBe(false);
     en.unmount();
     const th = mount(<ProgressView progress={progress} />, { language: "th" });
     expect(screen.getByText("กำลังคืนค่าเดิม…")).toBeTruthy();
+    expect(screen.queryByText(/\d/)).toBeNull();
     expect(th.container.querySelector("progress")?.hasAttribute("value")).toBe(false);
+  });
+
+  it("keeps one status region from before the first event on, and names the bar by its text", () => {
+    const view = mount(<ProgressView progress={null} />);
+    const region = screen.getByRole("status");
+    expect(region.textContent).toContain("Applying…");
+    view.rerender(<ProgressView progress={{ phase: "backingUp", step: 1, total: 7, kind: null }} />);
+    expect(screen.getByRole("status")).toBe(region);
+    const text = screen.getByText("Saving a restore point (1 of 7)");
+    const bar = region.querySelector("progress") as HTMLProgressElement;
+    expect(text.id).not.toBe("");
+    expect(bar.getAttribute("aria-labelledby")).toBe(text.id);
+    expect(bar.hasAttribute("aria-label")).toBe(false);
   });
 });
 
@@ -237,5 +306,152 @@ describe("ApplyFlow", () => {
     await user.click(copy);
     expect(await screen.findByText("The details could not be copied")).toBeTruthy();
     expect(screen.queryByText("Copied")).toBeNull();
+  });
+
+  it("tries again with the request it was mounted with, not a later prop", async () => {
+    const ipc = createMockIpc({ failApplyWith: "E_VERIFY_OMP" });
+    const planApply = ipc.planApply.bind(ipc);
+    const planned: string[] = [];
+    ipc.planApply = (request) => {
+      planned.push(request.themeId);
+      return planApply(request);
+    };
+    const user = userEvent.setup();
+    const view = mount(<ApplyFlow request={REQUEST} />, { ipc });
+    await user.click(await screen.findByRole("button", { name: "Apply" }));
+    await screen.findByText("The theme could not be applied. Everything was put back as it was.");
+    view.rerender(<ApplyFlow request={{ ...REQUEST, themeId: presetId("Paper") }} />);
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+    await screen.findByRole("button", { name: "Apply" });
+    expect(planned).toEqual([REQUEST.themeId, REQUEST.themeId]);
+  });
+
+  it("shows a plan that changed while the user read it, and applies nothing until Apply again", async () => {
+    const ipc = createMockIpc();
+    const apply = ipc.apply.bind(ipc);
+    let stale = true;
+    ipc.apply = (request, digest, onProgress) => {
+      // The first apply carries the digest of a plan from before: the machine changed since.
+      const sent = stale ? "a digest from before" : digest;
+      stale = false;
+      return apply(request, sent, onProgress);
+    };
+    const onApplied = vi.fn();
+    const user = userEvent.setup();
+    mount(<ApplyFlow request={REQUEST} onApplied={onApplied} />, { ipc });
+    await user.click(await screen.findByRole("button", { name: "Apply" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toBe("This computer changed while you were looking. Here is the new plan; check it again.");
+    expect(screen.getByText("Update the prompt and the welcome box")).toBeTruthy();
+    expect(ipc.state.calls.filter((c) => c === "apply")).toHaveLength(1);
+    expect(ipc.state.applied).toBeNull();
+    // No outcome either way (the plan's own step "Remember what was applied" aside).
+    expect(screen.queryByText(/Theme "Nord" applied|could not be applied/)).toBeNull();
+    expect(onApplied).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Apply" }));
+    await screen.findByText(/Theme "Nord" applied/);
+    expect(ipc.state.calls.filter((c) => c === "apply")).toHaveLength(2);
+    expect(onApplied).toHaveBeenCalledTimes(1);
+  });
+
+  it("lists right under its header what a rollback could not put back, with the fix in the UI's language", async () => {
+    const texts = {
+      en: {
+        apply: "Apply",
+        header: "The theme could not be applied, and not everything could be put back. Fix these by hand:",
+        fix: "Close Windows Terminal, then go back to the latest restore point in Help",
+      },
+      th: {
+        apply: "ใช้ธีม",
+        header: "ใช้ธีมไม่สำเร็จ และคืนค่าเดิมได้ไม่ครบ ต้องแก้รายการต่อไปนี้เอง:",
+        fix: "ปิด Windows Terminal แล้วกลับไปที่จุดย้อนกลับล่าสุดในหน้าช่วยเหลือ",
+      },
+    };
+    for (const language of ["en", "th"] as const) {
+      const ipc = createMockIpc();
+      ipc.apply = async () => ({
+        status: "rollbackIncomplete",
+        themeName: "Nord",
+        snapshotId: "1791694709000-abcd1234",
+        error: { code: "E_ROLLBACK_INCOMPLETE", messageTh: "(E_ROLLBACK_INCOMPLETE)", messageEn: "(E_ROLLBACK_INCOMPLETE)", details: "step 5 was not put back" },
+        unrestored: [
+          {
+            opIndex: 4,
+            target: "Windows Terminal's settings",
+            code: "E_WT_WRITE",
+            message: "access is denied",
+            fix: texts.en.fix,
+            fixTh: texts.th.fix,
+          },
+        ],
+        notes: [],
+        plan: null,
+      });
+      const user = userEvent.setup();
+      const view = mount(<ApplyFlow request={REQUEST} />, { ipc, language });
+      await user.click(await screen.findByRole("button", { name: texts[language].apply }));
+      const header = await screen.findByText(texts[language].header);
+      // "…by hand:" points at the list: it comes right after the header.
+      const list = header.nextElementSibling as HTMLElement;
+      expect(within(list).getByText("Windows Terminal's settings")).toBeTruthy();
+      expect(within(list).getByText("E_WT_WRITE")).toBeTruthy();
+      expect(within(list).getByText(texts[language].fix)).toBeTruthy();
+      view.unmount();
+    }
+  });
+
+  it("moves focus to each new stage, and back to the opener when its dialog closes", async () => {
+    function Host() {
+      const [open, setOpen] = useState(false);
+      return (
+        <>
+          <button type="button" onClick={() => setOpen(true)}>
+            Apply Nord
+          </button>
+          {open && (
+            <Dialog title="What will change" onClose={() => setOpen(false)}>
+              <ApplyFlow request={REQUEST} titled={false} />
+            </Dialog>
+          )}
+        </>
+      );
+    }
+    const ipc = createMockIpc({ otherClink: [OTHER_CLINK] });
+    const user = userEvent.setup();
+    mount(<Host />, { ipc });
+    const opener = screen.getByRole("button", { name: "Apply Nord" });
+    await user.click(opener);
+    const dialog = screen.getByRole("dialog", { name: "What will change" });
+    const replace = await within(dialog).findByRole("button", { name: "Use CMD Studio's instead" });
+    await user.click(replace);
+    // The pressed button is gone; focus is on the new stage, not dropped to the page.
+    const apply = await within(dialog).findByRole("button", { name: "Apply" });
+    expect(document.activeElement).not.toBe(document.body);
+    expect(document.activeElement).not.toBe(dialog);
+    expect(document.activeElement?.contains(apply)).toBe(true);
+    await user.click(apply);
+    const done = await within(dialog).findByText(/Theme "Nord" applied/);
+    expect(document.activeElement?.contains(done)).toBe(true);
+    await user.keyboard("{Escape}");
+    expect(document.activeElement).toBe(opener);
+  });
+
+  it("says it is busy from just before the apply until the apply has ended", async () => {
+    const ipc = createMockIpc();
+    const events: string[] = [];
+    const apply = ipc.apply.bind(ipc);
+    ipc.apply = async (request, digest, onProgress) => {
+      events.push("apply starts");
+      try {
+        return await apply(request, digest, onProgress);
+      } finally {
+        events.push("apply ends");
+      }
+    };
+    const user = userEvent.setup();
+    mount(<ApplyFlow request={REQUEST} onBusy={(busy) => events.push(`busy ${busy}`)} />, { ipc });
+    await user.click(await screen.findByRole("button", { name: "Apply" }));
+    await screen.findByText(/Theme "Nord" applied/);
+    expect(events).toEqual(["busy true", "apply starts", "apply ends", "busy false"]);
   });
 });
