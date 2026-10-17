@@ -466,6 +466,7 @@ mod tests {
                 scheme: serde_json::json!({}),
                 profile: serde_json::Map::new(),
                 set_default: false,
+                create: false,
             },
             Op::SetAutoRun {
                 value: Some("ours".into()),

@@ -703,13 +703,16 @@ fn d6(sys: System<'_>) -> Check {
         present += 1;
     }
     if present == 0 {
+        // Installed but never opened: an apply sets it up from the template (founder 2026-10-17,
+        // spec §5.4), so there is nothing to open first.
         return if locations.iter().any(|l| l.installed) {
             check(
                 "D6",
                 Status::Warn,
                 Some("E_WT_NOT_FOUND"),
-                "Windows Terminal ยังไม่เคยเปิด ให้เปิดสักครั้งแล้วใช้ธีมซ้ำ",
-                "Windows Terminal has never been opened. Open it once, then apply the theme again",
+                "Windows Terminal ยังไม่เคยเปิด จึงยังไม่มีการตั้งค่า การใช้ธีมจะตั้งค่าให้เอง",
+                "Windows Terminal has never been opened, so it has no settings yet. Applying a \
+                 theme sets them up",
                 "settings.json does not exist yet",
             )
         } else {
@@ -1444,23 +1447,56 @@ mod tests {
     }
 
     #[test]
-    fn windows_terminal_never_opened_is_a_warning_with_a_way_out() {
-        // Review Focus 1: a fresh Windows 11 has WT installed but no settings.json yet.
+    fn windows_terminal_never_opened_is_a_warning_that_an_apply_puts_right() {
+        // Review Focus 1: a fresh Windows 11 has WT installed but no settings.json yet. This
+        // pinned "never created" until the founder's decision of 2026-10-17 ("รวมเลย"): the
+        // apply now sets Terminal up from the template, so D6 says so instead of "open it once".
         let (m, ctx) = machine();
         m.fs.remove_file(std::path::Path::new(WT)).unwrap();
         let d6 = by_id(&doctor(m.system(), &ctx), "D6");
         assert_eq!((d6.status, d6.code), (Status::Warn, Some("E_WT_NOT_FOUND")));
-        assert!(d6.message_en.contains("Open it once"), "{d6:?}");
+        assert_eq!(
+            d6.message_en,
+            "Windows Terminal has never been opened, so it has no settings yet. Applying a theme \
+             sets them up"
+        );
+        assert_eq!(
+            d6.message_th,
+            "Windows Terminal ยังไม่เคยเปิด จึงยังไม่มีการตั้งค่า การใช้ธีมจะตั้งค่าให้เอง"
+        );
         let p = prepare_apply(m.system(), &ctx, &terracotta(), &request(Target::All)).unwrap();
-        assert!(p
+        assert!(!p
             .plan
             .warnings
             .contains(&crate::plan::Warning::NoWindowsTerminal));
-        assert!(!p
+        assert!(p
             .ops
             .iter()
-            .any(|o| matches!(o, crate::plan::Op::WtApply { .. })));
-        assert!(!m.fs.exists(std::path::Path::new(WT)), "never created");
+            .any(|o| matches!(o, crate::plan::Op::WtApply { create: true, .. })));
+        assert!(
+            !m.fs.exists(std::path::Path::new(WT)),
+            "planning makes nothing"
+        );
+        assert_eq!(
+            run_apply(m.system(), &ctx, p),
+            crate::txn::Outcome::Committed
+        );
+        // D6 and D7 read the file the apply made as any other.
+        let checks = doctor(m.system(), &ctx);
+        assert_eq!(by_id(&checks, "D6").status, Status::Ok);
+        assert_eq!(by_id(&checks, "D7").status, Status::Ok, "{checks:?}");
+        // Not installed at all: the warning it always was.
+        let (mut m, ctx) = machine();
+        m.wt.locations.clear();
+        let d6 = by_id(&doctor(m.system(), &ctx), "D6");
+        assert_eq!(
+            (d6.status, d6.code, d6.message_en.as_str()),
+            (
+                Status::Warn,
+                Some("E_WT_NOT_FOUND"),
+                "Windows Terminal is not installed"
+            )
+        );
     }
 
     #[test]
@@ -2265,22 +2301,18 @@ mod tests {
     }
 
     #[test]
-    fn d8_says_no_settings_file_was_there_when_the_theme_set_no_font() {
-        // Windows Terminal installed but never opened has no settings.json: the planner wrote
-        // no font, though Windows Terminal is installed.
+    fn d8_checks_the_font_of_a_terminal_the_apply_set_up() {
+        // Windows Terminal installed but never opened has no settings.json. Until the founder's
+        // decision of 2026-10-17 the planner then wrote no font and D8 was skipped; now the
+        // apply makes the file, with the font, and D8 checks it as for any other file.
         let (m, ctx) = machine();
         m.fs.remove_file(std::path::Path::new(WT)).unwrap();
         m.process.answer("oh-my-posh.exe", "version", 0, "31.5.0\n");
         let p = prepare_apply(m.system(), &ctx, &terracotta(), &request(Target::All)).unwrap();
         assert_eq!(run_apply(m.system(), &ctx, p), Outcome::Committed);
         let d8 = by_id(&run(&m, &ctx), "D8");
-        assert_eq!((d8.status, d8.code), (Status::Skipped, None));
-        assert!(
-            d8.message_en
-                .contains("no Windows Terminal settings file was found"),
-            "{d8:?}"
-        );
-        assert!(!d8.message_en.contains("not installed"), "{d8:?}");
+        assert_eq!((d8.status, d8.code), (Status::Ok, None), "{d8:?}");
+        assert!(d8.details.starts_with(NERD_FONT_FAMILY), "{d8:?}");
     }
 
     /// Settings.json after `themed`, with `from` replaced by `to` once (which must be there).

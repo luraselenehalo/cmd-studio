@@ -16,7 +16,7 @@ use crate::plan::{Component, Op, Paths, AUTORUN_NOT_TEXT};
 use crate::resources::{check_bundle, sha256_hex, Manifest, ResourceError, Resources};
 use crate::state::{AutoRunRecord, RegValueRecord};
 use crate::txn::{Executor, Failure, Verifier};
-use crate::wt_edit::{apply_edit, WtEdit};
+use crate::wt_edit::{apply_edit, WtEdit, WT_TEMPLATE};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -758,14 +758,24 @@ impl Executor for SystemExecutor<'_> {
                 scheme,
                 profile,
                 set_default,
+                create,
             } => {
-                let bytes = fs
-                    .read(settings)
-                    .map_err(|e| failure("E_WT_WRITE", e))?
-                    .ok_or_else(|| {
-                        failure("E_WT_WRITE", format!("{} is gone", settings.display()))
-                    })?;
-                let text = String::from_utf8(bytes).map_err(|e| failure("E_WT_PARSE", e))?;
+                // A file that is there is edited, also when the op was planned to create it
+                // (Windows Terminal was opened in between): it is never replaced by the template.
+                let (text, made) = match fs.read(settings).map_err(|e| failure("E_WT_WRITE", e))? {
+                    Some(bytes) => (
+                        String::from_utf8(bytes).map_err(|e| failure("E_WT_PARSE", e))?,
+                        false,
+                    ),
+                    // Windows Terminal was never opened (founder 2026-10-17, spec §5.4).
+                    None if *create => (WT_TEMPLATE.to_string(), true),
+                    None => {
+                        return Err(failure(
+                            "E_WT_WRITE",
+                            format!("{} is gone", settings.display()),
+                        ))
+                    }
+                };
                 let edited = apply_edit(
                     &text,
                     &WtEdit {
@@ -775,9 +785,10 @@ impl Executor for SystemExecutor<'_> {
                     },
                 )
                 .map_err(|e| failure(e.code(), e))?;
-                if edited.text == text {
+                if edited.text == text && !made {
                     return Ok(());
                 }
+                // `write_atomic` makes the folder that holds it when it is missing.
                 fs.write_atomic(settings, edited.text.as_bytes())
                     .map_err(|e| failure("E_WT_WRITE", e))
             }
@@ -822,15 +833,27 @@ impl Executor for SystemExecutor<'_> {
                 None => fs.remove_file(path),
             }
             .map_err(|e| failure("E_DATA_WRITE", e)),
-            Op::WtApply { settings, .. } => match prior {
+            Op::WtApply {
+                settings, create, ..
+            } => match prior {
                 Some(bytes)
                     if fs.read(settings).ok().flatten().as_deref() != Some(bytes.as_slice()) =>
                 {
                     fs.write_atomic(settings, bytes)
                         .map_err(|e| failure("E_WT_WRITE", e))
                 }
-                // CMD Studio never creates or deletes a settings.json.
-                _ => Ok(()),
+                Some(_) => Ok(()),
+                // The file was not there, and the apply made it from the template (founder
+                // 2026-10-17): it goes again, as every other target comes back byte for byte.
+                // Also when Windows Terminal has added its own profiles to it since: changes made
+                // after the apply are not kept by an undo, and the machine is back to "Terminal
+                // never configured", so Terminal makes its defaults again on its next start. The
+                // folder that holds it is Windows Terminal's, and stays.
+                None if *create => fs
+                    .remove_file(settings)
+                    .map_err(|e| failure("E_WT_WRITE", e)),
+                // An op that does not create never creates or deletes a settings.json.
+                None => Ok(()),
             },
             Op::SetAutoRun { .. } => {
                 let a = self.sys.autorun;
@@ -1341,6 +1364,7 @@ mod tests {
                 scheme: json!({ "name": "CMD Studio" }),
                 profile,
                 set_default: true,
+                create: false,
             },
             Op::SetAutoRun {
                 value: Some("%A% & echo hi & ours".into()),
@@ -1476,6 +1500,7 @@ mod tests {
             scheme: json!({ "name": "CMD Studio" }),
             profile: Map::new(),
             set_default: false,
+            create: false,
         };
         let mut ex = SystemExecutor::new(m.system(), &res);
         assert_eq!(ex.apply(&op).unwrap_err().code, "E_WT_PARSE");
@@ -1561,6 +1586,7 @@ mod tests {
                 scheme: json!({}),
                 profile: Map::new(),
                 set_default: false,
+                create: false,
             })
             .unwrap_err();
         assert_eq!(err.code, "E_WT_WRITE");
@@ -1606,6 +1632,7 @@ mod tests {
             scheme: serde_json::json!({}),
             profile: serde_json::Map::new(),
             set_default: false,
+            create: false,
         };
         assert_eq!(
             fix_by_hand(&wt, &Some(b"{}".to_vec()), payload).en,
@@ -1720,6 +1747,7 @@ mod tests {
             scheme: json!({}),
             profile: Map::new(),
             set_default: false,
+            create: false,
         };
         let th = fix_by_hand(&wt, &Some(b"{}".to_vec()), payload).th;
         assert!(
@@ -2338,6 +2366,7 @@ mod tests {
             scheme: json!({}),
             profile: Map::new(),
             set_default: false,
+            create: false,
         };
         for op in [write, wt] {
             let err = ex.capture(&op).unwrap_err();
@@ -2543,6 +2572,7 @@ mod tests {
             scheme: json!({ "name": "CMD Studio" }),
             profile: Map::new(),
             set_default: false,
+            create: false,
         };
         let mut ex = SystemExecutor::new(m.system(), &res);
         let prior = ex.capture(&op).unwrap();
@@ -2555,15 +2585,214 @@ mod tests {
         ex.restore(&op, &applied).unwrap();
         // A restore that has to write reports the failure with the settings code.
         assert_eq!(ex.restore(&op, &prior).unwrap_err().code, "E_WT_WRITE");
-        // A settings.json that was not there is neither created nor deleted.
+        // A settings.json that was not there is neither created nor deleted by an op that does
+        // not create. One that does (founder 2026-10-17: Windows Terminal was never opened) makes
+        // the file from the template, and its restore deletes it again: see the tests of a
+        // Terminal that was never opened.
         let gone = Op::WtApply {
             settings: PathBuf::from(r"C:\wt\other.json"),
             scheme: json!({}),
             profile: Map::new(),
             set_default: false,
+            create: false,
         };
         ex.restore(&gone, &None).unwrap();
         assert!(!m.fs.exists(Path::new(r"C:\wt\other.json")));
+    }
+
+    // ---- A Windows Terminal that was never opened (founder 2026-10-17) ----
+
+    /// Where a Windows Terminal that was never opened gets its settings: its LocalState folder
+    /// is there, the file is not.
+    const NEW_WT: &str = r"C:\Users\tester\AppData\Local\Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\settings.json";
+
+    fn set_up_op(set_default: bool) -> Op {
+        let mut profile = Map::new();
+        profile.insert("colorScheme".into(), json!("CMD Studio"));
+        profile.insert(
+            "font".into(),
+            json!({ "face": "Cascadia Mono", "size": 12 }),
+        );
+        Op::WtApply {
+            settings: PathBuf::from(NEW_WT),
+            scheme: json!({ "name": "CMD Studio", "background": "#1f1e1d" }),
+            profile,
+            set_default,
+            create: true,
+        }
+    }
+
+    /// The text `op` writes into `from`.
+    fn edited(op: &Op, from: &str) -> String {
+        let Op::WtApply {
+            scheme,
+            profile,
+            set_default,
+            ..
+        } = op
+        else {
+            panic!("{op:?}")
+        };
+        apply_edit(
+            from,
+            &WtEdit {
+                scheme,
+                profile,
+                set_default: *set_default,
+            },
+        )
+        .unwrap()
+        .text
+    }
+
+    fn new_wt_machine() -> (FakeMachine, Resources) {
+        let (m, res, _) = setup();
+        m.fs.create_dir_all(Path::new(NEW_WT).parent().unwrap())
+            .unwrap();
+        (m, res)
+    }
+
+    #[test]
+    fn a_terminal_that_was_never_opened_gets_the_template_with_the_edit_and_a_restore_removes_it() {
+        for set_default in [true, false] {
+            let (m, res) = new_wt_machine();
+            let op = set_up_op(set_default);
+            let before = m.fs.snapshot();
+            let mut ex = SystemExecutor::new(m.system(), &res);
+            let prior = ex.capture(&op).unwrap();
+            assert_eq!(prior, None, "the absent file is captured as absent");
+            ex.apply(&op).unwrap();
+            let written = String::from_utf8(m.fs.file(NEW_WT).unwrap()).unwrap();
+            assert_eq!(written, edited(&op, crate::wt_edit::WT_TEMPLATE));
+            // Applied again: the same file, as any edit.
+            ex.apply(&op).unwrap();
+            assert_eq!(m.fs.file(NEW_WT), Some(written.into_bytes()));
+            ex.restore(&op, &prior).unwrap();
+            ex.restore(&op, &prior).unwrap();
+            assert_eq!(m.fs.snapshot(), before, "set_default: {set_default}");
+        }
+    }
+
+    #[test]
+    fn a_settings_file_that_appeared_since_the_plan_is_edited_never_replaced() {
+        // Windows Terminal was opened between the plan and the apply: its own file is edited.
+        let (m, res) = new_wt_machine();
+        let op = set_up_op(true);
+        let theirs = "{\n    // Windows Terminal's own\n    \"copyOnSelect\": true,\n    \"profiles\": { \"list\": [] }\n}\n";
+        m.fs.put(NEW_WT, theirs);
+        let mut ex = SystemExecutor::new(m.system(), &res);
+        let prior = ex.capture(&op).unwrap();
+        ex.apply(&op).unwrap();
+        let written = String::from_utf8(m.fs.file(NEW_WT).unwrap()).unwrap();
+        assert_eq!(written, edited(&op, theirs));
+        assert!(written.contains("// Windows Terminal's own") && !written.contains("$schema"));
+        // Its restore puts that file back, byte for byte; it is not deleted.
+        ex.restore(&op, &prior).unwrap();
+        assert_eq!(m.fs.file(NEW_WT), Some(theirs.as_bytes().to_vec()));
+    }
+
+    #[test]
+    fn without_create_a_settings_file_is_never_made_nor_deleted() {
+        let (m, res) = new_wt_machine();
+        let Op::WtApply {
+            settings,
+            scheme,
+            profile,
+            set_default,
+            ..
+        } = set_up_op(true)
+        else {
+            unreachable!()
+        };
+        let op = Op::WtApply {
+            settings,
+            scheme,
+            profile,
+            set_default,
+            create: false,
+        };
+        let mut ex = SystemExecutor::new(m.system(), &res);
+        let err = ex.apply(&op).unwrap_err();
+        assert_eq!(err.code, "E_WT_WRITE");
+        assert!(err.message.ends_with("is gone"), "{}", err.message);
+        assert!(!m.fs.exists(Path::new(NEW_WT)));
+        // A file that is there now stays, though the restore point says there was none.
+        m.fs.put(NEW_WT, b"{}");
+        ex.restore(&op, &None).unwrap();
+        assert_eq!(m.fs.file(NEW_WT), Some(b"{}".to_vec()));
+    }
+
+    #[test]
+    fn a_rollback_removes_the_settings_file_it_made() {
+        // A later step fails: the file the apply made from the template goes again.
+        let (m, res) = new_wt_machine();
+        let before = m.fs.snapshot();
+        let file =
+            PathBuf::from(r"C:\Users\tester\AppData\Local\ai.resincore.cmdstudio\state.json");
+        m.fs.fail_writes_to(&file);
+        let ops = vec![
+            set_up_op(true),
+            Op::WriteFile {
+                path: file,
+                contents: "{}".into(),
+            },
+        ];
+        let out = txn::run(
+            "t",
+            ops,
+            &mut SystemExecutor::new(m.system(), &res),
+            &mut Pass,
+            &mut Journals::default(),
+        );
+        assert!(
+            matches!(
+                out,
+                Outcome::RolledBack {
+                    code: "E_DATA_WRITE",
+                    ..
+                }
+            ),
+            "{out:?}"
+        );
+        assert!(!m.fs.exists(Path::new(NEW_WT)));
+        assert_eq!(m.fs.snapshot(), before);
+    }
+
+    #[test]
+    fn an_undo_removes_the_settings_file_it_made_even_after_terminal_added_to_it() {
+        // Terminal, started once after the apply, adds its own profiles to the file. An undo
+        // still takes the machine back to "Terminal never configured", byte for byte, as every
+        // undo does: Terminal makes its defaults again on its next start.
+        let (m, res) = new_wt_machine();
+        let before = (m.fs.snapshot(), m.autorun.snapshot(), m.fonts.snapshot());
+        let ops = vec![set_up_op(true)];
+        let priors = apply_all(&m, &res, &ops);
+        assert_eq!(priors, vec![(ops[0].clone(), None)]);
+        let ours = String::from_utf8(m.fs.file(NEW_WT).unwrap()).unwrap();
+        let theirs = ours.replacen(
+            "\"list\": [",
+            "\"list\": [\n            { \"guid\": \"{61c54bbd-c2c6-5271-96e7-009a87ff44bf}\", \"name\": \"Windows PowerShell\" },",
+            1,
+        );
+        assert_ne!(theirs, ours);
+        m.fs.put(NEW_WT, &theirs);
+        assert_eq!(undo_all(&m, &res, &ops, priors), Outcome::Committed);
+        assert!(!m.fs.exists(Path::new(NEW_WT)));
+        assert_eq!(
+            (m.fs.snapshot(), m.autorun.snapshot(), m.fonts.snapshot()),
+            before
+        );
+    }
+
+    #[test]
+    fn the_fix_by_hand_for_a_settings_file_it_made_is_to_delete_it() {
+        let payload = Path::new(r"C:\d\snapshots\1-a\payload\4.bin");
+        let fix = fix_by_hand(&set_up_op(true), &None, payload);
+        assert_eq!(
+            fix.en,
+            format!("Close Windows Terminal, then delete {NEW_WT}.")
+        );
+        assert_eq!(fix.th, format!("ปิด Windows Terminal แล้วลบ {NEW_WT}"));
     }
 
     #[test]
@@ -2742,6 +2971,7 @@ mod tests {
                 scheme: json!({ "name": "CMD Studio" }),
                 profile: Map::new(),
                 set_default: true,
+                create: false,
             },
             Op::SetAutoRun {
                 value: Some("ours & %A% & echo hi".into()),

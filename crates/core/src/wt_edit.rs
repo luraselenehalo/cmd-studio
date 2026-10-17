@@ -24,6 +24,13 @@ pub fn wt_parse_options() -> ParseOptions {
     }
 }
 
+/// The settings.json CMD Studio starts from when Windows Terminal is installed but was never
+/// opened, so it has none yet (founder 2026-10-17, spec §5.4): the smallest file Windows Terminal
+/// reads, with its schema, an empty profile list and no schemes. [`apply_edit`] then writes the
+/// scheme, the cmd profile and, when asked, `defaultProfile` into it, as into any other file.
+/// With CMD Studio's parts taken out again ([`revert`]), the text is this one byte for byte.
+pub const WT_TEMPLATE: &str = "{\n    \"$schema\": \"https://aka.ms/terminal-profiles-schema\",\n    \"profiles\": {\n        \"list\": []\n    },\n    \"schemes\": []\n}\n";
+
 /// One setting CMD Studio owns in a settings.json.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "at", rename_all = "camelCase", rename_all_fields = "camelCase")]
@@ -1450,6 +1457,53 @@ mod tests {
             let originals = BTreeMap::from([(key.clone(), Some(json!(1)))]);
             let written = BTreeMap::from([(key.clone(), json!(2))]);
             refused(revert(text, &originals, &written, &[]).map(|_| ()));
+        }
+    }
+
+    #[test]
+    fn the_template_is_the_smallest_settings_file_and_the_same_edit_fills_it() {
+        // Founder 2026-10-17: a Windows Terminal that was never opened has no settings.json, and
+        // an apply starts it from this template.
+        let parsed = |t: &str| {
+            CstRootNode::parse(t, &wt_parse_options())
+                .unwrap()
+                .to_serde_value()
+                .unwrap()
+        };
+        check_parses(WT_TEMPLATE).unwrap();
+        assert_eq!(
+            parsed(WT_TEMPLATE),
+            json!({
+                "$schema": "https://aka.ms/terminal-profiles-schema",
+                "profiles": { "list": [] },
+                "schemes": []
+            })
+        );
+        let (s, p) = (scheme(), profile());
+        for set_default in [true, false] {
+            let e = apply_edit(WT_TEMPLATE, &edit(&s, &p, set_default)).unwrap();
+            check_parses(&e.text).unwrap();
+            assert_eq!(
+                read_value(&e.text, &WtKey::Scheme).unwrap(),
+                Some(s.clone())
+            );
+            let key = |key: &str| read_value(&e.text, &WtKey::Profile { key: key.into() });
+            assert_eq!(key("guid").unwrap(), Some(json!(CMD_PROFILE_GUID)));
+            assert_eq!(key("colorScheme").unwrap(), Some(json!("CMD Studio")));
+            assert_eq!(
+                key("font").unwrap(),
+                Some(json!({ "face": "Cascadia Mono", "size": 12 }))
+            );
+            assert_eq!(
+                read_value(&e.text, &WtKey::DefaultProfile).unwrap(),
+                set_default.then(|| json!(CMD_PROFILE_GUID))
+            );
+            // Only the cmd profile is new: the template has the list and the schemes already.
+            assert_eq!(e.created, vec![WtCreated::CmdProfile]);
+            // With CMD Studio's parts taken out, it is the template again, byte for byte: that is
+            // how a revert of everything knows a file that holds nothing but ours.
+            let back = revert(&e.text, &originals(&e), &written(&e), &e.created).unwrap();
+            assert_eq!(back, WT_TEMPLATE, "set_default: {set_default}");
         }
     }
 

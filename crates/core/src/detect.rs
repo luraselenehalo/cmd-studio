@@ -59,11 +59,19 @@ pub fn detect(sys: System<'_>, paths: &Paths) -> Result<Detected, DetectError> {
         .filter(|l| sys.fs.exists(&l.settings))
         .map(|l| l.settings.clone())
         .collect();
+    // An installed Windows Terminal that was never opened has no settings.json yet: the apply
+    // makes one (founder 2026-10-17, spec §5.4).
+    let wt_create = wt
+        .iter()
+        .filter(|l| l.installed && !sys.fs.exists(&l.settings))
+        .map(|l| l.settings.clone())
+        .collect();
     // Raw text for the planner. A value that is there but is not plain text is told apart from
     // an absent one: the planner never edits it (spec §5.4).
     let text = |v: Option<RegValue>| RegText::of(v.as_ref());
     let machine = Machine {
         wt_settings,
+        wt_create,
         autorun_hkcu: text(sys.autorun.read_user().map_err(DetectError::Read)?),
         autorun_hklm: text(sys.autorun.read_machine().map_err(DetectError::Read)?),
         fonts: sys.fonts.families().map_err(DetectError::Read)?,
@@ -157,6 +165,39 @@ mod tests {
         assert_eq!(d.user_sid, "S-1-5-21-1-2-3-1001");
         assert_eq!(d.wt, m.wt.locations, "every variant, installed or not");
         assert_eq!(d.info, m.host.info);
+    }
+
+    #[test]
+    fn an_installed_terminal_without_settings_is_one_to_set_up() {
+        // Founder 2026-10-17: a Windows Terminal that is installed but was never opened has no
+        // settings.json yet, and an apply sets it up. One that is not installed is not.
+        let mut m = machine();
+        let unpackaged = PathBuf::from(r"C:\L\Microsoft\Windows Terminal\settings.json");
+        m.wt.locations.push(WtLocation {
+            variant: WtVariant::Unpackaged,
+            installed: false,
+            settings: unpackaged.clone(),
+        });
+        let [store, preview, _] =
+            m.wt.locations
+                .iter()
+                .map(|l| l.settings.clone())
+                .collect::<Vec<_>>()
+                .try_into()
+                .unwrap();
+        let d = detect(m.system(), &paths()).unwrap();
+        assert_eq!(d.machine.wt_settings, vec![store.clone()]);
+        assert_eq!(d.machine.wt_create, vec![preview.clone()]);
+        // Both lists keep the order of the variants.
+        m.fs.remove_file(&store).unwrap();
+        let d = detect(m.system(), &paths()).unwrap();
+        assert!(d.machine.wt_settings.is_empty());
+        assert_eq!(d.machine.wt_create, vec![store, preview.clone()]);
+        // Once the file is there, it is one to edit, never one to make.
+        m.fs.put(&preview, b"{}");
+        let d = detect(m.system(), &paths()).unwrap();
+        assert_eq!(d.machine.wt_settings, vec![preview]);
+        assert!(!d.machine.wt_create.contains(&unpackaged));
     }
 
     #[test]

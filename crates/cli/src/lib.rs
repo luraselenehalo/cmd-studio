@@ -1208,6 +1208,43 @@ mod tests {
     }
 
     #[test]
+    fn apply_sets_up_a_terminal_that_was_never_opened_and_undo_and_cleanup_take_it_out() {
+        // Founder 2026-10-17: Windows Terminal is installed but has no settings.json yet. The
+        // apply makes it and keeps its exit codes; undo and --cleanup delete it again.
+        let (m, d) = machine();
+        m.fs.remove_file(Path::new(WT)).unwrap();
+        let (code, out, err) = cli(&m, &d, &["apply", THEME]);
+        assert_eq!(code, EXIT_OK, "{out}{err}");
+        assert!(
+            out.contains("\n  - Set up Windows Terminal's settings so cmd gets this theme\n"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("Warning: Windows Terminal is not installed"),
+            "{out}"
+        );
+        assert!(m.fs.exists(Path::new(WT)));
+        let (code, out, err) = cli(&m, &later(&d, 1), &["undo"]);
+        assert_eq!(code, EXIT_OK, "{out}{err}");
+        assert!(!m.fs.exists(Path::new(WT)));
+        assert_eq!(cli(&m, &later(&d, 2), &["apply", THEME]).0, EXIT_OK);
+        assert!(m.fs.exists(Path::new(WT)));
+        let (code, out, err) = cli(&m, &later(&d, 3), &["--cleanup"]);
+        assert_eq!(code, EXIT_OK, "{out}{err}");
+        assert!(!m.fs.exists(Path::new(WT)));
+        // Without any Windows Terminal installed, the warning it always was.
+        let (mut m, d) = machine();
+        m.wt.locations.clear();
+        let (code, out, _) = cli(&m, &d, &["apply", THEME]);
+        assert_eq!(code, EXIT_OK);
+        assert!(
+            out.contains("Warning: Windows Terminal is not installed"),
+            "{out}"
+        );
+        assert!(!out.contains("Set up Windows Terminal"), "{out}");
+    }
+
+    #[test]
     fn invalid_input_exits_2() {
         let (m, d) = machine();
         assert_eq!(cli(&m, &d, &["apply"]).0, EXIT_INVALID);

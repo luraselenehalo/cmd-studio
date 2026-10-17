@@ -64,6 +64,10 @@ impl Paths {
 pub struct Machine {
     /// settings.json of every Windows Terminal variant found.
     pub wt_settings: Vec<PathBuf>,
+    /// Where the settings.json of every installed Windows Terminal variant that has none yet
+    /// goes: one that was never opened. An apply sets it up from `wt_edit::WT_TEMPLATE`
+    /// (founder 2026-10-17, spec §5.4). In the order of the variants, as `wt_settings`.
+    pub wt_create: Vec<PathBuf>,
     /// Current HKCU AutoRun value as the registry holds it: the raw text, never expanded, so a
     /// `%USERPROFILE%` in it stays as written; or absent; or there but not plain text, which
     /// the planner never edits (spec §5.4).
@@ -153,6 +157,19 @@ pub enum Op {
         scheme: Value,
         profile: Map<String, Value>,
         set_default: bool,
+        /// Windows Terminal is installed but was never opened, so it had no settings.json when
+        /// this was planned (founder 2026-10-17, spec §5.4). When the file is still absent at
+        /// apply time, the edit starts from `wt_edit::WT_TEMPLATE`; one that is there by then
+        /// (Terminal was opened in between) is edited as any other. A restore to "absent" (undo,
+        /// rollback) deletes the file again, also when Terminal has added its own profiles to it
+        /// since: it is the byte-for-byte rule every restore follows, so changes made after the
+        /// apply are not kept by an undo, and Terminal makes its defaults again on its next
+        /// start (see `exec`). Without `create`, a restore never creates or deletes a
+        /// settings.json. Not written while false, so an op that does not create is the same
+        /// JSON as before this field existed, and an op of an earlier build reads as one that
+        /// does not create.
+        #[serde(default, skip_serializing_if = "is_false")]
+        create: bool,
     },
     /// The complete new HKCU AutoRun value, raw as the registry holds it (never expanded);
     /// `None` deletes it. Writing it keeps the value's registry type: a `REG_EXPAND_SZ` stays
@@ -163,6 +180,11 @@ pub enum Op {
     InstallFont {
         family: String,
     },
+}
+
+/// For `skip_serializing_if`: a flag that is off is not written.
+fn is_false(flag: &bool) -> bool {
+    !*flag
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -379,7 +401,9 @@ pub fn plan(
         en.push("Keep the add-on outside your user folder, because your user folder's name has letters it can't use");
     }
 
-    if machine.wt_settings.is_empty() {
+    // Only a machine with no Windows Terminal installed at all is warned: one that was never
+    // opened is set up from the template (founder 2026-10-17, spec §5.4).
+    if machine.wt_settings.is_empty() && machine.wt_create.is_empty() {
         warnings.push(Warning::NoWindowsTerminal);
     } else {
         let font = wt_font(theme, machine, &mut warnings);
@@ -395,13 +419,20 @@ pub fn plan(
         let scheme = wt::scheme(&wt_theme);
         let profile =
             wt::profile_values(&wt_theme, req.target, &launch.exe(), &paths.clink_profile());
-        for settings in &machine.wt_settings {
+        let existing = machine.wt_settings.iter().map(|s| (s, false));
+        let to_set_up = machine.wt_create.iter().map(|s| (s, true));
+        for (settings, create) in existing.chain(to_set_up) {
             ops.push(Op::WtApply {
                 settings: settings.clone(),
                 scheme: scheme.clone(),
                 profile: profile.clone(),
                 set_default: req.set_wt_default_profile,
+                create,
             });
+        }
+        if !machine.wt_create.is_empty() {
+            th.push("ตั้งค่า Windows Terminal ให้ cmd ได้ธีมนี้");
+            en.push("Set up Windows Terminal's settings so cmd gets this theme");
         }
         th.push("สีและตัวอักษรของหน้าต่าง cmd ใน Windows Terminal");
         en.push("Colors and font of cmd in Windows Terminal");
@@ -834,6 +865,173 @@ mod tests {
             .any(|o| matches!(o, Op::WtApply { .. } | Op::InstallFont { .. })));
     }
 
+    /// `machine()`, but its Windows Terminal is installed and was never opened: it has no
+    /// settings.json yet.
+    fn never_opened() -> Machine {
+        Machine {
+            wt_settings: Vec::new(),
+            wt_create: vec![PathBuf::from(r"C:\wt\settings.json")],
+            ..machine()
+        }
+    }
+
+    const SET_UP_TH: &str = "ตั้งค่า Windows Terminal ให้ cmd ได้ธีมนี้";
+    const SET_UP_EN: &str = "Set up Windows Terminal's settings so cmd gets this theme";
+
+    #[test]
+    fn a_terminal_that_was_never_opened_is_set_up_with_the_same_edit() {
+        // Founder 2026-10-17: the colours come to a Windows Terminal that was never opened too.
+        let p = plan(&terracotta(), &req(Target::All), &never_opened(), &paths()).unwrap();
+        let wt: Vec<&Op> = p
+            .ops
+            .iter()
+            .filter(|o| matches!(o, Op::WtApply { .. }))
+            .collect();
+        let [Op::WtApply {
+            settings,
+            set_default,
+            create,
+            ..
+        }] = wt[..]
+        else {
+            panic!("{wt:?}")
+        };
+        assert_eq!(settings, &PathBuf::from(r"C:\wt\settings.json"));
+        assert!(*set_default && *create);
+        assert!(!p.warnings.contains(&Warning::NoWindowsTerminal));
+        for (lines, set_up, colors) in [
+            (
+                &p.summary_th,
+                SET_UP_TH,
+                "สีและตัวอักษรของหน้าต่าง cmd ใน Windows Terminal",
+            ),
+            (
+                &p.summary_en,
+                SET_UP_EN,
+                "Colors and font of cmd in Windows Terminal",
+            ),
+        ] {
+            let at = |line: &str| lines.iter().position(|l| *l == line);
+            assert!(at(set_up) < at(colors) && at(set_up).is_some(), "{lines:?}");
+        }
+        // A file that is there is edited as before, and nothing is said about setting it up.
+        let p = plan(&terracotta(), &req(Target::All), &machine(), &paths()).unwrap();
+        assert!(p
+            .ops
+            .iter()
+            .any(|o| matches!(o, Op::WtApply { create: false, .. })));
+        assert!(!p.summary_th.contains(&SET_UP_TH) && !p.summary_en.contains(&SET_UP_EN));
+        // Only a machine with no Windows Terminal installed at all is warned.
+        let none = Machine {
+            wt_create: Vec::new(),
+            ..never_opened()
+        };
+        let p = plan(&terracotta(), &req(Target::All), &none, &paths()).unwrap();
+        assert_eq!(p.warnings, vec![Warning::NoWindowsTerminal]);
+    }
+
+    #[test]
+    fn a_terminal_to_set_up_gets_the_font_an_existing_one_would() {
+        // The same font decision, the same values, the same font install: only the op's
+        // `create` and the summary line about setting it up differ.
+        let without_create = |p: Plan| -> Vec<Op> {
+            p.ops
+                .into_iter()
+                .map(|o| match o {
+                    Op::WtApply {
+                        settings,
+                        scheme,
+                        profile,
+                        set_default,
+                        ..
+                    } => Op::WtApply {
+                        settings,
+                        scheme,
+                        profile,
+                        set_default,
+                        create: false,
+                    },
+                    other => other,
+                })
+                .collect()
+        };
+        for fonts in [
+            vec![],
+            vec!["Cascadia Mono".to_string()],
+            vec![NERD_FONT_FAMILY.to_string()],
+        ] {
+            let existing = Machine {
+                fonts: fonts.clone(),
+                ..machine()
+            };
+            let to_set_up = Machine {
+                fonts: fonts.clone(),
+                ..never_opened()
+            };
+            let a = plan(&terracotta(), &req(Target::All), &existing, &paths()).unwrap();
+            let b = plan(&terracotta(), &req(Target::All), &to_set_up, &paths()).unwrap();
+            assert_eq!(a.warnings, b.warnings, "{fonts:?}");
+            assert_eq!(without_create(a), without_create(b), "{fonts:?}");
+        }
+    }
+
+    #[test]
+    fn a_settings_file_to_set_up_and_one_to_edit_are_both_planned() {
+        // Two variants: one opened, one never opened. One font decision, one line each.
+        let m = Machine {
+            wt_create: vec![PathBuf::from(r"C:\preview\settings.json")],
+            ..machine()
+        };
+        let p = plan(&terracotta(), &req(Target::Wt), &m, &paths()).unwrap();
+        let wt: Vec<(PathBuf, bool)> = p
+            .ops
+            .iter()
+            .filter_map(|o| match o {
+                Op::WtApply {
+                    settings, create, ..
+                } => Some((settings.clone(), *create)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            wt,
+            vec![
+                (PathBuf::from(r"C:\wt\settings.json"), false),
+                (PathBuf::from(r"C:\preview\settings.json"), true)
+            ]
+        );
+        for lines in [&p.summary_th, &p.summary_en] {
+            let unique: std::collections::BTreeSet<_> = lines.iter().collect();
+            assert_eq!(unique.len(), lines.len(), "{lines:?}");
+        }
+        assert!(p.summary_en.contains(&SET_UP_EN));
+    }
+
+    #[test]
+    fn create_is_written_to_the_journal_only_when_it_is_on() {
+        // A journal an earlier build wrote has no `create`, and reads as an edit of a file that
+        // is there; an op that does not create is written as before, byte for byte.
+        let p = plan(&terracotta(), &req(Target::All), &machine(), &paths()).unwrap();
+        let edit = p
+            .ops
+            .iter()
+            .find(|o| matches!(o, Op::WtApply { .. }))
+            .unwrap();
+        let json = serde_json::to_value(edit).unwrap();
+        assert!(json.get("create").is_none(), "{json}");
+        let back: Op = serde_json::from_value(json).unwrap();
+        assert_eq!(&back, edit);
+        let p = plan(&terracotta(), &req(Target::All), &never_opened(), &paths()).unwrap();
+        let make = p
+            .ops
+            .iter()
+            .find(|o| matches!(o, Op::WtApply { .. }))
+            .unwrap();
+        let json = serde_json::to_value(make).unwrap();
+        assert_eq!(json["create"], true);
+        assert_eq!(&serde_json::from_value::<Op>(json).unwrap(), make);
+    }
+
     #[test]
     fn machine_wide_clink_is_flagged() {
         let clink = r#""C:\Program Files\clink\clink.bat" inject --autorun"#;
@@ -1068,6 +1266,8 @@ mod tests {
         m.data_short = None;
         m.program_data_dir = Some(PathBuf::from(PROGRAM_DATA));
         m.fonts.clear();
+        // A Windows Terminal that was never opened besides the one that was: its line too.
+        m.wt_create = vec![PathBuf::from(r"C:\preview\settings.json")];
         // An older entry of ours and another Clink: every AutoRun line, for both targets.
         m.autorun_hkcu = RegText::Text(format!(r#"{} & "C:\clink\clink.bat" inject"#, entry()));
         let mut lines = std::collections::BTreeSet::new();
@@ -1079,7 +1279,7 @@ mod tests {
             lines.extend(p.summary_en);
         }
         // Every line the planner has, in both languages.
-        assert_eq!(lines.len(), 16, "{lines:#?}");
+        assert_eq!(lines.len(), 18, "{lines:#?}");
         for line in lines {
             let lower = line.to_lowercase();
             for term in [
