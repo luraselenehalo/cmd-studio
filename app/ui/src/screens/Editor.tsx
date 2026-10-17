@@ -76,9 +76,13 @@ export function Editor({ id }: { id: string }) {
   const [status, setStatus] = useState<Key | null>(null);
   const [applying, setApplying] = useState<{ key: number; request: ApplyRequest } | null>(null);
   const [applyBusy, setApplyBusy] = useState(false);
-  /** The theme the last draft write wrote (or the draft that was taken up): not written again.
-   * Null while no draft of this page's is stored (none yet, or a save or removal took it). */
+  /** The theme the last draft write wrote (or the draft that was taken up), as landed. Null while
+   * no draft of this page's is stored (none yet, or a save or removal took it). */
   const lastDraft = useRef<Theme | null>(null);
+  /** What the draft file will hold once the writes queued so far land: the theme of the last
+   * write queued, set when it is queued, not when it lands. What "written already" compares with,
+   * so an undo made while a write is on its way is written after it (round 3, C). */
+  const queuedDraft = useRef<Theme | null>(null);
   const applies = useRef(0);
   /** Counts the regenerates of simple mode: only the newest one's answer is used (item 5). */
   const regenerations = useRef(0);
@@ -119,12 +123,20 @@ export function Editor({ id }: { id: string }) {
    * 2, fix 2): its Try again would write an older one over it. So is it after a removal or a
    * save, below. */
   const writeDraft = (draft: Theme): Promise<void> => {
+    queuedDraft.current = draft;
     const write = pendingDraft.current
       .then(() => ipc.themeSave(draft, true))
-      .then(() => {
-        lastDraft.current = draft;
-        clearDraftProblem(id);
-      });
+      .then(
+        () => {
+          lastDraft.current = draft;
+          clearDraftProblem(id);
+        },
+        (e: unknown) => {
+          // Not written: unless a later write was queued, the file holds what last landed.
+          if (queuedDraft.current === draft) queuedDraft.current = lastDraft.current;
+          throw e;
+        },
+      );
     pendingDraft.current = write.catch(() => {});
     return write;
   };
@@ -135,11 +147,14 @@ export function Editor({ id }: { id: string }) {
    * Resolves to whether it took one away.
    */
   const dropDraft = (): Promise<boolean> => {
+    const queued = queuedDraft.current;
     const drop = pendingDraft.current.then(async () => {
       // A draft that is the theme is never taken away (round 2, fix 1).
       if (lastDraft.current === null || (draftOnly.current && lastSaved.current === null)) return false;
       await ipc.themeDelete(id, true);
       lastDraft.current = null;
+      // The file holds nothing now, unless a write was queued after this removal.
+      if (queuedDraft.current === queued) queuedDraft.current = null;
       clearDraftProblem(id);
       return true;
     });
@@ -161,7 +176,7 @@ export function Editor({ id }: { id: string }) {
     const write = wantsDraft(last, last.theme);
     try {
       if (!write) return { changed: await dropDraft(), problem: null };
-      if (last.theme === lastDraft.current) return { changed: false, problem: null };
+      if (last.theme === queuedDraft.current) return { changed: false, problem: null };
       await writeDraft(last.theme);
       return { changed: true, problem: null };
     } catch (error) {
@@ -208,7 +223,7 @@ export function Editor({ id }: { id: string }) {
         setSample(sampleContext(sys.report?.previewSample ?? CORE_SAMPLE_IDENTITY));
         // A draft-only theme's draft file holds the theme as loaded: that is the draft written.
         draftOnly.current = detail.source === "draft";
-        if (draftOnly.current) lastDraft.current = detail.theme;
+        if (draftOnly.current) lastDraft.current = queuedDraft.current = detail.theme;
         dispatch({ type: "load", theme: detail.theme });
         if (detail.draft) setDraftOffer({ draft: detail.draft, stored: detail.theme });
       },
@@ -272,7 +287,7 @@ export function Editor({ id }: { id: string }) {
     if (!draftTheme || !state || draftTheme !== state.theme) return;
     if (draftOffer || saveRun.current) return;
     const dirty = wantsDraft(state, draftTheme);
-    if (dirty && draftTheme === lastDraft.current) return;
+    if (dirty && draftTheme === queuedDraft.current) return;
     let alive = true;
     (dirty ? writeDraft(draftTheme).then(() => true) : dropDraft()).then(
       (changed) => {
@@ -395,7 +410,7 @@ export function Editor({ id }: { id: string }) {
       // At once, not at the next render: the page may be left first (item 2). The save took
       // the draft away (library.rs), so the next edit writes a new one.
       lastSaved.current = sent;
-      lastDraft.current = null;
+      lastDraft.current = queuedDraft.current = null;
       clearDraftProblem(id);
     })();
     const ended = run.then(
@@ -446,7 +461,7 @@ export function Editor({ id }: { id: string }) {
   const leave = async () => {
     await saveRun.current;
     const { state: last, draftOffer: offer } = latest.current;
-    if (last && !offer && wantsDraft(last, last.theme) && last.theme !== lastDraft.current) {
+    if (last && !offer && wantsDraft(last, last.theme) && last.theme !== queuedDraft.current) {
       try {
         await writeDraft(last.theme);
       } catch (e) {
@@ -462,7 +477,10 @@ export function Editor({ id }: { id: string }) {
     if (!draftOffer) return;
     // Starts dirty: the draft differs from the stored theme until it is saved.
     dispatch({ type: "load", theme: draftOffer.draft, savedTheme: draftOffer.stored });
-    lastDraft.current = draftOffer.draft;
+    lastDraft.current = queuedDraft.current = draftOffer.draft;
+    // The user keeps this draft: a problem said about it before is over, so its Try again
+    // cannot take the draft away (round 3, A).
+    clearDraftProblem(id);
     setDraftOffer(null);
   };
 

@@ -54,7 +54,7 @@ export class ErrorBoundary extends Component<{ children: ReactNode; /** For test
           <p lang="th">{e.messageTh}</p>
           <details>
             <summary>
-              <Both text={(d) => d["common.details"]} /> · {fill(en["error.code"], { code: e.code })}
+              <Both text={(d) => d["common.details"]} /> · <Both text={(d) => fill(d["error.code"], { code: e.code })} />
             </summary>
             {e.details && <pre>{e.details}</pre>}
           </details>

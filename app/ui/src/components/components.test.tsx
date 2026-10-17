@@ -504,6 +504,7 @@ describe("ErrorBoundary", () => {
         ),
       ).toBeTruthy();
       expect(within(notice).getByText(/Code E_INTERNAL/)).toBeTruthy();
+      expect(within(notice).getByText(/รหัส E_INTERNAL/)).toBeTruthy();
       expect(within(notice).getByText("Cannot read properties of undefined (reading 'themes')")).toBeTruthy();
       // What went wrong is on the console as well, with where it happened.
       expect(logged).toHaveBeenCalledWith("CMD Studio: a screen could not be drawn", thrown, expect.any(String));

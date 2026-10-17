@@ -847,6 +847,28 @@ describe("the editor", () => {
     expect(within(await card("Never saved")).getByText("Draft")).toBeTruthy();
   });
 
+  it("writes the loaded theme back when an undo comes while the autosave is still being written (round 3, C)", async () => {
+    const { ipc, user, control } = await mountRefusingDrafts();
+    control.refuse = false;
+    await openThemes(user);
+    await user.click(screen.getByRole("button", { name: "Create a theme" }));
+    await screen.findByRole("heading", { name: "Edit theme" });
+    const created = structuredClone(ipc.state.drafts[0]!);
+    control.holdNext = true;
+    await user.type(screen.getByLabelText("Author"), "Q");
+    // The autosave of "Q" has started and not landed; the user undoes and leaves meanwhile.
+    await waitFor(() => expect(control.held).toBe(true), { timeout: 3000 });
+    await user.click(screen.getByRole("heading", { name: "Edit theme" }));
+    await user.keyboard("{Control>}z{/Control}");
+    await user.click(screen.getByRole("button", { name: "Back to themes" }));
+    await act(async () => {
+      control.release(false);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    await screen.findByRole("heading", { name: "Themes" });
+    await waitFor(() => expect(ipc.state.drafts).toEqual([created]));
+  });
+
   it("says a draft that could not be taken away, on the page and on the next screen, and takes it on Try again", async () => {
     let refuse = true;
     const { ipc, user } = await mountWith((m) => {
@@ -1116,6 +1138,37 @@ describe("a draft problem said on the next screen (round 2, fix 2)", () => {
     await waitFor(() => expect(ipc.state.drafts.map((d) => d.name)).toEqual(["My Nord"]));
     expect(screen.queryByRole("group", { name: 'The draft of "My Nord" could not be saved' })).toBeNull();
     expect(terracotta.isConnected).toBe(true);
+  });
+
+  it("is over once the user keeps the offered draft, so Try again cannot take it away (round 3, A)", async () => {
+    let refuse = true;
+    const { ipc, user } = await mountWith((m) => {
+      const remove = m.themeDelete.bind(m);
+      vi.spyOn(m, "themeDelete").mockImplementation(async (id, draftOnly) => {
+        if (refuse) throw ipcError("E_DATA_WRITE", "drafts folder is read-only");
+        return remove(id, draftOnly);
+      });
+    });
+    await customize(user, "Terracotta");
+    await user.type(screen.getByLabelText("Author"), "Q");
+    await waitFor(() => expect(ipc.state.drafts).toHaveLength(1), { timeout: 3000 });
+    // Undo, and leave at once: the old draft cannot be taken away.
+    await user.click(screen.getByRole("heading", { name: "Edit theme" }));
+    await user.keyboard("{Control>}z{/Control}");
+    await user.click(screen.getByRole("button", { name: "Themes" }));
+    await screen.findByRole("heading", { name: "Themes" });
+    await screen.findByRole("button", { name: "Try again" });
+    refuse = false;
+    // The user opens the theme again and keeps the draft it offers.
+    await user.click(within(await card("My Terracotta")).getByRole("button", { name: "Edit" }));
+    const offer = await screen.findByRole("dialog");
+    await user.click(within(offer).getByRole("button", { name: "Keep editing them" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    const retry = screen.queryByRole("button", { name: "Try again" });
+    if (retry) await user.click(retry);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(ipc.state.drafts.map((d) => d.author.endsWith("Q"))).toEqual([true]);
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
   });
 
   it("does not make a theme deleted since again on Try again", async () => {
