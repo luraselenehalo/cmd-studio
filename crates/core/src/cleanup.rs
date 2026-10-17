@@ -1997,23 +1997,31 @@ mod tests {
 
     #[test]
     fn every_way_out_text_keeps_the_ui_words() {
-        // The builders that need no machine, called directly, so a text no scenario above
-        // reaches is checked too (autorun_original_by_hand, settings_by_hand and the step fixes
-        // are reached by the scenarios).
-        let data = Path::new(r"C:Users	esterAppDataLocalCMD Studio");
+        // The builders called directly, so a text no scenario above reaches is checked too: the
+        // ones that need no machine, and autorun_original_by_hand on a machine with no restore
+        // point, the one text of it no scenario reaches (the scenarios reach its other two, as
+        // they do settings_by_hand and the step fixes).
+        let data = Path::new(r"C:\Users\tester\AppData\Local\CMD Studio");
         let font = FontRecord {
             family: NERD_FONT_FAMILY.to_string(),
-            file: PathBuf::from(r"C:Users	esteronts.ttf"),
+            file: PathBuf::from(r"C:\Users\tester\fonts\f.ttf"),
             value_name: "CaskaydiaCove NF (TrueType)".to_string(),
         };
+        let (m, ctx) = machine();
+        let no_copy = autorun_original_by_hand(m.system(), &ctx);
+        assert!(
+            no_copy.en.starts_with("No restore point holds a copy"),
+            "{no_copy:?}"
+        );
         for fix in [
-            autorun_by_hand("cmd /d", r"C:dataclink-profile"),
-            autorun_not_text_by_hand(r"C:dataclink-profile"),
+            autorun_by_hand("cmd /d", r"C:\data\clink-profile"),
+            autorun_not_text_by_hand(r"C:\data\clink-profile"),
             held_file_by_hand(&font.file),
             font_by_hand(&font),
             folder_by_hand(data),
             records_by_hand(data),
             newer_state_by_hand(data),
+            no_copy,
         ] {
             assert_thai_words(&fix.th, &fix);
         }
