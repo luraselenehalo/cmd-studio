@@ -68,18 +68,35 @@ function push(state: EditorState, theme: Theme): EditorState {
   return { ...state, theme, past, future: [], dirty: true };
 }
 
+/** The index of an `ansiN` slot, or null when `N` is not a whole number (`ansi`, `ansi-1`, `ansi3.5`). */
+function ansiIndex(slot: string): number | null {
+  const match = /^ansi(0|[1-9]\d*)$/.exec(slot);
+  return match?.[1] === undefined ? null : Number(match[1]);
+}
+
+/**
+ * The colors with one slot set. When nothing would change (the value is the one already there,
+ * or the slot does not exist: an ansi index outside the palette, a name that is not a color),
+ * it returns the SAME `colors` object, so the caller can tell and treat it as no edit.
+ */
 export function setSlot(colors: Colors, slot: ColorSlot, value: string): Colors {
   if (slot.startsWith("ansi")) {
-    const index = Number(slot.slice(4));
+    const index = ansiIndex(slot);
+    if (index === null || index >= colors.ansi.length || colors.ansi[index] === value) return colors;
     const ansi = [...colors.ansi];
-    if (index >= 0 && index < ansi.length) ansi[index] = value;
+    ansi[index] = value;
     return { ...colors, ansi };
   }
-  return { ...colors, [slot]: value };
+  const key = slot as Exclude<keyof Colors, "ansi">;
+  if (typeof colors[key] !== "string" || colors[key] === value) return colors;
+  return { ...colors, [key]: value };
 }
 
 export function getSlot(colors: Colors, slot: ColorSlot): string {
-  if (slot.startsWith("ansi")) return colors.ansi[Number(slot.slice(4))] ?? "#000000";
+  if (slot.startsWith("ansi")) {
+    const index = ansiIndex(slot);
+    return (index === null ? undefined : colors.ansi[index]) ?? "#000000";
+  }
   return colors[slot as Exclude<keyof Colors, "ansi">];
 }
 
@@ -90,8 +107,11 @@ export function reduce(state: EditorState, action: EditorAction): EditorState {
     case "edit":
       return push(state, action.theme);
     case "setColor": {
-      const theme: Theme = { ...state.theme, colors: setSlot(state.theme.colors, action.slot, action.value), simple: null };
-      return push(state, theme);
+      // An edit that changes nothing is no edit: no undo step, and the recipe is not wiped.
+      // The guard is here, not in the callers, so no input can null `simple` by accident.
+      const colors = setSlot(state.theme.colors, action.slot, action.value);
+      if (colors === state.theme.colors) return state;
+      return push(state, { ...state.theme, colors, simple: null });
     }
     case "setColors": {
       const theme: Theme = { ...state.theme, colors: action.colors, simple: action.simple, tone: action.tone };

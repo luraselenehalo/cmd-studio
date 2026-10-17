@@ -80,6 +80,47 @@ describe("simple and advanced mode (spec §3.4)", () => {
   });
 });
 
+describe("a color edit that changes nothing is no edit", () => {
+  // The recipe must never be wiped by accident, whichever input dispatches (the guard lives in
+  // the reducer, not in the callers).
+  const advancedWithRecipe = () => {
+    const s = initialState({ ...terracotta(), simple: { accent: "#d97757", tint: 0.1 } });
+    return reduce(s, { type: "setMode", mode: "advanced" });
+  };
+
+  it("ignores a value equal to the current one: no undo step, simple stays", () => {
+    const s = advancedWithRecipe();
+    const sameNamed = reduce(s, { type: "setColor", slot: "frame", value: s.theme.colors.frame });
+    expect(sameNamed).toBe(s);
+    const sameAnsi = reduce(s, { type: "setColor", slot: "ansi3", value: s.theme.colors.ansi[3]! });
+    expect(sameAnsi).toBe(s);
+    expect(sameAnsi.theme.simple).toEqual({ accent: "#d97757", tint: 0.1 });
+    expect(sameAnsi.past).toEqual([]);
+    expect(sameAnsi.dirty).toBe(false);
+  });
+
+  it("ignores an ansi index outside 0 to 15: no undo step, simple stays", () => {
+    const s = advancedWithRecipe();
+    for (const slot of ["ansi16", "ansi99", "ansi-1", "ansi3.5"] as const) {
+      const next = reduce(s, { type: "setColor", slot, value: "#abcdef" });
+      expect(next, slot).toBe(s);
+    }
+    expect(s.theme.simple).toEqual({ accent: "#d97757", tint: 0.1 });
+    expect(s.theme.colors.ansi.length).toBe(16);
+    expect(s.past).toEqual([]);
+  });
+
+  it("still takes a real change, and the two ends of the ansi range", () => {
+    let s = advancedWithRecipe();
+    s = reduce(s, { type: "setColor", slot: "ansi0", value: "#010101" });
+    s = reduce(s, { type: "setColor", slot: "ansi15", value: "#fefefe" });
+    expect(s.theme.colors.ansi[0]).toBe("#010101");
+    expect(s.theme.colors.ansi[15]).toBe("#fefefe");
+    expect(s.theme.simple).toBeNull();
+    expect(s.past.length).toBe(2);
+  });
+});
+
 describe("a change of tone (ruling R9)", () => {
   it("changes the tone and the palette together, so one undo brings both back", () => {
     const before = initialState({ ...terracotta(), simple: { accent: "#d97757", tint: 0.1 } });
