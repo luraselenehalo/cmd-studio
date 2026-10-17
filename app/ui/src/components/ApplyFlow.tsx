@@ -124,8 +124,9 @@ export function ProgressView({ progress }: { progress: ApplyProgress | null }) {
   );
 }
 
-/** "Copy details for a problem report", saying whether the details reached the clipboard. */
-function useCopyDiagnostics() {
+/** "Copy details for a problem report", saying whether the details reached the clipboard. Help's
+ * "Report a problem" copies through it too, so both say it the same way. */
+export function useCopyDiagnostics() {
   const ipc = useIpc();
   const [copied, setCopied] = useState<"yes" | IpcError | null>(null);
   const copy = async () => {
