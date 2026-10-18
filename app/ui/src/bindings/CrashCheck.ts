@@ -6,14 +6,22 @@ import type { PauseOutcome } from "./PauseOutcome";
  */
 export type CrashCheck = { "kind": "noTheme" } | { "kind": "read", count: number, 
 /**
- * This check paused the theme on this computer for them, and the pause went through
- * ([`PauseOutcome::went_through`]).
+ * This check paused the theme on this computer, and the pause went through
+ * ([`PauseOutcome::paused_now`]).
  */
 pausedNow: boolean, 
 /**
  * What the pause this check tried did, to say the way every change is said (spec §4.1,
  * §5.5): a revert that was refused or rolled back, a record that could not be saved.
- * One that did not go through is tried again at the next start. `None` when it tried
- * none (fewer than three crashes).
+ * It tries one for three crashes or more, and one an earlier pause of this computer
+ * did not get through (its record, with a theme still applied), with that pause's
+ * reason. One that does not go through is tried again at the next start. `None` when
+ * it tried none.
  */
-pause: PauseOutcome | null, } | { "kind": "unreadable", why: string, };
+pause: PauseOutcome | null, } | { "kind": "unreadable", why: string, 
+/**
+ * A pause of this computer that had not gone through, tried again all the same: it
+ * comes from its record, not from the reports. `None` when there was none, and always
+ * when state.json could not be read (whether a theme is applied is not known).
+ */
+pause: PauseOutcome | null, };

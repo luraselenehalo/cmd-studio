@@ -12,6 +12,7 @@
 use crate::adapters::{AdapterError, Fs};
 use crate::model::Target;
 use crate::plan::Paths;
+use crate::state::{State, StateError};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -113,6 +114,44 @@ pub struct Paused {
     pub at_ms: Option<u64>,
     pub count: u32,
     pub resume: Option<Resume>,
+}
+
+/// How far a pause reaches now (recovery spec §4.1): who wrote its record, and for one of the
+/// app's, whether CMD Studio's changes are out, as state.json says. The app's record is written
+/// before Revert everything runs, so it does not say by itself that the theme is out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub enum PauseLevel {
+    /// init.lua's pause, or a paused.json that can't be read as a record: cmd loads no theme,
+    /// and nothing on the computer was changed.
+    Cmd,
+    /// A pause of this computer in effect: no theme is applied, CMD Studio's changes are out.
+    Computer,
+    /// A pause of this computer that has not gone through: a theme is still applied, because
+    /// Revert everything was refused or rolled back. cmd loads no theme while the record is
+    /// there, and the app's next start tries the pause again.
+    ComputerNotYet,
+    /// A pause of this computer whose state can't be told: state.json can't be read, so
+    /// whether CMD Studio's changes are out is not known. Never taken for one in effect.
+    ComputerUnknown,
+}
+
+impl Paused {
+    /// How far this pause reaches now, with `state` as `State::load` read it.
+    pub fn level(&self, state: &Result<State, StateError>) -> PauseLevel {
+        match (self.by, state) {
+            (PausedBy::Clink, _) => PauseLevel::Cmd,
+            (PausedBy::App, Ok(State { applied: None, .. })) => PauseLevel::Computer,
+            (
+                PausedBy::App,
+                Ok(State {
+                    applied: Some(_), ..
+                }),
+            ) => PauseLevel::ComputerNotYet,
+            (PausedBy::App, Err(_)) => PauseLevel::ComputerUnknown,
+        }
+    }
 }
 
 impl From<PauseRecord> for Paused {
@@ -384,6 +423,51 @@ mod tests {
             ("paused.json", false),
         ] {
             assert_eq!(is_tag(Path::new(name)), tag, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_pause_of_this_computer_is_in_effect_only_while_no_theme_is_applied() {
+        use crate::state::{Applied, Launch};
+        let by_app = Paused {
+            by: PausedBy::App,
+            reason: Some(PauseReason::User),
+            at_ms: Some(1),
+            count: 0,
+            resume: None,
+        };
+        let in_cmd = Paused {
+            by: PausedBy::Clink,
+            ..by_app.clone()
+        };
+        let none: Result<State, StateError> = Ok(State::default());
+        let applied: Result<State, StateError> = Ok(State {
+            applied: Some(Applied {
+                theme_id: uuid::Uuid::nil(),
+                theme_name: "Terracotta".to_string(),
+                target: Target::All,
+                set_default: true,
+                launch: Launch::Direct {
+                    exe: PathBuf::from(r"C:\x\clink_x64.exe"),
+                },
+                omp_version: "31.5.0".to_string(),
+                clink_version: "1.9.34".to_string(),
+                generated: Default::default(),
+                wt_font: None,
+                clink_log_len: 0,
+                snapshot_id: "1".to_string(),
+                applied_at_ms: 1,
+            }),
+            ..State::default()
+        });
+        let unreadable: Result<State, StateError> = Err(StateError::Read("locked".to_string()));
+        assert_eq!(by_app.level(&none), PauseLevel::Computer);
+        // Revert everything was refused or rolled back: the theme is still applied.
+        assert_eq!(by_app.level(&applied), PauseLevel::ComputerNotYet);
+        // Not known is never "in effect".
+        assert_eq!(by_app.level(&unreadable), PauseLevel::ComputerUnknown);
+        for state in [&none, &applied, &unreadable] {
+            assert_eq!(in_cmd.level(state), PauseLevel::Cmd);
         }
     }
 

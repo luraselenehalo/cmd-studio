@@ -12,7 +12,7 @@ use crate::generate::wt::{commandline, CMD_PROFILE_GUID, SCHEME_NAME};
 use crate::model::Target;
 use crate::plan::autorun::{is_foreign, is_our_entry, runs_clink, scan};
 use crate::plan::{autorun_entry, Component, AUTORUN_NOT_TEXT, AUTORUN_NOT_TEXT_TH, OMP_VERSION};
-use crate::recovery::{read_pause, PauseReason, Paused, PausedBy, PAUSE_AFTER};
+use crate::recovery::{read_pause, PauseLevel, PauseReason, Paused, PausedBy, PAUSE_AFTER};
 use crate::resources::{check_bundle, sha256_hex, ResourceError};
 use crate::snapshot::{SnapshotStore, UnreadableKind};
 use crate::state::{Applied, State, StateError};
@@ -40,10 +40,11 @@ pub enum Status {
 ///
 /// `details` is English, or text that is not in a language: paths, values, error messages. The
 /// CLI prints it in cmd, where nothing CMD Studio writes is Thai. Where the details tell the user
-/// what to do, `details_th` holds them in Thai for the app's own UI (R3's way to fix each step);
-/// it is `None`, and left out of JSON, for every other check. It is boxed, a pointer wide, so
-/// that a `Check`, which many checks' helpers return as their error, stays under clippy's size
-/// for an error (`result_large_err`, 128 bytes).
+/// what to do or what to know, `details_th` holds them in Thai for the app's own UI (R3's way to
+/// fix each step, D12's pause of this computer that has not gone through or can't be known to
+/// have); it is `None`, and left out of JSON, for every other check. It is boxed, a pointer
+/// wide, so that a `Check`, which many checks' helpers return as their error, stays under
+/// clippy's size for an error (`result_large_err`, 128 bytes).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -1102,7 +1103,7 @@ fn d11(sys: System<'_>) -> Check {
 /// still going on, `EventLog`'s single-flight guard).
 fn d12(sys: System<'_>, ctx: &Ctx, state: &Result<State, StateError>) -> Check {
     match read_pause(sys.fs, &ctx.paths) {
-        Ok(Some(paused)) => return paused_check(&paused),
+        Ok(Some(paused)) => return paused_check(&paused, state),
         Ok(None) => {}
         Err(e) => {
             return unreadable(
@@ -1185,8 +1186,12 @@ fn d12(sys: System<'_>, ctx: &Ctx, state: &Result<State, StateError>) -> Check {
     )
 }
 
-/// D12 while the theme is paused: who paused it, why and since when (recovery spec §4.5).
-fn paused_check(p: &Paused) -> Check {
+/// D12 while the theme is paused: who paused it, why and since when (recovery spec §4.5), and how
+/// far it reaches now ([`Paused::level`]). The app's record is written before Revert everything
+/// runs, so a pause of this computer is said as one that took CMD Studio's changes out only while
+/// no theme is applied. Otherwise the details also come in Thai (`details_th`): they tell the user
+/// that the pause has not gone through, or can't be known to have.
+fn paused_check(p: &Paused, state: &Result<State, StateError>) -> Check {
     let n = p.count;
     let (th, en) = match (p.by, p.reason) {
         (PausedBy::Clink, Some(PauseReason::CmdStarts)) => (
@@ -1228,26 +1233,46 @@ fn paused_check(p: &Paused) -> Check {
             "The theme is paused. Turn it back on from CMD Studio's home page".to_string(),
         ),
     };
-    let level = match p.by {
-        PausedBy::Clink => "cmd only (nothing on this computer was changed)",
-        PausedBy::App => "this computer (CMD Studio took its changes out)",
+    let (level, level_th) = match p.level(state) {
+        PauseLevel::Cmd => ("cmd only (nothing on this computer was changed)", None),
+        PauseLevel::Computer => ("this computer (CMD Studio took its changes out)", None),
+        PauseLevel::ComputerNotYet => (
+            "this computer, not yet: CMD Studio could not take its changes out and tries again \
+             at the next start",
+            Some("เครื่องนี้ ยังไม่สำเร็จ: CMD Studio เอาการเปลี่ยนแปลงออกไม่ได้ และจะลองใหม่ตอนเปิดครั้งหน้า"),
+        ),
+        PauseLevel::ComputerUnknown => (
+            "this computer, not known: state.json can't be read, so whether CMD Studio took its \
+             changes out is not known",
+            Some(
+                "เครื่องนี้ ยังบอกไม่ได้: อ่าน state.json ไม่ได้ จึงไม่รู้ว่า CMD Studio \
+                 เอาการเปลี่ยนแปลงออกแล้วหรือยัง",
+            ),
+        ),
     };
     let reason = p.reason.map_or(
         "not known (paused.json can't be read as a pause record)",
         PauseReason::as_str,
     );
     let mut details = vec![format!("paused: {level}"), format!("reason: {reason}")];
+    let mut details_th =
+        level_th.map(|level| vec![format!("หยุดไว้: {level}"), format!("เหตุผล: {reason}")]);
     if let Some(at) = p.at_ms {
         details.push(format!("since: {}", utc::iso(at)));
+        if let Some(lines) = &mut details_th {
+            lines.push(format!("ตั้งแต่: {}", utc::iso(at)));
+        }
     }
-    check(
+    let mut found = check(
         "D12",
         Status::Warn,
         Some("E_THEME_PAUSED"),
         th,
         en,
         details.join("\n"),
-    )
+    );
+    found.details_th = details_th.map(|lines| Box::new(lines.join("\n")));
+    found
 }
 
 /// What doctor finds wrong with CMD Studio's restore points, one entry for each problem, read
@@ -2751,6 +2776,61 @@ mod tests {
             br#"{"version":1,"reason":"user","at":1,"count":0,"by":"app"}"#,
         );
         assert_eq!(by_id(&run(&m, &ctx), "D12").code, Some("E_THEME_PAUSED"));
+    }
+
+    #[test]
+    fn d12_says_a_pause_of_this_computer_is_in_effect_only_when_the_theme_is_out() {
+        // The app writes its record before Revert everything runs: with a theme still applied,
+        // that revert was refused or rolled back, and nothing says the changes are out.
+        let user = br#"{"version":1,"reason":"user","at":1791694709000,"count":0,"by":"app"}"#;
+        let (m, ctx) = themed(Target::All);
+        m.fs.put(ctx.paths.paused_file(), user);
+        let d12 = by_id(&run(&m, &ctx), "D12");
+        assert_eq!(
+            (d12.status, d12.code),
+            (Status::Warn, Some("E_THEME_PAUSED")),
+            "{d12:?}"
+        );
+        assert_eq!(
+            d12.details,
+            "paused: this computer, not yet: CMD Studio could not take its changes out and tries \
+             again at the next start\nreason: user\nsince: 2026-10-11T04:58:29Z"
+        );
+        assert_eq!(
+            d12.details_th.as_deref().map(String::as_str),
+            Some(
+                "หยุดไว้: เครื่องนี้ ยังไม่สำเร็จ: CMD Studio เอาการเปลี่ยนแปลงออกไม่ได้ และจะลองใหม่ตอนเปิดครั้งหน้า\n\
+                 เหตุผล: user\nตั้งแต่: 2026-10-11T04:58:29Z"
+            )
+        );
+        // state.json can't be read: whether the changes are out is not known, never "out".
+        m.fs.fail_reads_of(ctx.paths.state_file());
+        let d12 = by_id(&run(&m, &ctx), "D12");
+        assert_eq!(d12.code, Some("E_THEME_PAUSED"), "{d12:?}");
+        assert!(
+            d12.details.starts_with(
+                "paused: this computer, not known: state.json can't be read, so whether CMD \
+                 Studio took its changes out is not known\n"
+            ),
+            "{d12:?}"
+        );
+        assert!(
+            d12.details_th.as_deref().is_some_and(|th| th.starts_with(
+                "หยุดไว้: เครื่องนี้ ยังบอกไม่ได้: อ่าน state.json ไม่ได้ จึงไม่รู้ว่า CMD Studio \
+                 เอาการเปลี่ยนแปลงออกแล้วหรือยัง\n"
+            )),
+            "{d12:?}"
+        );
+        // No theme is applied: the pause is in effect, and that is said as before.
+        let (m, ctx) = machine();
+        m.fs.put(ctx.paths.paused_file(), user);
+        let d12 = by_id(&run(&m, &ctx), "D12");
+        assert_eq!(
+            d12.details,
+            "paused: this computer (CMD Studio took its changes out)\nreason: user\n\
+             since: 2026-10-11T04:58:29Z"
+        );
+        assert_eq!(d12.details_th, None, "{d12:?}");
     }
 
     #[test]

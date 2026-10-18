@@ -9,6 +9,12 @@ import type { RevertOutcome } from "./RevertOutcome";
  */
 export type PauseOutcome = { 
 /**
+ * The pause went through: Revert everything ended well, and its record was saved. When
+ * not, the fields below say why, and a theme still applied is paused again at the next
+ * start.
+ */
+pausedNow: boolean, 
+/**
  * What Revert everything did; `None` when it was refused before it changed anything.
  */
 revert: RevertOutcome | null, 
