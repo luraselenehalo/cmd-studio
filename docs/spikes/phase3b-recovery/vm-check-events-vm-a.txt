@@ -1,0 +1,6 @@
+# vm-check.md step 7b on VM-A (cmdstudio-win11, tester), recovery-events.ps1
+
+events 1000 from 'Application Error' in the log before: 4
+wrote 1100 events 1000 from 'Application Error' in 2 s
+events 1000 from 'Application Error' in the log now: 1104
+newest: 2026-10-18T16:44:49.1265209Z

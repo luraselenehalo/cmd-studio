@@ -11,6 +11,7 @@ use windows_sys::Win32::System::Diagnostics::Debug::{
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 
+pub mod eventlog;
 pub mod fonts;
 pub mod fs;
 pub mod host;

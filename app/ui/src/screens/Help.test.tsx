@@ -75,12 +75,14 @@ function Shell({ language, start, applied }: { language: Language; start: Route;
   const [lastApply, setLastApply] = useState<LastApply | null>(applied);
   const draftProblems = useDraftProblems();
   const [version, setVersion] = useState(0);
+  const [recoveryActed, setRecoveryActed] = useState(false);
   const bump = useCallback(() => setVersion((v) => v + 1), []);
+  const markRecoveryActed = useCallback(() => setRecoveryActed(true), []);
   const saveSettings = useCallback(async () => {}, []);
   const settings = useMemo(() => ({ ...DEFAULT_SETTINGS, language: lang, wizardDone: true }), [lang]);
   const appState = useMemo<AppState>(
-    () => ({ settings, saveSettings, lastApply, setLastApply, draftProblems, version, bump }),
-    [settings, saveSettings, lastApply, draftProblems, version, bump],
+    () => ({ settings, saveSettings, lastApply, setLastApply, draftProblems, version, bump, recoveryActed, markRecoveryActed }),
+    [settings, saveSettings, lastApply, draftProblems, version, bump, recoveryActed, markRecoveryActed],
   );
   const nav = useMemo<Nav>(() => ({ route, go: setRoute }), [route]);
   return (
@@ -827,10 +829,10 @@ describe("report a problem", () => {
 });
 
 describe("the guide and the credits", () => {
-  it("has the five paragraphs of the guide", async () => {
+  it("has the five paragraphs of the guide and what to do when cmd won't open", async () => {
     const { user } = mount(createMockIpc());
     await openTab(user, "Short guide");
-    for (const p of ["p1", "p2", "p3", "p4", "p5"] as const) {
+    for (const p of ["p1", "p2", "p3", "p4", "p5", "cmdWontOpen"] as const) {
       expect(screen.getByText(en[`help.guide.${p}`])).toBeTruthy();
     }
   });

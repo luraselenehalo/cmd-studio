@@ -1,6 +1,6 @@
 //! Guards over `tauri.conf.json` (tests only). No cargo build enables `tauri/custom-protocol`, so
 //! every exe is a "dev build" to tauri-codegen, which loads `build.devUrl` instead of the embedded
-//! assets when the key is set: whatever served that port would then hold the IPC of all 27
+//! assets when the key is set: whatever served that port would then hold the IPC of all 30
 //! commands. The config must not have it, must carry the CSP of the Global Constraints and
 //! nothing else under `app.security`, and must not create the window at startup (Task 15 builds
 //! it with a data directory).

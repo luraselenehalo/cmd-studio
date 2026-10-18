@@ -1310,6 +1310,7 @@ mod tests {
     mod on_disk {
         use super::*;
         use cmdstudio_core::adapters::windows::{
+            eventlog::WinEventLog,
             fonts::WinFonts,
             fs::WinFs,
             host::WinHost,
@@ -1346,6 +1347,7 @@ mod tests {
             wt: WinWt,
             process: WinProcess,
             host: WinHost,
+            event_log: WinEventLog,
         }
 
         impl DiskMachine {
@@ -1358,6 +1360,7 @@ mod tests {
                     wt: WinWt::new(dir.join("local")),
                     process: WinProcess::new(Vec::new(), Duration::from_secs(1)),
                     host: WinHost,
+                    event_log: WinEventLog::real(),
                 }
             }
         }
@@ -1371,6 +1374,7 @@ mod tests {
                     wt: &self.wt,
                     process: &self.process,
                     host: &self.host,
+                    event_log: &self.event_log,
                 }
             }
         }

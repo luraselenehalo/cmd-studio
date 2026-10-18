@@ -84,6 +84,11 @@ export interface AppState {
   /** Bumped after an apply, undo, restore or revert: screens that show the machine reload. */
   version: number;
   bump: () => void;
+  /** The user paused the theme or turned it back on during this run (from Home or from Help). From
+   * then on the pause the start tried is out of date, and Home no longer shows it (recovery spec
+   * §4.3). In the app state, not in a module, so each mounted app has its own. */
+  recoveryActed: boolean;
+  markRecoveryActed: () => void;
 }
 
 export const AppStateContext = createContext<AppState | null>(null);

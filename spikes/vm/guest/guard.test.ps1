@@ -11,6 +11,10 @@ $changers = [ordered]@{
   'wt-cmd-scheme.ps1' = @(); 'proto-setup.ps1' = @(); 'thai-clink-workaround.ps1' = @('-Mode', 'short')
   'font-persist.ps1' = @(); 'thai-prefs.ps1' = @(); 'run-ci-probe.ps1' = @('-Probe', 'fonts')
   'add-thai-user.ps1' = @(); 'phase1b-check.ps1' = @('-Step', 'Snapshot')
+  'recovery-setup.ps1' = @(); 'recovery-crash.ps1' = @('-Swap'); 'recovery-timing.ps1' = @(); 'recovery-cmdc.ps1' = @()
+  'recovery-s6b.ps1' = @('-Setup')
+  'recovery-hang.ps1' = @('-Swap'); 'recovery-fakecrash.ps1' = @(); 'recovery-filters.ps1' = @('-Install')
+  'recovery-ping.ps1' = @('-Open'); 'recovery-tasklist.ps1' = @(); 'recovery-events.ps1' = @()
 }
 
 function Run-Guest($script, [string[]] $argv, $computer, $localAppData) {

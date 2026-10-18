@@ -18,6 +18,7 @@
 //!   folder's bundled files are missing or changed), reinstall CMD Studio (words); an add-on
 //!   folder is gone, apply again (the apply installs it); files missing or changed inside a
 //!   folder that is there, nothing but D1's own hand step;
+//! - the theme paused (D12): turn it back on; cmd crashed in its add-on (D12): pause the theme;
 //! - nothing for a check that could not read (check again), for what the doctor says to fix by
 //!   hand (a settings.json CMD Studio can't work with, an AutoRun value that is not text), for D2
 //!   and for D3 when Clink does not run (both say to do what D1 says first);
@@ -45,10 +46,11 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use ts_rs::TS;
 
-/// What the app offers for a finding. `reapply`, `replaceOtherClink`, `installWindowsTerminal`
-/// and `openNewCmdWindow` are buttons; `reinstall` is a step only the user can take, shown as
-/// words. A Windows Terminal that was never opened needs no step of the user's: an apply sets it
-/// up (founder 2026-10-17), so D6 offers `reapply` for it once a theme is applied.
+/// What the app offers for a finding. `reapply`, `replaceOtherClink`, `installWindowsTerminal`,
+/// `openNewCmdWindow`, `resume` and `pause` are buttons; `reinstall` is a step only the user can
+/// take, shown as words. A Windows Terminal that was never opened needs no step of the user's:
+/// an apply sets it up (founder 2026-10-17), so D6 offers `reapply` for it once a theme is
+/// applied.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
@@ -69,6 +71,12 @@ pub enum FixKind {
     /// from are missing or changed among them (D1; D8 for the Nerd Font): only a new install of
     /// CMD Studio brings them back. Words, not a button.
     Reinstall,
+    /// Turn the theme back on (D12 while it is paused): a pause in cmd is lifted at once, one of
+    /// this computer applies the paused theme again through the plan (`theme_resume`).
+    Resume,
+    /// Pause the theme on this computer (D12 when cmd crashed in its add-on), after the user's
+    /// yes (`theme_pause` with `clinkCrash`).
+    Pause,
 }
 
 /// One check as the Help page shows it: the core's result, and the fix offered for it.
@@ -269,6 +277,9 @@ pub fn fix_for(
         ("D3" | "D4" | "D7" | "D8" | "D9", _) => can_apply.then_some(FixKind::Reapply),
         ("D5", _) => (can_apply && autorun.is_some_and(|a| !a.foreign_clink.is_empty()))
             .then_some(FixKind::ReplaceOtherClink),
+        // The theme's pause and cmd's crashes in its add-on (recovery spec §4.5).
+        ("D12", "E_THEME_PAUSED") => Some(FixKind::Resume),
+        ("D12", "E_CMD_CRASHED") => Some(FixKind::Pause),
         ("D6", "E_WT_NOT_FOUND") => {
             // D6 finds this only while no Terminal has a settings.json, so none has one here.
             if !never_opened(wt, |_| false).is_empty() {
@@ -441,7 +452,7 @@ mod tests {
         let b = backend();
         applied(&b);
         let report = b.doctor_run().unwrap();
-        assert_eq!(report.checks.len(), 11);
+        assert_eq!(report.checks.len(), 12);
         assert!(report.checked_at_ms >= 1_791_694_709_000);
         for c in &report.checks {
             assert!(!c.message_th.is_empty() && !c.message_en.is_empty());

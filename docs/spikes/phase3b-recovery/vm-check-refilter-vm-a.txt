@@ -1,0 +1,26 @@
+# vm-check.md step 2f on VM-A (cmdstudio-win11, tester), recovery-filters.ps1 -Probe refilter
+
+--- refilter-5260.txt
+beginedit n=1 t=0.268 wall=1792338682
+wrapped 3 methods of 2 filters
+own n=1 t=0.278 wall=1792338682
+filter@0 start n=1 t=0.278 wall=1792338682
+filter@0 end n=1 t=0.278 wall=1792338682 results=0 second=nil
+filter@1 start n=1 t=0.279 wall=1792338682
+filter@1 end n=1 t=0.448 wall=1792338682 results=1 second=nil
+rightfilter@1 start n=1 t=0.449 wall=1792338682
+rightfilter@1 end n=1 t=0.449 wall=1792338682 results=2 second=false
+own n=2 t=0.552 wall=1792338682
+filter@0 start n=2 t=0.553 wall=1792338682
+filter@0 end n=2 t=0.554 wall=1792338682 results=0 second=nil
+filter@1 start n=2 t=0.555 wall=1792338682
+filter@1 end n=2 t=0.557 wall=1792338682 results=1 second=nil
+rightfilter@1 start n=2 t=0.558 wall=1792338682
+rightfilter@1 end n=2 t=0.559 wall=1792338682 results=2 second=false
+own n=3 t=0.691 wall=1792338682
+filter@0 start n=3 t=0.691 wall=1792338682
+filter@0 end n=3 t=0.692 wall=1792338682 results=0 second=nil
+filter@1 start n=3 t=0.692 wall=1792338682
+filter@1 end n=3 t=0.692 wall=1792338682 results=1 second=nil
+rightfilter@1 start n=3 t=0.692 wall=1792338682
+rightfilter@1 end n=3 t=0.692 wall=1792338682 results=2 second=false

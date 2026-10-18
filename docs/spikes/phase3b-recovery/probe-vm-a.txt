@@ -1,0 +1,134 @@
+# VM-A (cmdstudio-win11, tester, Windows 11 26H2 26300.9457 en-US), 2026-10-18, spike steps 1-4 (S1-S7)
+# Step 1 first failed: aa-probe.lua:26 (probe.lua line 25) `tostring(os.getenv("_ZL_CLINK_PROMPT_PRIORITY"))` -> "bad argument #1 to 'tostring' (value expected)": Clink's os.getenv returns no value at all for an unset variable. The VM's copy of probe.lua (not the repo's) was changed to `tostring((os.getenv(...)))` and step 1 was run again.
+# VM-A was cold-booted from clean's disk (snapshot restore clean, discardstate, startvm) because the host was locked; Windows Terminal was never opened before step 2.
+
+### p3b-a-1-setup.log
+## 1. recovery-setup.ps1 2026-10-18T07:39:55.1583630+07:00
+...al\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua:26: bad argument #1 to 'tostring' (value expected)
+...al\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua:26: bad argument #1 to 'tostring' (value expected)
+...al\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua:26: bad argument #1 to 'tostring' (value expected)
+clink set said:
+...al\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua:26: bad argument #1 to 'tostring' (value expected)
+        Name: clink.logo
+ Description: Controls what startup logo to show
+     Options: none,full,short
+       Value: none
+     Default: full
+
+The default is 'full' which shows the full copyright logo when Clink is
+injected.  A value of 'short' shows an abbreviated startup logo with version
+information.  A value of 'none' omits the startup logo entirely.
+AutoRun: (if exist "C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\runtime\clink-1.9.34\clink_x64.exe" "C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\runtime\clink-1.9.34\clink_x64.exe" inject --autorun --quiet --profile "C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\clink-profile")
+data: C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b
+health: C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\health
+
+### p3b-a-1-setup-2.log
+## 1. recovery-setup.ps1 again, probe.lua getenv wrapped in the VM's copy 2026-10-18T07:40:54.7351102+07:00
+clink set said:
+p3b 5972 load host=C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\runtime\clink-1.9.34\clink_x64.exe time=1792284065 zl=nil
+p3b 5972 api getpid=function gethost=function globfiles=function find_files=function promptfilter=function onbeginedit=function onendedit=function oninject=function clock=0.012318
+p3b 5972 io.open write ok=true why=nil
+p3b 5972 io.open read text=v1 1792284065\n why=nil
+p3b 5972 globfiles count=1 first=start-5972
+p3b 5972 os.remove ok=true why=nil
+p3b 5972 gone after remove=true
+p3b 5972 files pcall ok=true err=nil
+        Name: clink.logo
+ Description: Controls what startup logo to show
+     Options: none,full,short
+       Value: none
+     Default: full
+
+The default is 'full' which shows the full copyright logo when Clink is
+injected.  A value of 'short' shows an abbreviated startup logo with version
+information.  A value of 'none' omits the startup logo entirely.
+AutoRun: (if exist "C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\runtime\clink-1.9.34\clink_x64.exe" "C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\runtime\clink-1.9.34\clink_x64.exe" inject --autorun --quiet --profile "C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\clink-profile")
+data: C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b
+health: C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\health
+
+### step 2: two Win+R cmd windows (pids 5080 and 1208 by Get-GuestCmdWindows, each with clink_dll_x64.dll), exit typed in each
+
+# VM-A (cmdstudio-win11, tester), 2026-10-18T07:42:58.4839325+07:00; spike step 3 (recovery-cmdc.ps1) then step 4 (recovery-report.ps1)
+## recovery-cmdc.ps1
+cmd /c pid=1448 exit=0
+cmd /c pid=7900 exit=0
+cmd /c pid=11040 exit=0
+## recovery-report.ps1
+--- clink.log
+p3b 1208 load host=C:\WINDOWS\system32\cmd.exe time=1792284108 zl=nil
+p3b 1208 api getpid=function gethost=function globfiles=function find_files=function promptfilter=function onbeginedit=function onendedit=function oninject=function clock=0.054494
+p3b 1208 io.open write ok=true why=nil
+p3b 1208 io.open read text=v1 1792284108\n why=nil
+p3b 1208 globfiles count=1 first=start-1208
+p3b 1208 os.remove ok=true why=nil
+p3b 1208 gone after remove=true
+p3b 1208 files pcall ok=true err=nil
+cmdstudio: prompt loaded
+p3b 1208 order 1 oninject
+p3b 1208 order 2 onbeginedit
+p3b 1208 order 3 filter-0 bytes=16 esc=false
+--- probe.txt
+p3b 8436 load host=C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\runtime\clink-1.9.34\clink_x64.exe time=1792284064 zl=nil
+p3b 8436 api getpid=function gethost=function globfiles=function find_files=function promptfilter=function onbeginedit=function onendedit=function oninject=function clock=0.015383
+p3b 8436 io.open write ok=true why=nil
+p3b 8436 io.open read text=v1 1792284064\n why=nil
+p3b 8436 globfiles count=1 first=start-8436
+p3b 8436 os.remove ok=true why=nil
+p3b 8436 gone after remove=true
+p3b 8436 files pcall ok=true err=nil
+p3b 11228 load host=C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\runtime\clink-1.9.34\clink_x64.exe time=1792284065 zl=nil
+p3b 11228 api getpid=function gethost=function globfiles=function find_files=function promptfilter=function onbeginedit=function onendedit=function oninject=function clock=0.012903
+p3b 11228 io.open write ok=true why=nil
+p3b 11228 io.open read text=v1 1792284065\n why=nil
+p3b 11228 globfiles count=1 first=start-11228
+p3b 11228 os.remove ok=true why=nil
+p3b 11228 gone after remove=true
+p3b 11228 files pcall ok=true err=nil
+p3b 9004 load host=C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\runtime\clink-1.9.34\clink_x64.exe time=1792284065 zl=nil
+p3b 9004 api getpid=function gethost=function globfiles=function find_files=function promptfilter=function onbeginedit=function onendedit=function oninject=function clock=0.016908
+p3b 9004 io.open write ok=true why=nil
+p3b 9004 io.open read text=v1 1792284065\n why=nil
+p3b 9004 globfiles count=1 first=start-9004
+p3b 9004 os.remove ok=true why=nil
+p3b 9004 gone after remove=true
+p3b 9004 files pcall ok=true err=nil
+p3b 9728 load host=C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\runtime\clink-1.9.34\clink_x64.exe time=1792284065 zl=nil
+p3b 9728 api getpid=function gethost=function globfiles=function find_files=function promptfilter=function onbeginedit=function onendedit=function oninject=function clock=0.011771
+p3b 9728 io.open write ok=true why=nil
+p3b 9728 io.open read text=v1 1792284065\n why=nil
+p3b 9728 globfiles count=1 first=start-9728
+p3b 9728 os.remove ok=true why=nil
+p3b 9728 gone after remove=true
+p3b 9728 files pcall ok=true err=nil
+p3b 5972 load host=C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\runtime\clink-1.9.34\clink_x64.exe time=1792284065 zl=nil
+p3b 5972 api getpid=function gethost=function globfiles=function find_files=function promptfilter=function onbeginedit=function onendedit=function oninject=function clock=0.012318
+p3b 5972 io.open write ok=true why=nil
+p3b 5972 io.open read text=v1 1792284065\n why=nil
+p3b 5972 globfiles count=1 first=start-5972
+p3b 5972 os.remove ok=true why=nil
+p3b 5972 gone after remove=true
+p3b 5972 files pcall ok=true err=nil
+p3b 5080 load host=C:\WINDOWS\system32\cmd.exe time=1792284080 zl=nil
+p3b 5080 api getpid=function gethost=function globfiles=function find_files=function promptfilter=function onbeginedit=function onendedit=function oninject=function clock=0.043425
+p3b 5080 io.open write ok=true why=nil
+p3b 5080 io.open read text=v1 1792284080\n why=nil
+p3b 5080 globfiles count=1 first=start-5080
+p3b 5080 os.remove ok=true why=nil
+p3b 5080 gone after remove=true
+p3b 5080 files pcall ok=true err=nil
+p3b 5080 order 1 oninject
+p3b 5080 order 2 onbeginedit
+p3b 5080 order 3 filter-0 bytes=16 esc=false
+p3b 1208 load host=C:\WINDOWS\system32\cmd.exe time=1792284108 zl=nil
+p3b 1208 api getpid=function gethost=function globfiles=function find_files=function promptfilter=function onbeginedit=function onendedit=function oninject=function clock=0.054494
+p3b 1208 io.open write ok=true why=nil
+p3b 1208 io.open read text=v1 1792284108\n why=nil
+p3b 1208 globfiles count=1 first=start-1208
+p3b 1208 os.remove ok=true why=nil
+p3b 1208 gone after remove=true
+p3b 1208 files pcall ok=true err=nil
+p3b 1208 order 1 oninject
+p3b 1208 order 2 onbeginedit
+p3b 1208 order 3 filter-0 bytes=16 esc=false
+--- health\
+--- cmd.exe processes now

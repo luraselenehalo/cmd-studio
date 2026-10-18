@@ -5,8 +5,8 @@
 //! `command_names::COMMANDS`, to what Tauri registers and to what `capabilities/default.json`
 //! allows (spec §5.10), and check which commands log.
 //!
-//! Every command that reads or changes the machine, the data folder or the settings (23 of
-//! the 27) writes exactly one log line through [`Backend::logged`]: its name (a constant of
+//! Every command that reads or changes the machine, the data folder or the settings (26 of
+//! the 30) writes exactly one log line through [`Backend::logged`]: its name (a constant of
 //! `command_names`, never text built at run time), how long it took, and `ok` or the error's
 //! code. The two that ask the user for a file (`theme_import_preview`, `theme_export`) log once
 //! for the whole command: the time includes the user's time in the dialog, and a cancel is
@@ -25,6 +25,7 @@ use crate::backend::apply::{
 };
 use crate::backend::doctor::{DoctorReport, FixProposal};
 use crate::backend::preview::{self, ContrastIssue, PreviewResult};
+use crate::backend::recovery::{PauseOutcome, RecoveryStatus, ResumeOutcome};
 use crate::backend::system::SystemReport;
 use crate::backend::{AdvancedInfo, Backend};
 use crate::command_names as names;
@@ -36,6 +37,7 @@ use crate::settings::{AppSettings, SettingsLoad};
 use cmdstudio_core::model::Theme;
 use cmdstudio_core::palette::{Colors, Tone};
 use cmdstudio_core::preview::PreviewContext;
+use cmdstudio_core::recovery::PauseReason;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State as TauriState, WebviewWindow};
@@ -362,6 +364,29 @@ pub async fn advanced_read(state: TauriState<'_, Shared>) -> Result<AdvancedInfo
     blocking(move || b.logged(names::ADVANCED_READ, |b| b.advanced_read())).await
 }
 
+/// Whether the theme is paused, and what the start's crash check found (recovery spec §8): it
+/// waits for that check while it runs, on its worker, never on the window's thread.
+#[tauri::command]
+pub async fn recovery_status(state: TauriState<'_, Shared>) -> Result<RecoveryStatus, AppError> {
+    let b = state.inner().clone();
+    blocking(move || b.logged(names::RECOVERY_STATUS, |b| b.recovery_status())).await
+}
+
+#[tauri::command]
+pub async fn theme_pause(
+    state: TauriState<'_, Shared>,
+    reason: PauseReason,
+) -> Result<PauseOutcome, AppError> {
+    let b = state.inner().clone();
+    blocking(move || b.logged(names::THEME_PAUSE, |b| b.theme_pause(reason))).await
+}
+
+#[tauri::command]
+pub async fn theme_resume(state: TauriState<'_, Shared>) -> Result<ResumeOutcome, AppError> {
+    let b = state.inner().clone();
+    blocking(move || b.logged(names::THEME_RESUME, |b| b.theme_resume())).await
+}
+
 /// Every command, for `tauri::Builder::invoke_handler`.
 pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
@@ -392,6 +417,9 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         open_external,
         diagnostics_copy,
         advanced_read,
+        recovery_status,
+        theme_pause,
+        theme_resume,
     ]
 }
 
@@ -425,7 +453,7 @@ mod tests {
                 "{name} has no #[tauri::command] function"
             );
         }
-        assert_eq!(COMMANDS.len(), 27);
+        assert_eq!(COMMANDS.len(), 30);
     }
 
     #[test]
@@ -456,7 +484,7 @@ mod tests {
         "preview_render",
     ];
 
-    /// Ruling F11 of the pre-flight review, as revised: each of the 23 commands that read or
+    /// Ruling F11 of the pre-flight review, as revised: each of the 26 commands that read or
     /// change the machine, the data folder or the settings writes one log line through
     /// `Backend::logged`, under its own name from `command_names` (a constant, never text built
     /// at run time). The four pure commands write none, and stay sync.
@@ -493,6 +521,17 @@ mod tests {
                 continue;
             }
             logging += 1;
+            // Off the window's thread: `recovery_status` waits up to 30 s for the start's crash
+            // check, and a sync command, or one that does not go through `blocking`, would hold
+            // the window for that long.
+            assert!(
+                body.contains(&format!("pub async fn {name}(")),
+                "{name} is async"
+            );
+            assert!(
+                body.contains("blocking(move || "),
+                "{name} runs on a worker (`blocking`)"
+            );
             assert_eq!(body.matches(".logged(").count(), 1, "{name} logs once");
             assert_eq!(
                 body.matches("names::").count(),
@@ -505,7 +544,7 @@ mod tests {
                 "{name} logs under {constant}"
             );
         }
-        assert_eq!(logging, 23);
+        assert_eq!(logging, 26);
     }
 
     /// A pure command runs on the window's thread: a panic in it must come back as an error,

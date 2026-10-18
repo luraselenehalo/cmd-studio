@@ -73,4 +73,7 @@ export const tauriIpc: Ipc = {
   openExternal: (target) => call("open_external", { target }),
   diagnosticsCopy: () => call("diagnostics_copy"),
   advancedRead: () => call("advanced_read"),
+  recoveryStatus: () => call("recovery_status"),
+  themePause: (reason) => call("theme_pause", { reason }),
+  themeResume: () => call("theme_resume"),
 };

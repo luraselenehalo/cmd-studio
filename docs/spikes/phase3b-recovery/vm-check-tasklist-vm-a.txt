@@ -1,0 +1,18 @@
+# vm-check.md step 2d on VM-A (cmdstudio-win11, tester), recovery-tasklist.ps1
+
+--- cmd /d /c (the command alone, AutoRun off)
+command line: cmd.exe /d /c ""C:\WINDOWS\System32\tasklist.exe" /FO CSV /NH 2>nul"
+run 1: 778 ms, rows=145, cmd.exe rows=1, exit=0
+run 2: 613 ms, rows=145, cmd.exe rows=1, exit=0
+run 3: 604 ms, rows=145, cmd.exe rows=1, exit=0
+run 4: 593 ms, rows=145, cmd.exe rows=1, exit=0
+run 5: 566 ms, rows=145, cmd.exe rows=1, exit=0
+average of 5: 631 ms
+--- cmd /c (as io.popen starts it, AutoRun on)
+command line: cmd.exe /c ""C:\WINDOWS\System32\tasklist.exe" /FO CSV /NH 2>nul"
+run 1: 699 ms, rows=145, cmd.exe rows=1, exit=0
+run 2: 611 ms, rows=141, cmd.exe rows=1, exit=0
+run 3: 606 ms, rows=141, cmd.exe rows=1, exit=0
+run 4: 590 ms, rows=141, cmd.exe rows=1, exit=0
+run 5: 625 ms, rows=141, cmd.exe rows=1, exit=0
+average of 5: 626 ms

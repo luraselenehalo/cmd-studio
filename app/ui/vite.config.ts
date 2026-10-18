@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 
 // The UI is a static page Tauri embeds (frontendDist = app/ui/dist), and the window always loads
 // that build. tauri.conf.json deliberately has no devUrl, so no exe ever hands a localhost page
-// the IPC of all 27 commands. This dev server only serves the visual check in a browser without
+// the IPC of all 30 commands. This dev server only serves the visual check in a browser without
 // Tauri; with VITE_MOCK_IPC=1 the IPC there is the in-memory mock, never the real machine.
 export default defineConfig({
   root: fileURLToPath(new URL(".", import.meta.url)),

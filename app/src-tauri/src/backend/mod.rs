@@ -27,6 +27,7 @@ pub mod diagnostics;
 pub mod doctor;
 pub mod launch;
 pub mod preview;
+pub mod recovery;
 pub mod system;
 
 /// What the backend runs on: the real adapters (`crate::machine::RealMachine`) or the core's
@@ -76,6 +77,9 @@ pub struct Backend<M> {
     /// in it is the user's own: it goes to the UI and nowhere else, and is never logged; the
     /// diagnostics read it only to redact it.
     sample: SampleIdentity,
+    /// Where the start's check of Windows' crash reports leaves its answer for
+    /// `recovery_status` (recovery spec §4.3).
+    crash: recovery::CrashSlot,
 }
 
 impl<M: Machine> Backend<M> {
@@ -101,6 +105,7 @@ impl<M: Machine> Backend<M> {
             pending_import: Mutex::new(None),
             library_lock: Mutex::new(()),
             sample,
+            crash: recovery::CrashSlot::new(),
         }
     }
 
@@ -148,6 +153,13 @@ impl<M: Machine> Backend<M> {
             &format!("cmd={name} ms={ms} {ended}"),
         );
         result
+    }
+
+    /// Writes one line of the app's own, not a command's, to the log: the start's crash check, a
+    /// pause (recovery spec §4.3). As with `logged`, names and codes only, never the user's data;
+    /// a line that cannot be written is dropped.
+    pub(crate) fn note_line(&self, line: &str) {
+        let _ = self.log.write(self.sys().fs, self.now_ms(), line);
     }
 
     /// The last lines of the log, for the Advanced page and the diagnostics.
@@ -381,7 +393,7 @@ pub struct AdvancedInfo {
 pub(crate) mod testing {
     use super::*;
     use crate::backend::apply::{ApplyOutcome, ApplyProgress, ApplyRequest, PlanOutcome};
-    use cmdstudio_core::adapters::fake::{FakeFonts, FakeFs, FakeMachine};
+    use cmdstudio_core::adapters::fake::{FakeEventLog, FakeFonts, FakeFs, FakeMachine};
     use cmdstudio_core::adapters::{Fs, WtLocation, WtVariant};
     use cmdstudio_core::model::Target;
     use cmdstudio_core::plan::NERD_FONT_FAMILY;
@@ -420,6 +432,12 @@ pub(crate) mod testing {
     /// A machine with Windows Terminal, Oh My Posh and Clink answering like the real ones, and
     /// the bundled files; the backend over it.
     pub(crate) fn backend() -> Backend<FakeMachine> {
+        backend_on(|m| m)
+    }
+
+    /// [`backend`] over a machine of the test's own, made from that fake machine (one adapter
+    /// replaced, say).
+    pub(crate) fn backend_on<M: Machine>(machine: impl FnOnce(FakeMachine) -> M) -> Backend<M> {
         let mut m = FakeMachine::new();
         m.fs.create_dir_all(Path::new(
             r"C:\Users\tester\AppData\Local\Microsoft\Windows",
@@ -444,7 +462,7 @@ pub(crate) mod testing {
         let resources = fake_resources(&m.fs, Path::new(r"C:\Program Files\CMD Studio\resources"));
         let (_, now) = clock();
         Backend::new(
-            m,
+            machine(m),
             PathBuf::from(DATA),
             resources.root,
             now,
@@ -457,6 +475,11 @@ pub(crate) mod testing {
     /// through here.
     pub(crate) fn fake_fs(b: &Backend<FakeMachine>) -> &FakeFs {
         &b.machine.fs
+    }
+
+    /// The fake crash reports under the backend (see [`fake_fs`]).
+    pub(crate) fn fake_events(b: &Backend<FakeMachine>) -> &FakeEventLog {
+        &b.machine.event_log
     }
 
     /// The id of the Terracotta preset.
@@ -482,8 +505,8 @@ pub(crate) mod testing {
 
     /// Plans `req`, then applies it with the digest of the plan it was shown, as the UI does:
     /// the outcome, and every progress event in the order it was told. The plan must be ready.
-    pub(crate) fn plan_and_apply(
-        b: &Backend<FakeMachine>,
+    pub(crate) fn plan_and_apply<M: Machine>(
+        b: &Backend<M>,
         req: ApplyRequest,
     ) -> (ApplyOutcome, Vec<ApplyProgress>) {
         let plan = match b.plan_apply(req.clone()).unwrap() {
@@ -496,7 +519,9 @@ pub(crate) mod testing {
     }
 
     /// Applies Terracotta as [`terracotta_request`] asks (see [`plan_and_apply`]).
-    pub(crate) fn apply_terracotta(b: &Backend<FakeMachine>) -> (ApplyOutcome, Vec<ApplyProgress>) {
+    pub(crate) fn apply_terracotta<M: Machine>(
+        b: &Backend<M>,
+    ) -> (ApplyOutcome, Vec<ApplyProgress>) {
         plan_and_apply(b, terracotta_request())
     }
 }
