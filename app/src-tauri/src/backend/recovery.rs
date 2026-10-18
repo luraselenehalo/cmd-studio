@@ -97,8 +97,8 @@ pub enum CrashCheck {
         pause: Option<Box<PauseOutcome>>,
     },
     /// The reports could not be read (the log is off, this user may not read it, it did not
-    /// answer in five seconds, or an earlier read is still going on), or state.json could not
-    /// be, so nothing was done for them.
+    /// answer in five seconds, or an earlier read still held it as those five seconds ran
+    /// out), or state.json could not be, so nothing was done for them.
     Unreadable {
         why: String,
         /// A pause of this computer that had not gone through (its record no older than the
@@ -1100,9 +1100,9 @@ mod tests {
             matches!(&check, CrashCheck::Unreadable { why, .. } if why.contains("service is off")),
             "{check:?}"
         );
-        // A third crash, while an earlier read of the log is still going on (the reader's
-        // single-flight guard): reports that could not be read, never "no crash" and never a
-        // pause.
+        // A third crash, while an earlier read of the log still held it as this read's own time
+        // ran out (the reader lets one read run at a time): reports that could not be read,
+        // never "no crash" and never a pause.
         fake_events(&b).crash(at, "cmd.exe", CLINK_DLL);
         fake_events(&b).fail_reads(STILL_BEING_READ);
         let check = b.crash_check();

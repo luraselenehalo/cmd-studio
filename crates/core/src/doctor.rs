@@ -1099,8 +1099,9 @@ fn d11(sys: System<'_>) -> Check {
 /// pause, then cmd's crashes in Clink since the theme was applied, as Windows' crash reports (the
 /// Application event log) say. A pause comes first: while the theme is paused, its crashes are
 /// what paused it. A pause record that can't be read is `E_MACHINE_READ`; crash reports that
-/// can't be read are `skipped` with the reason, never "no crash" (so are those whose read is
-/// still going on, `EventLog`'s single-flight guard).
+/// can't be read are `skipped` with the reason, never "no crash" (so are those an earlier read
+/// still held as this read's own time ran out: `EventLog` reads one at a time, and a later read
+/// waits for the earlier one within its own five seconds).
 fn d12(sys: System<'_>, ctx: &Ctx, state: &Result<State, StateError>) -> Check {
     match read_pause(sys.fs, &ctx.paths) {
         Ok(Some(paused)) => return paused_check(&paused, state),
@@ -2771,8 +2772,9 @@ mod tests {
 
     #[test]
     fn d12_takes_a_read_that_is_still_going_on_for_one_that_could_not_be_read() {
-        // The Application log's reader lets one read run at a time: while an earlier read is
-        // still going, a new one is an error ("still being read"), which is no crash report.
+        // The Application log's reader lets one read run at a time: a new one waits for an
+        // earlier read within its own time, and is an error ("still being read") when that time
+        // runs out first, which is no crash report.
         let (m, ctx) = themed(Target::All);
         m.event_log.fail_reads(crate::eventlog::STILL_BEING_READ);
         let d12 = by_id(&run(&m, &ctx), "D12");

@@ -1,9 +1,10 @@
 //! The Application event log through Windows' Event Log API (recovery spec §4.3): the
 //! "Application Error" events 1000 (`EvtQuery` with an XPath query, `EvtNext`, `EvtRender` as
-//! XML). Read only. The read runs on a thread of its own, one at a time, and is given up after five
-//! seconds in all (each wait of `EvtNext` is what is left of them): a log that is off, that this
-//! user may not read, or that does not answer in time is an error, which the callers take for
-//! "could not be read" and never for "no crash".
+//! XML). Read only. The read runs on a thread of its own, one at a time (a second read waits for
+//! the first, within its own five seconds), and is given up after five seconds in all (the wait
+//! for its place, then each wait of `EvtNext`, is what is left of them): a log that is off, that
+//! this user may not read, or that does not answer in time is an error, which the callers take
+//! for "could not be read" and never for "no crash".
 use super::{last_error, wide};
 use crate::adapters::{AdapterError, AppCrash, EventLog};
 use crate::eventlog::{crash_query, parse_crash, STILL_BEING_READ};
@@ -30,6 +31,9 @@ pub const MOST_EVENTS: usize = 1000;
 const BATCH: usize = 16;
 /// How much further back than the caller's span the query looks, in milliseconds.
 const QUERY_MARGIN_MS: u64 = 60_000;
+/// How long a caller waits between its tries for the one reader's place while another read
+/// holds it.
+const SLOT_POLL: Duration = Duration::from_millis(50);
 
 /// Set while a reader thread of this process runs, also one whose caller gave up waiting.
 static READING: AtomicBool = AtomicBool::new(false);
@@ -52,8 +56,8 @@ impl EventLog for WinEventLog {
     fn app_crashes(&self, since_ms: u64, now_ms: u64) -> Result<Vec<AppCrash>, AdapterError> {
         let query = query_since(since_ms, now_ms);
         let timeout = self.timeout;
-        let events = within_time(timeout, &READING, move || {
-            read_events(&query, MOST_EVENTS, timeout)
+        let events = within_time(timeout, &READING, move |deadline| {
+            read_events(&query, MOST_EVENTS, deadline, timeout)
         })?;
         Ok(crashes_in(&events, since_ms, now_ms))
     }
@@ -84,12 +88,17 @@ fn crashes_in(xmls: &[String], since_ms: u64, now_ms: u64) -> Vec<AppCrash> {
         .collect()
 }
 
+/// What is left of a read's time at `now`: `None` once `deadline` has come.
+fn time_left(deadline: Instant, now: Instant) -> Option<Duration> {
+    deadline
+        .checked_duration_since(now)
+        .filter(|left| !left.is_zero())
+}
+
 /// The milliseconds of a read's time that are left at `now`, for `EvtNext`'s wait: at least 1
 /// (0 would mean "do not wait"), at most what a `u32` holds. `None` once `deadline` has come.
 fn ms_left(deadline: Instant, now: Instant) -> Option<u32> {
-    let left = deadline
-        .checked_duration_since(now)
-        .filter(|left| !left.is_zero())?;
+    let left = time_left(deadline, now)?;
     Some(u32::try_from(left.as_millis()).unwrap_or(u32::MAX).max(1))
 }
 
@@ -140,25 +149,35 @@ impl Drop for Slot {
     }
 }
 
-/// Runs `work` on a thread of its own and waits `timeout` for its answer. One that does not
-/// come in time is an error; the thread is left to end by itself.
+/// Runs `work` on a thread of its own, with the deadline the caller has (`timeout` from now),
+/// and waits until then for its answer. One that does not come in time is an error; the thread
+/// is left to end by itself.
 ///
-/// Only one reader runs at a time (`busy`): while an earlier one is still running, also one
-/// whose caller gave up, a new read is an error at once and starts no thread. The reader frees
-/// its place before it sends its answer, so a caller's next read always finds it free.
+/// Only one reader runs at a time (`busy`). While an earlier one is still running, also one
+/// whose caller gave up, a new read waits for its place, asking again every [`SLOT_POLL`],
+/// within its own `timeout`; the work then runs with the time that is left, since the deadline
+/// it is given is the caller's. A place that does not come free in time is the error
+/// [`STILL_BEING_READ`], and no thread is started. The reader frees its place before it sends
+/// its answer, so a caller's next read always finds it free.
 fn within_time<T: Send + 'static>(
     timeout: Duration,
     busy: &'static AtomicBool,
-    work: impl FnOnce() -> Result<T, AdapterError> + Send + 'static,
+    work: impl FnOnce(Instant) -> Result<T, AdapterError> + Send + 'static,
 ) -> Result<T, AdapterError> {
     let fail = |message: String| AdapterError::new("read the Application event log", message);
-    if busy
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        return Err(fail(STILL_BEING_READ.to_string()));
-    }
-    let slot = Slot(busy);
+    let deadline = Instant::now() + timeout;
+    let slot = loop {
+        if busy
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            break Slot(busy);
+        }
+        let Some(left) = time_left(deadline, Instant::now()) else {
+            return Err(fail(STILL_BEING_READ.to_string()));
+        };
+        std::thread::sleep(left.min(SLOT_POLL));
+    };
     let (tx, rx) = mpsc::channel();
     std::thread::Builder::new()
         .name("event-log".to_string())
@@ -167,13 +186,14 @@ fn within_time<T: Send + 'static>(
             // and only then does the caller hear that the reader is gone.
             let tx = tx;
             let slot = slot;
-            let answer = work();
+            let answer = work(deadline);
             drop(slot);
             // The receiver may have given up already; then nobody waits for the answer.
             let _ = tx.send(answer);
         })
         .map_err(|e| fail(format!("could not start the reader: {e}")))?;
-    match rx.recv_timeout(timeout) {
+    let left = time_left(deadline, Instant::now()).unwrap_or(Duration::ZERO);
+    match rx.recv_timeout(left) {
         Ok(answer) => answer,
         Err(mpsc::RecvTimeoutError::Timeout) => Err(timed_out(timeout)),
         Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -195,9 +215,14 @@ impl Drop for Handle {
 }
 
 /// The XML of the events of the Application log that match `query`, newest first, at most
-/// `most`, within `timeout` of now.
-fn read_events(query: &str, most: usize, timeout: Duration) -> Result<Vec<String>, AdapterError> {
-    let deadline = Instant::now() + timeout;
+/// `most`, until `deadline`. `timeout` is the whole time a read is given, named in the error of
+/// one whose time is used up.
+fn read_events(
+    query: &str,
+    most: usize,
+    deadline: Instant,
+    timeout: Duration,
+) -> Result<Vec<String>, AdapterError> {
     let path = wide(OsStr::new("Application"));
     let query = wide(OsStr::new(query));
     // SAFETY: both strings are NUL-terminated UTF-16 that outlive the call; session 0 is this
@@ -301,8 +326,8 @@ mod tests {
     fn an_answer_in_time_is_the_answer_and_a_late_one_an_error() {
         static BUSY: AtomicBool = AtomicBool::new(false);
         // Review Focus 4: a log that does not answer is "could not be read", never "no crash".
-        assert_eq!(within_time(Duration::from_secs(5), &BUSY, || Ok(7)), Ok(7));
-        let late = within_time(Duration::from_millis(50), &BUSY, || {
+        assert_eq!(within_time(Duration::from_secs(5), &BUSY, |_| Ok(7)), Ok(7));
+        let late = within_time(Duration::from_millis(50), &BUSY, |_| {
             std::thread::sleep(Duration::from_millis(500));
             Ok(7)
         });
@@ -311,7 +336,7 @@ mod tests {
         assert!(e.message.contains("did not answer within 50ms"), "{e:?}");
         // The late reader still holds the slot; wait for it before the next read.
         wait_until_free(&BUSY);
-        let failed: Result<u8, _> = within_time(Duration::from_secs(5), &BUSY, || {
+        let failed: Result<u8, _> = within_time(Duration::from_secs(5), &BUSY, |_| {
             Err(AdapterError::new(
                 "EvtQuery Application",
                 "Access is denied.",
@@ -332,19 +357,51 @@ mod tests {
     #[test]
     fn a_reader_that_panics_is_an_error_never_an_answer_and_frees_the_slot() {
         static BUSY: AtomicBool = AtomicBool::new(false);
-        let crashed: Result<u8, _> =
-            within_time(Duration::from_secs(5), &BUSY, || panic!("the reader broke"));
+        let crashed: Result<u8, _> = within_time(Duration::from_secs(5), &BUSY, |_| {
+            panic!("the reader broke")
+        });
         let e = crashed.unwrap_err();
         assert!(e.message.contains("stopped without an answer"), "{e:?}");
         // The slot is free by the time the caller hears it.
         assert!(!BUSY.load(Ordering::SeqCst));
-        assert_eq!(within_time(Duration::from_secs(5), &BUSY, || Ok(7)), Ok(7));
+        assert_eq!(within_time(Duration::from_secs(5), &BUSY, |_| Ok(7)), Ok(7));
     }
 
     #[test]
-    fn while_a_reader_still_runs_a_new_read_is_an_error_at_once() {
+    fn a_second_caller_waits_for_the_first_and_gets_its_own_answer() {
         static BUSY: AtomicBool = AtomicBool::new(false);
-        let slow = within_time(Duration::from_millis(20), &BUSY, || {
+        // The start's crash check and Home's doctor read the log at the same time (m2 of the
+        // final review): the one that comes second waits for the slot within its own time and
+        // reads then, with the time it has left. It is never "could not be read" at once.
+        let slow = within_time(Duration::from_millis(20), &BUSY, |_| {
+            std::thread::sleep(Duration::from_millis(300));
+            Ok(1)
+        });
+        assert!(
+            slow.is_err(),
+            "the first caller gave up; its reader holds the slot"
+        );
+        let started = Instant::now();
+        let second = within_time(Duration::from_secs(5), &BUSY, |deadline| Ok(deadline));
+        let deadline = second.unwrap();
+        let waited = started.elapsed();
+        assert!(
+            waited >= Duration::from_millis(200),
+            "it waited for the first reader: {waited:?}"
+        );
+        assert!(waited < Duration::from_secs(2), "{waited:?}");
+        // The work was given the caller's own deadline (five seconds from the call, which came
+        // moments after `started`), not a fresh five seconds from when the place came free, 200
+        // ms or more later.
+        let slack = Duration::from_millis(50);
+        assert!(deadline <= started + Duration::from_secs(5) + slack);
+        assert!(deadline >= started + Duration::from_secs(4));
+    }
+
+    #[test]
+    fn a_caller_whose_time_runs_out_while_the_slot_is_held_is_still_being_read() {
+        static BUSY: AtomicBool = AtomicBool::new(false);
+        let slow = within_time(Duration::from_millis(20), &BUSY, |_| {
             std::thread::sleep(Duration::from_millis(400));
             Ok(1)
         });
@@ -352,27 +409,28 @@ mod tests {
         let started = Instant::now();
         let ran = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&ran);
-        let second = within_time(Duration::from_secs(5), &BUSY, move || {
+        let second = within_time(Duration::from_millis(100), &BUSY, move |_| {
             flag.store(true, Ordering::SeqCst);
             Ok(2)
         });
         let e = second.unwrap_err();
         assert_eq!(e.message, STILL_BEING_READ, "{e:?}");
+        let waited = started.elapsed();
         assert!(
-            started.elapsed() < Duration::from_millis(200),
-            "not at once"
+            waited >= Duration::from_millis(100) && waited < Duration::from_millis(350),
+            "it waited its own time, not the first reader's: {waited:?}"
         );
         assert!(!ran.load(Ordering::SeqCst), "a second reader was started");
         // The first reader ends; the slot is free again.
         wait_until_free(&BUSY);
-        assert_eq!(within_time(Duration::from_secs(5), &BUSY, || Ok(3)), Ok(3));
+        assert_eq!(within_time(Duration::from_secs(5), &BUSY, |_| Ok(3)), Ok(3));
     }
 
     #[test]
     fn a_read_that_ended_leaves_the_slot_free_for_the_next_one_at_once() {
         static BUSY: AtomicBool = AtomicBool::new(false);
         for i in 0..5000u32 {
-            let answer = within_time(Duration::from_secs(5), &BUSY, move || Ok(i));
+            let answer = within_time(Duration::from_secs(5), &BUSY, move |_| Ok(i));
             assert_eq!(answer, Ok(i), "read {i}");
         }
     }
@@ -380,7 +438,7 @@ mod tests {
     #[test]
     fn a_reader_that_answers_with_an_error_frees_the_slot() {
         static BUSY: AtomicBool = AtomicBool::new(false);
-        let failed: Result<u8, _> = within_time(Duration::from_secs(5), &BUSY, || {
+        let failed: Result<u8, _> = within_time(Duration::from_secs(5), &BUSY, |_| {
             Err(AdapterError::new(
                 "EvtNext Application",
                 "Access is denied.",
@@ -616,7 +674,7 @@ mod tests {
         assert!(started.elapsed() < READ_TIMEOUT + Duration::from_secs(1));
         // A runner may have had no crash in seven days, and then the read above never renders
         // an event. The newest five events of any kind do reach EvtRender.
-        let events = read_events("*", 5, READ_TIMEOUT).unwrap();
+        let events = read_events("*", 5, Instant::now() + READ_TIMEOUT, READ_TIMEOUT).unwrap();
         assert!(
             !events.is_empty(),
             "the Application log holds no event at all"
