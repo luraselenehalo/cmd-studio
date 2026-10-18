@@ -1224,7 +1224,7 @@ mod tests {
         assert!(out.contains("Plan for \"Terracotta\":\n  - "), "{out}");
         let (code, out, _) = cli(&m, &later(&d, 1), &["doctor", "--json"]);
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(v["checks"].as_array().unwrap().len(), 11);
+        assert_eq!(v["checks"].as_array().unwrap().len(), 12);
         // English only: the Thai text of a check is for the app's own UI.
         assert!(v["checks"][0]["messageEn"].is_string(), "{out}");
         assert!(v["checks"][0].get("messageTh").is_none(), "{out}");
@@ -2050,10 +2050,10 @@ mod tests {
         let (code, out, _) = cli(&m, &later(&d, 1), &["doctor", "--json"]);
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         let checks = v["checks"].as_array().unwrap();
-        assert_eq!((code, checks.len()), (EXIT_FAILED, 12), "{out}");
-        assert_eq!(checks[11]["id"], "R1");
-        assert_eq!(checks[11]["code"], "E_SNAPSHOT_READ");
-        assert!(checks[11]["messageEn"].as_str().unwrap().contains(&way_out));
+        assert_eq!((code, checks.len()), (EXIT_FAILED, 13), "{out}");
+        assert_eq!(checks[12]["id"], "R1");
+        assert_eq!(checks[12]["code"], "E_SNAPSHOT_READ");
+        assert!(checks[12]["messageEn"].as_str().unwrap().contains(&way_out));
         // Every command that changes the machine refuses, changes nothing and names the way out.
         for args in [vec!["apply", THEME], vec!["undo"], vec!["--cleanup"]] {
             let (code, out, err) = cli(&m, &later(&d, 1), &args);

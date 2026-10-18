@@ -648,6 +648,8 @@ exit code: `0` สำเร็จ · `1` ล้มเหลวและย้อ
 | `E_SNAPSHOT_READ` | อ่านจุดย้อนกลับไม่ได้ (ไฟล์หาย เสีย หรือเปิดไม่ได้ในตอนนี้) · ถ้าเป็นจุดของการเปลี่ยนแปลงที่ถูกตัดกลางทาง แปลว่ายังตรวจการเปลี่ยนแปลงครั้งก่อนไม่ได้ จึงยังไม่ได้เปลี่ยนการตั้งค่าของคุณ ให้ลองใหม่ (§5.5) | A restore point can't be read (missing, damaged, or not readable right now). When it is the one of a change that was cut off, an earlier change could not be checked yet: your settings were not changed; try again (§5.5) |
 | `E_BUSY` | มี CMD Studio อีกตัว หรือโปรแกรมอื่น เปิดไฟล์ `cmdstudio.lock` อยู่ คือกำลังเปลี่ยนการตั้งค่าของเครื่องนี้ ให้ลองใหม่เมื่อทำเสร็จ (§5.5) | Another CMD Studio, or another program, has cmdstudio.lock open: it is changing this computer right now. Try again when it is done (§5.5) |
 | `E_INTERNAL` | CMD Studio เองมีปัญหา รายละเอียดบอกว่าตรงไหน ลองใหม่อีกครั้ง ถ้ายังเป็นอยู่ให้แจ้งปัญหาพร้อมข้อมูลวินิจฉัย | CMD Studio itself ran into a problem; the details say where. Try again, and if it stays, report it with the diagnostics |
+| `E_THEME_PAUSED` | ธีมถูกหยุดไว้ ใน cmd เพราะ cmd เปิดไม่ถึงพร้อมท์ซ้ำๆ หรือทั้งเครื่อง เพราะ cmd แครชในส่วนเสริมหรือผู้ใช้หยุดเอง เปิดธีมกลับได้ที่หน้าแรก (D12) | The theme is paused, in cmd because cmd failed to reach its prompt again and again, or on this computer because cmd crashed in its add-on or it was paused by hand; turn it back on from the home page (D12) |
+| `E_CMD_CRASHED` | cmd แครชในส่วนเสริมของ cmd (Clink) ตั้งแต่ใช้ธีม ตามรายงานแครชของ Windows (D12) | cmd crashed in its add-on (Clink) since the theme was applied, as Windows' crash reports say (D12) |
 
 ### 5.10 Log ความเป็นส่วนตัว และความปลอดภัยของแอป
 - ไม่มี telemetry ใดๆ

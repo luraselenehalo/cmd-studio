@@ -1,4 +1,4 @@
-//! Health checks D1–D11 (spec §5.8), then what doctor finds wrong with CMD Studio's own restore
+//! Health checks D1–D12 (spec §5.8), then what doctor finds wrong with CMD Studio's own restore
 //! points (R1–R3). Read only: doctor writes nothing, takes no lock and runs no recovery, so it
 //! is never blocked by another run, by a restore point or by a state.json it cannot read; it
 //! says what it found and goes on. A check says `ok` only after it really looked (spec §2.1
@@ -6,15 +6,18 @@
 //! (`E_MACHINE_READ`): a read that failed is never taken for the problem a check looks for.
 use crate::actions::{latest_record, Ctx, BUSY_EN, BUSY_TH};
 use crate::adapters::{DefaultTerminal, RegText, System};
+use crate::eventlog::clink_crashes;
 use crate::exec::{CLEANUP_FIX_EN, CLEANUP_FIX_TH, COMMAND_PROCESSOR_KEY};
 use crate::generate::wt::{commandline, CMD_PROFILE_GUID, SCHEME_NAME};
 use crate::model::Target;
 use crate::plan::autorun::{is_foreign, is_our_entry, runs_clink, scan};
 use crate::plan::{autorun_entry, Component, AUTORUN_NOT_TEXT, AUTORUN_NOT_TEXT_TH, OMP_VERSION};
+use crate::recovery::{read_pause, PauseReason, Paused, PausedBy, PAUSE_AFTER};
 use crate::resources::{check_bundle, sha256_hex, ResourceError};
 use crate::snapshot::{SnapshotStore, UnreadableKind};
 use crate::state::{Applied, State, StateError};
 use crate::txn::{Failure, JournalStore};
+use crate::utc;
 use crate::verify::lua_error_line;
 use crate::wt_edit::{check_parses, read_value, WtError, WtKey};
 use serde::{Deserialize, Serialize};
@@ -144,7 +147,7 @@ pub fn last_inject(log: &str) -> InjectSeen {
     seen
 }
 
-/// Runs D1–D11, always all eleven and in this order, then adds one entry for each problem it
+/// Runs D1–D12, always all twelve and in this order, then adds one entry for each problem it
 /// finds with CMD Studio's restore points (R1–R3, see `records`); none when there is none.
 /// Read only.
 pub fn doctor(sys: System<'_>, ctx: &Ctx) -> Vec<Check> {
@@ -161,6 +164,7 @@ pub fn doctor(sys: System<'_>, ctx: &Ctx) -> Vec<Check> {
         d9(sys, &state),
         d10(sys),
         d11(sys),
+        d12(sys, ctx, &state),
     ];
     checks.extend(records(sys, ctx));
     checks
@@ -1090,6 +1094,162 @@ fn d11(sys: System<'_>) -> Check {
     )
 }
 
+/// D12 (recovery spec §4.5, numbered after D11: D10 is the packaged-app check): the theme's
+/// pause, then cmd's crashes in Clink since the theme was applied, as Windows' crash reports (the
+/// Application event log) say. A pause comes first: while the theme is paused, its crashes are
+/// what paused it. A pause record that can't be read is `E_MACHINE_READ`; crash reports that
+/// can't be read are `skipped` with the reason, never "no crash" (so are those whose read is
+/// still going on, `EventLog`'s single-flight guard).
+fn d12(sys: System<'_>, ctx: &Ctx, state: &Result<State, StateError>) -> Check {
+    match read_pause(sys.fs, &ctx.paths) {
+        Ok(Some(paused)) => return paused_check(&paused),
+        Ok(None) => {}
+        Err(e) => {
+            return unreadable(
+                "D12",
+                "บันทึกการหยุดธีมของ CMD Studio (paused.json)",
+                "CMD Studio's record of the theme's pause (paused.json)",
+                e,
+            )
+        }
+    }
+    let a = match applied("D12", state) {
+        Ok(a) => a,
+        Err(skipped) => return skipped,
+    };
+    let crashes = match clink_crashes(sys.event_log, a.applied_at_ms, ctx.now_ms) {
+        Ok(crashes) => crashes,
+        Err(e) => {
+            return check(
+                "D12",
+                Status::Skipped,
+                None,
+                format!(
+                    "ตรวจข้อนี้ไม่ได้ เพราะอ่านรายงานแครชของ Windows (event log ของ Application) \
+                     ไม่ได้: {e}"
+                ),
+                format!(
+                    "Not checked: Windows' crash reports (the Application event log) could not be \
+                     read: {e}"
+                ),
+                "",
+            )
+        }
+    };
+    let n = u32::try_from(crashes.len()).unwrap_or(u32::MAX);
+    if n == 0 {
+        return check(
+            "D12",
+            Status::Ok,
+            None,
+            "cmd ไม่ได้แครชในส่วนเสริมตั้งแต่ใช้ธีม และธีมไม่ได้ถูกหยุดไว้",
+            "cmd has not crashed in its add-on since the theme was applied, and the theme is not \
+             paused",
+            "",
+        );
+    }
+    let details = crashes
+        .iter()
+        .map(|c| format!("{} {} crashed in {}", utc::iso(c.at_ms), c.app, c.module))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if n < PAUSE_AFTER {
+        return check(
+            "D12",
+            Status::Warn,
+            Some("E_CMD_CRASHED"),
+            format!(
+                "cmd แครชในส่วนเสริม {n} ครั้งตั้งแต่ใช้ธีม ถ้ายังเกิดอีก ให้หยุดธีมใน CMD Studio \
+                 เพื่อให้ cmd เปิดได้"
+            ),
+            format!(
+                "cmd crashed in its add-on {n} time(s) since the theme was applied. If it happens \
+                 again, pause the theme in CMD Studio so that cmd opens"
+            ),
+            details,
+        );
+    }
+    check(
+        "D12",
+        Status::Fail,
+        Some("E_CMD_CRASHED"),
+        format!(
+            "cmd แครชในส่วนเสริม {n} ครั้งตั้งแต่ใช้ธีม และธีมยังเปิดอยู่ ให้หยุดธีมใน CMD Studio \
+             เพื่อให้ cmd เปิดได้"
+        ),
+        format!(
+            "cmd crashed in its add-on {n} times since the theme was applied, and the theme is \
+             still on. Pause the theme in CMD Studio so that cmd opens"
+        ),
+        details,
+    )
+}
+
+/// D12 while the theme is paused: who paused it, why and since when (recovery spec §4.5).
+fn paused_check(p: &Paused) -> Check {
+    let n = p.count;
+    let (th, en) = match (p.by, p.reason) {
+        (PausedBy::Clink, Some(PauseReason::CmdStarts)) => (
+            format!(
+                "ธีมถูกหยุดไว้ใน cmd เพราะ cmd เปิดไม่ถึงพร้อมท์ {n} ครั้งติดกัน \
+                 เปิดธีมกลับได้ที่หน้าแรกของ CMD Studio"
+            ),
+            format!(
+                "The theme is paused in cmd: cmd failed to reach its prompt {n} times in a row. \
+                 Turn it back on from CMD Studio's home page"
+            ),
+        ),
+        (PausedBy::App, Some(PauseReason::ClinkCrash)) => (
+            format!(
+                "CMD Studio หยุดธีมของเครื่องนี้ไว้ เพราะ cmd แครชในส่วนเสริม {n} ครั้ง \
+                 เปิดธีมกลับได้ที่หน้าแรกของ CMD Studio"
+            ),
+            format!(
+                "CMD Studio paused the theme on this computer: cmd crashed in its add-on {n} \
+                 times. Turn it back on from CMD Studio's home page"
+            ),
+        ),
+        (PausedBy::App, Some(PauseReason::Recovery)) => (
+            "CMD Studio หยุดธีมของเครื่องนี้ไว้จากทางลัด CMD Studio Recovery \
+             เปิดธีมกลับได้ที่หน้าแรกของ CMD Studio"
+                .to_string(),
+            "CMD Studio paused the theme on this computer from the CMD Studio Recovery shortcut. \
+             Turn it back on from CMD Studio's home page"
+                .to_string(),
+        ),
+        (PausedBy::App, Some(PauseReason::User)) => (
+            "ธีมของเครื่องนี้ถูกหยุดไว้ตามที่คุณสั่ง เปิดธีมกลับได้ที่หน้าแรกของ CMD Studio".to_string(),
+            "The theme is paused on this computer, as you asked. Turn it back on from CMD \
+             Studio's home page"
+                .to_string(),
+        ),
+        _ => (
+            "ธีมถูกหยุดไว้ เปิดธีมกลับได้ที่หน้าแรกของ CMD Studio".to_string(),
+            "The theme is paused. Turn it back on from CMD Studio's home page".to_string(),
+        ),
+    };
+    let level = match p.by {
+        PausedBy::Clink => "cmd only (nothing on this computer was changed)",
+        PausedBy::App => "this computer (CMD Studio took its changes out)",
+    };
+    let reason = p.reason.map_or(
+        "not known (paused.json can't be read as a pause record)",
+        PauseReason::as_str,
+    );
+    let mut details = vec![format!("paused: {level}"), format!("reason: {reason}")];
+    if let Some(at) = p.at_ms {
+        details.push(format!("since: {}", utc::iso(at)));
+    }
+    check(
+        "D12",
+        Status::Warn,
+        Some("E_THEME_PAUSED"),
+        th,
+        en,
+        details.join("\n"),
+    )
+}
+
 /// What doctor finds wrong with CMD Studio's restore points, one entry for each problem, read
 /// as the next command that changes the machine would find it (`actions::begin`), without the
 /// recovery, the lock or anything set aside:
@@ -1315,9 +1475,9 @@ mod tests {
         let checks = doctor(m.system(), &ctx);
         assert_eq!(
             checks.iter().map(|c| c.id).collect::<Vec<_>>(),
-            ["D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D9", "D10", "D11"]
+            ["D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D9", "D10", "D11", "D12"]
         );
-        for id in ["D1", "D2", "D3", "D4", "D7", "D8", "D9"] {
+        for id in ["D1", "D2", "D3", "D4", "D7", "D8", "D9", "D12"] {
             assert_eq!(by_id(&checks, id).status, Status::Skipped, "{id}");
         }
         assert_eq!(by_id(&checks, "D6").status, Status::Ok);
@@ -1568,7 +1728,7 @@ mod tests {
         (m.fs.snapshot(), m.autorun.snapshot(), m.fonts.snapshot())
     }
 
-    /// Runs doctor and checks what holds for every result: D1–D11 first, in order; every text
+    /// Runs doctor and checks what holds for every result: D1–D12 first, in order; every text
     /// in Thai and in English (spec §5.9); `ok` never with a code, and every warning or failure
     /// with one; and nothing on the machine changed.
     fn run(m: &FakeMachine, ctx: &Ctx) -> Vec<Check> {
@@ -1577,8 +1737,8 @@ mod tests {
         assert_eq!(everything(m), before, "doctor only reads");
         let ids: Vec<&str> = checks.iter().map(|c| c.id).collect();
         assert_eq!(
-            ids.get(..11).unwrap(),
-            ["D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D9", "D10", "D11"]
+            ids.get(..12).unwrap(),
+            ["D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D9", "D10", "D11", "D12"]
         );
         let thai = |s: &str| s.chars().any(|c| ('\u{0e00}'..='\u{0e7f}').contains(&c));
         for c in &checks {
@@ -1863,7 +2023,7 @@ mod tests {
                 m.fs.put(&journal, b"{ damaged");
             }
             let checks = run(&m, &ctx);
-            assert_eq!(checks.len(), 12, "{checks:#?}");
+            assert_eq!(checks.len(), 13, "{checks:#?}");
             assert_eq!(by_id(&checks, "D1").status, Status::Ok);
             let r2 = by_id(&checks, "R2");
             assert_eq!(
@@ -1891,7 +2051,7 @@ mod tests {
         let checks = run(&m, &ctx);
         assert_eq!(
             checks.len(),
-            12,
+            13,
             "the same point is not listed twice: {checks:#?}"
         );
         let r1 = by_id(&checks, "R1");
@@ -2019,7 +2179,7 @@ mod tests {
     fn doctor_only_reads_and_never_waits_for_the_lock() {
         // A fresh machine: not even the data folder appears.
         let (m, ctx) = machine();
-        assert_eq!(run(&m, &ctx).len(), 11);
+        assert_eq!(run(&m, &ctx).len(), 12);
         assert!(!m.fs.exists(&ctx.paths.data));
 
         // After an apply: the bundled programs are run with fixed arguments, and only these.
@@ -2051,7 +2211,7 @@ mod tests {
         );
         assert_eq!(r1.message_en, BUSY_EN);
         drop(held);
-        assert_eq!(run(&m, &ctx).len(), 11);
+        assert_eq!(run(&m, &ctx).len(), 12);
     }
 
     #[test]
@@ -2440,5 +2600,168 @@ mod tests {
             (Status::Warn, Some("E_GENERATED_EDITED"))
         );
         assert_eq!(d9.details, init.display().to_string());
+    }
+
+    // ---- D12: the theme's pause and cmd's crashes in Clink (recovery spec §4.5) ----
+
+    const CLINK_DLL: &str = "clink_dll_x64.dll";
+
+    #[test]
+    fn d12_is_ok_after_an_apply_and_skipped_before_one() {
+        let (m, ctx) = machine();
+        let d12 = by_id(&run(&m, &ctx), "D12");
+        assert_eq!((d12.status, d12.code), (Status::Skipped, None));
+        assert!(d12.message_en.contains("No theme"), "{d12:?}");
+        let (m, ctx) = themed(Target::All);
+        let d12 = by_id(&run(&m, &ctx), "D12");
+        assert_eq!((d12.status, d12.code), (Status::Ok, None), "{d12:?}");
+        // The crashes since the apply, and never more than seven days back.
+        assert_eq!(m.event_log.asked(), [(ctx.now_ms, ctx.now_ms)]);
+        let much_later = later(&ctx, 10 * 24 * 60 * 60 * 1000);
+        run(&m, &much_later);
+        assert_eq!(
+            m.event_log.asked().last(),
+            Some(&(
+                much_later.now_ms - crate::recovery::CRASH_WINDOW_MS,
+                much_later.now_ms
+            ))
+        );
+    }
+
+    #[test]
+    fn d12_counts_cmds_crashes_in_clink_since_the_apply() {
+        let (m, ctx) = themed(Target::All);
+        let at = ctx.now_ms;
+        let then = later(&ctx, 60_000);
+        // Before the apply, another program, another module: none of them counts.
+        m.event_log.crash(at - 1, "cmd.exe", CLINK_DLL);
+        m.event_log.crash(at + 1, "notepad.exe", CLINK_DLL);
+        m.event_log.crash(at + 2, "cmd.exe", "ntdll.dll");
+        assert_eq!(by_id(&run(&m, &then), "D12").status, Status::Ok);
+        m.event_log.crash(at + 10, "cmd.exe", CLINK_DLL);
+        m.event_log.crash(at + 20, "CMD.EXE", "Clink_DLL_x64.dll");
+        let d12 = by_id(&run(&m, &then), "D12");
+        assert_eq!(
+            (d12.status, d12.code),
+            (Status::Warn, Some("E_CMD_CRASHED")),
+            "{d12:?}"
+        );
+        assert!(d12.message_en.contains("2 time(s)"), "{d12:?}");
+        assert_eq!(d12.details.lines().count(), 2, "{d12:?}");
+        assert!(d12.details.starts_with(&utc::iso(at + 10)), "{d12:?}");
+        m.event_log.crash(at + 30, "cmd.exe", CLINK_DLL);
+        let d12 = by_id(&run(&m, &then), "D12");
+        assert_eq!(
+            (d12.status, d12.code),
+            (Status::Fail, Some("E_CMD_CRASHED")),
+            "{d12:?}"
+        );
+        assert!(d12.message_en.contains("the theme is still on"), "{d12:?}");
+    }
+
+    #[test]
+    fn d12_never_takes_crash_reports_it_cannot_read_for_none() {
+        // Review Focus 4: a log that is off, that this user may not read, or that is slow.
+        let (m, ctx) = themed(Target::All);
+        m.event_log.fail_reads("it did not answer within 5 seconds");
+        let d12 = by_id(&run(&m, &ctx), "D12");
+        assert_eq!((d12.status, d12.code), (Status::Skipped, None));
+        assert!(
+            d12.message_en.contains(
+                "could not be read: read the Application event log: it did not answer within 5 \
+                 seconds"
+            ),
+            "{d12:?}"
+        );
+    }
+
+    #[test]
+    fn d12_takes_a_read_that_is_still_going_on_for_one_that_could_not_be_read() {
+        // The Application log's reader lets one read run at a time: while an earlier read is
+        // still going, a new one is an error ("still being read"), which is no crash report.
+        let (m, ctx) = themed(Target::All);
+        m.event_log
+            .fail_reads("the Application log is still being read by an earlier read");
+        let d12 = by_id(&run(&m, &ctx), "D12");
+        assert_eq!((d12.status, d12.code), (Status::Skipped, None), "{d12:?}");
+        assert!(d12.message_en.contains("still being read"), "{d12:?}");
+        assert!(!d12.message_en.contains("has not crashed"), "{d12:?}");
+    }
+
+    #[test]
+    fn d12_says_a_pause_first_with_its_level_its_reason_and_since_when() {
+        let (m, ctx) = themed(Target::All);
+        let pause = ctx.paths.paused_file();
+        m.fs.put(
+            &pause,
+            br#"{"version":1,"reason":"cmdStarts","at":1791694709000,"count":3,"by":"clink"}"#,
+        );
+        // The crashes are what a pause is about: it is said first, and they are not read.
+        for _ in 0..3 {
+            m.event_log.crash(ctx.now_ms, "cmd.exe", CLINK_DLL);
+        }
+        let d12 = by_id(&run(&m, &ctx), "D12");
+        assert_eq!(
+            (d12.status, d12.code),
+            (Status::Warn, Some("E_THEME_PAUSED")),
+            "{d12:?}"
+        );
+        assert!(
+            d12.message_en
+                .contains("failed to reach its prompt 3 times in a row"),
+            "{d12:?}"
+        );
+        assert_eq!(
+            d12.details,
+            "paused: cmd only (nothing on this computer was changed)\nreason: cmdStarts\n\
+             since: 2026-10-11T04:58:29Z"
+        );
+        assert!(m.event_log.asked().is_empty());
+        // The app's pause of this computer, for each of its reasons, and a record it can't read.
+        for (text, says) in [
+            (
+                r#"{"version":1,"reason":"clinkCrash","at":1,"count":4,"by":"app"}"#,
+                "crashed in its add-on 4 times",
+            ),
+            (
+                r#"{"version":1,"reason":"user","at":1,"count":0,"by":"app"}"#,
+                "as you asked",
+            ),
+            (
+                r#"{"version":1,"reason":"recovery","at":1,"count":0,"by":"app"}"#,
+                "CMD Studio Recovery shortcut",
+            ),
+            ("{ not json", "The theme is paused. Turn it back on"),
+        ] {
+            m.fs.put(&pause, text);
+            let d12 = by_id(&run(&m, &ctx), "D12");
+            assert_eq!(
+                (d12.status, d12.code),
+                (Status::Warn, Some("E_THEME_PAUSED")),
+                "{text}"
+            );
+            assert!(d12.message_en.contains(says), "{text}: {d12:?}");
+        }
+        // A pause of this computer took the theme out: no theme is applied, and it is said.
+        let (m, ctx) = machine();
+        m.fs.put(
+            ctx.paths.paused_file(),
+            br#"{"version":1,"reason":"user","at":1,"count":0,"by":"app"}"#,
+        );
+        assert_eq!(by_id(&run(&m, &ctx), "D12").code, Some("E_THEME_PAUSED"));
+    }
+
+    #[test]
+    fn d12_fails_with_the_read_error_when_the_pause_record_cannot_be_read() {
+        let (m, ctx) = themed(Target::All);
+        m.fs.put(ctx.paths.paused_file(), b"{}");
+        m.fs.fail_reads_of(ctx.paths.paused_file());
+        let d12 = by_id(&run(&m, &ctx), "D12");
+        assert_eq!(
+            (d12.status, d12.code),
+            (Status::Fail, Some("E_MACHINE_READ")),
+            "{d12:?}"
+        );
+        assert!(d12.message_en.contains("paused.json"), "{d12:?}");
     }
 }

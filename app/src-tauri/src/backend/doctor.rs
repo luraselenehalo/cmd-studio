@@ -441,7 +441,7 @@ mod tests {
         let b = backend();
         applied(&b);
         let report = b.doctor_run().unwrap();
-        assert_eq!(report.checks.len(), 11);
+        assert_eq!(report.checks.len(), 12);
         assert!(report.checked_at_ms >= 1_791_694_709_000);
         for c in &report.checks {
             assert!(!c.message_th.is_empty() && !c.message_en.is_empty());
