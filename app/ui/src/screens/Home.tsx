@@ -80,11 +80,11 @@ export function Home() {
   const heading = useRef<HTMLHeadingElement>(null);
   const closing = useRef(false);
   const pause = usePause(heading);
-  const resume = useResume(heading);
 
   const lib = library.value;
   const appliedId = lib?.applied?.themeId ?? null;
   const paused = recovery.value?.paused ?? null;
+  const resume = useResume(heading, paused);
   // The pause the start's crash check tried, when it tried one (§4.3).
   const crashes = recovery.value?.crashes ?? null;
   const startPause = crashes && crashes.kind !== "noTheme" ? crashes.pause : null;

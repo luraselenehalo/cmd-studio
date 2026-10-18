@@ -187,6 +187,7 @@ export const th: Dictionary = {
   "resume.title": "เปิดธีมกลับ",
   "resume.button": "เปิดธีมกลับ",
   "resume.done": "เปิดธีมกลับแล้ว เปิดหน้าต่าง cmd ใหม่เพื่อดูธีม",
+  "resume.noteRemoved": "ลบบันทึกแล้ว หน้าต่าง cmd จะเปิดได้ตามปกติอีกครั้ง",
 
   "themes.title": "ธีม",
   "themes.filter.label": "แสดง",

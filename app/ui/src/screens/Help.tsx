@@ -13,6 +13,7 @@ import type { ApplyRequest } from "../bindings/ApplyRequest";
 import type { CheckReport } from "../bindings/CheckReport";
 import type { DoctorReport } from "../bindings/DoctorReport";
 import type { FixKind } from "../bindings/FixKind";
+import type { PauseInfo } from "../bindings/PauseInfo";
 import type { RestoreOutcome } from "../bindings/RestoreOutcome";
 import type { RestorePoint } from "../bindings/RestorePoint";
 import type { RestorePoints } from "../bindings/RestorePoints";
@@ -81,17 +82,29 @@ function Doctor() {
   const [applying, setApplying] = useState<{ key: number; request: ApplyRequest } | null>(null);
   const [applyBusy, setApplyBusy] = useState(false);
   const [tick, setTick] = useState(0);
+  /** The pause as it stands with this check, for what D12's "Turn the theme back on" then says
+   * (a record that can't be read is only a note removed). A status that fails leaves it unknown:
+   * D12 says what it says on its own. */
+  const [paused, setPaused] = useState<PauseInfo | null>(null);
   const applies = useRef(0);
   const heading = useRef<HTMLHeadingElement>(null);
   /** The fix's dialog was just closed: where focus lands is checked once it is gone. */
   const closing = useRef(false);
   const pause = usePause(heading);
-  const resume = useResume(heading);
+  const resume = useResume(heading, paused);
 
   useEffect(() => {
     let alive = true;
     setChecking(true);
     setLoadError(null);
+    ipc.recoveryStatus().then(
+      (status) => {
+        if (alive) setPaused(status.paused);
+      },
+      () => {
+        if (alive) setPaused(null);
+      },
+    );
     ipc.doctorRun().then(
       (r) => {
         if (!alive) return;

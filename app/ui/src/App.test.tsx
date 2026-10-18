@@ -1087,12 +1087,27 @@ describe("the theme's pause", () => {
     expect(within(card).queryByText(/nothing on this computer was changed/)).toBeNull();
     expect(within(card).getByRole("button", { name: "Undo everything" })).toBeTruthy();
     await user.click(within(card).getByRole("button", { name: "Turn the theme back on" }));
-    expect(await screen.findByText("The theme is back on. Open a new cmd window to see it.")).toBeTruthy();
+    // The banner said that turning it back on only removes the note: the status line must not
+    // say the theme is back on (m1 of the final review).
+    expect(await screen.findByText("The note was removed: cmd windows open without a pause again.")).toBeTruthy();
+    expect(screen.queryByText("The theme is back on. Open a new cmd window to see it.")).toBeNull();
     // Lifted at once: no plan, no apply.
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(ipc.state.paused).toBeNull();
     expect(ipc.state.calls.filter((c) => c === "planApply")).toHaveLength(1);
     expect(ipc.state.calls.filter((c) => c === "apply")).toHaveLength(1);
+  });
+
+  it("says on the health check too that only the note was removed, after lifting a record that cannot be read", async () => {
+    const unreadable: PauseInfo = { by: "clink", level: "cmd", reason: null, atMs: null, count: 0, resume: null };
+    const { ipc, user } = await home({}, pausedWith(unreadable));
+    await open(user, "Help");
+    await screen.findByText(/D12/);
+    await user.click(await screen.findByRole("button", { name: "Turn the theme back on" }));
+    expect(await screen.findByText("The note was removed: cmd windows open without a pause again.")).toBeTruthy();
+    expect(screen.queryByText("The theme is back on. Open a new cmd window to see it.")).toBeNull();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(ipc.state.paused).toBeNull();
   });
 
   it("never says 0 times or 1 times for the crashes that paused the theme", async () => {

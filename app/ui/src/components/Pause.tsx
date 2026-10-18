@@ -230,12 +230,17 @@ export function PauseResult({ outcome, live = false }: { outcome: PauseOutcome; 
  * "Turn the theme back on": `resume()` asks the backend, which lifts a pause in cmd at once
  * (said in the status line of `view`), gives a request for a pause of this computer (applied
  * through the plan in a dialog of `view`), or sends the user to the Themes page when the paused
- * theme is gone. `reset()` takes the status line and an error away, for when something else is
- * done on the page (a new pause), so "the theme is back on" is never left beside it. After a lift
- * at once, the button that was pressed goes with its banner on the next read: focus then goes to
- * `fallback`, as it does when a dialog goes with the button that opened it.
+ * theme is gone. `paused` is the pause the page shows, so the status line says what the lift did:
+ * for a record that can't be read (`reason: null`) only the note was removed, as the banner said,
+ * and no theme is back on. `reset()` takes the status line and an error away, for when something
+ * else is done on the page (a new pause), so "the theme is back on" is never left beside it.
+ * After a lift at once, the button that was pressed goes with its banner on the next read: focus
+ * then goes to `fallback`, as it does when a dialog goes with the button that opened it.
  */
-export function useResume(fallback: RefObject<HTMLElement | null>): { resume: () => Promise<void>; reset: () => void; view: ReactNode } {
+export function useResume(
+  fallback: RefObject<HTMLElement | null>,
+  paused: PauseInfo | null,
+): { resume: () => Promise<void>; reset: () => void; view: ReactNode } {
   const ipc = useIpc();
   const { t } = useI18n();
   const { go } = useNav();
@@ -243,7 +248,8 @@ export function useResume(fallback: RefObject<HTMLElement | null>): { resume: ()
   const [applying, setApplying] = useState<{ key: number; request: ApplyRequest } | null>(null);
   const [applyBusy, setApplyBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
-  const [resumed, setResumed] = useState(false);
+  /** What a lift at once did, for the status line: the theme is back on, or only the note went. */
+  const [resumed, setResumed] = useState<"themeOn" | "noteRemoved" | null>(null);
   const keys = useRef(0);
   const running = useRef(false);
   /** The element that had focus when the pause was lifted at once, until it has left the page. */
@@ -258,7 +264,7 @@ export function useResume(fallback: RefObject<HTMLElement | null>): { resume: ()
 
   const reset = () => {
     setError(null);
-    setResumed(false);
+    setResumed(null);
   };
 
   const resume = async () => {
@@ -273,7 +279,8 @@ export function useResume(fallback: RefObject<HTMLElement | null>): { resume: ()
       if (outcome.kind === "resumed") {
         const active = document.activeElement;
         liftedFrom.current = active === document.body ? null : active;
-        setResumed(true);
+        // The pause lifted is the one shown when the button was pressed.
+        setResumed(paused?.reason === null ? "noteRemoved" : "themeOn");
         bump();
       } else if (outcome.kind === "apply") {
         keys.current += 1;
@@ -298,7 +305,7 @@ export function useResume(fallback: RefObject<HTMLElement | null>): { resume: ()
   const view = (
     <>
       {/* Always there, its text toggled (2c item 10). */}
-      <div role="status">{resumed && <p>{t("resume.done")}</p>}</div>
+      <div role="status">{resumed && <p>{t(resumed === "noteRemoved" ? "resume.noteRemoved" : "resume.done")}</p>}</div>
       {error !== null && <ErrorNotice error={error} />}
       {applying && (
         // No Close while the apply runs (ruling R7), and the outcome is read in the dialog.

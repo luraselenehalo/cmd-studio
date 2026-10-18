@@ -183,6 +183,7 @@ export const en = {
   "resume.title": "Turn the theme back on",
   "resume.button": "Turn the theme back on",
   "resume.done": "The theme is back on. Open a new cmd window to see it.",
+  "resume.noteRemoved": "The note was removed: cmd windows open without a pause again.",
 
   "themes.title": "Themes",
   "themes.filter.label": "Show",
