@@ -3,8 +3,9 @@ import type { AppError } from "./AppError";
 import type { RevertOutcome } from "./RevertOutcome";
 
 /**
- * What "Pause the theme" did. `paused.json` is written however the revert went (spec §4.1):
- * while it is there, init.lua loads no theme, and the home page says the state.
+ * What "Pause the theme" did. `paused.json` is written first, and Revert everything runs
+ * however that went (spec §4.1): while the file is there, init.lua loads no theme, and the home
+ * page says the state.
  */
 export type PauseOutcome = { 
 /**

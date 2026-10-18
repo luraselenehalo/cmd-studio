@@ -14,6 +14,10 @@ const CLINK_DLL: &str = "clink_dll";
 /// positions when none has a name.
 const APP_FIELD: &str = "AppName";
 const MODULE_FIELD: &str = "ModuleName";
+/// What the Application log reader says when an earlier read is still going on (it runs one at a
+/// time): an error like any other, which the callers take for "could not be read", never for "no
+/// crash" (doctor D12 skips, the app's start check pauses nothing).
+pub const STILL_BEING_READ: &str = "the Application log is still being read by an earlier read";
 
 /// The XPath query of the Application log for the "Application Error" events 1000 of the last
 /// `within_ms` milliseconds (`timediff` counts back from the clock of the Event Log service

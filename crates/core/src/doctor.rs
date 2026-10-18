@@ -2680,11 +2680,13 @@ mod tests {
         // The Application log's reader lets one read run at a time: while an earlier read is
         // still going, a new one is an error ("still being read"), which is no crash report.
         let (m, ctx) = themed(Target::All);
-        m.event_log
-            .fail_reads("the Application log is still being read by an earlier read");
+        m.event_log.fail_reads(crate::eventlog::STILL_BEING_READ);
         let d12 = by_id(&run(&m, &ctx), "D12");
         assert_eq!((d12.status, d12.code), (Status::Skipped, None), "{d12:?}");
-        assert!(d12.message_en.contains("still being read"), "{d12:?}");
+        assert!(
+            d12.message_en.contains(crate::eventlog::STILL_BEING_READ),
+            "{d12:?}"
+        );
         assert!(!d12.message_en.contains("has not crashed"), "{d12:?}");
     }
 

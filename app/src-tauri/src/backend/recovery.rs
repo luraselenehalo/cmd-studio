@@ -8,7 +8,9 @@
 //! everything, and notes the theme to apply again. Turning the theme back on lifts a pause in cmd
 //! at once (nothing on the computer changed, so no transaction), and for a pause of this computer
 //! gives the UI the request to apply the paused theme again through the plan; that apply's
-//! commit lifts the pause (`Backend::apply`).
+//! commit lifts the pause (`Backend::apply`). Undo everything, and an undo or a restore that
+//! leaves no theme applied, lift a pause in cmd too, since nothing of CMD Studio's is left for it
+//! to pause; none of them lifts a pause of this computer, which holds the theme to turn back on.
 use super::apply::{ApplyRequest, PlanOutcome, RevertOutcome};
 use super::{Backend, Machine};
 use crate::error::AppError;
@@ -69,13 +71,23 @@ pub struct PauseInfo {
 )]
 #[ts(export)]
 pub enum CrashCheck {
-    /// No theme is applied, or state.json can't be read: nothing to look for.
+    /// No theme is applied: nothing to look for.
     NoTheme,
-    /// `count` crashes of cmd in its add-on since the theme was applied; `paused_now` when this
-    /// check paused the theme on this computer for them.
-    Read { count: u32, paused_now: bool },
-    /// The reports could not be read (the log is off, this user may not read it, or it did not
-    /// answer in five seconds), so nothing was done.
+    /// `count` crashes of cmd in its add-on since the theme was applied.
+    Read {
+        count: u32,
+        /// This check paused the theme on this computer for them, and the pause went through
+        /// ([`PauseOutcome::went_through`]).
+        paused_now: bool,
+        /// What the pause this check tried did, to say the way every change is said (spec §4.1,
+        /// §5.5): a revert that was refused or rolled back, a record that could not be saved.
+        /// One that did not go through is tried again at the next start. `None` when it tried
+        /// none (fewer than three crashes).
+        pause: Option<Box<PauseOutcome>>,
+    },
+    /// The reports could not be read (the log is off, this user may not read it, it did not
+    /// answer in five seconds, or an earlier read is still going on), or state.json could not
+    /// be, so nothing was done.
     Unreadable { why: String },
 }
 
@@ -89,8 +101,9 @@ pub struct RecoveryStatus {
     pub crashes: Option<CrashCheck>,
 }
 
-/// What "Pause the theme" did. `paused.json` is written however the revert went (spec §4.1):
-/// while it is there, init.lua loads no theme, and the home page says the state.
+/// What "Pause the theme" did. `paused.json` is written first, and Revert everything runs
+/// however that went (spec §4.1): while the file is there, init.lua loads no theme, and the home
+/// page says the state.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
@@ -101,6 +114,13 @@ pub struct PauseOutcome {
     pub refused: Option<AppError>,
     /// `paused.json` could not be written (`E_DATA_WRITE`).
     pub not_saved: Option<AppError>,
+}
+
+impl PauseOutcome {
+    /// The pause went through: Revert everything ended well, and its record was saved.
+    pub fn went_through(&self) -> bool {
+        self.revert.as_ref().is_some_and(|r| r.ok) && self.not_saved.is_none()
+    }
 }
 
 /// What "Turn the theme back on" does (spec §4.1, §8).
@@ -133,7 +153,6 @@ pub(crate) struct CrashSlot {
     done: Condvar,
 }
 
-#[derive(Clone)]
 enum Slot {
     NotStarted,
     Running,
@@ -227,11 +246,13 @@ impl<M: Machine> Backend<M> {
 
     /// The start's check of Windows' crash reports (spec §4.3): cmd's crashes in Clink's DLL since
     /// the theme was applied, at most seven days back. [`PAUSE_AFTER`] or more, with a theme
-    /// applied and no pause of this computer yet, pause it on this computer
-    /// ([`PauseReason::ClinkCrash`]); a pause in cmd does not count, because Clink still injects
-    /// and its DLL still loads. Reports that can't be read pause nothing. One log line, never the
-    /// user's data. A panic in it is an `Unreadable` answer, never a `recovery_status` that waits
-    /// for nothing.
+    /// applied, pause it on this computer ([`PauseReason::ClinkCrash`]). A record of a pause of
+    /// this computer counts as one only while no theme is applied, because a pause that went
+    /// through takes the theme out: one whose revert was refused or rolled back is tried again,
+    /// keeping the theme it noted. A pause in cmd does not count either, because Clink still
+    /// injects and its DLL still loads. Reports, or a state.json, that can't be read pause
+    /// nothing. One log line, never the user's data. A panic in it is an `Unreadable` answer,
+    /// never a `recovery_status` that waits for nothing.
     pub fn crash_check(&self) -> CrashCheck {
         self.crash.start();
         // UNWIND SAFETY: the check only reads, and a pause it starts is a journaled
@@ -254,13 +275,23 @@ impl<M: Machine> Backend<M> {
     fn run_crash_check(&self) -> CrashCheck {
         let sys = self.sys();
         let ctx = self.ctx();
-        let Ok(State {
-            applied: Some(applied),
-            ..
-        }) = State::load(sys.fs, &ctx.paths.state_file())
-        else {
-            self.note_line("crash_check theme=none");
-            return CrashCheck::NoTheme;
+        let applied = match State::load(sys.fs, &ctx.paths.state_file()) {
+            Ok(State {
+                applied: Some(applied),
+                ..
+            }) => applied,
+            Ok(State { applied: None, .. }) => {
+                self.note_line("crash_check theme=none");
+                return CrashCheck::NoTheme;
+            }
+            Err(e) => {
+                // It says whether a theme is applied, and since when to count: not knowing is
+                // no answer, never "no theme".
+                self.note_line("crash_check state=unreadable");
+                return CrashCheck::Unreadable {
+                    why: format!("state.json could not be read: {e}"),
+                };
+            }
         };
         let crashes = match clink_crashes(sys.event_log, applied.applied_at_ms, ctx.now_ms) {
             Ok(crashes) => crashes,
@@ -271,21 +302,18 @@ impl<M: Machine> Backend<M> {
             }
         };
         let count = u32::try_from(crashes.len()).unwrap_or(u32::MAX);
-        let paused_here = matches!(
-            read_pause(sys.fs, &ctx.paths),
-            Ok(Some(Paused {
-                by: PausedBy::App,
-                ..
-            }))
-        );
-        let paused_now = count >= PAUSE_AFTER
-            && !paused_here
-            && self
-                .pause_machine(PauseReason::ClinkCrash, count)
-                .not_saved
-                .is_none();
+        // A theme is applied, so no pause of this computer went through, whatever paused.json
+        // says: the theme is paused now, or tried again, and `pause_machine` keeps the theme an
+        // earlier record noted.
+        let pause =
+            (count >= PAUSE_AFTER).then(|| self.pause_machine(PauseReason::ClinkCrash, count));
+        let paused_now = pause.as_ref().is_some_and(PauseOutcome::went_through);
         self.note_line(&format!("crash_check crashes={count} paused={paused_now}"));
-        CrashCheck::Read { count, paused_now }
+        CrashCheck::Read {
+            count,
+            paused_now,
+            pause: pause.map(Box::new),
+        }
     }
 
     /// "Pause the theme" (spec §4.2, D12's fix): on this computer, for the user (`user`) or for
@@ -319,10 +347,18 @@ impl<M: Machine> Backend<M> {
         }
     }
 
-    /// Pauses the theme on this computer (spec §4.1): Revert everything (a journaled
-    /// transaction, under the lock), then `paused.json` with the theme to apply again: the one
-    /// applied now, else the one an earlier pause of this computer noted. Written however the
-    /// revert went. Phase 3b-2's `--recovery` pauses through here too (`recovery`).
+    /// Pauses the theme on this computer (spec §4.1): first `paused.json`, by the app, with the
+    /// theme to apply again (the one applied now, else the one an earlier pause of this computer
+    /// noted), then Revert everything (a journaled transaction, under the lock).
+    ///
+    /// The record comes first because the core's Revert everything never touches it: an app
+    /// that stops in between leaves a pause that can be turned back on (the next command rolls
+    /// the cut-off revert back), never a reverted machine with nothing that says which theme it
+    /// had. Revert everything runs however the write went, so that cmd opens either way. A
+    /// revert that is refused or rolls back leaves the record as it is: init.lua loads no theme
+    /// while it is there, so the theme is paused in cmd, and while a theme is still applied the
+    /// next start's crash check tries the pause again ([`PauseOutcome::went_through`]). Phase
+    /// 3b-2's `--recovery` pauses through here too (`recovery`).
     pub(crate) fn pause_machine(&self, reason: PauseReason, count: u32) -> PauseOutcome {
         let sys = self.sys();
         let ctx = self.ctx();
@@ -343,10 +379,6 @@ impl<M: Machine> Backend<M> {
             })) => resume,
             _ => None,
         };
-        let (revert, refused) = match cleanup::revert_all(sys, &ctx) {
-            Ok(report) => (Some(self.revert_outcome(&ctx, &report)), None),
-            Err(e) => (None, Some(AppError::from(e))),
-        };
         let record = PauseRecord {
             version: PAUSED_VERSION,
             reason,
@@ -358,17 +390,23 @@ impl<M: Machine> Backend<M> {
         let not_saved = write_pause(sys.fs, &ctx.paths, &record)
             .err()
             .map(|e| AppError::coded("E_DATA_WRITE", e.to_string()));
-        let reverted = match (&revert, &refused) {
-            (Some(r), _) if r.ok => "ok",
-            (Some(_), _) => "incomplete",
-            (None, Some(e)) => e.code.as_str(),
-            (None, None) => "none",
+        let reverted = cleanup::revert_all(sys, &ctx)
+            .map(|report| self.revert_outcome(&ctx, &report))
+            .map_err(AppError::from);
+        let how = match &reverted {
+            Ok(r) if r.ok => "ok".to_string(),
+            Ok(_) => "incomplete".to_string(),
+            Err(e) => e.code.clone(),
         };
         self.note_line(&format!(
-            "pause reason={} count={count} revert={reverted} saved={}",
+            "pause reason={} count={count} revert={how} saved={}",
             reason.as_str(),
             not_saved.is_none()
         ));
+        let (revert, refused) = match reverted {
+            Ok(r) => (Some(r), None),
+            Err(e) => (None, Some(e)),
+        };
         PauseOutcome {
             revert,
             refused,
@@ -414,14 +452,18 @@ impl<M: Machine> Backend<M> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::apply::{ApplyOutcome, ApplyStatus, TxnStatus};
+    use crate::backend::apply::{ApplyOutcome, ApplyStatus, RestoreStatus, TxnStatus, UndoStatus};
     use crate::backend::doctor::FixKind;
     use crate::backend::testing::{
-        apply_terracotta, backend, fake_events, fake_fs, plan_and_apply, terracotta_id,
+        apply_terracotta, backend, backend_on, fake_events, fake_fs, plan_and_apply, terracotta_id,
+        WT,
     };
     use cmdstudio_core::adapters::fake::FakeMachine;
-    use cmdstudio_core::adapters::Fs;
+    use cmdstudio_core::adapters::{AdapterError, AutoRun, Fs, RegValue, System};
     use cmdstudio_core::doctor::Status;
+    use cmdstudio_core::eventlog::STILL_BEING_READ;
+    use std::cell::Cell;
+    use std::path::Path;
     use std::sync::Arc;
 
     const CLINK_DLL: &str = "clink_dll_x64.dll";
@@ -429,12 +471,105 @@ mod tests {
     const IN_CMD: &[u8] =
         br#"{"version":1,"reason":"cmdStarts","at":1791694709000,"count":3,"by":"clink"}"#;
 
-    fn applied_at(b: &Backend<FakeMachine>) -> u64 {
+    fn applied_at<M: Machine>(b: &Backend<M>) -> u64 {
         State::load(b.sys().fs, &b.paths().state_file())
             .unwrap()
             .applied
             .unwrap()
             .applied_at_ms
+    }
+
+    /// Terracotta applied, and cmd crashed in its add-on three times since.
+    fn crashed_three_times(b: &Backend<FakeMachine>) {
+        assert_eq!(apply_terracotta(b).0.status, ApplyStatus::Committed);
+        let at = applied_at(b);
+        for _ in 0..3 {
+            fake_events(b).crash(at, "cmd.exe", CLINK_DLL);
+        }
+    }
+
+    /// The count and `paused_now` of a check that read the reports.
+    fn counted(check: &CrashCheck) -> (u32, bool) {
+        match check {
+            CrashCheck::Read {
+                count, paused_now, ..
+            } => (*count, *paused_now),
+            other => panic!("the reports were not read: {other:?}"),
+        }
+    }
+
+    /// What the pause a check tried did.
+    fn tried(check: &CrashCheck) -> PauseOutcome {
+        match check {
+            CrashCheck::Read {
+                pause: Some(pause), ..
+            } => (**pause).clone(),
+            other => panic!("no pause was tried: {other:?}"),
+        }
+    }
+
+    /// Pauses the theme for the user while another run holds the lock: Revert everything is
+    /// refused, and the record is there with the theme still applied.
+    fn pause_refused(b: &Backend<FakeMachine>) {
+        let held = fake_fs(b)
+            .try_lock(&b.paths().lock_file())
+            .unwrap()
+            .unwrap();
+        let out = b.theme_pause(PauseReason::User).unwrap();
+        drop(held);
+        assert_eq!(out.refused.map(|e| e.code).as_deref(), Some("E_BUSY"));
+    }
+
+    fn health_is_empty<M: Machine>(b: &Backend<M>) -> bool {
+        b.sys().fs.list_dir(&b.paths().health()).unwrap().is_empty()
+    }
+
+    /// A machine whose AutoRun stops the app (a panic) when the user's value is written or
+    /// deleted while `cut` is set: the app ended in the middle of a change of its own.
+    struct CutOff {
+        m: FakeMachine,
+        cut: Cell<bool>,
+    }
+
+    impl CutOff {
+        fn stop_here(&self) {
+            if self.cut.get() {
+                panic!("the app stopped here");
+            }
+        }
+    }
+
+    impl AutoRun for CutOff {
+        fn user_key_exists(&self) -> Result<bool, AdapterError> {
+            self.m.autorun.user_key_exists()
+        }
+        fn read_user(&self) -> Result<Option<RegValue>, AdapterError> {
+            self.m.autorun.read_user()
+        }
+        fn write_user(&self, value: &RegValue) -> Result<(), AdapterError> {
+            self.stop_here();
+            self.m.autorun.write_user(value)
+        }
+        fn delete_user(&self) -> Result<(), AdapterError> {
+            self.stop_here();
+            self.m.autorun.delete_user()
+        }
+        fn delete_user_key_if_empty(&self) -> Result<(), AdapterError> {
+            self.stop_here();
+            self.m.autorun.delete_user_key_if_empty()
+        }
+        fn read_machine(&self) -> Result<Option<RegValue>, AdapterError> {
+            self.m.autorun.read_machine()
+        }
+    }
+
+    impl Machine for CutOff {
+        fn system(&self) -> System<'_> {
+            System {
+                autorun: self,
+                ..self.m.system()
+            }
+        }
     }
 
     /// Terracotta applied, then the theme paused in cmd by init.lua, with two tags left.
@@ -632,26 +767,17 @@ mod tests {
         for _ in 0..3 {
             fake_events(&b).crash(at, "cmd.exe", CLINK_DLL);
         }
-        assert_eq!(
-            b.crash_check(),
-            CrashCheck::Read {
-                count: 3,
-                paused_now: true
-            }
-        );
+        let check = b.crash_check();
+        assert_eq!(counted(&check), (3, true));
+        let pause = tried(&check);
+        assert!(pause.went_through(), "{pause:?}");
         let status = b.recovery_status().unwrap();
         let paused = status.paused.unwrap();
         assert_eq!(
             (paused.by, paused.reason, paused.count),
             (PausedBy::App, Some(PauseReason::ClinkCrash), 3)
         );
-        assert_eq!(
-            status.crashes,
-            Some(CrashCheck::Read {
-                count: 3,
-                paused_now: true
-            })
-        );
+        assert_eq!(status.crashes, Some(check));
         assert_eq!(b.sys().autorun.read_user().unwrap(), None);
         let log = b.log_tail(20);
         assert!(log.contains(" crash_check crashes=3 paused=true"), "{log}");
@@ -672,7 +798,8 @@ mod tests {
             b.crash_check(),
             CrashCheck::Read {
                 count: 2,
-                paused_now: false
+                paused_now: false,
+                pause: None,
             }
         );
         fake_events(&b).fail_reads("the event log service is off");
@@ -685,10 +812,10 @@ mod tests {
         // single-flight guard): reports that could not be read, never "no crash" and never a
         // pause.
         fake_events(&b).crash(at, "cmd.exe", CLINK_DLL);
-        fake_events(&b).fail_reads("the Application log is still being read by an earlier read");
+        fake_events(&b).fail_reads(STILL_BEING_READ);
         let check = b.crash_check();
         assert!(
-            matches!(&check, CrashCheck::Unreadable { why } if why.contains("still being read")),
+            matches!(&check, CrashCheck::Unreadable { why } if why.contains(STILL_BEING_READ)),
             "{check:?}"
         );
         assert_eq!(b.recovery_status().unwrap().paused, None);
@@ -716,17 +843,252 @@ mod tests {
         for _ in 0..3 {
             fake_events(&b).crash(at, "cmd.exe", CLINK_DLL);
         }
+        assert_eq!(counted(&b.crash_check()), (3, true));
         assert_eq!(
-            b.crash_check(),
-            CrashCheck::Read {
-                count: 3,
-                paused_now: true
-            }
+            b.recovery_status().unwrap().paused.unwrap().by,
+            PausedBy::App
+        );
+    }
+
+    #[test]
+    fn an_automatic_pause_that_did_not_go_through_says_why_and_is_tried_again_at_the_next_start() {
+        let b = backend();
+        crashed_three_times(&b);
+        // Another run holds the lock: Revert everything is refused.
+        let held = fake_fs(&b)
+            .try_lock(&b.paths().lock_file())
+            .unwrap()
+            .unwrap();
+        let check = b.crash_check();
+        drop(held);
+        assert_eq!(counted(&check), (3, false), "{check:?}");
+        let pause = tried(&check);
+        assert_eq!(pause.refused.map(|e| e.code).as_deref(), Some("E_BUSY"));
+        assert_eq!((pause.revert, pause.not_saved), (None, None));
+        assert!(
+            b.sys().autorun.read_user().unwrap().is_some(),
+            "the theme is still on"
+        );
+        let status = b.recovery_status().unwrap();
+        assert_eq!(status.crashes, Some(check));
+        // Its record is there, with the theme to turn back on (cmd loads no theme meanwhile).
+        // While a theme is applied it is no pause of this computer, so the next start tries
+        // again, and this time it goes through.
+        let paused = status.paused.unwrap();
+        assert_eq!(
+            (paused.by, paused.resume.map(|r| r.theme_id)),
+            (PausedBy::App, Some(terracotta_id()))
+        );
+        let again = b.crash_check();
+        assert_eq!(counted(&again), (3, true), "{again:?}");
+        assert!(tried(&again).went_through());
+        assert_eq!(
+            b.sys().autorun.read_user().unwrap(),
+            None,
+            "the theme is out"
+        );
+        let paused = b.recovery_status().unwrap().paused.unwrap();
+        assert_eq!(
+            paused.resume.map(|r| r.theme_id),
+            Some(terracotta_id()),
+            "the theme it noted is kept"
+        );
+        let log = b.log_tail(20);
+        assert!(
+            log.contains(" pause reason=clinkCrash count=3 revert=E_BUSY saved=true"),
+            "{log}"
+        );
+        assert!(log.contains(" crash_check crashes=3 paused=false"), "{log}");
+    }
+
+    #[test]
+    fn a_pause_whose_revert_cannot_finish_its_rollback_says_so_and_keeps_its_record() {
+        let b = backend();
+        crashed_three_times(&b);
+        // Windows Terminal's settings.json can't be written: the revert fails there, and so
+        // does putting it back (as in the core's a_revert_whose_rollback_cannot_finish_...).
+        fake_fs(&b).fail_writes_to(WT);
+        let check = b.crash_check();
+        assert_eq!(counted(&check), (3, false), "{check:?}");
+        let pause = tried(&check);
+        assert_eq!((pause.refused, pause.not_saved), (None, None));
+        let revert = pause.revert.unwrap();
+        assert!(!revert.ok);
+        assert_eq!(revert.status, Some(TxnStatus::RollbackIncomplete));
+        assert!(!revert.unrestored.is_empty(), "{revert:?}");
+        let paused = b.recovery_status().unwrap().paused.unwrap();
+        assert_eq!(
+            (paused.by, paused.resume.map(|r| r.theme_id)),
+            (PausedBy::App, Some(terracotta_id()))
+        );
+        let log = b.log_tail(20);
+        assert!(log.contains(" revert=incomplete saved=true"), "{log}");
+        // The theme is still applied: the next start tries again, and once the file can be
+        // written the pause goes through.
+        fake_fs(&b).stop_failing(WT);
+        let again = b.crash_check();
+        assert_eq!(counted(&again), (3, true), "{again:?}");
+        assert_eq!(
+            b.sys().autorun.read_user().unwrap(),
+            None,
+            "the theme is out"
+        );
+    }
+
+    #[test]
+    fn the_pause_record_comes_first_so_an_app_stopped_before_the_revert_leaves_one_to_turn_back_on()
+    {
+        let b = backend_on(|m| CutOff {
+            m,
+            cut: Cell::new(false),
+        });
+        assert_eq!(apply_terracotta(&b).0.status, ApplyStatus::Committed);
+        let at = applied_at(&b);
+        for _ in 0..3 {
+            b.machine.m.event_log.crash(at, "cmd.exe", CLINK_DLL);
+        }
+        // The app stops as Revert everything takes CMD Studio's AutoRun entry out.
+        b.machine.cut.set(true);
+        let check = b.crash_check();
+        b.machine.cut.set(false);
+        assert!(
+            matches!(&check, CrashCheck::Unreadable { why } if why.contains("panic")),
+            "{check:?}"
+        );
+        // The record was written before: a pause that can be turned back on.
+        let paused = read_pause(b.sys().fs, b.paths()).unwrap().unwrap();
+        assert_eq!(
+            (paused.by, paused.resume.map(|r| r.theme_id)),
+            (PausedBy::App, Some(terracotta_id()))
+        );
+        // The next start rolls the cut-off revert back, finds the theme applied, and pauses.
+        let again = b.crash_check();
+        assert_eq!(counted(&again), (3, true), "{again:?}");
+        assert_eq!(b.sys().autorun.read_user().unwrap(), None);
+    }
+
+    #[test]
+    fn a_state_file_that_cannot_be_read_is_no_answer_never_no_theme() {
+        let b = backend();
+        crashed_three_times(&b);
+        let state = b.paths().state_file();
+        fake_fs(&b).fail_reads_of(&state);
+        let check = b.crash_check();
+        assert!(
+            matches!(&check, CrashCheck::Unreadable { why } if why.contains("state.json")),
+            "{check:?}"
+        );
+        fake_fs(&b).stop_failing(&state);
+        fake_fs(&b).put(&state, b"{ damaged");
+        let check = b.crash_check();
+        assert!(
+            matches!(&check, CrashCheck::Unreadable { why } if why.contains("state.json")),
+            "{check:?}"
+        );
+        assert!(fake_events(&b).asked().is_empty(), "nothing to count from");
+        assert!(b.sys().autorun.read_user().unwrap().is_some());
+        assert!(b.log_tail(20).contains(" crash_check state=unreadable"));
+    }
+
+    #[test]
+    fn an_undo_that_leaves_no_theme_lifts_a_pause_in_cmd_but_never_one_of_this_computer() {
+        let b = backend();
+        // Two applies, then a pause in cmd.
+        assert_eq!(apply_terracotta(&b).0.status, ApplyStatus::Committed);
+        paused_in_cmd(&b);
+        // Undoing the newer apply leaves the older theme on, and its pause with it.
+        assert_eq!(b.undo_last().unwrap().status, UndoStatus::Committed);
+        assert_eq!(
+            b.recovery_status().unwrap().paused.unwrap().by,
+            PausedBy::Clink
+        );
+        // Undoing the last one leaves none: nothing is left for the pause to pause.
+        let undone = b.undo_last().unwrap();
+        assert_eq!(undone.status, UndoStatus::Committed);
+        assert!(undone.notes.is_empty(), "{:?}", undone.notes);
+        assert_eq!(b.recovery_status().unwrap().paused, None);
+        assert!(health_is_empty(&b));
+        // A pause of this computer keeps its record: it holds the theme to turn back on.
+        assert_eq!(apply_terracotta(&b).0.status, ApplyStatus::Committed);
+        pause_refused(&b);
+        assert_eq!(b.undo_last().unwrap().status, UndoStatus::Committed);
+        assert_eq!(
+            b.recovery_status().unwrap().paused.unwrap().by,
+            PausedBy::App
+        );
+    }
+
+    #[test]
+    fn a_restore_that_leaves_no_theme_lifts_a_pause_in_cmd_but_never_one_of_this_computer() {
+        let b = backend();
+        let first = apply_terracotta(&b).0.snapshot_id.unwrap();
+        paused_in_cmd(&b);
+        let second = b.snapshots_list().unwrap().points[0].id.clone();
+        // Back to before the second apply: the first theme is still on, and its pause too.
+        assert_eq!(
+            b.snapshot_restore(&second).unwrap().status,
+            RestoreStatus::Done
+        );
+        assert_eq!(
+            b.recovery_status().unwrap().paused.unwrap().by,
+            PausedBy::Clink
+        );
+        // Back to before the first: no theme is left, and neither is the pause.
+        let restored = b.snapshot_restore(&first).unwrap();
+        assert_eq!(restored.status, RestoreStatus::Done);
+        assert!(restored.notes.is_empty(), "{:?}", restored.notes);
+        assert_eq!(b.recovery_status().unwrap().paused, None);
+        assert!(health_is_empty(&b));
+        // A pause of this computer keeps its record.
+        let third = apply_terracotta(&b).0.snapshot_id.unwrap();
+        pause_refused(&b);
+        assert_eq!(
+            b.snapshot_restore(&third).unwrap().status,
+            RestoreStatus::Done
         );
         assert_eq!(
             b.recovery_status().unwrap().paused.unwrap().by,
             PausedBy::App
         );
+    }
+
+    #[test]
+    fn undo_everything_keeps_a_pause_in_cmd_unless_it_went_fully_well_and_says_one_it_could_not_lift(
+    ) {
+        let b = backend();
+        paused_in_cmd(&b);
+        // Windows Terminal's settings.json can't be read: that step fails, so CMD Studio's
+        // changes are not all out, and the pause in cmd stays.
+        fake_fs(&b).fail_reads_of(Path::new(WT));
+        let out = b.revert_all().unwrap();
+        assert!(!out.ok, "{out:?}");
+        assert_eq!(
+            b.recovery_status().unwrap().paused.unwrap().by,
+            PausedBy::Clink
+        );
+        fake_fs(&b).stop_failing(Path::new(WT));
+        // Fully well this time, but paused.json is held: said, and the pause is as it was.
+        fake_fs(&b).fail_removes_of(b.paths().paused_file());
+        let out = b.revert_all().unwrap();
+        assert!(out.ok, "{out:?}");
+        assert!(
+            out.notes.iter().any(|n| n.code == "E_DATA_WRITE"
+                && n.details.starts_with(
+                    "everything was undone, but the pause in cmd could not be lifted"
+                )),
+            "{:?}",
+            out.notes
+        );
+        assert!(fake_fs(&b).exists(&b.paths().paused_file()));
+    }
+
+    #[test]
+    fn an_apply_on_a_fresh_machine_makes_the_folder_init_lua_writes_its_tags_in() {
+        // init.lua can't make folders: the first window's tag needs health\ to be there.
+        let b = backend();
+        assert!(!fake_fs(&b).is_dir(&b.paths().health()));
+        assert_eq!(apply_terracotta(&b).0.status, ApplyStatus::Committed);
+        assert!(fake_fs(&b).is_dir(&b.paths().health()));
     }
 
     #[test]
@@ -774,6 +1136,7 @@ mod tests {
         paused_in_cmd(&b);
         assert!(b.revert_all().unwrap().ok);
         assert_eq!(b.recovery_status().unwrap().paused, None);
+        assert!(health_is_empty(&b), "its start tags went too");
         assert_eq!(apply_terracotta(&b).0.status, ApplyStatus::Committed);
         b.theme_pause(PauseReason::User).unwrap();
         assert!(b.revert_all().unwrap().ok);

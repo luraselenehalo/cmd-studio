@@ -15,6 +15,7 @@ use cmdstudio_core::plan::{autorun_summary, Component, Op, Paths, PlanError, Req
 use cmdstudio_core::recovery::{clear_pause, read_pause, Paused, PausedBy};
 use cmdstudio_core::resources::sha256_hex;
 use cmdstudio_core::snapshot::{SnapshotKind, SnapshotStore, ThemeRef, Unrestored};
+use cmdstudio_core::state::State;
 use cmdstudio_core::txn::Outcome;
 use serde::{Deserialize, Serialize};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -659,7 +660,9 @@ impl<M: Machine> Backend<M> {
         }
     }
 
-    /// Undoes the newest apply that is not undone (spec §4.4 "ย้อนกลับ").
+    /// Undoes the newest apply that is not undone (spec §4.4 "ย้อนกลับ"). One that commits and
+    /// leaves no theme applied lifts a pause in cmd (recovery spec §4.1); an undo is no apply,
+    /// so a pause of this computer stays.
     pub fn undo_last(&self) -> Result<UndoOutcome, AppError> {
         let ctx = self.ctx();
         let report = undo(self.sys(), &ctx)?;
@@ -693,6 +696,10 @@ impl<M: Machine> Backend<M> {
         let mut unrestored = start_unrestored(&report.start);
         unrestored.append(&mut out.unrestored);
         out.unrestored = unrestored;
+        if out.status == UndoStatus::Committed && self.no_theme_left(&ctx) {
+            out.notes
+                .extend(self.lift_pause_in_cmd(&ctx, "the apply was undone"));
+        }
         Ok(out)
     }
 
@@ -767,6 +774,8 @@ impl<M: Machine> Backend<M> {
     /// older one cannot be put back alone. The core holds the lock (spec §5.5) from the first
     /// undo to the last, so no other command changes the machine in between, and prunes old
     /// restore points once, at the end, so none it still goes back through is lost on the way.
+    /// A restore that undid an apply and leaves no theme applied lifts a pause in cmd (recovery
+    /// spec §4.1); it is no apply, so a pause of this computer stays.
     pub fn snapshot_restore(&self, id: &str) -> Result<RestoreOutcome, AppError> {
         let ctx = self.ctx();
         let report = restore_to(self.sys(), &ctx, id)?;
@@ -796,6 +805,9 @@ impl<M: Machine> Backend<M> {
                 RestoreStatus::Stopped
             }
         };
+        if !undone.is_empty() && self.no_theme_left(&ctx) {
+            notes.extend(self.lift_pause_in_cmd(&ctx, "the restore went through"));
+        }
         Ok(RestoreOutcome {
             status,
             undone,
@@ -810,26 +822,42 @@ impl<M: Machine> Backend<M> {
         let ctx = self.ctx();
         let report = cleanup::revert_all(self.sys(), &ctx)?;
         let mut out = self.revert_outcome(&ctx, &report);
-        // Everything CMD Studio changed is out, so a pause in cmd has nothing left to pause (the
-        // banner's "Undo everything", recovery spec §4.2). A pause of this computer stays: it
-        // holds the theme to turn back on.
+        // Everything CMD Studio changed is out (the banner's "Undo everything", recovery spec
+        // §4.2).
         if out.ok {
-            if let Ok(Some(Paused {
-                by: PausedBy::Clink,
-                ..
-            })) = read_pause(self.sys().fs, &ctx.paths)
-            {
-                if let Err(e) = clear_pause(self.sys().fs, &ctx.paths) {
-                    out.notes.push(note(
-                        "E_DATA_WRITE",
-                        format!(
-                            "everything was undone, but the pause in cmd could not be lifted ({e})"
-                        ),
-                    ));
-                }
-            }
+            out.notes
+                .extend(self.lift_pause_in_cmd(&ctx, "everything was undone"));
         }
         Ok(out)
+    }
+
+    /// Lifts a pause in cmd, once nothing of CMD Studio's is left for it to pause: after Undo
+    /// everything, or an undo or a restore that leaves no theme applied. A pause of this computer
+    /// stays: it holds the theme to turn back on, and only an apply lifts it. One that can't be
+    /// lifted is a note, which `done` (what went through) starts.
+    fn lift_pause_in_cmd(&self, ctx: &Ctx, done: &str) -> Option<Note> {
+        let fs = self.sys().fs;
+        let Ok(Some(Paused {
+            by: PausedBy::Clink,
+            ..
+        })) = read_pause(fs, &ctx.paths)
+        else {
+            return None;
+        };
+        clear_pause(fs, &ctx.paths).err().map(|e| {
+            note(
+                "E_DATA_WRITE",
+                format!("{done}, but the pause in cmd could not be lifted ({e})"),
+            )
+        })
+    }
+
+    /// No theme is applied now, as state.json says; one that can't be read is not "none".
+    fn no_theme_left(&self, ctx: &Ctx) -> bool {
+        matches!(
+            State::load(self.sys().fs, &ctx.paths.state_file()),
+            Ok(State { applied: None, .. })
+        )
     }
 
     /// What the core's Revert everything did, for the UI: each step, what its start found, and

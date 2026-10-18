@@ -432,6 +432,12 @@ pub(crate) mod testing {
     /// A machine with Windows Terminal, Oh My Posh and Clink answering like the real ones, and
     /// the bundled files; the backend over it.
     pub(crate) fn backend() -> Backend<FakeMachine> {
+        backend_on(|m| m)
+    }
+
+    /// [`backend`] over a machine of the test's own, made from that fake machine (one adapter
+    /// replaced, say).
+    pub(crate) fn backend_on<M: Machine>(machine: impl FnOnce(FakeMachine) -> M) -> Backend<M> {
         let mut m = FakeMachine::new();
         m.fs.create_dir_all(Path::new(
             r"C:\Users\tester\AppData\Local\Microsoft\Windows",
@@ -456,7 +462,7 @@ pub(crate) mod testing {
         let resources = fake_resources(&m.fs, Path::new(r"C:\Program Files\CMD Studio\resources"));
         let (_, now) = clock();
         Backend::new(
-            m,
+            machine(m),
             PathBuf::from(DATA),
             resources.root,
             now,
@@ -499,8 +505,8 @@ pub(crate) mod testing {
 
     /// Plans `req`, then applies it with the digest of the plan it was shown, as the UI does:
     /// the outcome, and every progress event in the order it was told. The plan must be ready.
-    pub(crate) fn plan_and_apply(
-        b: &Backend<FakeMachine>,
+    pub(crate) fn plan_and_apply<M: Machine>(
+        b: &Backend<M>,
         req: ApplyRequest,
     ) -> (ApplyOutcome, Vec<ApplyProgress>) {
         let plan = match b.plan_apply(req.clone()).unwrap() {
@@ -513,7 +519,9 @@ pub(crate) mod testing {
     }
 
     /// Applies Terracotta as [`terracotta_request`] asks (see [`plan_and_apply`]).
-    pub(crate) fn apply_terracotta(b: &Backend<FakeMachine>) -> (ApplyOutcome, Vec<ApplyProgress>) {
+    pub(crate) fn apply_terracotta<M: Machine>(
+        b: &Backend<M>,
+    ) -> (ApplyOutcome, Vec<ApplyProgress>) {
         plan_and_apply(b, terracotta_request())
     }
 }

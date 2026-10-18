@@ -6,7 +6,7 @@
 //! "could not be read" and never for "no crash".
 use super::{last_error, wide};
 use crate::adapters::{AdapterError, AppCrash, EventLog};
-use crate::eventlog::{crash_query, parse_crash};
+use crate::eventlog::{crash_query, parse_crash, STILL_BEING_READ};
 use std::ffi::OsStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -155,9 +155,7 @@ fn within_time<T: Send + 'static>(
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
     {
-        return Err(fail(
-            "the Application log is still being read by an earlier read".to_string(),
-        ));
+        return Err(fail(STILL_BEING_READ.to_string()));
     }
     let slot = Slot(busy);
     let (tx, rx) = mpsc::channel();
@@ -358,7 +356,7 @@ mod tests {
             Ok(2)
         });
         let e = second.unwrap_err();
-        assert!(e.message.contains("still being read"), "{e:?}");
+        assert_eq!(e.message, STILL_BEING_READ, "{e:?}");
         assert!(
             started.elapsed() < Duration::from_millis(200),
             "not at once"
