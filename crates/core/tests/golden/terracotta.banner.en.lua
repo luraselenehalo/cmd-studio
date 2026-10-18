@@ -64,6 +64,7 @@ local function clear_cmd_logo()
   end
 end
 clink.oninject(function()
+  if CMDSTUDIO_PAUSED then return end
   if os.getenv("CMDSTUDIO_BANNER") then return end
   os.setenv("CMDSTUDIO_BANNER", "1")
   clear_cmd_logo()
