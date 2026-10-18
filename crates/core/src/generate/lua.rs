@@ -32,16 +32,25 @@ pub const PAUSED_STILL: &str = "CMD Studio's theme is paused. Open CMD Studio to
 ///
 /// - The host check is `os.gethost()`: Clink's own program runs `clink set`, so only a name
 ///   ending in `\cmd.exe` counts (spike S4).
-/// - "The first prompt" is a prompt coroutine (spike S6b, `docs/spikes/phase3b-recovery/
-///   results.md`, round 2). A prompt filter of CMD Studio's runs before Oh My Posh's, returns no
-///   value, and on the window's first prompt only asks `clink.promptcoroutine` for a function
-///   that takes the tags away. Clink resumes it only while the edit loop waits for a key, after
-///   every filter, Oh My Posh's included, has returned and the prompt is drawn: 0.06 to 0.17 s
-///   after Oh My Posh's end on the VMs, with no key pressed. A filter that hangs, or a window
-///   closed before then, never runs it, and the tag stays to be counted. A filter after Oh My
-///   Posh's would never run at all: its right filter returns `false`, which ends the chain
-///   (spike S6). Waiting for the first line to end instead (the plan's F5) would count a window
-///   opened and closed without a key as a start that failed.
+/// - "The first prompt" is a prompt coroutine (spike S6b, round 2 of
+///   `docs/spikes/phase3b-recovery/results.md`). A prompt filter of CMD Studio's runs before Oh
+///   My Posh's, returns no value, and asks `clink.promptcoroutine` for a function that takes the
+///   tags away, until that function has run once. Clink resumes it only while the edit loop
+///   waits for a key, after every filter, Oh My Posh's included, has returned and the prompt is
+///   drawn: 0.06 to 0.17 s after Oh My Posh's end on the VMs, with no key pressed. A filter that
+///   hangs, or a window closed before then, never runs it, and the tag stays to be counted. A
+///   first line that ends before Clink waits (keys typed ahead) drops its coroutine unrun, so
+///   the next line asks again; on one line Clink keeps one coroutine for the filter, so a
+///   refilter clears nothing twice. A filter after Oh My Posh's would never run at all: its
+///   right filter returns `false`, which ends the chain (spike S6). Waiting for the first line
+///   to end instead (the plan's F5) would count a window opened and closed without a key as a
+///   start that failed.
+/// - Before it pauses the theme, and only then, the counter lists the running programs once
+///   (`tasklist /FO CSV /NH`): a stale tag whose pid is a running `cmd.exe` is a window started
+///   as `cmd /k <a long command>` that has not reached its prompt yet, not one that failed. It
+///   is neither counted nor deleted. Only the first two fields of each row are read, the image
+///   name and the pid, which tasklist never translates. A tasklist that cannot be run or read
+///   counts every stale tag, as before.
 /// - Oh My Posh registers its filter at `_ZL_CLINK_PROMPT_PRIORITY + 1`, 1 when that is unset,
 ///   and Clink calls the lower number first: CMD Studio's is at 0, or lower when the variable
 ///   puts Oh My Posh's at 0 or below.
@@ -54,7 +63,7 @@ pub const PAUSED_STILL: &str = "CMD Studio's theme is paused. Open CMD Studio to
 ///   through a 32-bit `long`, and a time in milliseconds is out of its range.
 /// - Every file step is under `pcall`, and one that fails skips the counter: the theme is never
 ///   paused because a file could not be read or written. What fails is written to Clink's log,
-///   never to the window.
+///   never to the window: the paused line's callback and its registration too.
 const HEALTH_BODY: &str = r#"-- The start counter (recovery spec §3): each cmd window leaves a tag health\start-<pid> that
 -- holds "v1 <unix seconds>" until its first prompt. PAUSE_AFTER tags older than STALE_AFTER
 -- seconds are that many windows in a row that never got there, and the theme is paused in cmd:
@@ -102,6 +111,29 @@ local function stale(now)
   end
   return old
 end
+local function pid_of(path)
+  return path:match("start%-(%d+)$")
+end
+-- The pids of the cmd windows still running, from one tasklist, asked only when the theme would
+-- pause: a window started as `cmd /k <a long command>` keeps its tag until that command ends.
+-- Only a row's first two fields are read, the image name and the pid, which tasklist never
+-- translates. nil when tasklist gives no row: then every stale tag counts.
+local function running_cmds()
+  local handle = io.popen("tasklist /FO CSV /NH 2>nul")
+  if not handle then return nil end
+  local text = handle:read("*a") or ""
+  handle:close()
+  local pids, rows = {}, 0
+  for line in text:gmatch("[^\r\n]+") do
+    local image, pid = line:match('^"([^"]*)","(%d+)",')
+    if image then
+      rows = rows + 1
+      if image:lower() == "cmd.exe" then pids[pid] = true end
+    end
+  end
+  if rows == 0 then return nil end
+  return pids
+end
 local function count_start()
   local f = io.open(paused_file, "rb")
   if f then
@@ -115,12 +147,26 @@ local function count_start()
   end
   local now = os.time()
   local old = stale(now)
+  local live = {}
+  if #old >= PAUSE_AFTER then
+    local asked, running = pcall(running_cmds)
+    if asked and running then
+      live = running
+      local dead = {}
+      for _, path in ipairs(old) do
+        if not live[pid_of(path)] then dead[#dead + 1] = path end
+      end
+      old = dead
+    end
+  end
   if #old >= PAUSE_AFTER then
     local p = io.open(paused_file, "wb")
     if p then
       p:write(string.format('{"version":1,"reason":"cmdStarts","at":%.0f,"count":%d,"by":"clink"}\n', now * 1000, #old))
       p:close()
-      for _, path in ipairs(tags()) do os.remove(path) end
+      for _, path in ipairs(tags()) do
+        if not live[pid_of(path)] then os.remove(path) end
+      end
       paused_count = #old
       return true
     end
@@ -135,20 +181,28 @@ local function count_start()
   return false
 end
 local counted, paused = pcall(count_start)
+-- The paused line, once for a cmd window and the cmd windows started from it.
+local function say_paused()
+  if os.getenv("CMDSTUDIO_PAUSE_SAID") then return end
+  os.setenv("CMDSTUDIO_PAUSE_SAID", "1")
+  if paused_count > 0 then
+    clink.print(string.format(PAUSED_NOW, paused_count))
+  else
+    clink.print(PAUSED_STILL)
+  end
+end
 if counted and paused then
   -- No prompt and no welcome box (banner.lua reads CMDSTUDIO_PAUSED), and one English line in a
-  -- cmd window, once for it and the cmd windows started from it.
+  -- cmd window. A failure to register or print it goes to Clink's log, never to the window.
   CMDSTUDIO_PAUSED = true
-  if is_cmd and clink.oninject then
-    clink.oninject(function()
-      if os.getenv("CMDSTUDIO_PAUSE_SAID") then return end
-      os.setenv("CMDSTUDIO_PAUSE_SAID", "1")
-      if paused_count > 0 then
-        clink.print(string.format(PAUSED_NOW, paused_count))
-      else
-        clink.print(PAUSED_STILL)
-      end
+  if is_cmd then
+    local registered, why = pcall(function()
+      clink.oninject(function()
+        local said, err = pcall(say_paused)
+        if not said then note("cmdstudio: the paused line could not be printed: " .. tostring(err)) end
+      end)
     end)
+    if not registered then note("cmdstudio: the paused line could not be set up: " .. tostring(why)) end
   end
   return
 end
@@ -157,11 +211,15 @@ end
 -- drawn. No key is needed. A filter that hangs, or a window closed before then, never runs it,
 -- and the tag stays to be counted. A success takes this window's tag and the stale ones away;
 -- the fresh tags of other windows stay (Windows Terminal opens several tabs at once).
+-- first_done is set once the function has run: a first line that ends before Clink waits (keys
+-- typed ahead) drops its coroutine unrun, and the next line asks again.
+local first_done = false
 local function first_prompt()
   local ok, err = pcall(function()
     if own_tag then os.remove(own_tag) end
     for _, path in ipairs(stale(os.time())) do os.remove(path) end
   end)
+  first_done = true
   if not ok then note("cmdstudio: the start counter could not clear its tags: " .. tostring(err)) end
 end
 -- The first prompt cannot be seen: this window is not counted.
@@ -174,15 +232,17 @@ end
 local function watch_first_prompt()
   -- Oh My Posh registers its filter at _ZL_CLINK_PROMPT_PRIORITY + 1 (1 when that is unset) and
   -- its right filter ends the chain, so no filter after it runs; Clink calls the lower number
-  -- first. This one returns no value: the prompt is Oh My Posh's.
+  -- first. This one returns no value: the prompt is Oh My Posh's. On one line Clink keeps one
+  -- coroutine for it, so a refilter before the coroutine ran starts no second one.
   local zl_priority = tonumber(os.getenv("_ZL_CLINK_PROMPT_PRIORITY") or "") or 0
   local first = clink.promptfilter(math.min(0, zl_priority))
-  local asked = false
   function first:filter()
-    if asked then return end
-    asked = true
+    if first_done then return end
     local ok, err = pcall(clink.promptcoroutine, first_prompt)
-    if not ok then not_counted(err) end
+    if not ok then
+      first_done = true
+      not_counted(err)
+    end
   end
 end
 if counted and is_cmd and sees_prompt then
@@ -706,7 +766,8 @@ mod tests {
         let counter = s
             .find("local counted, paused = pcall(count_start)")
             .unwrap();
-        let prompt = s.find("io.popen(").unwrap();
+        // Oh My Posh's popen, not the counter's own tasklist one, which is defined above it.
+        let prompt = s.find("io.popen('\"' .. '\"' .. omp").unwrap();
         assert!(
             counter < prompt,
             "the tag is written before Oh My Posh runs"

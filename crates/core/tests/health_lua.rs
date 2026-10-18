@@ -53,6 +53,10 @@ const T: u64 = 1_791_694_709;
 /// - `__idle()` is Clink waiting for a key: it resumes the coroutines with `true`, fails when one
 ///   raises, and filters the prompt once more when one has completed, as Clink does.
 /// - `__new_line()` is the next input line: the coroutines of the last one are dropped.
+///
+/// `io.popen` answers `tasklist …` with `__tasklist` (`nil`: the command cannot start;
+/// `__tasklist_raises`: the call raises) and every other command, Oh My Posh's, with
+/// `__popen_result`. Each command is noted in `__popen_cmds`.
 const STUBS: &str = r#"
 __fail = {}
 __fail_all = false
@@ -133,8 +137,13 @@ os.globfiles = function(pattern)
 end
 io.popen = function(cmd)
   __popen_cmds[#__popen_cmds + 1] = cmd
-  if __popen_result == nil then return nil end
-  return { read = function() return __popen_result end, close = function() end }
+  local answer = __popen_result
+  if cmd:find("^tasklist") then
+    if __tasklist_raises then error("io.popen: access denied") end
+    answer = __tasklist
+  end
+  if answer == nil then return nil end
+  return { read = function() return answer end, close = function() end }
 end
 function __inject()
   for _, f in ipairs(__injects) do f() end
@@ -218,6 +227,8 @@ struct How {
     prompt: bool,
     /// Then Clink waits for a key (no key is pressed).
     idle: bool,
+    /// The health folder init.lua is given.
+    health: &'static str,
 }
 
 /// A cmd window, process `pid`, started at `now`, closed (or hung) before its first prompt.
@@ -229,6 +240,7 @@ fn window(pid: u32, now: u64) -> How {
         inject: true,
         prompt: false,
         idle: false,
+        health: HEALTH,
     }
 }
 
@@ -243,8 +255,9 @@ impl How {
         }
     }
 
-    /// The same window, closed once its prompt was drawn but before Clink waited for a key.
-    fn closed_at_its_prompt(self) -> How {
+    /// The same window, its prompt drawn, and Clink has not waited for a key yet: the window is
+    /// closed then, or its first line ends at once (keys typed ahead), or the test goes on.
+    fn prompt_drawn(self) -> How {
         How {
             prompt: true,
             idle: false,
@@ -266,6 +279,8 @@ struct Window {
     printed: Vec<String>,
     /// It ran Oh My Posh.
     omp: bool,
+    /// The `tasklist` commands it ran.
+    tasklists: Vec<String>,
     /// init.lua set CMDSTUDIO_PAUSED.
     paused: bool,
     /// The prompt as drawn last, `None` when it was not drawn or a filter failed.
@@ -303,6 +318,10 @@ impl Window {
             .filter(|l| l.contains("start counter"))
             .collect()
     }
+    /// Its log lines that hold `text`.
+    fn logs_with(&self, text: &str) -> Vec<&String> {
+        self.logs.iter().filter(|l| l.contains(text)).collect()
+    }
 }
 
 fn terracotta() -> Theme {
@@ -314,19 +333,61 @@ fn terracotta() -> Theme {
         .1
 }
 
+fn tag_in(health: &str, pid: u32) -> String {
+    format!(r"{health}\start-{pid}")
+}
+
 fn tag(pid: u32) -> String {
-    format!(r"{HEALTH}\start-{pid}")
+    tag_in(HEALTH, pid)
+}
+
+fn paused_file_in(health: &str) -> String {
+    format!(r"{health}\paused.json")
 }
 
 fn paused_file() -> String {
-    format!(r"{HEALTH}\paused.json")
+    paused_file_in(HEALTH)
+}
+
+/// A disk with a tag in `health` for each of `pids`, written `age` seconds before [`T`].
+fn tags_in(health: &str, pids: &[u32], age: u64) -> Disk {
+    pids.iter()
+        .map(|pid| (tag_in(health, *pid), format!("v1 {}\n", T - age)))
+        .collect()
 }
 
 /// A disk with a tag for each of `pids`, written `age` seconds before [`T`].
 fn tags_of_age(pids: &[u32], age: u64) -> Disk {
-    pids.iter()
-        .map(|pid| (tag(*pid), format!("v1 {}\n", T - age)))
+    tags_in(HEALTH, pids, age)
+}
+
+/// What `paused.json` holds when init.lua paused the theme at `now` for `count` windows.
+fn pause_record(now: u64, count: u32) -> String {
+    format!(
+        "{{\"version\":1,\"reason\":\"cmdStarts\",\"at\":{},\"count\":{count},\"by\":\"clink\"}}\n",
+        now * 1000
+    )
+}
+
+/// What `tasklist /FO CSV /NH` prints for these programs, one row each, with no header (`/NH`).
+fn tasklist(rows: &[(&str, u32)]) -> String {
+    rows.iter()
+        .map(|(image, pid)| format!("\"{image}\",\"{pid}\",\"Console\",\"1\",\"4,512 K\"\r\n"))
         .collect()
+}
+
+/// `tasklist` on a computer where this window runs among other programs, with the `cmd /c`
+/// that `io.popen` started for the tasklist itself.
+fn usual_tasklist(pid: u32) -> String {
+    tasklist(&[
+        ("System Idle Process", 0),
+        ("System", 4),
+        ("explorer.exe", 3100),
+        ("conhost.exe", 7012),
+        ("cmd.exe", pid),
+        ("cmd.exe", 9001),
+        ("tasklist.exe", 9002),
+    ])
 }
 
 fn truthy(lua: &Lua, name: &str) -> mlua::Result<bool> {
@@ -358,8 +419,9 @@ fn open_steps(
     g.set("__now", how.now)?;
     g.set("__pid", how.pid)?;
     g.set("__host", how.host)?;
-    g.set("__health", HEALTH)?;
+    g.set("__health", how.health)?;
     g.set("__popen_result", OMP)?;
+    g.set("__tasklist", usual_tasklist(how.pid))?;
     before(&lua)?;
     lua.load(banner_lua(&terracotta()))
         .set_name("banner.lua")
@@ -367,7 +429,7 @@ fn open_steps(
     lua.load(init_lua(
         Path::new(OMP_EXE),
         Path::new(OMP_CONFIG),
-        Path::new(HEALTH),
+        Path::new(how.health),
     ))
     .set_name("init.lua")
     .exec()?;
@@ -383,7 +445,7 @@ fn open_steps(
         if g.get::<bool>("__prompt_ok")? {
             tag_before_idle = g
                 .get::<Table>("__files")?
-                .contains_key(tag(how.pid).as_str())?;
+                .contains_key(tag_in(how.health, how.pid).as_str())?;
             if how.idle {
                 g.get::<Function>("__idle")?.call::<()>(())?;
             }
@@ -411,9 +473,14 @@ fn open_steps(
     }
     filters.sort_by_key(|f| f.priority);
     let env: Table = g.get("__env")?;
+    let commands = strings(&g.get::<Table>("__popen_cmds")?)?;
     Ok(Window {
         printed,
-        omp: g.get::<Table>("__popen_cmds")?.raw_len() > 0,
+        omp: commands.iter().any(|c| c.contains("oh-my-posh.exe")),
+        tasklists: commands
+            .into_iter()
+            .filter(|c| c.starts_with("tasklist"))
+            .collect(),
         paused: truthy(&lua, "CMDSTUDIO_PAUSED")?,
         prompt,
         tag_seen_by_omp: truthy(&lua, "__tag_seen_by_omp")?,
@@ -707,7 +774,7 @@ fn a_window_whose_prompt_never_comes_keeps_its_tag() -> mlua::Result<()> {
     assert_eq!(disk.keys().cloned().collect::<Vec<_>>(), [tag(6)]);
     // The filters returned, but the window was closed before Clink waited for a key.
     let mut disk = Disk::new();
-    let w = open(&mut disk, window(7, T).closed_at_its_prompt())?;
+    let w = open(&mut disk, window(7, T).prompt_drawn())?;
     assert_eq!(w.prompt.as_deref(), Some("omp> "));
     assert_eq!(disk.keys().cloned().collect::<Vec<_>>(), [tag(7)]);
     Ok(())
@@ -715,15 +782,18 @@ fn a_window_whose_prompt_never_comes_keeps_its_tag() -> mlua::Result<()> {
 
 #[test]
 fn a_refilter_on_the_same_line_clears_nothing_twice() -> mlua::Result<()> {
-    // Clink filters the prompt again when the coroutine completes, and on every later line. The
-    // filter asks for its coroutine on the first line only: a tag of another window that goes
-    // stale afterwards is left to the next window's start.
+    // Clink filters the prompt again on the same line (another filter's coroutine completed,
+    // or this one's), and on every later line. Before the coroutine ran, Clink keeps the one it
+    // has for the filter on that line; after it ran, the filter asks for none: a tag of another
+    // window that goes stale afterwards is left to the next window's start.
     let mut disk = Disk::new();
     let w = open_steps(
         &mut disk,
-        window(100, T).prompted(),
+        window(100, T).prompt_drawn(),
         |_| Ok(()),
         |lua| {
+            lua.load("__prompt()").exec()?;
+            lua.globals().get::<Function>("__idle")?.call::<()>(())?;
             lua.globals()
                 .get::<Table>("__files")?
                 .set(tag(7), format!("v1 {}\n", T - 600))?;
@@ -732,7 +802,224 @@ fn a_refilter_on_the_same_line_clears_nothing_twice() -> mlua::Result<()> {
         },
     )?;
     assert_eq!(disk.keys().cloned().collect::<Vec<_>>(), [tag(7)]);
-    assert_eq!(w.coroutine_calls, 1);
+    // the first prompt, and the refilter before the coroutine ran
+    assert_eq!(w.coroutine_calls, 2);
+    Ok(())
+}
+
+#[test]
+fn a_first_line_that_ends_before_clink_waits_leaves_the_clear_to_the_next_line() -> mlua::Result<()>
+{
+    // Keys typed ahead (or a paste that ends with Enter) end the first line before Clink ever
+    // waits for one: Clink drops that line's coroutine unrun. The prompt was there all the same,
+    // so the next line asks again, and its coroutine takes the tags away.
+    let mut disk = tags_of_age(&[1], 600);
+    let w = open_steps(
+        &mut disk,
+        window(100, T).prompt_drawn(),
+        |_| Ok(()),
+        |lua| {
+            lua.load("__new_line() __prompt()").exec()?;
+            lua.globals().get::<Function>("__idle")?.call::<()>(())
+        },
+    )?;
+    assert!(disk.is_empty(), "{disk:?}");
+    assert_eq!(w.coroutine_calls, 2, "once on each line");
+    Ok(())
+}
+
+#[test]
+fn a_window_whose_oh_my_posh_is_missing_or_broken_still_starts() -> mlua::Result<()> {
+    // Recovery spec §13: Oh My Posh that is missing, or whose script raises at load, leaves cmd
+    // with a prompt that works (init.lua logs it and goes on): that window started, and leaves no
+    // tag. The watcher of the first prompt is set up before Oh My Posh is loaded for that.
+    let cases: [(&str, Option<&str>); 2] = [
+        ("the exe is missing", None),
+        (
+            "its script raises at load",
+            Some("error('oh-my-posh init broke')"),
+        ),
+    ];
+    for (why, script) in cases {
+        let mut disk = tags_of_age(&[1, 2], 61);
+        let w = open_with(&mut disk, window(3, T).prompted(), |lua| match script {
+            None => lua.globals().set("__popen_result", Value::Nil),
+            Some(text) => lua.globals().set("__popen_result", text),
+        })?;
+        assert!(!w.paused && w.shows_the_box(), "{why}");
+        assert_eq!(
+            w.prompt.as_deref(),
+            Some("C:\\>"),
+            "{why}: cmd's own prompt"
+        );
+        assert!(disk.is_empty(), "{why}: {disk:?}");
+    }
+    Ok(())
+}
+
+#[test]
+fn a_paused_line_that_cannot_be_registered_or_printed_goes_only_to_the_log() -> mlua::Result<()> {
+    // The paused window's line is printed by an inject callback. Registering it, or printing it,
+    // may fail: that goes to Clink's log, never to the window as an error, and the theme stays
+    // paused.
+    let mut disk = Disk::from([(paused_file(), "{}".to_string())]);
+    // banner.lua registers its callback first, init.lua second: the second registration fails.
+    let w = open_with(&mut disk, window(7, T).prompted(), |lua| {
+        lua.load(
+            r#"
+            local register = clink.oninject
+            local calls = 0
+            clink.oninject = function(f)
+              calls = calls + 1
+              if calls > 1 then error("oninject: not now") end
+              register(f)
+            end
+            "#,
+        )
+        .exec()
+    })?;
+    assert!(
+        w.paused && !w.omp && w.printed.is_empty(),
+        "{:?}",
+        w.printed
+    );
+    assert_eq!(w.logs_with("oninject: not now").len(), 1, "{:?}", w.logs);
+    assert_eq!(w.prompt.as_deref(), Some("C:\\>"));
+    // The callback runs and its print fails.
+    let w = open_with(&mut disk, window(8, T).prompted(), |lua| {
+        lua.load("clink.print = function() error('the console is gone') end")
+            .exec()
+    })?;
+    assert!(
+        w.paused && !w.omp && w.printed.is_empty(),
+        "{:?}",
+        w.printed
+    );
+    assert_eq!(w.logs_with("the console is gone").len(), 1, "{:?}", w.logs);
+    Ok(())
+}
+
+/// The data folder of VM-C's Thai user, a space in it (spike S2).
+const THAI_HEALTH: &str = r"C:\Users\ผู้ทดสอบ ไทย\AppData\Local\ai.resincore.cmdstudio\health";
+
+#[test]
+fn a_thai_data_folder_counts_and_clears_the_same_with_names_or_whole_paths() -> mlua::Result<()> {
+    // os.globfiles gives the names alone (as on the VMs, S3) or whole paths: either way the tag's
+    // name is read out of what it gives and the path is made again in the Thai folder.
+    for glob_paths in [false, true] {
+        let how = |pid| How {
+            health: THAI_HEALTH,
+            ..window(pid, T)
+        };
+        // A success takes its own tag and the stale ones away.
+        let mut disk = tags_in(THAI_HEALTH, &[1, 2], 61);
+        let w = open_with(&mut disk, how(3).prompted(), |lua| {
+            lua.globals().set("__glob_paths", glob_paths)
+        })?;
+        assert!(w.tag_before_idle && !w.paused, "{glob_paths}");
+        assert!(disk.is_empty(), "{glob_paths}: {disk:?}");
+        // Three that never got there pause the theme, and every tag goes.
+        let mut disk = tags_in(THAI_HEALTH, &[1, 2, 3], 600);
+        let w = open_with(&mut disk, how(4), |lua| {
+            lua.globals().set("__glob_paths", glob_paths)
+        })?;
+        assert!(w.paused, "{glob_paths}");
+        assert_eq!(
+            disk,
+            Disk::from([(paused_file_in(THAI_HEALTH), pause_record(T, 3))]),
+            "{glob_paths}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_stale_tag_of_a_cmd_window_still_running_is_neither_counted_nor_deleted() -> mlua::Result<()> {
+    // A window started as `cmd /k <a long command>` (a Windows Terminal profile that runs a dev
+    // server) keeps its tag until that command ends, maybe for hours: it is no window that
+    // failed to start. Before it pauses the theme, init.lua asks tasklist once.
+    let mut disk = tags_of_age(&[1, 2, 3], 600);
+    let before = disk.clone();
+    let w = open_with(&mut disk, window(4, T), |lua| {
+        lua.globals().set(
+            "__tasklist",
+            tasklist(&[
+                ("System", 4),
+                ("cmd.exe", 1),
+                ("conhost.exe", 70),
+                ("cmd.exe", 2),
+                ("Cmd.EXE", 3),
+                ("cmd.exe", 4),
+            ]),
+        )
+    })?;
+    assert!(!w.paused && w.omp && w.shows_the_box());
+    let mut want = before;
+    want.insert(tag(4), format!("v1 {T}\n"));
+    assert_eq!(disk, want);
+    // One of four still runs: the three others pause the theme and go; the running one stays.
+    // A pid that another program has taken since is no cmd window, and the rows' other fields
+    // may be in Thai.
+    let mut disk = tags_of_age(&[1, 2, 3, 5], 600);
+    let w = open_with(&mut disk, window(6, T), |lua| {
+        lua.globals().set(
+            "__tasklist",
+            "\"node.exe\",\"1\",\"Console\",\"1\",\"80,000 K\"\r\n\
+             \"CMD.EXE\",\"5\",\"คอนโซล\",\"1\",\"4,512 K\"\r\n\
+             \"cmd.exe\",\"6\",\"คอนโซล\",\"1\",\"4,512 K\"\r\n\
+             \"cmd.exe\",\"30\",\"คอนโซล\",\"1\",\"4,512 K\"\r\n",
+        )
+    })?;
+    assert!(w.paused);
+    assert_eq!(w.lines(), [PAUSED_NOW.replace("%d", "3")]);
+    assert_eq!(
+        disk,
+        Disk::from([
+            (paused_file(), pause_record(T, 3)),
+            (tag(5), format!("v1 {}\n", T - 600)),
+        ])
+    );
+    Ok(())
+}
+
+#[test]
+fn a_tasklist_that_cannot_be_read_counts_every_stale_tag_as_before() -> mlua::Result<()> {
+    // No answer to rely on is no window still running. Nothing here is read for its English.
+    for (why, setup) in [
+        ("the command cannot start", "__tasklist = nil"),
+        ("it raises", "__tasklist_raises = true"),
+        ("it prints nothing", "__tasklist = ''"),
+        (
+            "it prints a message and no row",
+            "__tasklist = 'ข้อมูล: ไม่มีงานที่กำลังทำงาน\\r\\n'",
+        ),
+    ] {
+        let mut disk = tags_of_age(&[1, 2, 3], 600);
+        let w = open_with(&mut disk, window(4, T), |lua| lua.load(setup).exec())?;
+        assert!(w.paused, "{why}");
+        assert_eq!(w.lines(), [PAUSED_NOW.replace("%d", "3")], "{why}");
+        assert_eq!(
+            disk,
+            Disk::from([(paused_file(), pause_record(T, 3))]),
+            "{why}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn tasklist_runs_once_and_only_when_the_theme_would_pause() -> mlua::Result<()> {
+    // Its cost (a program started through cmd /c) is paid only at the pause decision, never on a
+    // window's usual start, its first prompt, nor while the theme is paused.
+    let mut disk = tags_of_age(&[1, 2], 600);
+    let w = open(&mut disk, window(3, T).prompted())?;
+    assert!(w.tasklists.is_empty(), "{:?}", w.tasklists);
+    let mut disk = tags_of_age(&[1, 2, 3, 4, 5], 600);
+    let w = open(&mut disk, window(6, T))?;
+    assert!(w.paused);
+    assert_eq!(w.tasklists, ["tasklist /FO CSV /NH 2>nul"]);
+    let w = open(&mut disk, window(7, T).prompted())?;
+    assert!(w.paused && w.tasklists.is_empty(), "{:?}", w.tasklists);
     Ok(())
 }
 
@@ -786,7 +1073,7 @@ fn a_raise_in_the_coroutine_is_logged_and_never_thrown() -> mlua::Result<()> {
     let mut disk = tags_of_age(&[1], 600);
     let w = open_steps(
         &mut disk,
-        window(2, T).closed_at_its_prompt(),
+        window(2, T).prompt_drawn(),
         |_| Ok(()),
         |lua| {
             lua.load("__fail_all = true").exec()?;
