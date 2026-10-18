@@ -99,4 +99,18 @@ describe("Tauri's IPC", () => {
     }
     expect(unhandled).toEqual([]);
   });
+
+  it("calls the three commands of the theme's pause by their names, the reason as Rust reads it", async () => {
+    invoke.mockReset();
+    invoke.mockResolvedValue(null);
+    await tauriIpc.recoveryStatus();
+    await tauriIpc.themePause("user");
+    await tauriIpc.themeResume();
+    expect(invoke.mock.calls).toEqual([
+      ["recovery_status", undefined],
+      ["theme_pause", { reason: "user" }],
+      ["theme_resume", undefined],
+    ]);
+    invoke.mockReset();
+  });
 });

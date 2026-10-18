@@ -14,16 +14,22 @@ import type { ApplyRequest } from "../bindings/ApplyRequest";
 import type { CheckReport } from "../bindings/CheckReport";
 import type { Colors } from "../bindings/Colors";
 import type { ContrastIssue } from "../bindings/ContrastIssue";
+import type { CrashCheck } from "../bindings/CrashCheck";
 import type { DoctorReport } from "../bindings/DoctorReport";
 import type { FixProposal } from "../bindings/FixProposal";
 import type { ImportPreview } from "../bindings/ImportPreview";
 import type { Library } from "../bindings/Library";
 import type { Line } from "../bindings/Line";
+import type { PauseInfo } from "../bindings/PauseInfo";
+import type { PauseOutcome } from "../bindings/PauseOutcome";
+import type { PauseReason } from "../bindings/PauseReason";
 import type { PlanOutcome } from "../bindings/PlanOutcome";
 import type { PreviewResult } from "../bindings/PreviewResult";
+import type { RecoveryStatus } from "../bindings/RecoveryStatus";
 import type { RestoreOutcome } from "../bindings/RestoreOutcome";
 import type { RestorePoint } from "../bindings/RestorePoint";
 import type { RestorePoints } from "../bindings/RestorePoints";
+import type { ResumeOutcome } from "../bindings/ResumeOutcome";
 import type { RevertOutcome } from "../bindings/RevertOutcome";
 import type { SettingsLoad } from "../bindings/SettingsLoad";
 import type { SystemReport } from "../bindings/SystemReport";
@@ -157,6 +163,119 @@ function knownContrast(colors: Colors) {
  */
 const SIMPLE_BASE: Record<Tone, string> = { dark: "Terracotta", light: "Daylight" };
 
+/** The cmd windows in a row that fail to start, and the crashes of cmd in Clink, that pause the
+ * theme: the core's `recovery::PAUSE_AFTER`, copied as fixed data (D12 says `warn` below it and
+ * `fail` from it). */
+const PAUSE_AFTER = 3;
+
+/**
+ * D12's words for a pause, copied from the core's `paused_check` as fixed rows (crates/core/src/
+ * doctor.rs), in the order the core tries them. A row is chosen by what the pause is given as (its
+ * `level`, who paused it and why); nothing is worked out. Thai then English. A pause "not yet" or
+ * "not known" never says "paused": the theme is paused in cmd only, or may be, and the words say so.
+ */
+function pausedWords(p: PauseInfo): { th: string; en: string } {
+  const home = "เปิดธีมกลับได้ที่หน้าแรกของ CMD Studio";
+  if (p.level === "computerNotYet") {
+    return {
+      th: "ตอนนี้หยุดธีมไว้ใน cmd เท่านั้น ยังหยุดทั้งเครื่องไม่สำเร็จ: CMD Studio เอาการเปลี่ยนแปลงออกไม่ได้ และจะลองใหม่ตอนเปิดแอป CMD Studio ครั้งหน้า",
+      en: "The theme is paused in cmd only, not yet on this computer: CMD Studio could not take its changes out and tries again the next time the CMD Studio app starts",
+    };
+  }
+  if (p.level === "computerUnknown") {
+    return {
+      th: "อาจมีการหยุดธีมของเครื่องนี้อยู่ แต่อ่าน state.json ไม่ได้",
+      en: "A pause of this computer may be in place, but state.json could not be read",
+    };
+  }
+  if (p.reason === null) {
+    return {
+      th: "CMD Studio อ่านบันทึกการหยุดธีม (paused.json) ไม่ได้ จึงถือว่าธีมถูกหยุดไว้ใน cmd การเปิดธีมกลับที่หน้าแรกของ CMD Studio จะยกเลิกการหยุดนี้",
+      en: "CMD Studio can't read its pause record (paused.json), so it treats the theme as paused in cmd. Turning the theme back on from CMD Studio's home page lifts it",
+    };
+  }
+  if (p.level === "cmd" && p.by === "app") {
+    return {
+      th: `ธีมถูกหยุดไว้ใน cmd เท่านั้น: มีการใช้ธีมหลังการหยุดนี้ แต่ลบบันทึกการหยุดไม่ได้ ${home}`,
+      en: "The theme is paused in cmd only: a theme was applied after this pause, but its record could not be cleared. Turn it back on from CMD Studio's home page",
+    };
+  }
+  if (p.by === "clink" && p.reason === "cmdStarts") {
+    return {
+      th: `ธีมถูกหยุดไว้ใน cmd เพราะ cmd เปิดไม่ถึงพร้อมท์ ${p.count} ครั้งติดกัน ${home}`,
+      en: `The theme is paused in cmd: cmd failed to reach its prompt ${p.count} times in a row. Turn it back on from CMD Studio's home page`,
+    };
+  }
+  if (p.by === "app" && p.reason === "clinkCrash") {
+    // A count of 0 is a pause saved when the crash reports could not be read: no number is true.
+    const times =
+      p.count === 0
+        ? { th: "", en: "" }
+        : p.count === 1
+          ? { th: " 1 ครั้ง", en: " once" }
+          : { th: ` ${p.count} ครั้ง`, en: ` ${p.count} times` };
+    return {
+      th: `CMD Studio หยุดธีมของเครื่องนี้ไว้ เพราะ cmd แครชในส่วนเสริม${times.th} ${home}`,
+      en: `CMD Studio paused the theme on this computer: cmd crashed in its add-on${times.en}. Turn it back on from CMD Studio's home page`,
+    };
+  }
+  if (p.by === "app" && p.reason === "recovery") {
+    return {
+      th: `CMD Studio หยุดธีมของเครื่องนี้ไว้จากทางลัด CMD Studio Recovery ${home}`,
+      en: "CMD Studio paused the theme on this computer from the CMD Studio Recovery shortcut. Turn it back on from CMD Studio's home page",
+    };
+  }
+  if (p.by === "app" && p.reason === "user") {
+    return {
+      th: `ธีมของเครื่องนี้ถูกหยุดไว้ตามที่คุณสั่ง ${home}`,
+      en: "The theme is paused on this computer, as you asked. Turn it back on from CMD Studio's home page",
+    };
+  }
+  return { th: `ธีมถูกหยุดไว้ ${home}`, en: "The theme is paused. Turn it back on from CMD Studio's home page" };
+}
+
+/** The level line of D12's details, as the core words it (the Thai only for the two levels that
+ * are not plain). The core's "since" line is left out: it is a time worked out from `atMs`. */
+function pausedLevel(p: PauseInfo): { en: string; th: string | null } {
+  if (p.level === "computerNotYet") {
+    return {
+      en: "this computer, not yet (in cmd only for now): CMD Studio could not take its changes out and tries again the next time the CMD Studio app starts",
+      th: "เครื่องนี้ ยังไม่สำเร็จ (ตอนนี้หยุดไว้ใน cmd เท่านั้น): CMD Studio เอาการเปลี่ยนแปลงออกไม่ได้ และจะลองใหม่ตอนเปิดแอป CMD Studio ครั้งหน้า",
+    };
+  }
+  if (p.level === "computerUnknown") {
+    return {
+      en: "this computer, not known: state.json can't be read, so whether CMD Studio took its changes out is not known",
+      th: "เครื่องนี้ ยังบอกไม่ได้: อ่าน state.json ไม่ได้ จึงไม่รู้ว่า CMD Studio เอาการเปลี่ยนแปลงออกแล้วหรือยัง",
+    };
+  }
+  if (p.level === "computer") return { en: "this computer (CMD Studio took its changes out)", th: null };
+  if (p.reason === null) {
+    return { en: "treated as in cmd (the record can't be read: it may be damaged, or written by a newer CMD Studio)", th: null };
+  }
+  if (p.by === "app") {
+    return { en: "cmd only (a theme was applied after this pause, but its record could not be cleared)", th: null };
+  }
+  return { en: "cmd only (nothing on this computer was changed)", th: null };
+}
+
+/** D12 while the theme is paused: the core's row for the pause it is given. */
+function pausedCheck(p: PauseInfo): CheckReport {
+  const words = pausedWords(p);
+  const level = pausedLevel(p);
+  const reason = p.reason ?? "not known (paused.json can't be read as a pause record)";
+  return {
+    id: "D12",
+    status: "warn",
+    code: "E_THEME_PAUSED",
+    messageTh: words.th,
+    messageEn: words.en,
+    details: `paused: ${level.en}\nreason: ${reason}`,
+    detailsTh: level.th === null ? null : `หยุดไว้: ${level.th}\nเหตุผล: ${reason}`,
+    fix: "resume",
+  };
+}
+
 export interface MockOptions {
   /** Another Clink in AutoRun: `planApply` answers `otherClink` until `replaceOtherClink`. */
   otherClink?: string[];
@@ -178,6 +297,37 @@ export interface MockOptions {
    * when it is `true`, as the backend's `fix_for` does. */
   storeAvailable?: boolean;
   settings?: Partial<AppSettings>;
+  /**
+   * The theme is paused when the mock starts, as `recovery_status` says it (recovery spec §4.2):
+   * any shape of `PauseInfo`, given whole and never worked out. Its `level` says how far it
+   * reaches (in effect `computer`, `computerNotYet`, `computerUnknown`, or in `cmd`), `reason: null`
+   * is a record that can't be read, and a `count` of 0 is a pause saved with no crash count.
+   * D12 and `themeResume` go by it.
+   */
+  paused?: PauseInfo;
+  /**
+   * cmd's crashes in its add-on since the theme was applied, as the backend's D12 and its start
+   * check count them: a fixed number given here, never read from anything. D12 says `warn` for 1
+   * and 2 and `fail` from 3, the core's rows (`recovery::PAUSE_AFTER`) copied as fixed data, and
+   * the start check pauses the theme on this computer for 3 or more.
+   */
+  cmdCrashes?: number;
+  /** `recovery_status` fails with this code. */
+  failRecoveryWith?: string;
+  /**
+   * The start's crash check answers this at the first `recovery_status`, as given, and nothing is
+   * worked out or paused (give `paused` to match): for the shapes `cmdCrashes` does not make, such
+   * as crash reports that can't be read (`unreadable`, which D12 then says as not checked), a pause
+   * the check tried that did not go through, or an earlier one it tried again.
+   */
+  crashCheck?: CrashCheck;
+  /**
+   * "Pause the theme" does not go through, as the backend says it, and so does the start check's
+   * own pause for 3 crashes: `refused` (Revert everything is refused with `E_BUSY`, so the theme
+   * stays applied and the pause is "not yet"), `rolledBack` (it ran and rolled back, the same) or
+   * `notSaved` (the record could not be written, `E_DATA_WRITE`, though the theme is out).
+   */
+  failPause?: "refused" | "rolledBack" | "notSaved";
 }
 
 /** The mock's own state, open to the tests. */
@@ -189,6 +339,8 @@ export interface MockState {
   settings: AppSettings;
   calls: string[];
   clipboardSuggestion: string;
+  /** The theme's pause, as `paused.json` would hold it, with how far it reaches now. */
+  paused: PauseInfo | null;
 }
 
 /**
@@ -234,6 +386,7 @@ export function createMockIpc(options: MockOptions = {}): Ipc & { state: MockSta
     },
     calls: [],
     clipboardSuggestion: "",
+    paused: options.paused ? structuredClone(options.paused) : null,
   };
   let nextMs = 1791694709000;
   const now = () => nextMs++;
@@ -344,6 +497,47 @@ export function createMockIpc(options: MockOptions = {}): Ipc & { state: MockSta
       ...ok(id, "No theme has been applied yet", "ยังไม่ได้ใช้ธีม"),
       status: "skipped",
     });
+    /** The core's D12 in fixed words: a pause first, then the crashes it is given (cmdCrashes). */
+    const d12 = (): CheckReport => {
+      if (state.paused) return pausedCheck(state.paused);
+      if (!applied) return skip("D12");
+      if (options.crashCheck?.kind === "unreadable") {
+        const why = options.crashCheck.why;
+        return {
+          id: "D12",
+          status: "skipped",
+          code: null,
+          messageTh: `ตรวจข้อนี้ไม่ได้ เพราะอ่านรายงานแครชของ Windows (event log ของ Application) ไม่ได้: ${why}`,
+          messageEn: `Not checked: Windows' crash reports (the Application event log) could not be read: ${why}`,
+          details: "",
+          detailsTh: null,
+          fix: null,
+        };
+      }
+      const crashes = options.cmdCrashes ?? 0;
+      if (crashes === 0) {
+        return ok(
+          "D12",
+          "cmd has not crashed in its add-on since the theme was applied, and the theme is not paused",
+          "cmd ไม่ได้แครชในส่วนเสริมตั้งแต่ใช้ธีม และธีมไม่ได้ถูกหยุดไว้",
+        );
+      }
+      const fail = crashes >= PAUSE_AFTER;
+      return {
+        id: "D12",
+        status: fail ? "fail" : "warn",
+        code: "E_CMD_CRASHED",
+        messageTh: fail
+          ? `cmd แครชในส่วนเสริม ${crashes} ครั้งตั้งแต่ใช้ธีม และธีมยังเปิดอยู่ ให้หยุดธีมใน CMD Studio เพื่อให้ cmd เปิดได้`
+          : `cmd แครชในส่วนเสริม ${crashes} ครั้งตั้งแต่ใช้ธีม ถ้ายังเกิดอีก ให้หยุดธีมใน CMD Studio เพื่อให้ cmd เปิดได้`,
+        messageEn: fail
+          ? `cmd crashed in its add-on ${crashes} times since the theme was applied, and the theme is still on. Pause the theme in CMD Studio so that cmd opens`
+          : `cmd crashed in its add-on ${crashes} time(s) since the theme was applied. If it happens again, pause the theme in CMD Studio so that cmd opens`,
+        details: "",
+        detailsTh: null,
+        fix: "pause",
+      };
+    };
     const list: CheckReport[] = [
       applied ? ok("D1", "Runtime files are complete", "ไฟล์ runtime ครบ") : skip("D1"),
       ok("D2", "Oh My Posh 31.5.0 runs", "Oh My Posh 31.5.0 รันได้"),
@@ -403,8 +597,93 @@ export function createMockIpc(options: MockOptions = {}): Ipc & { state: MockSta
       applied ? ok("D9", "The generated files are as written", "ไฟล์ที่สร้างตรงกับที่บันทึกไว้") : skip("D9"),
       ok("D10", "The app runs unpackaged", "แอปไม่ได้อยู่ในแพ็กเกจ"),
       ok("D11", "Windows Terminal is the default terminal", "แอปเทอร์มินัลเริ่มต้นคือ Windows Terminal"),
+      d12(),
     ];
     return list;
+  };
+
+  /** What Revert everything does to the mock: every apply undone by a new revertAll point. */
+  const revertState = () => {
+    const id = `${now()}-${uuid().slice(0, 8)}`;
+    for (const p of state.points) if (p.kind === "apply" && p.undoneBy === null) { p.undoneBy = id; p.restorable = false; }
+    state.points.unshift({ id, kind: "revertAll", createdMs: Number(id.split("-")[0]), theme: null, target: null, summary: ["Revert everything"], undoes: null, undoneBy: null, restorable: false });
+    state.applied = null;
+    // As the backend's level (`Paused::level`): with the theme out, the app's pause is one of this
+    // computer in effect, however far it reached before (not known stays not known).
+    if (state.paused?.by === "app" && state.paused.level !== "computerUnknown") state.paused.level = "computer";
+  };
+  const revertOutcome = (): RevertOutcome => ({
+    ok: true,
+    steps: [
+      { what: "AutoRun and Windows Terminal's settings", ok: true, detail: "CMD Studio's part is taken out", code: null, fixEn: null, fixTh: null, error: null },
+      { what: "Fonts", ok: true, detail: "nothing to uninstall", code: null, fixEn: null, fixTh: null, error: null },
+    ],
+    notes: [],
+    status: "committed",
+    error: null,
+    unrestored: [],
+  });
+  /** A Revert everything that ran and rolled back (`failPause: "rolledBack"`). */
+  const revertRolledBack = (): RevertOutcome => {
+    const failed = error("E_AUTORUN_WRITE", "the mock was told to fail").toAppError();
+    return {
+      ok: false,
+      steps: [{ what: "AutoRun and Windows Terminal's settings", ok: false, detail: "AutoRun could not be written", code: failed.code, fixEn: null, fixTh: null, error: failed }],
+      notes: [],
+      status: "rolledBack",
+      error: failed,
+      unrestored: [],
+    };
+  };
+  /**
+   * As the backend's pause_machine: the record first, with the theme to apply again (the one
+   * applied now, else the one an earlier pause of this computer noted), then Revert everything.
+   * Whether that goes through is `failPause`'s fixed answer, never worked out: a refused or
+   * rolled-back revert leaves the record with the theme still applied ("not yet"), and a record
+   * that was not saved leaves the theme out with no pause.
+   */
+  const pauseHere = (reason: PauseReason, count: number): PauseOutcome => {
+    const resume = state.applied
+      ? { themeId: state.applied.theme.id, target: state.applied.request.target, themeName: state.applied.theme.name }
+      : state.paused?.by === "app"
+        ? state.paused.resume
+        : null;
+    const record = (level: PauseInfo["level"]): PauseInfo => ({ by: "app", level, reason, atMs: now(), count, resume });
+    const fail = options.failPause;
+    if (fail === "notSaved") {
+      revertState();
+      return { pausedNow: false, revert: revertOutcome(), refused: null, notSaved: error("E_DATA_WRITE", "the mock was told to fail").toAppError() };
+    }
+    if (fail) {
+      state.paused = record(state.applied ? "computerNotYet" : "computer");
+      return fail === "refused"
+        ? { pausedNow: false, revert: null, refused: error("E_BUSY", "the mock was told to fail").toAppError(), notSaved: null }
+        : { pausedNow: false, revert: revertRolledBack(), refused: null, notSaved: null };
+    }
+    revertState();
+    state.paused = record("computer");
+    return { pausedNow: true, revert: revertOutcome(), refused: null, notSaved: null };
+  };
+  /**
+   * The start's crash check, run once at the first `recoveryStatus`, as the backend runs it once per
+   * start (`CrashSlot`): `crashCheck` as given, else with no theme applied `noTheme`, else
+   * `cmdCrashes` read, and the pause of this computer for 3 or more (the core's PAUSE_AFTER). An
+   * earlier pause it tried again is not worked out: give `crashCheck`.
+   */
+  let startCheck: CrashCheck | null = null;
+  const recovery = (): RecoveryStatus => {
+    if (startCheck === null) {
+      if (options.crashCheck) {
+        startCheck = structuredClone(options.crashCheck);
+      } else if (!state.applied) {
+        startCheck = { kind: "noTheme" };
+      } else {
+        const count = options.cmdCrashes ?? 0;
+        const pause = count >= PAUSE_AFTER ? pauseHere("clinkCrash", count) : null;
+        startCheck = { kind: "read", count, pausedNow: pause?.pausedNow ?? false, pause };
+      }
+    }
+    return { paused: structuredClone(state.paused), crashes: structuredClone(startCheck) };
   };
 
   const ipc: Ipc & { state: MockState } = {
@@ -598,6 +877,8 @@ export function createMockIpc(options: MockOptions = {}): Ipc & { state: MockSta
         restorable: true,
       });
       state.applied = { theme: structuredClone(theme), request, snapshotId };
+      // As the backend: a theme applied is the theme on again.
+      state.paused = null;
       return { status: "committed", themeName: theme.name, snapshotId, error: null, unrestored: [], notes: [], plan: null };
     },
     async undoLast(): Promise<UndoOutcome> {
@@ -632,21 +913,11 @@ export function createMockIpc(options: MockOptions = {}): Ipc & { state: MockSta
     },
     async revertAll(): Promise<RevertOutcome> {
       state.calls.push("revertAll");
-      const id = `${now()}-${uuid().slice(0, 8)}`;
-      for (const p of state.points) if (p.kind === "apply" && p.undoneBy === null) { p.undoneBy = id; p.restorable = false; }
-      state.points.unshift({ id, kind: "revertAll", createdMs: Number(id.split("-")[0]), theme: null, target: null, summary: ["Revert everything"], undoes: null, undoneBy: null, restorable: false });
-      state.applied = null;
-      return {
-        ok: true,
-        steps: [
-          { what: "AutoRun and Windows Terminal's settings", ok: true, detail: "CMD Studio's part is taken out", code: null, fixEn: null, fixTh: null, error: null },
-          { what: "Fonts", ok: true, detail: "nothing to uninstall", code: null, fixEn: null, fixTh: null, error: null },
-        ],
-        notes: [],
-        status: "committed",
-        error: null,
-        unrestored: [],
-      };
+      revertState();
+      // As the backend: everything is out, so a pause by init.lua (in cmd) goes too; one of the
+      // app's stays, since it holds the theme to turn back on.
+      if (state.paused?.by === "clink") state.paused = null;
+      return revertOutcome();
     },
     async doctorRun(): Promise<DoctorReport> {
       state.calls.push("doctorRun");
@@ -694,6 +965,39 @@ export function createMockIpc(options: MockOptions = {}): Ipc & { state: MockSta
           : [],
         versions: { app: "0.1.0", ohMyPosh: "31.5.0", clink: "1.9.34", nerdFonts: "3.5.1" },
       };
+    },
+    async recoveryStatus(): Promise<RecoveryStatus> {
+      state.calls.push("recoveryStatus");
+      if (options.failRecoveryWith) throw error(options.failRecoveryWith, "the mock was told to fail");
+      return recovery();
+    },
+    async themePause(reason): Promise<PauseOutcome> {
+      state.calls.push(`themePause:${reason}`);
+      // As the backend: only the user's and cmd's crashes are the app's reasons to give.
+      if (reason !== "user" && reason !== "clinkCrash") {
+        throw error("E_INTERNAL", `the app does not pause the theme for ${reason}`);
+      }
+      return pauseHere(reason, reason === "clinkCrash" ? (options.cmdCrashes ?? 0) : 0);
+    },
+    async themeResume(): Promise<ResumeOutcome> {
+      state.calls.push("themeResume");
+      const paused = state.paused;
+      if (!paused) return { kind: "notPaused" };
+      // By level, as the backend: a pause in cmd (init.lua's, a record that can't be read, or an
+      // app record older than the theme in use) is lifted at once.
+      if (paused.level === "cmd") {
+        state.paused = null;
+        return { kind: "resumed" };
+      }
+      const theme = paused.resume ? all().find((t) => t.id === paused.resume?.themeId) : undefined;
+      if (!paused.resume || !theme) return { kind: "pickTheme" };
+      const request: ApplyRequest = {
+        themeId: theme.id,
+        target: paused.resume.target,
+        setWtDefaultProfile: state.settings.setWtDefaultProfile,
+        replaceOtherClink: false,
+      };
+      return { kind: "apply", request, plan: await ipc.planApply(request) };
     },
   };
   return ipc;
