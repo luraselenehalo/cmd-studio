@@ -3,15 +3,18 @@ local omp = "C:\\Users\\ผู้ทดสอบ ไทย\\AppData\\Local\\ai.r
 local config = "C:\\Users\\ผู้ทดสอบ ไทย\\AppData\\Local\\ai.resincore.cmdstudio\\generated\\theme.omp.json"
 local health = "C:\\Users\\ผู้ทดสอบ ไทย\\AppData\\Local\\ai.resincore.cmdstudio\\health"
 local STALE_AFTER = 60
+local FORGET_AFTER = 600
 local PAUSE_AFTER = 3
 local PAUSED_NOW = "CMD Studio paused its theme because cmd failed to start %d times. Open CMD Studio to turn it back on."
 local PAUSED_STILL = "CMD Studio's theme is paused. Open CMD Studio to turn it back on."
 -- The start counter (recovery spec §3): each cmd window leaves a tag health\start-<pid> that
 -- holds "v1 <unix seconds>" until its first prompt. PAUSE_AFTER tags older than STALE_AFTER
 -- seconds are that many windows in a row that never got there, and the theme is paused in cmd:
--- health\paused.json. Only a cmd window counts: CMD Studio's own `clink set` (the apply's check,
--- doctor D3) loads this file too and never shows a prompt. A file that cannot be read or written
--- skips the counter: the theme is never paused for that.
+-- health\paused.json. A tag older than FORGET_AFTER seconds is forgotten first, deleted and never
+-- counted: a window that lived that long was no start that failed. Only a cmd window counts: CMD
+-- Studio's own `clink set` (the apply's check, doctor D3) loads this file too and never shows a
+-- prompt. A file that cannot be read or written skips the counter: the theme is never paused for
+-- that.
 local paused_file = health .. "\\paused.json"
 local own_tag = nil
 local paused_count = 0
@@ -45,12 +48,28 @@ local function tags()
   end
   return found
 end
-local function stale(now)
-  local old = {}
+-- The tags older than STALE_AFTER seconds, in two lists: `old`, the windows that never reached
+-- their prompt, and `forgotten`, the ones older than FORGET_AFTER as well. A tag that old is no
+-- start that failed (a window that lived for hours, or a failure long past), and three of them
+-- closed together must pause nothing. A tag with no time in it yet (another window is writing
+-- it) is in neither.
+local function stale_split(now)
+  local old, forgotten = {}, {}
   for _, path in ipairs(tags()) do
     local t = tag_time(path)
-    if t and now - t > STALE_AFTER then old[#old + 1] = path end
+    if t and now - t > FORGET_AFTER then
+      forgotten[#forgotten + 1] = path
+    elseif t and now - t > STALE_AFTER then
+      old[#old + 1] = path
+    end
   end
+  return old, forgotten
+end
+-- Every tag older than STALE_AFTER seconds, the forgotten ones included: what a first prompt
+-- takes away.
+local function stale(now)
+  local old, forgotten = stale_split(now)
+  for _, path in ipairs(forgotten) do old[#old + 1] = path end
   return old
 end
 local function pid_of(path)
@@ -93,7 +112,9 @@ local function count_start()
     return false
   end
   local now = os.time()
-  local old = stale(now)
+  -- The forgotten tags go before the pause is decided, so tasklist never runs for them.
+  local old, forgotten = stale_split(now)
+  for _, path in ipairs(forgotten) do os.remove(path) end
   local live = {}
   if #old >= PAUSE_AFTER then
     local asked, running = pcall(running_cmds)

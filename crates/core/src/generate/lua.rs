@@ -13,7 +13,7 @@
 //! only.
 use crate::color::Rgb;
 use crate::model::Theme;
-use crate::recovery::{PAUSE_AFTER, STALE_AFTER_SECS};
+use crate::recovery::{FORGET_AFTER_SECS, PAUSE_AFTER, STALE_AFTER_SECS};
 use crate::text::{lua_str, sanitize_text};
 use std::path::Path;
 
@@ -27,8 +27,9 @@ pub const PAUSED_NOW: &str = "CMD Studio paused its theme because cmd failed to 
 pub const PAUSED_STILL: &str = "CMD Studio's theme is paused. Open CMD Studio to turn it back on.";
 
 /// init.lua's start counter (recovery spec §3.2), in front of the load of Oh My Posh. It reads
-/// `health`, `STALE_AFTER`, `PAUSE_AFTER`, `PAUSED_NOW` and `PAUSED_STILL`, which [`init_lua`]
-/// puts before it, and sets the global `CMDSTUDIO_PAUSED` that banner.lua reads.
+/// `health`, `STALE_AFTER`, `FORGET_AFTER`, `PAUSE_AFTER`, `PAUSED_NOW` and `PAUSED_STILL`,
+/// which [`init_lua`] puts before it, and sets the global `CMDSTUDIO_PAUSED` that banner.lua
+/// reads.
 ///
 /// - The host check is `os.gethost()`: Clink's own program runs `clink set`, so only a name
 ///   ending in `\cmd.exe` counts (spike S4).
@@ -45,12 +46,20 @@ pub const PAUSED_STILL: &str = "CMD Studio's theme is paused. Open CMD Studio to
 ///   right filter returns `false`, which ends the chain (spike S6). Waiting for the first line
 ///   to end instead (the plan's F5) would count a window opened and closed without a key as a
 ///   start that failed.
+/// - A tag older than `FORGET_AFTER` (ten minutes) is forgotten at a window's start, before
+///   the pause is decided and so before tasklist could run for it: deleted, and never counted.
+///   A window that lived that long without a prompt was no start that failed (a `cmd /k <dev
+///   server>` profile closed hours later, three of them together when Windows Terminal closes
+///   its tabs), and a failure that old is not one of `PAUSE_AFTER` in a row. A tag still being
+///   written (no time in it yet) is left alone, as everywhere.
 /// - Before it pauses the theme, and only then, the counter lists the running programs once
 ///   (`tasklist /FO CSV /NH`): a stale tag whose pid is a running `cmd.exe` is a window started
-///   as `cmd /k <a long command>` that has not reached its prompt yet, not one that failed. It
-///   is neither counted nor deleted. Only the first two fields of each row are read, the image
-///   name and the pid, which tasklist never translates. A tasklist that cannot be run or read
-///   counts every stale tag, as before. tasklist is run by its full path,
+///   as `cmd /k <a long command>` that has not reached its prompt yet, not one that failed. At
+///   the pause decision it is kept: not counted, and not deleted with the others. A window's
+///   first prompt deletes every tag older than `STALE_AFTER` all the same, the live windows'
+///   included. Only the first two fields of each row are read, the image name and the pid,
+///   which tasklist never translates. A tasklist that cannot be run or read counts every stale
+///   tag, as before. tasklist is run by its full path,
 ///   `<SystemRoot>\System32\tasklist.exe` (`C:\Windows` when `SystemRoot` is unset or empty),
 ///   quoted as Oh My Posh's command is (spec §5.4, G17): `cmd /c` looks in the window's folder
 ///   before PATH, so a bare `tasklist` would run a `tasklist.bat` that sits there.
@@ -70,9 +79,11 @@ pub const PAUSED_STILL: &str = "CMD Studio's theme is paused. Open CMD Studio to
 const HEALTH_BODY: &str = r#"-- The start counter (recovery spec §3): each cmd window leaves a tag health\start-<pid> that
 -- holds "v1 <unix seconds>" until its first prompt. PAUSE_AFTER tags older than STALE_AFTER
 -- seconds are that many windows in a row that never got there, and the theme is paused in cmd:
--- health\paused.json. Only a cmd window counts: CMD Studio's own `clink set` (the apply's check,
--- doctor D3) loads this file too and never shows a prompt. A file that cannot be read or written
--- skips the counter: the theme is never paused for that.
+-- health\paused.json. A tag older than FORGET_AFTER seconds is forgotten first, deleted and never
+-- counted: a window that lived that long was no start that failed. Only a cmd window counts: CMD
+-- Studio's own `clink set` (the apply's check, doctor D3) loads this file too and never shows a
+-- prompt. A file that cannot be read or written skips the counter: the theme is never paused for
+-- that.
 local paused_file = health .. "\\paused.json"
 local own_tag = nil
 local paused_count = 0
@@ -106,12 +117,28 @@ local function tags()
   end
   return found
 end
-local function stale(now)
-  local old = {}
+-- The tags older than STALE_AFTER seconds, in two lists: `old`, the windows that never reached
+-- their prompt, and `forgotten`, the ones older than FORGET_AFTER as well. A tag that old is no
+-- start that failed (a window that lived for hours, or a failure long past), and three of them
+-- closed together must pause nothing. A tag with no time in it yet (another window is writing
+-- it) is in neither.
+local function stale_split(now)
+  local old, forgotten = {}, {}
   for _, path in ipairs(tags()) do
     local t = tag_time(path)
-    if t and now - t > STALE_AFTER then old[#old + 1] = path end
+    if t and now - t > FORGET_AFTER then
+      forgotten[#forgotten + 1] = path
+    elseif t and now - t > STALE_AFTER then
+      old[#old + 1] = path
+    end
   end
+  return old, forgotten
+end
+-- Every tag older than STALE_AFTER seconds, the forgotten ones included: what a first prompt
+-- takes away.
+local function stale(now)
+  local old, forgotten = stale_split(now)
+  for _, path in ipairs(forgotten) do old[#old + 1] = path end
   return old
 end
 local function pid_of(path)
@@ -154,7 +181,9 @@ local function count_start()
     return false
   end
   local now = os.time()
-  local old = stale(now)
+  -- The forgotten tags go before the pause is decided, so tasklist never runs for them.
+  local old, forgotten = stale_split(now)
+  for _, path in ipairs(forgotten) do os.remove(path) end
   local live = {}
   if #old >= PAUSE_AFTER then
     local asked, running = pcall(running_cmds)
@@ -577,7 +606,7 @@ pub fn init_lua(omp_exe: &Path, omp_config: &Path, health: &Path) -> String {
         lua_str(&health.to_string_lossy())
     ));
     s.push_str(&format!(
-        "local STALE_AFTER = {STALE_AFTER_SECS}\nlocal PAUSE_AFTER = {PAUSE_AFTER}\n"
+        "local STALE_AFTER = {STALE_AFTER_SECS}\nlocal FORGET_AFTER = {FORGET_AFTER_SECS}\nlocal PAUSE_AFTER = {PAUSE_AFTER}\n"
     ));
     s.push_str(&format!(
         "local PAUSED_NOW = {}\nlocal PAUSED_STILL = {}\n",
@@ -763,7 +792,9 @@ mod tests {
             Path::new(r"C:\h"),
         );
         assert!(
-            s.contains("\nlocal STALE_AFTER = 60\nlocal PAUSE_AFTER = 3\n"),
+            s.contains(
+                "\nlocal STALE_AFTER = 60\nlocal FORGET_AFTER = 600\nlocal PAUSE_AFTER = 3\n"
+            ),
             "{s}"
         );
         assert!(s.contains(&format!("\nlocal PAUSED_NOW = {}\n", lua_str(PAUSED_NOW))));

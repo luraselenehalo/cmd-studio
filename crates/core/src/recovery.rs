@@ -3,9 +3,11 @@
 //! - `start-<pid>`: init.lua's tag for one cmd window, the text `v1 <unix seconds>`, from the
 //!   window's start to its first prompt;
 //! - `paused.json`: the pause. init.lua writes it when [`PAUSE_AFTER`] windows in a row never
-//!   reached their prompt, and loads no theme while the file is there, whatever it holds; the app
-//!   writes it when it pauses the theme on this computer (Revert everything underneath), with the
-//!   theme to apply again.
+//!   reached their prompt (tags older than [`STALE_AFTER_SECS`] whose windows are gone, and none
+//!   older than [`FORGET_AFTER_SECS`]: a tag that old is forgotten, deleted and never counted),
+//!   and loads no theme while the file is there, whatever it holds; the app writes it when it
+//!   pauses the theme on this computer (Revert everything underneath), with the theme to apply
+//!   again.
 //!
 //! The numbers live here once: the generator writes them into init.lua
 //! (`generate::lua::init_lua`).
@@ -18,6 +20,13 @@ use std::path::{Path, PathBuf};
 
 /// A tag older than this many seconds is a window that never reached its first prompt.
 pub const STALE_AFTER_SECS: u64 = 60;
+/// A tag older than this many seconds is forgotten at the next window's start: deleted, and
+/// never counted. A window that lived that long without a prompt was no start that failed: a
+/// `cmd /k <dev server>` profile closed hours later, three of them together when Windows
+/// Terminal closes its tabs; and a failure that old is not one of [`PAUSE_AFTER`] in a row,
+/// which are the same windows, just not hours apart (the controller's ruling of 2026-10-18; the
+/// founder may change the number).
+pub const FORGET_AFTER_SECS: u64 = 600;
 /// How many windows in a row that never reached their prompt pause the theme in cmd; also how
 /// many crashes of cmd in Clink's DLL pause it on this computer (recovery spec §4.3) and make
 /// doctor D12 fail.
@@ -258,7 +267,10 @@ mod tests {
         let p = paths();
         assert_eq!(p.health(), p.data.join("health"));
         assert_eq!(p.paused_file(), p.data.join(r"health\paused.json"));
-        assert_eq!((STALE_AFTER_SECS, PAUSE_AFTER), (60, 3));
+        assert_eq!(
+            (STALE_AFTER_SECS, FORGET_AFTER_SECS, PAUSE_AFTER),
+            (60, 600, 3)
+        );
         assert_eq!(CRASH_WINDOW_MS, 604_800_000);
     }
 

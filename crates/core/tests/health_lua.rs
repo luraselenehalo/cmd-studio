@@ -1178,6 +1178,83 @@ fn with_prompt_async_off_a_start_is_never_counted() -> mlua::Result<()> {
 }
 
 #[test]
+fn three_dead_tags_three_hours_old_are_forgotten_and_pause_nothing() -> mlua::Result<()> {
+    // Three `cmd /k <a dev server>` windows that served for hours and were closed together
+    // (closing Windows Terminal closes its tabs at once) leave three dead stale tags: nothing
+    // failed to start. A tag older than FORGET_AFTER is forgotten at the next window's start:
+    // deleted, and never counted.
+    let mut disk = tags_of_age(&[1, 2, 3], 3 * 60 * 60);
+    let w = open(&mut disk, window(4, T))?;
+    assert!(!w.paused && w.omp && w.shows_the_box());
+    assert!(w.lines().is_empty(), "{:?}", w.printed);
+    assert_eq!(
+        disk,
+        Disk::from([(tag(4), format!("v1 {T}\n"))]),
+        "all three deleted"
+    );
+    // Three closed three minutes after they opened are three starts that failed.
+    let mut disk = tags_of_age(&[1, 2, 3], 3 * 60);
+    let w = open(&mut disk, window(4, T))?;
+    assert!(w.paused);
+    assert_eq!(w.lines(), [PAUSED_NOW.replace("%d", "3")]);
+    assert_eq!(disk, Disk::from([(paused_file(), pause_record(T, 3))]));
+    // A first prompt still takes a forgotten tag away with the stale ones: one that went that
+    // old after this window loaded (its own load forgot none).
+    let mut disk = Disk::new();
+    open_steps(
+        &mut disk,
+        window(5, T).prompt_drawn(),
+        |_| Ok(()),
+        |lua| {
+            let files: Table = lua.globals().get("__files")?;
+            files.set(tag(7), format!("v1 {}\n", T - 3 * 60 * 60))?;
+            files.set(tag(8), format!("v1 {}\n", T - 61))?;
+            lua.globals().get::<Function>("__idle")?.call::<()>(())
+        },
+    )?;
+    assert!(disk.is_empty(), "{disk:?}");
+    Ok(())
+}
+
+#[test]
+fn a_tag_is_counted_at_600_seconds_and_forgotten_from_601() -> mlua::Result<()> {
+    // The boundary, pinned: a tag is forgotten when `now - t > FORGET_AFTER`, the comparison
+    // STALE_AFTER has.
+    let mut disk = tags_of_age(&[1, 2, 3], 600);
+    let w = open(&mut disk, window(4, T))?;
+    assert!(w.paused, "600 s still counts");
+    assert_eq!(disk, Disk::from([(paused_file(), pause_record(T, 3))]));
+    let mut disk = tags_of_age(&[1, 2, 3], 601);
+    let w = open(&mut disk, window(4, T))?;
+    assert!(!w.paused, "601 s is forgotten");
+    assert_eq!(disk, Disk::from([(tag(4), format!("v1 {T}\n"))]));
+    Ok(())
+}
+
+#[test]
+fn tasklist_is_not_run_when_only_forgotten_tags_are_over_the_threshold() -> mlua::Result<()> {
+    // Three forgotten tags and two stale ones: the forgotten go first, so the pause is decided
+    // over two, under PAUSE_AFTER, and tasklist (a program started through cmd /c) never runs.
+    let mut disk = tags_of_age(&[1, 2, 3], 3 * 60 * 60);
+    disk.extend(tags_of_age(&[5, 6], 120));
+    let w = open(&mut disk, window(7, T))?;
+    assert!(!w.paused && w.tasklists.is_empty(), "{:?}", w.tasklists);
+    let mut want = tags_of_age(&[5, 6], 120);
+    want.insert(tag(7), format!("v1 {T}\n"));
+    assert_eq!(disk, want);
+    // Three stale ones beside two forgotten: tasklist runs once, the pause counts the three, and
+    // the forgotten are gone without being counted.
+    let mut disk = tags_of_age(&[1, 2], 3 * 60 * 60);
+    disk.extend(tags_of_age(&[5, 6, 8], 120));
+    let w = open(&mut disk, window(9, T))?;
+    assert!(w.paused);
+    assert_eq!(w.tasklists.len(), 1, "{:?}", w.tasklists);
+    assert_eq!(w.lines(), [PAUSED_NOW.replace("%d", "3")]);
+    assert_eq!(disk, Disk::from([(paused_file(), pause_record(T, 3))]));
+    Ok(())
+}
+
+#[test]
 fn loading_init_lua_prints_nothing_and_sets_no_variable() -> mlua::Result<()> {
     // Only the inject callbacks print, and only in a cmd window (spec §2.2 #4).
     let mut disk = Disk::from([(paused_file(), "{}".to_string())]);
