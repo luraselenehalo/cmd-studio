@@ -32,6 +32,9 @@
     "allow-open-cmd",
     "allow-open-external",
     "allow-diagnostics-copy",
-    "allow-advanced-read"
+    "allow-advanced-read",
+    "allow-recovery-status",
+    "allow-theme-pause",
+    "allow-theme-resume"
   ]
 }
