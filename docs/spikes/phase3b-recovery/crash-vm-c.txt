@@ -1,0 +1,55 @@
+# VM-C (cmdstudio-th, ผู้ทดสอบ ไทย, Thai Windows), 2026-10-18, spike step 6 (S9, S10, S11)
+# As on VM-A: after -Swap each Win+R cmd window stopped at the AutoRun line with "clink_x64.exe - Entry Point Not Found" (the loader imports ?loader_main_thunk@@YAHXZ from clink_dll_x64.dll; the stand-in has no such export). No cmd.exe crash, no new event 1000.
+# The one event 1000 in the Application log is older (2026-10-10, svchost.exe_CDPSvc in ntdll.dll); its XML is event1000-th-svchost.xml beside this file. It shows the EventData names on Thai Windows. The app's seven-day query leaves it out: 0 hits with NoMatchingEventsFound, not a refused query.
+# The three clink_x64.exe and cmd.exe left waiting were stopped and the error boxes dismissed before -Restore.
+
+cmd left: 0
+## VM-C 6a. recovery-setup.ps1 -NoProbe 2026-10-18T13:15:09.2808125+07:00
+## VM-C 6b. recovery-crash.ps1 -Swap 2026-10-18T13:15:18.4081626+07:00
+swapped: 1.9.34.4e8ae4 D52A20C769D0DFF30D8E67575AF78E389FC8D245F441D23B06FFD03675928A2E
+## VM-C 6c. Win+R cmd #1 2026-10-18T13:15:25.1408206+07:00
+foreground: pid 5292 WindowsTerminal, minimized: False
+window: csrss (pid 768) "clink_x64.exe - Entry Point Not Found"
+window: explorer (pid 3168) ""
+window: WindowsTerminal (pid 5292) "C:\WINDOWS\system32\cmd.exe - "C:\Users\3607~1\AppData\Local\AIRESI~1.CMD\runtime\clink-1.9.34\clink_x64.exe"  inject --autorun --quiet --profile "C:\Users\ผู้ทดสอบ ไทย\AppData\Local\ai.resincore.cmdstudio-spike3b\clink-profile""
+## VM-C 6c. Win+R cmd #2 2026-10-18T13:15:49.3058596+07:00
+## VM-C 6c. Win+R cmd #3 2026-10-18T13:16:07.0232424+07:00
+## VM-C 6d. recovery-crash.ps1 -Events 2026-10-18T13:16:24.7394954+07:00
+events 1000: 1
+--- event 1 at 2026-10-10T19:24:55.4021444Z
+  [AppName] = [svchost.exe_CDPSvc]
+  [AppVersion] = [10.0.26100.8737]
+  [AppTimeStamp] = [8dd923d6]
+  [ModuleName] = [ntdll.dll]
+  [ModuleVersion] = [10.0.26100.9444]
+  [ModuleTimeStamp] = [6bdf03ca]
+  [ExceptionCode] = [c0000409]
+  [FaultingOffset] = [000000000013dca5]
+  [ProcessId] = [0xf18]
+  [ProcessCreationTime] = [0x1dd58ec97eef684]
+  [AppPath] = [C:\WINDOWS\system32\svchost.exe]
+  [ModulePath] = [C:\WINDOWS\SYSTEM32\ntdll.dll]
+  [IntegratorReportId] = [f7484399-061f-4dd9-921d-dbf18765c082]
+  [PackageFullName] = []
+  [PackageRelativeAppId] = []
+the app's query finds: 0
+  error: NoMatchingEventsFound,Microsoft.PowerShell.Commands.GetWinEventCommand: No events were found that match the specified selection criteria.
+with EventData[Data='cmd.exe']: 0
+  error: NoMatchingEventsFound,Microsoft.PowerShell.Commands.GetWinEventCommand: No events were found that match the specified selection criteria.
+--- clink.log, last lines
+## processes
+clink_x64 6020
+clink_x64 7080
+clink_x64 7944
+cmd 1888
+cmd 2844
+cmd 4904
+left: 0
+## VM-C 6e. recovery-crash.ps1 -Restore 2026-10-18T13:16:58.5868801+07:00
+restored: 889B712037886DFDE205E4B637A021848734ED218EE21C5718E2BF23A9E9D8F2
+## VM-C 6f. a cmd window after -Restore 2026-10-18T13:18:12.9351333+07:00
+cmd.exe processes: 1
+cmd pid 2484 started 1:18:15 PM, Clink loaded: clink_dll_x64.dll
+## VM-C 7. recovery-setup.ps1 -Remove 2026-10-18T13:18:35.6650365+07:00
+AutoRun restored (there was none)
+AutoRun now: (absent)

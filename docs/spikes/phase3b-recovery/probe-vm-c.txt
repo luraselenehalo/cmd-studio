@@ -1,0 +1,110 @@
+# VM-C (cmdstudio-th, ผู้ทดสอบ ไทย, Windows 11 26H2 26300.9457, system locale th-TH, ANSI code page 874), 2026-10-18T13:11:05.0490729+07:00; spike steps 1-4 (S1-S7)
+# VM-C was restored from clean (its saved state) while the host was unlocked; the guest bugchecked (0x21) 3 minutes after the resume and rebooted, and guestcontrol worked after that. Phase 3 Run 6 ran first on the same boot and ended with the app's --cleanup (AutoRun absent, its data folder gone).
+# probe.lua is the VM-only copy with `tostring((os.getenv(...)))` (see probe-vm-a.txt). The data folder is C:\Users\ผู้ทดสอบ ไทย\AppData\Local\ai.resincore.cmdstudio-spike3b; Clink starts through its 8.3 path.
+
+### step 1: recovery-setup.ps1
+## VM-C 1. recovery-setup.ps1 (probe.lua with the VM-only getenv fix) 2026-10-18T13:09:27.9888045+07:00
+clink set said:
+p3b 11160 load host=C:\Users\3607~1\AppData\Local\AIRESI~1.CMD\runtime\clink-1.9.34\clink_x64.exe time=1792303764 zl=nil
+p3b 11160 api getpid=function gethost=function globfiles=function find_files=function promptfilter=function onbeginedit=function onendedit=function oninject=function clock=0.016773
+p3b 11160 io.open write ok=true why=nil
+p3b 11160 io.open read text=v1 1792303764\n why=nil
+p3b 11160 globfiles count=1 first=start-11160
+p3b 11160 os.remove ok=true why=nil
+p3b 11160 gone after remove=true
+p3b 11160 files pcall ok=true err=nil
+        Name: clink.logo
+ Description: Controls what startup logo to show
+     Options: none,full,short
+       Value: none
+     Default: full
+
+The default is 'full' which shows the full copyright logo when Clink is
+injected.  A value of 'short' shows an abbreviated startup logo with version
+information.  A value of 'none' omits the startup logo entirely.
+AutoRun: (if exist "C:\Users\3607~1\AppData\Local\AIRESI~1.CMD\runtime\clink-1.9.34\clink_x64.exe" "C:\Users\3607~1\AppData\Local\AIRESI~1.CMD\runtime\clink-1.9.34\clink_x64.exe" inject --autorun --quiet --profile "C:\Users\ผู้ทดสอบ ไทย\AppData\Local\ai.resincore.cmdstudio-spike3b\clink-profile")
+data: C:\Users\ผู้ทดสอบ ไทย\AppData\Local\ai.resincore.cmdstudio-spike3b
+health: C:\Users\ผู้ทดสอบ ไทย\AppData\Local\ai.resincore.cmdstudio-spike3b\health
+
+### step 2: two Win+R cmd windows
+cmd.exe processes: 1
+cmd pid 2020 started 1:10:00 PM, Clink loaded: clink_dll_x64.dll
+cmd.exe processes: 1
+cmd pid 8800 started 1:10:33 PM, Clink loaded: clink_dll_x64.dll
+
+### step 3: recovery-cmdc.ps1
+cmd /c pid=8080 exit=0
+cmd /c pid=6592 exit=0
+cmd /c pid=6096 exit=0
+
+### step 4: recovery-report.ps1
+--- clink.log
+p3b 8800 load host=C:\WINDOWS\system32\cmd.exe time=1792303834 zl=nil
+p3b 8800 api getpid=function gethost=function globfiles=function find_files=function promptfilter=function onbeginedit=function onendedit=function oninject=function clock=0.109438
+p3b 8800 io.open write ok=true why=nil
+p3b 8800 io.open read text=v1 1792303834\n why=nil
+p3b 8800 globfiles count=1 first=start-8800
+p3b 8800 os.remove ok=true why=nil
+p3b 8800 gone after remove=true
+p3b 8800 files pcall ok=true err=nil
+cmdstudio: prompt loaded
+p3b 8800 order 1 oninject
+p3b 8800 order 2 onbeginedit
+p3b 8800 order 3 filter-0 bytes=44 esc=false
+--- probe.txt
+p3b 7376 load host=C:\Users\3607~1\AppData\Local\AIRESI~1.CMD\runtime\clink-1.9.34\clink_x64.exe time=1792303762 zl=nil
+p3b 7376 api getpid=function gethost=function globfiles=function find_files=function promptfilter=function onbeginedit=function onendedit=function oninject=function clock=0.011846
+p3b 7376 io.open write ok=true why=nil
+p3b 7376 io.open read text=v1 1792303762\n why=nil
+p3b 7376 globfiles count=1 first=start-7376
+p3b 7376 os.remove ok=true why=nil
+p3b 7376 gone after remove=true
+p3b 7376 files pcall ok=true err=nil
+p3b 6260 load host=C:\Users\3607~1\AppData\Local\AIRESI~1.CMD\runtime\clink-1.9.34\clink_x64.exe time=1792303764 zl=nil
+p3b 6260 api getpid=function gethost=function globfiles=function find_files=function promptfilter=function onbeginedit=function onendedit=function oninject=function clock=0.010518
+p3b 6260 io.open write ok=true why=nil
+p3b 6260 io.open read text=v1 1792303764\n why=nil
+p3b 6260 globfiles count=1 first=start-6260
+p3b 6260 os.remove ok=true why=nil
+p3b 6260 gone after remove=true
+p3b 6260 files pcall ok=true err=nil
+p3b 2728 load host=C:\Users\3607~1\AppData\Local\AIRESI~1.CMD\runtime\clink-1.9.34\clink_x64.exe time=1792303764 zl=nil
+p3b 2728 api getpid=function gethost=function globfiles=function find_files=function promptfilter=function onbeginedit=function onendedit=function oninject=function clock=0.014004
+p3b 2728 io.open write ok=true why=nil
+p3b 2728 io.open read text=v1 1792303764\n why=nil
+p3b 2728 globfiles count=1 first=start-2728
+p3b 2728 os.remove ok=true why=nil
+p3b 2728 gone after remove=true
+p3b 2728 files pcall ok=true err=nil
+p3b 11160 load host=C:\Users\3607~1\AppData\Local\AIRESI~1.CMD\runtime\clink-1.9.34\clink_x64.exe time=1792303764 zl=nil
+p3b 11160 api getpid=function gethost=function globfiles=function find_files=function promptfilter=function onbeginedit=function onendedit=function oninject=function clock=0.016773
+p3b 11160 io.open write ok=true why=nil
+p3b 11160 io.open read text=v1 1792303764\n why=nil
+p3b 11160 globfiles count=1 first=start-11160
+p3b 11160 os.remove ok=true why=nil
+p3b 11160 gone after remove=true
+p3b 11160 files pcall ok=true err=nil
+p3b 2020 load host=C:\WINDOWS\system32\cmd.exe time=1792303801 zl=nil
+p3b 2020 api getpid=function gethost=function globfiles=function find_files=function promptfilter=function onbeginedit=function onendedit=function oninject=function clock=0.091511
+p3b 2020 io.open write ok=true why=nil
+p3b 2020 io.open read text=v1 1792303801\n why=nil
+p3b 2020 globfiles count=1 first=start-2020
+p3b 2020 os.remove ok=true why=nil
+p3b 2020 gone after remove=true
+p3b 2020 files pcall ok=true err=nil
+p3b 2020 order 1 oninject
+p3b 2020 order 2 onbeginedit
+p3b 2020 order 3 filter-0 bytes=44 esc=false
+p3b 8800 load host=C:\WINDOWS\system32\cmd.exe time=1792303834 zl=nil
+p3b 8800 api getpid=function gethost=function globfiles=function find_files=function promptfilter=function onbeginedit=function onendedit=function oninject=function clock=0.109438
+p3b 8800 io.open write ok=true why=nil
+p3b 8800 io.open read text=v1 1792303834\n why=nil
+p3b 8800 globfiles count=1 first=start-8800
+p3b 8800 os.remove ok=true why=nil
+p3b 8800 gone after remove=true
+p3b 8800 files pcall ok=true err=nil
+p3b 8800 order 1 oninject
+p3b 8800 order 2 onbeginedit
+p3b 8800 order 3 filter-0 bytes=44 esc=false
+--- health\
+--- cmd.exe processes now

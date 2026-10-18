@@ -1,0 +1,82 @@
+# VM-C (Thai Windows), round 2: F10. C:\cmdstudio\fake\cmd.exe (fake-cmd.exe, sha256 4E8B65AD…B672) run 3 times with C:\cmdstudio\crash-dll\clink_dll_x64.dll; then recovery-crash.ps1 -Events without -Swap.
+# The "code=0x00000000" in the run lines is PowerShell's Process.ExitCode after Start-Process -PassThru without a cached handle, not the real exit status; the three events below are the crashes.
+
+### f10-c-run.log
+## VM-C F10 2026-10-18T14:17:41.9368054+07:00
+fake cmd.exe run 1: pid 4092 exited=True code=0x00000000 at 2:18:09 PM
+fake cmd.exe run 2: pid 3412 exited=True code=0x00000000 at 2:18:19 PM
+fake cmd.exe run 3: pid 11244 exited=True code=0x00000000 at 2:18:28 PM
+WerFault processes now: 0
+
+### f10-c-events.log
+## VM-C recovery-crash.ps1 -Events (no -Swap) 2026-10-18T14:19:11.8084734+07:00
+events 1000: 3
+--- event 1 at 2026-10-18T07:18:27.0507989Z
+  [AppName] = [cmd.exe]
+  [AppVersion] = [0.0.0.0]
+  [AppTimeStamp] = [6ad46762]
+  [ModuleName] = [clink_dll_x64.dll]
+  [ModuleVersion] = [1.9.34.0]
+  [ModuleTimeStamp] = [6ad40453]
+  [ExceptionCode] = [c000001d]
+  [FaultingOffset] = [000000000000100d]
+  [ProcessId] = [0x2bec]
+  [ProcessCreationTime] = [0x1dd5ed0dd49528f]
+  [AppPath] = [C:\cmdstudio\fake\cmd.exe]
+  [ModulePath] = [C:\cmdstudio\crash-dll\clink_dll_x64.dll]
+  [IntegratorReportId] = [8fa1c47e-049b-4782-b121-7c0e7fb34ee0]
+  [PackageFullName] = []
+  [PackageRelativeAppId] = []
+--- event 2 at 2026-10-18T07:18:18.0508625Z
+  [AppName] = [cmd.exe]
+  [AppVersion] = [0.0.0.0]
+  [AppTimeStamp] = [6ad46762]
+  [ModuleName] = [clink_dll_x64.dll]
+  [ModuleVersion] = [1.9.34.0]
+  [ModuleTimeStamp] = [6ad40453]
+  [ExceptionCode] = [c000001d]
+  [FaultingOffset] = [000000000000100d]
+  [ProcessId] = [0xd54]
+  [ProcessCreationTime] = [0x1dd5ed0d6f7bafb]
+  [AppPath] = [C:\cmdstudio\fake\cmd.exe]
+  [ModulePath] = [C:\cmdstudio\crash-dll\clink_dll_x64.dll]
+  [IntegratorReportId] = [3cd95c03-8537-48f7-9bd4-f2e9839d44cb]
+  [PackageFullName] = []
+  [PackageRelativeAppId] = []
+--- event 3 at 2026-10-18T07:18:06.5892359Z
+  [AppName] = [cmd.exe]
+  [AppVersion] = [0.0.0.0]
+  [AppTimeStamp] = [6ad46762]
+  [ModuleName] = [clink_dll_x64.dll]
+  [ModuleVersion] = [1.9.34.0]
+  [ModuleTimeStamp] = [6ad40453]
+  [ExceptionCode] = [c000001d]
+  [FaultingOffset] = [000000000000100d]
+  [ProcessId] = [0xffc]
+  [ProcessCreationTime] = [0x1dd5ed0cfb9f8d4]
+  [AppPath] = [C:\cmdstudio\fake\cmd.exe]
+  [ModulePath] = [C:\cmdstudio\crash-dll\clink_dll_x64.dll]
+  [IntegratorReportId] = [35e3f9ae-512c-43c6-afdf-a5d0d3b38b51]
+  [PackageFullName] = []
+  [PackageRelativeAppId] = []
+the app's query finds: 3
+with EventData[Data='cmd.exe']: 3
+--- clink.log, last lines
+16f8 @C:\Users\ผู้ทดสอบ ไทย\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua   31 p3b2 5880 omp filter end prio=1 n=1 t=1.442 wall=1792307784 results=1 second=nil
+16f8 @C:\Users\ผู้ทดสอบ ไทย\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua   31 p3b2 5880 omp rightfilter start prio=1 n=1 t=1.444 wall=1792307784
+16f8 @C:\Users\ผู้ทดสอบ ไทย\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua   31 p3b2 5880 omp rightfilter end prio=1 n=1 t=1.448 wall=1792307784 results=2 second=false
+16f8 @C:\Users\ผู้ทดสอบ ไทย\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua   31 p3b2 5880 coroutine t=1.550 after=0.524 wall=1792307785
+16f8 @C:\Users\ผู้ทดสอบ ไทย\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua   31 p3b2 5880 promptcoroutine t=1.553 wall=1792307785 after=0.527
+16f8 @C:\Users\ผู้ทดสอบ ไทย\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua   31 p3b2 5880 filter0 again n=2 t=1.589 wall=1792307785
+16f8 @C:\Users\ผู้ทดสอบ ไทย\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua   31 p3b2 5880 omp filter start prio=1 n=2 t=1.591 wall=1792307785
+16f8 @C:\Users\ผู้ทดสอบ ไทย\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua   31 p3b2 5880 omp filter end prio=1 n=2 t=1.592 wall=1792307785 results=1 second=nil
+16f8 @C:\Users\ผู้ทดสอบ ไทย\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua   31 p3b2 5880 omp rightfilter start prio=1 n=2 t=1.593 wall=1792307785
+16f8 @C:\Users\ผู้ทดสอบ ไทย\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua   31 p3b2 5880 omp rightfilter end prio=1 n=2 t=1.594 wall=1792307785 results=2 second=false
+16f8 @C:\Users\ผู้ทดสอบ ไทย\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua   31 p3b2 5880 filter0 again n=3 t=1.900 wall=1792307785
+16f8 @C:\Users\ผู้ทดสอบ ไทย\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua   31 p3b2 5880 omp filter start prio=1 n=3 t=1.902 wall=1792307785
+16f8 @C:\Users\ผู้ทดสอบ ไทย\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua   31 p3b2 5880 omp filter end prio=1 n=3 t=1.903 wall=1792307785 results=1 second=nil
+16f8 @C:\Users\ผู้ทดสอบ ไทย\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua   31 p3b2 5880 omp rightfilter start prio=1 n=3 t=1.904 wall=1792307785
+16f8 @C:\Users\ผู้ทดสอบ ไทย\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua   31 p3b2 5880 omp rightfilter end prio=1 n=3 t=1.905 wall=1792307785 results=2 second=false
+## VM-C recovery-setup.ps1 -Remove 2026-10-18T14:19:44.1123805+07:00
+AutoRun restored (there was none)
+
