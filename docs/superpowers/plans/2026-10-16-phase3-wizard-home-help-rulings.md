@@ -2,15 +2,16 @@
 
 Every decision the controller made on the founder's behalf while executing `2026-10-16-phase3-wizard-home-help.md` (subagent-driven, 2026-10-17), in the order made, each with its reason and what it costs if wrong; every minor finding a reviewer raised that this plan did not fix; every item handed on to a later plan; and the founder's own decisions recorded during the run. Source: the execution ledger; the git history has the commits and their evidence.
 
-## The founder's decisions during the run (5)
+## The founder's decisions during the run (6)
 
 - 2026-10-17 founder (answering "must criterion 1 include colours on a never-opened Windows Terminal?"): "รวมเลย" — include it.
 - 2026-10-17 founder: "อนุญาต" — VBoxManage may run outside the sandbox for the VM checks (VM-only actions). The WT pre-check on VM-A started.
 - 2026-10-17 founder: recovery mode, all four cases (cmd hangs or crashes because of the theme; app won't start or crash-loops; app hangs while used; unexpected crash + report); cmd: pause the theme automatically after repeated failures + a one-click Start-menu recovery; schedule: its own phase after phase 3, before phase 4. Brainstorming in progress (architectural path); phase 3 continues meanwhile.
 - 2026-10-17 founder: chose approach ก (init.lua counter + event log + Recovery shortcut); approved the design; "โอเค เขียนสเปกได้เลย" then "โอเค เขียนแผนต่อได้เลย" for docs/superpowers/specs/2026-10-17-recovery-mode-design.md (uncommitted until Task 3's implementer finishes — shared index). Plan 3b-1 drafting dispatched (opus) to docs/superpowers/plans/2026-10-17-phase3b-1-recovery-cmd.md; 3b-2 after the spike.
 - 2026-10-17: plan 3b-1 drafted (opus) — docs/superpowers/plans/2026-10-17-phase3b-1-recovery-cmd.md, 12 tasks (1 and 12 on VMs), code of Tasks 2-10 validated in a scratch copy; found 12 spec mismatches (D10 taken → D12 + E_THEME_PAUSED/E_CMD_CRASHED; CMD Studio's own clink set loads init.lua → count only cmd.exe hosts; onbeginedit before filters → own prompt filter; Recovery shortcut needs 3b-2; no new event; revert_all lifts the cmd pause; OMP crash/Lua error that reach a prompt are not counted). Controller recorded them in the recovery spec §13 and set its status to approved (uncommitted; commit after the fix pass). Plan handed to the founder for review and execution choice.
+- 2026-10-17 founder: "อนุญาต" — download PR #9's cmdstudio-exe artifact to the scratchpad for the VMs. Downloaded run 39038662772 (commit 04e36f6) into scratchpad\artifact-pr9-04e36f6 (33 MB unpacked). CI of #9: 2/2 green, MERGEABLE.
 
-## Rulings (37)
+## Rulings (43)
 
 - Pre-flight Q1: Ruling: keep th.ts "ข้าม แล้วตั้งค่าเอง"; tests read the dictionary; Task 3 updates the spec quote — cost if wrong: none.
 - Pre-flight Q2: Ruling: wizard page 2 gets a fourth state "Windows Terminal installed but never opened" with D6's wording, a button that opens WT and Check again; the confirm page never promises colours without settings.json; the VM run first records the clean snapshot's WT state — founder question: must criterion 1 deliver colours on a never-opened WT (CMD Studio does not create settings.json itself, a phase 1b ruling)? — cost if wrong: +2 clicks on such a machine.
@@ -49,8 +50,14 @@ Every decision the controller made on the founder's behalf while executing `2026
 - Final: Ruling: re-graded Minor 1 (App.tsx settings clobber) to Important — a settings.json locked for a moment at start (antivirus) is overwritten with defaults on the user's first change: their language, target and wizardDone are lost and the wizard returns — it enters the fix pass — cost if wrong: a few lines.
 - Final: Ruling: Important 1 (I4) is not fixed in this pass — whether a never-opened WT can lack its Packages folder is a VM fact; step 0 on VM-A decides; on FINDING the core fix becomes a task before merge — cost if wrong: criterion 1 fails on fresh users until fixed.
 - Final: Ruling: while startError stands, screens that build apply requests (Themes, Home, Editor, Settings) use the in-memory default target and default-profile choice, so an apply could go to "every window" where the unreadable file says "wt" — not fixed in phase 3 (no second fix pass): the plan dialog lists every change before Apply (R7 flow), the start notice says the settings could not be read, and phase 3b's safe-mode work owns start-up failures — cost if wrong: in that rare state, an apply touches AutoRun that the user had kept out, undoable with one Undo.
+- Controller note: a first Step 0 attempt started powershell.exe with -ExecutionPolicy Bypass; stopped at once and rerun inline in the PowerShell tool (whose process scope is already Bypass by the harness; machine and user scopes Undefined). Ruling: VM driving runs inline in the tool, never with an -ExecutionPolicy argument — cost if wrong: none.
+- Ruling: F1 and F2 are fixed on phase3-ui before PR #9 merges (vm-fix-brief.md), with the tooling fixes; then CI's new artifact gets Run 5, Run 6 (VM-C) and the present path of Run 2 when the host is unlocked — cost if wrong: one more VM session.
+- Ruling: round 2 adds the work-area clamp of the window (pure fit_size + tests) and the editor stacking rule (stack when the form < 20rem, preview above the form) — both decide whether the app is usable on a small screen — cost if wrong: a little more Rust in lib.rs.
+- Ruling: preventOverflow in place of a hand-written fit_size is accepted — Tauri adds the title bar and frame and works in physical pixels — cost if wrong: none.
+- Ruling: the "never pass -ExecutionPolicy" rule covers the host (the founder's PC) only; the guest-side -ExecutionPolicy Bypass in spikes/vm/vm.ps1 and run-on-desktop.ps1 runs inside the test VMs, where anything is allowed — cost if wrong: none.
+- Ruling: phase 3's VM gate is met — criterion 1 passes on a never-opened Terminal (VM-A, twice) and the present path passes on VM-C; VM-A's present path and the mouse walk are recorded as not run — cost if wrong: a present-path defect on English Windows that VM-C's Thai run would have shown too.
 
-## Deferred minors (14)
+## Deferred minors (18)
 
 - Task WT: minor (deferred): a never-opened Preview started after an apply copies the themed Store file; state.json does not know that copy, so revert-all leaves Preview themed (rare: Preview users who never opened it) — document in spec §5.4; revisit if reported.
 - Task WT: minor (deferred): cleanup's "kept" message says "holds CMD Studio's part again" also for unreadable/unparseable text (safe side); cleanup::settings_still_ours (incomplete-rollback records) still counts Terminal's plain commandline as ours for a create op under Target::All (safe direction; could use wt_edit::holds_ours); two functions named holds_ours (wt_edit, plan/autorun).
@@ -66,6 +73,10 @@ Every decision the controller made on the founder's behalf while executing `2026
 - Final: minor (deferred): protocol Run 2 step 16's $skip drops WT LocalState entry lines; the hash line still compares the file.
 - Final: minor (deferred): after a failed save during a start problem, Settings' error and the start notice are both role="alert" with the same reason, so a screen reader reads it twice.
 - Final: minor (deferred): protocol Run 2 step 6's conditional fallback uses Get-GuestFocus/Invoke-GuestButton before the first Terminal start on a never-opened snapshot (explicit conhost.exe, low risk); Run 3 step 4's ShiftTab count may follow a focus moved by step 3's Win+R read; the probes say "occurs N time(s)" but count lines; 16a's third reading is a count where the finding rule wants the text; 16a should record which Terminal launch it was.
+- Final: minor (deferred): F3 — a cmd window that Windows hands to Terminal (Win+R cmd) shows the * fallback in the welcome box instead of ✻, because the banner keys on WT_SESSION (generate/lua.rs:141-143, 219).
+- Final: minor (deferred → 3b-1 Task 10, which edits styles.css): in the stacked editor the Tab order (form, then the preview's sample fields) differs from the visual order (preview on top) — WCAG 2.4.3 still met; option (c) display:contents on .preview-column with order on the heading and preview only.
+- Final: minor (deferred → 3b-1 Task 10): overflow-wrap:anywhere is inherited by buttons inside cards, notices and lists and can break a squeezed label mid-word at 150% — add button { overflow-wrap: normal } after a look.
+- Final: minor (deferred): pre { white-space: pre-wrap } duplicates two older rules; styles.test asserts one inequality twice; protocol's msedgewebview2 wait cannot tell the app's WebView2 by name (a helper filtering --webview-exe-name=cmdstudio.exe would); Run 4's block hardcodes $u = 'tester'.
 
 ## Carries to later plans (2)
 
