@@ -425,7 +425,10 @@ legend {
    only what is looked at is lifted: the column's own box goes (`display: contents`, which also
    ends its sticking), and its top group (the heading, the preview and its error notice,
    `.preview-top`) takes `order: -1`. The sample fields (`.preview-sample`) are not lifted, so
-   they come after the form on the screen as they do for Tab. */
+   they come after the form on the screen as they do for Tab. The only focus stops left out of
+   order are inside that top group, which is the preview that is looked at: the error notice's
+   "Show details" toggle, and a scroller that a browser makes focusable; they are reached by Tab
+   after the form though they are seen above it. */
 .editor-box {
   container-name: editor;
   container-type: inline-size;

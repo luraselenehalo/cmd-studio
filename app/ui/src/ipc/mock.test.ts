@@ -516,6 +516,25 @@ describe("the mock IPC", () => {
     expect(status.paused).toMatchObject({ level: "computerNotYet", reason: "clinkCrash", count: 3 });
   });
 
+  it("says a pause whose Revert everything committed with a step that failed: the theme is out, the record is there, and it is not done", async () => {
+    const terracotta = PRESETS[0]!;
+    const request = { themeId: terracotta.id, target: "all" as const, setWtDefaultProfile: true, replaceOtherClink: false };
+    const ipc = createMockIpc({ failPause: "partial" });
+    const planned = await ipc.planApply(request);
+    if (planned.kind !== "ready") throw new Error("not ready");
+    await ipc.apply(request, planned.plan.digest, () => {});
+    const out = await ipc.themePause("user");
+    // The backend's paused_now is "the revert ended well and the record was saved".
+    expect(out).toMatchObject({ pausedNow: false, refused: null, notSaved: null });
+    expect(out.revert).toMatchObject({ ok: false, status: "committed", error: null, unrestored: [] });
+    const failed = out.revert?.steps.filter((s) => !s.ok) ?? [];
+    expect(failed).toHaveLength(1);
+    expect(failed[0]).toMatchObject({ code: "E_FONT_INSTALL", error: { code: "E_FONT_INSTALL" } });
+    // The theme is out, so the pause is one of this computer in effect, and not "not yet".
+    expect(ipc.state.applied).toBeNull();
+    expect((await ipc.recoveryStatus()).paused).toMatchObject({ by: "app", level: "computer", reason: "user", resume: { themeId: terracotta.id } });
+  });
+
   it("lifts a pause in cmd when an undo or a restore leaves no theme, and keeps the app's, as the backend does", async () => {
     const [first, second] = PRESETS;
     const apply = async (ipc: ReturnType<typeof createMockIpc>, themeId: string) => {

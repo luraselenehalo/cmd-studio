@@ -884,6 +884,17 @@ describe("the theme's pause", () => {
   const appError = (code: string): AppError => ({ code, messageTh: `(${code})`, messageEn: `(${code})`, details: `why ${code}` });
   const committed: RevertOutcome = { ok: true, steps: [], notes: [], status: "committed", error: null, unrestored: [] };
   const rolledBack: RevertOutcome = { ok: false, steps: [], notes: [], status: "rolledBack", error: appError("E_AUTORUN_WRITE"), unrestored: [] };
+  /** Revert everything committed (the theme is out) with a step that failed. */
+  const partialRevert: RevertOutcome = {
+    ok: false,
+    steps: [
+      { what: "Fonts", ok: false, detail: "a font could not be uninstalled", code: "E_FONT_INSTALL", fixEn: null, fixTh: null, error: appError("E_FONT_INSTALL") },
+    ],
+    notes: [],
+    status: "committed",
+    error: null,
+    unrestored: [],
+  };
 
   /** The words of the pause that did not go through (ruling R3), and the banner's (ruling R2). */
   const NOT_YET_DIALOG =
@@ -1220,6 +1231,123 @@ describe("the theme's pause", () => {
     // The mock keeps Terracotta applied (it was given the check, not run it): once, never in a loop.
     expect(ipc.state.calls.filter((c) => c === "themesList")).toHaveLength(2);
     expect(screen.queryByText("When CMD Studio started, it tried to pause the theme on this computer:")).toBeNull();
+  });
+
+  it("says a pause whose Revert everything rolled back as in cmd only for now, with why", async () => {
+    const { ipc, user } = await home({ failPause: "rolledBack" }, (m) => applyIn(m, "Terracotta"));
+    await user.click(await screen.findByRole("button", { name: "Pause the theme" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Pause the theme" }));
+    expect(await within(dialog).findByText(NOT_YET_DIALOG)).toBeTruthy();
+    // The failed step and the revert's own error both say why.
+    expect(within(dialog).getAllByText("(E_AUTORUN_WRITE)").length).toBeGreaterThan(0);
+    expect(ipc.state.applied).not.toBeNull();
+    await user.click(within(dialog).getByRole("button", { name: "Close" }));
+    expect(within(await banner()).getByText(NOT_YET_BANNER)).toBeTruthy();
+  });
+
+  it("says a pause that took the theme out but not every change as paused, with the step to look at, and the banner says this computer", async () => {
+    const { ipc, user } = await home({ failPause: "partial" }, (m) => applyIn(m, "Terracotta"));
+    await user.click(await screen.findByRole("button", { name: "Pause the theme" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Pause the theme" }));
+    expect(await within(dialog).findByText("The theme is paused, but not everything could be taken out: see below.")).toBeTruthy();
+    expect(within(dialog).getByText("(E_FONT_INSTALL)")).toBeTruthy();
+    // The theme is out, so nothing is "tried again at the next start".
+    expect(within(dialog).queryByText(NOT_YET_DIALOG)).toBeNull();
+    expect(ipc.state.applied).toBeNull();
+    await user.click(within(dialog).getByRole("button", { name: "Close" }));
+    const card = await banner();
+    expect(within(card).getByText("You paused the theme.")).toBeTruthy();
+    expect(within(card).getByText("CMD Studio took its changes out of this computer. Turning it back on applies Terracotta again.")).toBeTruthy();
+  });
+
+  it("shows at once a start pause that took the theme out but not every change", async () => {
+    const paused: PauseInfo = { by: "app", level: "computer", reason: "clinkCrash", atMs: PAUSED_AT, count: 3, resume: resumeTerracotta() };
+    const { ipc } = await home({
+      paused,
+      crashCheck: { kind: "read", count: 3, pausedNow: false, pause: { pausedNow: false, revert: partialRevert, refused: null, notSaved: null } },
+    });
+    const card = await banner();
+    expect(within(card).getByText("cmd crashed in its add-on 3 times, so CMD Studio paused the theme.")).toBeTruthy();
+    const tried = (await screen.findByText("When CMD Studio started, it tried to pause the theme on this computer:")).closest(".card") as HTMLElement;
+    expect(within(tried).getByText("The theme is paused, but not everything could be taken out: see below.")).toBeTruthy();
+    expect(within(tried).getByText("(E_FONT_INSTALL)")).toBeTruthy();
+    await settle();
+    expect(ipc.state.calls.filter((c) => c === "themesList")).toHaveLength(1);
+  });
+
+  it("drops the start's card once the user turns the theme back on, and does not bring it back for a later pause that is not yet", async () => {
+    const notYet: PauseInfo = { by: "app", level: "computerNotYet", reason: "clinkCrash", atMs: PAUSED_AT, count: 3, resume: resumeTerracotta() };
+    const tried = "When CMD Studio started, it tried to pause the theme on this computer:";
+    const { user } = await home(
+      {
+        failPause: "refused",
+        crashCheck: { kind: "read", count: 3, pausedNow: false, pause: { pausedNow: false, revert: null, refused: appError("E_BUSY"), notSaved: null } },
+      },
+      pausedWith(notYet),
+    );
+    const card = await banner();
+    expect(await screen.findByText(tried)).toBeTruthy();
+    await user.click(within(card).getByRole("button", { name: "Turn the theme back on" }));
+    expect(screen.queryByText(tried)).toBeNull();
+    const plan = await screen.findByRole("dialog");
+    await user.click(await within(plan).findByRole("button", { name: "Apply" }));
+    expect(await within(plan).findByText(/Theme "Terracotta" applied/)).toBeTruthy();
+    await user.click(within(plan).getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(screen.queryByRole("heading", { name: "The theme is paused" })).toBeNull());
+    // The user pauses, and it is not yet again: the banner says it, the start's card stays gone.
+    await user.click(await screen.findByRole("button", { name: "Pause the theme" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Pause the theme" }));
+    expect(await within(dialog).findByText(NOT_YET_DIALOG)).toBeTruthy();
+    await user.click(within(dialog).getByRole("button", { name: "Close" }));
+    expect(within(await banner()).getByText(NOT_YET_BANNER)).toBeTruthy();
+    expect(screen.queryByText(tried)).toBeNull();
+  });
+
+  it("puts focus on Home's heading when the lift at once takes the banner and its button away", async () => {
+    const { user } = await home({}, pausedInCmd);
+    await user.click(within(await banner()).getByRole("button", { name: "Turn the theme back on" }));
+    await waitFor(() => expect(screen.queryByRole("heading", { name: "The theme is paused" })).toBeNull());
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Home" })));
+  });
+
+  it("has no Close in the pause dialog while it runs, and Escape does not close it (R7)", async () => {
+    const { ipc, user } = await home({}, (m) => applyIn(m, "Terracotta"));
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const themePause = ipc.themePause.bind(ipc);
+    vi.spyOn(ipc, "themePause").mockImplementation(async (reason) => {
+      await gate;
+      return themePause(reason);
+    });
+    await user.click(await screen.findByRole("button", { name: "Pause the theme" }));
+    const dialog = await screen.findByRole("dialog");
+    // Asked first: until the user says yes, the dialog closes.
+    expect(within(dialog).getByRole("button", { name: "Close" })).toBeTruthy();
+    await user.click(within(dialog).getByRole("button", { name: "Pause the theme" }));
+    expect(await within(dialog).findByText("Pausing the theme…")).toBeTruthy();
+    expect(within(dialog).queryByRole("button", { name: "Close" })).toBeNull();
+    await user.keyboard("{Escape}");
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    release();
+    expect(await within(dialog).findByText("The theme is paused: cmd windows open without it.")).toBeTruthy();
+    expect(within(dialog).getByRole("button", { name: "Close" })).toBeTruthy();
+  });
+
+  it("does not leave the line that the theme is back on beside a pause started from the health check", async () => {
+    const { user } = await home({ cmdCrashes: 2 }, pausedInCmd);
+    await open(user, "Help");
+    await screen.findByText(/D12/);
+    await user.click(await screen.findByRole("button", { name: "Turn the theme back on" }));
+    expect(await screen.findByText("The theme is back on. Open a new cmd window to see it.")).toBeTruthy();
+    // Checked again: D12 now offers the pause.
+    await user.click(await screen.findByRole("button", { name: "Pause the theme" }));
+    expect(await screen.findByRole("dialog")).toBeTruthy();
+    expect(screen.queryByText("The theme is back on. Open a new cmd window to see it.")).toBeNull();
   });
 
   it("asks for the pause once, never on a timer, while the start's crash check has not finished (R8)", async () => {

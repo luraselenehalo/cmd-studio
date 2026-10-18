@@ -154,6 +154,10 @@ describe("pages that fit and scroll at Windows' Text size 150 % (F2)", () => {
     expect(body).toMatch(/\.editor \.preview-top\s*\{\s*order: -1;\s*\}/);
     expect(body.match(/\border:/g), "one lifted group, nothing else is reordered").toHaveLength(1);
     expect(body).not.toMatch(/position:/);
+    // Outside the rule the column keeps its box and its sticking: `display: contents` there would
+    // take the preview's column out of the wide layout, where the two columns sit side by side.
+    expect(declared(".editor .preview-column", "position"), "the lookup sees the column's own rule").toBe("sticky");
+    expect(declared(".editor .preview-column", "display")).toBeUndefined();
     // What that leaves of the windows of the spec at Text size 100 % (16 px a rem): the box is the
     // window less the sidebar, the page's side padding and a 17 px scrollbar. The 1100 px default
     // keeps two columns and a form of at least 20rem; the 900 px minimum stacks.

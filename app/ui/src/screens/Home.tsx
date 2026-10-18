@@ -62,7 +62,7 @@ export function Home() {
   const ipc = useIpc();
   const { t, language } = useI18n();
   const { go } = useNav();
-  const { settings, version, bump, setLastApply } = useAppState();
+  const { settings, version, bump, setLastApply, recoveryActed } = useAppState();
   const library = useRead(readLibrary, version);
   const checks = useRead(readChecks, version);
   const points = useRead(readPoints, version);
@@ -100,14 +100,20 @@ export function Home() {
     if (startTookThemeOut && lib.applied) bump();
   }, [lib, recovery.value, startTookThemeOut, bump]);
 
-  // A pause the start tried that did not go through (ruling R4): the pause of this computer is not
-  // yet in effect; or it could not be noted and either did not take the theme out or the theme is
-  // out now (a theme still read as applied is the read above, about to be done again).
+  // A pause the start tried that did not go through (ruling R4, with its correction):
+  // - the pause of this computer is not yet in effect;
+  // - it took the theme out with a step that failed, and the record is saved (`computer`);
+  // - or it could not be noted, and either did not take the theme out or the theme is out now (a
+  //   theme still read as applied is the read above, about to be done again).
+  // It is the start's own record, so it goes once the user has paused or turned the theme back on:
+  // a later pause that is not yet is said by the banner, not by this card.
   const themeIsOut = lib ? lib.applied === null : library.error !== null;
   const startPauseShown =
     startPause !== null &&
     !startPause.pausedNow &&
+    !recoveryActed &&
     (paused?.level === "computerNotYet" ||
+      (paused?.level === "computer" && startTookThemeOut && startPause.revert?.ok === false && startPause.notSaved === null) ||
       (paused === null && startPause.notSaved !== null && (!startTookThemeOut || themeIsOut)))
       ? startPause
       : null;

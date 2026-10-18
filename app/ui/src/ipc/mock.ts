@@ -327,10 +327,13 @@ export interface MockOptions {
   /**
    * "Pause the theme" does not go through, as the backend says it, and so does the start check's
    * own pause for 3 crashes: `refused` (Revert everything is refused with `E_BUSY`, so the theme
-   * stays applied and the pause is "not yet"), `rolledBack` (it ran and rolled back, the same) or
-   * `notSaved` (the record could not be written, `E_DATA_WRITE`, though the theme is out).
+   * stays applied and the pause is "not yet"), `rolledBack` (it ran and rolled back, the same),
+   * `notSaved` (the record could not be written, `E_DATA_WRITE`, though the theme is out) or
+   * `partial` (Revert everything committed with one step failed, `E_FONT_INSTALL`: the theme is
+   * out and the record is saved at level `computer`, but `pausedNow` is false, as the backend's
+   * `revert.ok && saved` has it).
    */
-  failPause?: "refused" | "rolledBack" | "notSaved";
+  failPause?: "refused" | "rolledBack" | "notSaved" | "partial";
 }
 
 /** The mock's own state, open to the tests. */
@@ -652,6 +655,20 @@ export function createMockIpc(options: MockOptions = {}): Ipc & { state: MockSta
       unrestored: [],
     };
   };
+  /** A Revert everything that committed with one step failed (`failPause: "partial"`): the theme
+   * is out, the fonts step is not. */
+  const revertPartial = (): RevertOutcome => {
+    const failed = error("E_FONT_INSTALL", "the mock was told to fail").toAppError();
+    const done = revertOutcome();
+    return {
+      ...done,
+      ok: false,
+      steps: [
+        done.steps[0]!,
+        { what: "Fonts", ok: false, detail: "a font could not be uninstalled", code: failed.code, fixEn: null, fixTh: null, error: failed },
+      ],
+    };
+  };
   /**
    * As the backend's pause_machine: the record first, with the theme to apply again (the one
    * applied now, else the one an earlier pause of this computer noted), then Revert everything.
@@ -670,6 +687,11 @@ export function createMockIpc(options: MockOptions = {}): Ipc & { state: MockSta
     if (fail === "notSaved") {
       revertState();
       return { pausedNow: false, revert: revertOutcome(), refused: null, notSaved: error("E_DATA_WRITE", "the mock was told to fail").toAppError() };
+    }
+    if (fail === "partial") {
+      revertState();
+      state.paused = record("computer");
+      return { pausedNow: false, revert: revertPartial(), refused: null, notSaved: null };
     }
     if (fail) {
       state.paused = record(state.applied ? "computerNotYet" : "computer");

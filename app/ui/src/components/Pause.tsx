@@ -92,6 +92,12 @@ export function PausedBanner({ paused, onResume }: { paused: PauseInfo; onResume
   );
 }
 
+/** Focus is nowhere: on the page's body, or on an element that has left the page. */
+function focusLost(): boolean {
+  const active = document.activeElement;
+  return active === null || active === document.body || !active.isConnected;
+}
+
 /** Once a dialog is gone with the button that opened it (the theme it paused is out), focus goes
  * to `fallback`, the page's heading, rather than to the page's body. */
 function useFocusAfterClose(open: boolean, fallback: RefObject<HTMLElement | null>) {
@@ -103,8 +109,7 @@ function useFocusAfterClose(open: boolean, fallback: RefObject<HTMLElement | nul
     }
     if (!wasOpen.current) return;
     wasOpen.current = false;
-    const active = document.activeElement;
-    if (active === null || active === document.body || !active.isConnected) fallback.current?.focus();
+    if (focusLost()) fallback.current?.focus();
   }, [open, fallback]);
 }
 
@@ -128,7 +133,7 @@ export function usePause(fallback: RefObject<HTMLElement | null>): { ask: (reaso
 function PauseDialog({ reason, onClose }: { reason: PauseAsk; onClose: () => void }) {
   const ipc = useIpc();
   const { t } = useI18n();
-  const { bump, setLastApply } = useAppState();
+  const { bump, setLastApply, markRecoveryActed } = useAppState();
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ kind: "done"; outcome: PauseOutcome } | { kind: "error"; error: unknown } | null>(null);
   const running = useRef(false);
@@ -142,6 +147,8 @@ function PauseDialog({ reason, onClose }: { reason: PauseAsk; onClose: () => voi
     if (running.current) return;
     running.current = true;
     setBusy(true);
+    // From here the pause the start tried is out of date (Home stops showing it).
+    markRecoveryActed();
     try {
       const outcome = await ipc.themePause(reason);
       setResult({ kind: "done", outcome });
@@ -180,20 +187,19 @@ function PauseDialog({ reason, onClose }: { reason: PauseAsk; onClose: () => voi
 }
 
 /**
- * The pause's headline, by whether it went through (ruling R3). Went through: every change taken
- * out, or not every one. Did not: the record could not be saved (the changes are out when Revert
- * everything committed, else nothing was changed and cmd still opens with the theme), or the record
- * is there and the changes are not out yet (refused, rolled back, or a rollback not complete): cmd
+ * The pause's headline (ruling R3, corrected). The backend's `pausedNow` is "Revert everything
+ * ended well and the record was saved", so it alone is "paused". Otherwise: the record could not
+ * be saved (the changes are out when Revert everything committed, else nothing was changed and cmd
+ * still opens with the theme); or Revert everything committed with a step that failed (the theme
+ * is out, the record is saved, and the pause is one of this computer; a step needs a look); or the
+ * changes are not out (refused, rolled back, or a rollback not complete): the record is there, cmd
  * opens without the theme, and the app tries again at its next start.
  */
 function pauseHeadline(outcome: PauseOutcome): { tone: "ok" | "warn"; key: Key } {
-  if (outcome.pausedNow) {
-    return outcome.revert && !outcome.revert.ok ? { tone: "warn", key: "pause.notOk" } : { tone: "ok", key: "pause.done" };
-  }
-  if (outcome.notSaved) {
-    return { tone: "warn", key: outcome.revert?.status === "committed" ? "pause.notSaved" : "pause.failed" };
-  }
-  return { tone: "warn", key: "pause.notYet" };
+  if (outcome.pausedNow) return { tone: "ok", key: "pause.done" };
+  const out = outcome.revert?.status === "committed";
+  if (outcome.notSaved) return { tone: "warn", key: out ? "pause.notSaved" : "pause.failed" };
+  return { tone: "warn", key: out ? "pause.notOk" : "pause.notYet" };
 }
 
 /**
@@ -225,20 +231,30 @@ export function PauseResult({ outcome, live = false }: { outcome: PauseOutcome; 
  * (said in the status line of `view`), gives a request for a pause of this computer (applied
  * through the plan in a dialog of `view`), or sends the user to the Themes page when the paused
  * theme is gone. `reset()` takes the status line and an error away, for when something else is
- * done on the page (a new pause), so "the theme is back on" is never left beside it.
+ * done on the page (a new pause), so "the theme is back on" is never left beside it. After a lift
+ * at once, the button that was pressed goes with its banner on the next read: focus then goes to
+ * `fallback`, as it does when a dialog goes with the button that opened it.
  */
 export function useResume(fallback: RefObject<HTMLElement | null>): { resume: () => Promise<void>; reset: () => void; view: ReactNode } {
   const ipc = useIpc();
   const { t } = useI18n();
   const { go } = useNav();
-  const { bump, setLastApply } = useAppState();
+  const { bump, setLastApply, markRecoveryActed } = useAppState();
   const [applying, setApplying] = useState<{ key: number; request: ApplyRequest } | null>(null);
   const [applyBusy, setApplyBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [resumed, setResumed] = useState(false);
   const keys = useRef(0);
   const running = useRef(false);
+  /** The element that had focus when the pause was lifted at once, until it has left the page. */
+  const liftedFrom = useRef<Element | null>(null);
   useFocusAfterClose(applying !== null, fallback);
+  useEffect(() => {
+    const from = liftedFrom.current;
+    if (from === null || from.isConnected) return;
+    liftedFrom.current = null;
+    if (focusLost()) fallback.current?.focus();
+  });
 
   const reset = () => {
     setError(null);
@@ -250,9 +266,13 @@ export function useResume(fallback: RefObject<HTMLElement | null>): { resume: ()
     if (running.current) return;
     running.current = true;
     reset();
+    // From here the pause the start tried is out of date (Home stops showing it).
+    markRecoveryActed();
     try {
       const outcome = await ipc.themeResume();
       if (outcome.kind === "resumed") {
+        const active = document.activeElement;
+        liftedFrom.current = active === document.body ? null : active;
         setResumed(true);
         bump();
       } else if (outcome.kind === "apply") {
