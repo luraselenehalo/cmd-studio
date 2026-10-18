@@ -21,11 +21,10 @@ use std::path::{Path, PathBuf};
 /// A tag older than this many seconds is a window that never reached its first prompt.
 pub const STALE_AFTER_SECS: u64 = 60;
 /// A tag older than this many seconds is forgotten at the next window's start: deleted, and
-/// never counted. A window that lived that long without a prompt was no start that failed: a
-/// `cmd /k <dev server>` profile closed hours later, three of them together when Windows
-/// Terminal closes its tabs; and a failure that old is not one of [`PAUSE_AFTER`] in a row,
-/// which are the same windows, just not hours apart (the controller's ruling of 2026-10-18; the
-/// founder may change the number).
+/// never counted. A failure that old is not one of [`PAUSE_AFTER`] in a row, which are the same
+/// windows, just not hours apart (the controller's ruling of 2026-10-18, the founder's number).
+/// A `cmd /k <a long command>` window writes no tag at all, since Clink loads init.lua only
+/// when cmd first reads a line (the VM check of 2026-10-18, finding F2).
 pub const FORGET_AFTER_SECS: u64 = 600;
 /// How many windows in a row that never reached their prompt pause the theme in cmd; also how
 /// many crashes of cmd in Clink's DLL pause it on this computer (recovery spec §4.3) and make

@@ -48,14 +48,16 @@ pub const PAUSED_STILL: &str = "CMD Studio's theme is paused. Open CMD Studio to
 ///   start that failed.
 /// - A tag older than `FORGET_AFTER` (ten minutes) is forgotten at a window's start, before
 ///   the pause is decided and so before tasklist could run for it: deleted, and never counted.
-///   A window that lived that long without a prompt was no start that failed (a `cmd /k <dev
-///   server>` profile closed hours later, three of them together when Windows Terminal closes
-///   its tabs), and a failure that old is not one of `PAUSE_AFTER` in a row. A tag still being
-///   written (no time in it yet) is left alone, as everywhere.
+///   A failure that old is not one of `PAUSE_AFTER` in a row, and a window that sat that long
+///   without a prompt is no start that failed just now. A tag still being written (no time in it
+///   yet) is left alone, as everywhere. A `cmd /k <a long command>` window writes no tag at all:
+///   Clink loads its scripts only when cmd first reads a line, which such a window never does
+///   while its command runs (the VM check of 2026-10-18, finding F2).
 /// - Before it pauses the theme, and only then, the counter lists the running programs once
-///   (`tasklist /FO CSV /NH`): a stale tag whose pid is a running `cmd.exe` is a window started
-///   as `cmd /k <a long command>` that has not reached its prompt yet, not one that failed. At
-///   the pause decision it is kept: not counted, and not deleted with the others. A window's
+///   (`tasklist /FO CSV /NH`): a stale tag whose pid is a running `cmd.exe` is a window whose
+///   scripts loaded and whose first prompt has not come yet (one still hanging, or a very slow
+///   one), not one that ended. At the pause decision it is kept: not counted, and not deleted
+///   with the others. A window's
 ///   first prompt deletes every tag older than `STALE_AFTER` all the same, the live windows'
 ///   included. Only the first two fields of each row are read, the image name and the pid,
 ///   which tasklist never translates. A tasklist that cannot be run or read counts every stale
