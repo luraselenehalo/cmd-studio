@@ -1155,17 +1155,19 @@ fn d12(sys: System<'_>, ctx: &Ctx, state: &Result<State, StateError>) -> Check {
         .map(|c| format!("{} {} crashed in {}", utc::iso(c.at_ms), c.app, c.module))
         .collect::<Vec<_>>()
         .join("\n");
+    // The count words of the pause rows: "once", else "{n} times" (n is 1 or more here).
+    let (times_th, times_en) = crashed_times(n);
     if n < PAUSE_AFTER {
         return check(
             "D12",
             Status::Warn,
             Some("E_CMD_CRASHED"),
             format!(
-                "cmd แครชในส่วนเสริม {n} ครั้งตั้งแต่ใช้ธีม ถ้ายังเกิดอีก ให้หยุดธีมใน CMD Studio \
+                "cmd แครชในส่วนเสริม{times_th}ตั้งแต่ใช้ธีม ถ้ายังเกิดอีก ให้หยุดธีมใน CMD Studio \
                  เพื่อให้ cmd เปิดได้"
             ),
             format!(
-                "cmd crashed in its add-on {n} time(s) since the theme was applied. If it happens \
+                "cmd crashed in its add-on{times_en} since the theme was applied. If it happens \
                  again, pause the theme in CMD Studio so that cmd opens"
             ),
             details,
@@ -1176,11 +1178,11 @@ fn d12(sys: System<'_>, ctx: &Ctx, state: &Result<State, StateError>) -> Check {
         Status::Fail,
         Some("E_CMD_CRASHED"),
         format!(
-            "cmd แครชในส่วนเสริม {n} ครั้งตั้งแต่ใช้ธีม และธีมยังเปิดอยู่ ให้หยุดธีมใน CMD Studio \
+            "cmd แครชในส่วนเสริม{times_th}ตั้งแต่ใช้ธีม และธีมยังเปิดอยู่ ให้หยุดธีมใน CMD Studio \
              เพื่อให้ cmd เปิดได้"
         ),
         format!(
-            "cmd crashed in its add-on {n} times since the theme was applied, and the theme is \
+            "cmd crashed in its add-on{times_en} since the theme was applied, and the theme is \
              still on. Pause the theme in CMD Studio so that cmd opens"
         ),
         details,
@@ -1334,9 +1336,9 @@ fn paused_words(by: PausedBy, reason: Option<PauseReason>, n: u32) -> (String, S
     }
 }
 
-/// How many times cmd crashed, Thai then English, each with its leading space: nothing for a
-/// count of 0 (the app saves one when the crash reports could not be read, so no number is
-/// true), "once" for 1, else "{n} times".
+/// How many times cmd crashed, Thai then English, each with its leading space, for the pause
+/// rows and the crash rows of D12 alike: nothing for a count of 0 (the app saves one when the
+/// crash reports could not be read, so no number is true), "once" for 1, else "{n} times".
 fn crashed_times(n: u32) -> (String, String) {
     match n {
         0 => (String::new(), String::new()),
@@ -2733,7 +2735,25 @@ mod tests {
         m.event_log.crash(at + 1, "notepad.exe", CLINK_DLL);
         m.event_log.crash(at + 2, "cmd.exe", "ntdll.dll");
         assert_eq!(by_id(&run(&m, &then), "D12").status, Status::Ok);
+        // The count words are the pause rows' (`crashed_times`): "once", else "{n} times", never
+        // "time(s)".
         m.event_log.crash(at + 10, "cmd.exe", CLINK_DLL);
+        let d12 = by_id(&run(&m, &then), "D12");
+        assert_eq!(
+            (d12.status, d12.code),
+            (Status::Warn, Some("E_CMD_CRASHED")),
+            "{d12:?}"
+        );
+        assert!(
+            d12.message_en
+                .contains("cmd crashed in its add-on once since the theme was applied."),
+            "{d12:?}"
+        );
+        assert!(
+            d12.message_th.contains("cmd แครชในส่วนเสริม 1 ครั้งตั้งแต่ใช้ธีม"),
+            "{d12:?}"
+        );
+        assert_eq!(d12.details.lines().count(), 1, "{d12:?}");
         m.event_log.crash(at + 20, "CMD.EXE", "Clink_DLL_x64.dll");
         let d12 = by_id(&run(&m, &then), "D12");
         assert_eq!(
@@ -2741,7 +2761,12 @@ mod tests {
             (Status::Warn, Some("E_CMD_CRASHED")),
             "{d12:?}"
         );
-        assert!(d12.message_en.contains("2 time(s)"), "{d12:?}");
+        assert!(
+            d12.message_en
+                .contains("cmd crashed in its add-on 2 times since the theme was applied."),
+            "{d12:?}"
+        );
+        assert!(!d12.message_en.contains("time(s)"), "{d12:?}");
         assert_eq!(d12.details.lines().count(), 2, "{d12:?}");
         assert!(d12.details.starts_with(&utc::iso(at + 10)), "{d12:?}");
         m.event_log.crash(at + 30, "cmd.exe", CLINK_DLL);
@@ -2751,7 +2776,13 @@ mod tests {
             (Status::Fail, Some("E_CMD_CRASHED")),
             "{d12:?}"
         );
-        assert!(d12.message_en.contains("the theme is still on"), "{d12:?}");
+        assert!(
+            d12.message_en.contains(
+                "cmd crashed in its add-on 3 times since the theme was applied, and the theme \
+                 is still on"
+            ),
+            "{d12:?}"
+        );
     }
 
     #[test]

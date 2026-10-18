@@ -529,16 +529,18 @@ export function createMockIpc(options: MockOptions = {}): Ipc & { state: MockSta
         );
       }
       const fail = crashes >= PAUSE_AFTER;
+      // The count words of the pause rows (the core's `crashed_times`): "once", else "{n} times".
+      const times = crashes === 1 ? { th: " 1 ครั้ง", en: " once" } : { th: ` ${crashes} ครั้ง`, en: ` ${crashes} times` };
       return {
         id: "D12",
         status: fail ? "fail" : "warn",
         code: "E_CMD_CRASHED",
         messageTh: fail
-          ? `cmd แครชในส่วนเสริม ${crashes} ครั้งตั้งแต่ใช้ธีม และธีมยังเปิดอยู่ ให้หยุดธีมใน CMD Studio เพื่อให้ cmd เปิดได้`
-          : `cmd แครชในส่วนเสริม ${crashes} ครั้งตั้งแต่ใช้ธีม ถ้ายังเกิดอีก ให้หยุดธีมใน CMD Studio เพื่อให้ cmd เปิดได้`,
+          ? `cmd แครชในส่วนเสริม${times.th}ตั้งแต่ใช้ธีม และธีมยังเปิดอยู่ ให้หยุดธีมใน CMD Studio เพื่อให้ cmd เปิดได้`
+          : `cmd แครชในส่วนเสริม${times.th}ตั้งแต่ใช้ธีม ถ้ายังเกิดอีก ให้หยุดธีมใน CMD Studio เพื่อให้ cmd เปิดได้`,
         messageEn: fail
-          ? `cmd crashed in its add-on ${crashes} times since the theme was applied, and the theme is still on. Pause the theme in CMD Studio so that cmd opens`
-          : `cmd crashed in its add-on ${crashes} time(s) since the theme was applied. If it happens again, pause the theme in CMD Studio so that cmd opens`,
+          ? `cmd crashed in its add-on${times.en} since the theme was applied, and the theme is still on. Pause the theme in CMD Studio so that cmd opens`
+          : `cmd crashed in its add-on${times.en} since the theme was applied. If it happens again, pause the theme in CMD Studio so that cmd opens`,
         details: "",
         detailsTh: null,
         fix: "pause",

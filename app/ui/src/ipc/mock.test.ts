@@ -314,8 +314,25 @@ describe("the mock IPC", () => {
     };
     expect((await d12(createMockIpc())).status).toBe("skipped");
     expect(await d12(await applied({}))).toMatchObject({ status: "ok", code: null, fix: null });
-    expect(await d12(await applied({ cmdCrashes: 2 }))).toMatchObject({ status: "warn", code: "E_CMD_CRASHED", fix: "pause" });
-    expect(await d12(await applied({ cmdCrashes: 3 }))).toMatchObject({ status: "fail", code: "E_CMD_CRASHED", fix: "pause" });
+    // The count words are the pause rows' (the core's `crashed_times`): "once", else "{n} times",
+    // never "time(s)".
+    const one = await d12(await applied({ cmdCrashes: 1 }));
+    expect(one).toMatchObject({ status: "warn", code: "E_CMD_CRASHED", fix: "pause" });
+    expect(one.messageEn).toBe(
+      "cmd crashed in its add-on once since the theme was applied. If it happens again, pause the theme in CMD Studio so that cmd opens",
+    );
+    expect(one.messageTh).toBe("cmd แครชในส่วนเสริม 1 ครั้งตั้งแต่ใช้ธีม ถ้ายังเกิดอีก ให้หยุดธีมใน CMD Studio เพื่อให้ cmd เปิดได้");
+    const two = await d12(await applied({ cmdCrashes: 2 }));
+    expect(two).toMatchObject({ status: "warn", code: "E_CMD_CRASHED", fix: "pause" });
+    expect(two.messageEn).toBe(
+      "cmd crashed in its add-on 2 times since the theme was applied. If it happens again, pause the theme in CMD Studio so that cmd opens",
+    );
+    const three = await d12(await applied({ cmdCrashes: 3 }));
+    expect(three).toMatchObject({ status: "fail", code: "E_CMD_CRASHED", fix: "pause" });
+    expect(three.messageEn).toBe(
+      "cmd crashed in its add-on 3 times since the theme was applied, and the theme is still on. Pause the theme in CMD Studio so that cmd opens",
+    );
+    for (const check of [one, two, three]) expect(check.messageEn).not.toContain("time(s)");
     // Crash reports that can't be read are "not checked", never "no crash".
     expect(await d12(await applied({ crashCheck: { kind: "unreadable", why: "access is denied", pause: null } }))).toMatchObject({
       status: "skipped",
