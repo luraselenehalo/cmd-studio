@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The main window may call exactly the IPC commands of spec §5.7 (with preview_render, open_external and advanced_read) and listen for the apply-progress event. Nothing else: no plugin command, no shell, no file system (spec §5.10).",
+  "description": "The main window may call exactly the IPC commands of spec §5.7 (with preview_render, open_external, advanced_read, recovery_status, theme_pause and theme_resume) and listen for the apply-progress event. Nothing else: no plugin command, no shell, no file system (spec §5.10).",
   "windows": ["main"],
   "permissions": [
     "core:event:allow-listen",
