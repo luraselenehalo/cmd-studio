@@ -382,7 +382,7 @@ mod tests {
             "the first caller gave up; its reader holds the slot"
         );
         let started = Instant::now();
-        let second = within_time(Duration::from_secs(5), &BUSY, |deadline| Ok(deadline));
+        let second = within_time(Duration::from_secs(5), &BUSY, Ok);
         let deadline = second.unwrap();
         let waited = started.elapsed();
         assert!(
