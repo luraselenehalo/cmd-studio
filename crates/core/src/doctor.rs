@@ -1189,8 +1189,8 @@ fn d12(sys: System<'_>, ctx: &Ctx, state: &Result<State, StateError>) -> Check {
 /// D12 while the theme is paused: who paused it, why and since when (recovery spec §4.5), and how
 /// far it reaches now ([`Paused::level`]). The app's record is written before Revert everything
 /// runs, so a pause of this computer is said as a pause, one that took CMD Studio's changes out,
-/// only while no theme is applied: with one applied since the record it is paused in cmd only
-/// and not yet on this computer, and with a state.json that can't be read it may be. Then the
+/// only while no theme is applied: with one applied no later than the record it is paused in cmd
+/// only and not yet on this computer, and with a state.json that can't be read it may be. Then the
 /// details also come in Thai (`details_th`). An app record older than the theme applied now is
 /// one an apply could not lift: a pause in cmd only, which turning the theme back on lifts. A
 /// record that can't be read is said as such: it may be a damaged or newer one of the app's, so

@@ -56,7 +56,7 @@ pub struct ResumeInfo {
 pub struct PauseInfo {
     pub by: PausedBy,
     /// How far the pause reaches now: a pause of this computer is in effect (`computer`) only
-    /// while no theme is applied; with one applied no earlier than the record it has not gone
+    /// while no theme is applied; with one applied no later than the record it has not gone
     /// through (`computerNotYet`); with one applied after the record it is a pause in cmd only
     /// (`cmd`), which an apply could not lift; and with a state.json that can't be read it is
     /// not known (`computerUnknown`).
