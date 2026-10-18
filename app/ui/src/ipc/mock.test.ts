@@ -515,4 +515,74 @@ describe("the mock IPC", () => {
     expect(status.crashes).toMatchObject({ kind: "read", count: 3, pausedNow: false, pause: { pausedNow: false, refused: { code: "E_BUSY" } } });
     expect(status.paused).toMatchObject({ level: "computerNotYet", reason: "clinkCrash", count: 3 });
   });
+
+  it("lifts a pause in cmd when an undo or a restore leaves no theme, and keeps the app's, as the backend does", async () => {
+    const [first, second] = PRESETS;
+    const apply = async (ipc: ReturnType<typeof createMockIpc>, themeId: string) => {
+      const request = { themeId, target: "all" as const, setWtDefaultProfile: true, replaceOtherClink: false };
+      const planned = await ipc.planApply(request);
+      if (planned.kind !== "ready") throw new Error("not ready");
+      await ipc.apply(request, planned.plan.digest, () => {});
+    };
+    const inCmd = { by: "clink", level: "cmd", reason: "cmdStarts", atMs: 1, count: 3, resume: null } as const;
+    const resume = { themeId: first!.id, target: "all" as const, themeName: first!.name };
+    // A restore that undoes the only apply leaves no theme: init.lua's pause is lifted.
+    const restoring = createMockIpc();
+    await apply(restoring, first!.id);
+    restoring.state.paused = { ...inCmd };
+    const point = (await restoring.snapshotsList()).points[0]!;
+    expect((await restoring.snapshotRestore(point.id)).status).toBe("done");
+    expect(restoring.state.applied).toBeNull();
+    expect(restoring.state.paused).toBeNull();
+    // An undo that leaves a theme lifts nothing and keeps the level as it was.
+    const undoing = createMockIpc();
+    await apply(undoing, first!.id);
+    await apply(undoing, second!.id);
+    undoing.state.paused = { ...inCmd };
+    expect((await undoing.undoLast()).status).toBe("committed");
+    expect(undoing.state.applied?.theme.id).toBe(first!.id);
+    expect(undoing.state.paused).toEqual(inCmd);
+    undoing.state.paused = { by: "app", level: "computerNotYet", reason: "user", atMs: 1, count: 0, resume };
+    await undoing.undoLast();
+    expect(undoing.state.applied).toBeNull();
+    // An undo that leaves no theme: the app's pause is one in effect now, and stays.
+    expect((await undoing.recoveryStatus()).paused).toMatchObject({ by: "app", level: "computer", reason: "user" });
+    // The same for a pause of the app's that was older than the theme (level cmd), and "not known"
+    // stays not known.
+    const older = createMockIpc();
+    await apply(older, first!.id);
+    older.state.paused = { by: "app", level: "cmd", reason: "user", atMs: 1, count: 0, resume };
+    await older.undoLast();
+    expect(older.state.paused?.level).toBe("computer");
+    const unknown = createMockIpc();
+    await apply(unknown, first!.id);
+    unknown.state.paused = { by: "app", level: "computerUnknown", reason: "user", atMs: 1, count: 0, resume };
+    await unknown.undoLast();
+    expect(unknown.state.paused?.level).toBe("computerUnknown");
+    // Pausing the theme runs Revert everything, which never lifts init.lua's pause (the core's
+    // revert leaves paused.json): a record that could not be saved leaves it as it was.
+    const notSaved = createMockIpc({ failPause: "notSaved" });
+    await apply(notSaved, first!.id);
+    notSaved.state.paused = { ...inCmd };
+    await notSaved.themePause("user");
+    expect(notSaved.state.applied).toBeNull();
+    expect(notSaved.state.paused).toEqual(inCmd);
+  });
+
+  it("answers a status whose crash check has not finished as crashes: null, whatever happens", async () => {
+    const paused = { by: "clink", level: "cmd", reason: "cmdStarts", atMs: 1, count: 3, resume: null } as const;
+    const ipc = createMockIpc({ crashCheck: null, paused });
+    expect(await ipc.recoveryStatus()).toEqual({ paused, crashes: null });
+    expect(await ipc.recoveryStatus()).toEqual({ paused, crashes: null });
+    // Not even a theme applied and three crashes make a check: it has not finished.
+    const crashing = createMockIpc({ crashCheck: null, cmdCrashes: 3 });
+    const request = { themeId: PRESETS[0]!.id, target: "all" as const, setWtDefaultProfile: true, replaceOtherClink: false };
+    const planned = await crashing.planApply(request);
+    if (planned.kind !== "ready") throw new Error("not ready");
+    await crashing.apply(request, planned.plan.digest, () => {});
+    expect(await crashing.recoveryStatus()).toEqual({ paused: null, crashes: null });
+    expect(crashing.state.applied).not.toBeNull();
+    // A crashCheck that is not given keeps the check that runs once.
+    expect((await createMockIpc().recoveryStatus()).crashes).toEqual({ kind: "noTheme" });
+  });
 });

@@ -318,9 +318,12 @@ export interface MockOptions {
    * The start's crash check answers this at the first `recovery_status`, as given, and nothing is
    * worked out or paused (give `paused` to match): for the shapes `cmdCrashes` does not make, such
    * as crash reports that can't be read (`unreadable`, which D12 then says as not checked), a pause
-   * the check tried that did not go through, or an earlier one it tried again.
+   * the check tried that did not go through, or an earlier one it tried again. `null` is the
+   * answer while the check has not finished or did not run: `recovery_status` then says
+   * `crashes: null` every time, whatever else the mock is given. Not given keeps the check that
+   * runs once.
    */
-  crashCheck?: CrashCheck;
+  crashCheck?: CrashCheck | null;
   /**
    * "Pause the theme" does not go through, as the backend says it, and so does the start check's
    * own pause for 3 crashes: `refused` (Revert everything is refused with `E_BUSY`, so the theme
@@ -608,9 +611,23 @@ export function createMockIpc(options: MockOptions = {}): Ipc & { state: MockSta
     for (const p of state.points) if (p.kind === "apply" && p.undoneBy === null) { p.undoneBy = id; p.restorable = false; }
     state.points.unshift({ id, kind: "revertAll", createdMs: Number(id.split("-")[0]), theme: null, target: null, summary: ["Revert everything"], undoes: null, undoneBy: null, restorable: false });
     state.applied = null;
-    // As the backend's level (`Paused::level`): with the theme out, the app's pause is one of this
-    // computer in effect, however far it reached before (not known stays not known).
-    if (state.paused?.by === "app" && state.paused.level !== "computerUnknown") state.paused.level = "computer";
+    // The core's Revert everything never touches paused.json, so it lifts no pause in cmd.
+    afterThemeLeft(false);
+  };
+  /**
+   * What a pause becomes once no theme is applied, as the backend has it. The app's pause is one of
+   * this computer in effect (`Paused::level`), however far it reached before; "not known" stays
+   * not known. A pause in cmd (init.lua's) has nothing left to pause, and `liftInCmd` lifts it, as
+   * Undo everything, and an undo or a restore that leaves no theme, do (`lift_pause_in_cmd`). The
+   * pause of the app's own Revert everything (`pauseHere`) does not.
+   */
+  const afterThemeLeft = (liftInCmd: boolean) => {
+    if (state.applied !== null || !state.paused) return;
+    if (state.paused.by === "clink") {
+      if (liftInCmd) state.paused = null;
+    } else if (state.paused.level !== "computerUnknown") {
+      state.paused.level = "computer";
+    }
   };
   const revertOutcome = (): RevertOutcome => ({
     ok: true,
@@ -666,13 +683,14 @@ export function createMockIpc(options: MockOptions = {}): Ipc & { state: MockSta
   };
   /**
    * The start's crash check, run once at the first `recoveryStatus`, as the backend runs it once per
-   * start (`CrashSlot`): `crashCheck` as given, else with no theme applied `noTheme`, else
-   * `cmdCrashes` read, and the pause of this computer for 3 or more (the core's PAUSE_AFTER). An
-   * earlier pause it tried again is not worked out: give `crashCheck`.
+   * start (`CrashSlot`): `crashCheck` as given (`null`: never finished, so `crashes: null`), else
+   * with no theme applied `noTheme`, else `cmdCrashes` read, and the pause of this computer for 3
+   * or more (the core's PAUSE_AFTER). An earlier pause it tried again is not worked out: give
+   * `crashCheck`.
    */
   let startCheck: CrashCheck | null = null;
   const recovery = (): RecoveryStatus => {
-    if (startCheck === null) {
+    if (startCheck === null && options.crashCheck !== null) {
       if (options.crashCheck) {
         startCheck = structuredClone(options.crashCheck);
       } else if (!state.applied) {
@@ -893,6 +911,8 @@ export function createMockIpc(options: MockOptions = {}): Ipc & { state: MockSta
       state.points.unshift({ ...target, id, kind: "undo", undoes: target.id, undoneBy: null, restorable: false, summary: [`Undo ${target.id}`] });
       const previous = state.points.find((p) => p.kind === "apply" && p.undoneBy === null);
       state.applied = previous && previous.theme ? { theme: structuredClone(find(previous.theme.id)[0]), request: { themeId: previous.theme.id, target: previous.target ?? "all", setWtDefaultProfile: true, replaceOtherClink: false }, snapshotId: previous.id } : null;
+      // As the backend: an undo that leaves no theme lifts a pause in cmd (a restore goes through here).
+      afterThemeLeft(true);
       return { status: "committed", undid: target.id, error: null, unrestored: [], notes: [], fontsLeft: [] };
     },
     async snapshotsList(): Promise<RestorePoints> {
@@ -916,7 +936,7 @@ export function createMockIpc(options: MockOptions = {}): Ipc & { state: MockSta
       revertState();
       // As the backend: everything is out, so a pause by init.lua (in cmd) goes too; one of the
       // app's stays, since it holds the theme to turn back on.
-      if (state.paused?.by === "clink") state.paused = null;
+      afterThemeLeft(true);
       return revertOutcome();
     },
     async doctorRun(): Promise<DoctorReport> {
