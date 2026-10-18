@@ -3,8 +3,9 @@
 //! only on a path that exists (spec §5.4 step 2).
 use crate::adapters::{
     program_data_dir, AdapterError, DirState, RegText, RegValue, System, SystemInfo, WtLocation,
+    WtVariant,
 };
-use crate::plan::{Machine, Paths};
+use crate::plan::{Machine, Paths, WtToCreate};
 use std::path::PathBuf;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -41,6 +42,32 @@ impl DetectError {
     }
 }
 
+/// The Windows Terminals that were never opened, whose settings.json an apply makes from the
+/// template (founder 2026-10-17, spec §5.4), in the order of `wt`: a Store or Preview variant
+/// that is installed and has no settings.json yet (`has_settings` says whether a location's file
+/// is there). Not the unpackaged variant: its `installed` says only that its folder is there,
+/// and that folder without a settings.json is a root for fragments or a leftover, never a
+/// Terminal that was never opened. Not a Preview while the Store variant has a settings.json: a
+/// Preview that starts without its own copies that one, which a file made here would stop; once
+/// it has started, its file is edited as any other. The one reading of this, for the planner
+/// (through `detect`), doctor D6 and the app's doctor.
+pub fn never_opened(
+    wt: &[WtLocation],
+    has_settings: impl Fn(&WtLocation) -> bool,
+) -> Vec<&WtLocation> {
+    let store_opened = wt
+        .iter()
+        .any(|l| l.variant == WtVariant::Store && has_settings(l));
+    wt.iter()
+        .filter(|l| l.installed && !has_settings(l))
+        .filter(|l| match l.variant {
+            WtVariant::Store => true,
+            WtVariant::Preview => !store_opened,
+            WtVariant::Unpackaged => false,
+        })
+        .collect()
+}
+
 /// Creating the data folder is the only write; every other step reads.
 pub fn detect(sys: System<'_>, paths: &Paths) -> Result<Detected, DetectError> {
     sys.fs
@@ -59,11 +86,21 @@ pub fn detect(sys: System<'_>, paths: &Paths) -> Result<Detected, DetectError> {
         .filter(|l| sys.fs.exists(&l.settings))
         .map(|l| l.settings.clone())
         .collect();
+    // A Windows Terminal that was never opened has no settings.json yet: the apply makes one
+    // (founder 2026-10-17, spec §5.4).
+    let wt_create = never_opened(&wt, |l| sys.fs.exists(&l.settings))
+        .into_iter()
+        .map(|l| WtToCreate {
+            settings: l.settings.clone(),
+            folder_exists: l.settings.parent().is_some_and(|f| sys.fs.is_dir(f)),
+        })
+        .collect();
     // Raw text for the planner. A value that is there but is not plain text is told apart from
     // an absent one: the planner never edits it (spec §5.4).
     let text = |v: Option<RegValue>| RegText::of(v.as_ref());
     let machine = Machine {
         wt_settings,
+        wt_create,
         autorun_hkcu: text(sys.autorun.read_user().map_err(DetectError::Read)?),
         autorun_hklm: text(sys.autorun.read_machine().map_err(DetectError::Read)?),
         fonts: sys.fonts.families().map_err(DetectError::Read)?,
@@ -141,6 +178,9 @@ mod tests {
             1,
             "only settings files that exist"
         );
+        // The Preview has no settings.json, but the Store Terminal has one, which a Preview
+        // that starts without its own copies: nothing to make.
+        assert_eq!(d.machine.wt_create, vec![]);
         assert_eq!(
             d.machine.autorun_hkcu,
             RegText::Text(r"%USERPROFILE%\x.cmd".into()),
@@ -157,6 +197,132 @@ mod tests {
         assert_eq!(d.user_sid, "S-1-5-21-1-2-3-1001");
         assert_eq!(d.wt, m.wt.locations, "every variant, installed or not");
         assert_eq!(d.info, m.host.info);
+    }
+
+    /// Where the settings.json of each Terminal to set up goes.
+    fn to_create(d: &Detected) -> Vec<PathBuf> {
+        d.machine
+            .wt_create
+            .iter()
+            .map(|c| c.settings.clone())
+            .collect()
+    }
+
+    #[test]
+    fn an_installed_terminal_without_settings_is_one_to_set_up() {
+        // Founder 2026-10-17: a Windows Terminal that is installed but was never opened has no
+        // settings.json yet, and an apply sets it up. One that is not installed is not.
+        let mut m = machine();
+        let unpackaged = PathBuf::from(r"C:\L\Microsoft\Windows Terminal\settings.json");
+        m.wt.locations.push(WtLocation {
+            variant: WtVariant::Unpackaged,
+            installed: false,
+            settings: unpackaged.clone(),
+        });
+        let [store, preview, _] =
+            m.wt.locations
+                .iter()
+                .map(|l| l.settings.clone())
+                .collect::<Vec<_>>()
+                .try_into()
+                .unwrap();
+        // Both lists keep the order of the variants. With no Store settings.json, the Preview
+        // has none to copy, so both are set up.
+        m.fs.remove_file(&store).unwrap();
+        let d = detect(m.system(), &paths()).unwrap();
+        assert!(d.machine.wt_settings.is_empty());
+        assert_eq!(to_create(&d), vec![store.clone(), preview.clone()]);
+        // Once the file is there, it is one to edit, never one to make.
+        m.fs.put(&preview, b"{}");
+        let d = detect(m.system(), &paths()).unwrap();
+        assert_eq!(d.machine.wt_settings, vec![preview]);
+        assert_eq!(to_create(&d), vec![store]);
+        assert!(!to_create(&d).contains(&unpackaged));
+    }
+
+    #[test]
+    fn an_unpackaged_folder_without_settings_is_no_terminal_to_set_up() {
+        // Coordinator's ruling on the Task WT review: for the unpackaged variant "installed"
+        // says only that its folder is there, and a folder without settings.json is a fragments
+        // root or a leftover, never a Terminal that was never opened.
+        let store = PathBuf::from(
+            r"C:\L\Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\settings.json",
+        );
+        let unpackaged = WtLocation {
+            variant: WtVariant::Unpackaged,
+            installed: true,
+            settings: PathBuf::from(r"C:\L\Microsoft\Windows Terminal\settings.json"),
+        };
+        let mut m = machine();
+        m.fs.remove_file(&store).unwrap();
+        m.fs.create_dir_all(unpackaged.settings.parent().unwrap())
+            .unwrap();
+        m.wt.locations = vec![
+            WtLocation {
+                variant: WtVariant::Store,
+                installed: true,
+                settings: store.clone(),
+            },
+            unpackaged.clone(),
+        ];
+        let d = detect(m.system(), &paths()).unwrap();
+        assert_eq!(to_create(&d), vec![store]);
+        // As the only location, it is no Windows Terminal at all.
+        m.wt.locations = vec![unpackaged];
+        let d = detect(m.system(), &paths()).unwrap();
+        assert!(d.machine.wt_settings.is_empty() && d.machine.wt_create.is_empty());
+        let req = crate::plan::Request {
+            target: crate::model::Target::All,
+            set_wt_default_profile: true,
+            replace_foreign_clink: false,
+        };
+        let p =
+            crate::plan::plan(&crate::presets::terracotta(), &req, &d.machine, &paths()).unwrap();
+        assert_eq!(p.warnings, vec![crate::plan::Warning::NoWindowsTerminal]);
+    }
+
+    #[test]
+    fn a_preview_is_left_to_copy_the_store_terminals_settings() {
+        // A Preview that starts without a settings.json copies the Store Terminal's; one made
+        // here would stop that (coordinator's ruling on the Task WT review).
+        let mut m = machine();
+        let [store, preview] =
+            m.wt.locations
+                .iter()
+                .map(|l| l.settings.clone())
+                .collect::<Vec<_>>()
+                .try_into()
+                .unwrap();
+        let d = detect(m.system(), &paths()).unwrap();
+        assert_eq!(d.machine.wt_settings, vec![store.clone()]);
+        assert!(d.machine.wt_create.is_empty());
+        // Without a Store Terminal at all, the Preview is set up.
+        m.wt.locations.retain(|l| l.variant == WtVariant::Preview);
+        let d = detect(m.system(), &paths()).unwrap();
+        assert_eq!(to_create(&d), vec![preview]);
+    }
+
+    #[test]
+    fn whether_the_folder_for_the_settings_is_there_is_told() {
+        // A packaged Terminal keeps its settings in LocalState; when that folder is missing, the
+        // apply makes it, and an undo takes it away again.
+        let mut m = machine();
+        m.wt.locations.retain(|l| l.variant == WtVariant::Preview);
+        let d = detect(m.system(), &paths()).unwrap();
+        let [made] = &d.machine.wt_create[..] else {
+            panic!("{:?}", d.machine.wt_create)
+        };
+        assert!(!made.folder_exists);
+        let preview = made.settings.clone();
+        m.fs.create_dir_all(preview.parent().unwrap()).unwrap();
+        let d = detect(m.system(), &paths()).unwrap();
+        assert_eq!(
+            d.machine.wt_create,
+            vec![crate::plan::WtToCreate {
+                settings: preview,
+                folder_exists: true
+            }]
+        );
     }
 
     #[test]

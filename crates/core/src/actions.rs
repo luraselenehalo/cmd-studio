@@ -19,7 +19,7 @@ use crate::snapshot::{
 use crate::state::{Applied, AutoRunRecord, FontRecord, RegValueRecord, State, StateError};
 use crate::txn::{self, Executor, Failure, Journal, Outcome, Stage, Verifier};
 use crate::verify::SystemVerifier;
-use crate::wt_edit::{apply_edit, WtEdit, WtError};
+use crate::wt_edit::{apply_edit, WtEdit, WtError, WT_TEMPLATE};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -211,21 +211,28 @@ pub fn prepare_apply(
                 scheme,
                 profile,
                 set_default,
+                create,
+                ..
             } => {
                 // Reading it is reading the machine; only text Windows Terminal cannot read is
                 // E_WT_PARSE.
                 let gone = || AdapterError::new(settings.display().to_string(), "the file is gone");
-                let bytes = sys
-                    .fs
-                    .read(settings)
-                    .map_err(DetectError::Read)?
-                    .ok_or_else(|| DetectError::Read(gone()))?;
                 let wt = |error| ActionError::Wt {
                     path: settings.clone(),
                     error,
                 };
-                let text =
-                    String::from_utf8(bytes).map_err(|e| wt(WtError::Parse(e.to_string())))?;
+                // A Windows Terminal that was never opened gets the template, as the apply's
+                // own edit does (founder 2026-10-17, spec §5.4).
+                let (text, from_template) =
+                    match sys.fs.read(settings).map_err(DetectError::Read)? {
+                        Some(bytes) => (
+                            String::from_utf8(bytes)
+                                .map_err(|e| wt(WtError::Parse(e.to_string())))?,
+                            false,
+                        ),
+                        None if *create => (WT_TEMPLATE.to_string(), true),
+                        None => return Err(DetectError::Read(gone()).into()),
+                    };
                 let edited = apply_edit(
                     &text,
                     &WtEdit {
@@ -235,7 +242,11 @@ pub fn prepare_apply(
                     },
                 )
                 .map_err(wt)?;
-                state.baseline.note_wt(settings, &edited);
+                if from_template {
+                    state.baseline.note_wt_from_template(settings, &edited);
+                } else {
+                    state.baseline.note_wt(settings, &edited);
+                }
                 wt_font = profile
                     .get("font")
                     .and_then(|f| f.get("face"))
@@ -1393,6 +1404,21 @@ pub(crate) mod testing {
     use crate::resources::NERD_FONT_FILE;
     use std::path::Path;
 
+    /// The words the Thai texts the UI shows must not use (V4, th.ts's conventions): the prompt
+    /// is พร้อมท์, a version is เวอร์ชัน (never รุ่น), CMD Studio's part is "ส่วนของ CMD Studio"
+    /// (never เรา), and the app says จุดย้อนกลับ (never สำรอง).
+    pub(crate) const BANNED_THAI_WORDS: [&str; 4] = ["prompt", "รุ่น", "เรา", "สำรอง"];
+
+    /// Fails when `th`, a Thai text the UI shows, uses a word of [`BANNED_THAI_WORDS`]; `what`
+    /// says whose text it is. "Command Prompt" is the name Windows Terminal gives cmd's profile,
+    /// which the user finds in its settings file as it is, so that name is not the word.
+    pub(crate) fn assert_thai_words(th: &str, what: &dyn std::fmt::Debug) {
+        let text = th.replace("Command Prompt", "").to_lowercase();
+        for word in BANNED_THAI_WORDS {
+            assert!(!text.contains(word), "{word:?} in the Thai text: {what:?}");
+        }
+    }
+
     pub(crate) const WT: &str = r"C:\Users\tester\AppData\Local\Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\settings.json";
     pub(crate) const SETTINGS: &str = include_str!("../tests/fixtures/wt/default.json");
 
@@ -1547,6 +1573,92 @@ mod tests {
         };
         undo(m.system(), &ctx4).unwrap();
         assert_eq!(everything(&m), before);
+    }
+
+    #[test]
+    fn an_apply_sets_up_a_terminal_that_was_never_opened_and_its_undo_removes_the_file() {
+        // Founder 2026-10-17: "รวมเลย". Windows Terminal is installed, but was never opened, so
+        // it has no settings.json yet; the apply makes it, with the theme's colours, font and
+        // cmd profile, and no click more.
+        let (m, ctx) = machine();
+        m.fs.remove_file(Path::new(WT)).unwrap();
+        let before = everything(&m);
+        let p = prepare_apply(m.system(), &ctx, &terracotta(), &request(Target::All)).unwrap();
+        assert!(p
+            .ops
+            .iter()
+            .any(|o| matches!(o, Op::WtApply { create: true, .. })));
+        assert!(p
+            .plan
+            .summary_en
+            .contains(&"Set up Windows Terminal's settings so cmd gets this theme"));
+        assert!(!p
+            .plan
+            .warnings
+            .contains(&crate::plan::Warning::NoWindowsTerminal));
+        assert!(!m.fs.exists(Path::new(WT)), "planning changes nothing");
+        // state.json knows that CMD Studio made the file, with every key's original absent.
+        let [file] = &p.state_after.baseline.wt[..] else {
+            panic!("{:?}", p.state_after.baseline.wt)
+        };
+        assert!(file.from_template);
+        assert!(file
+            .originals
+            .iter()
+            .all(|o| o.original == crate::state::Was::Absent));
+        assert_eq!(run_apply(m.system(), &ctx, p), Outcome::Committed);
+        let text = String::from_utf8(m.fs.file(WT).unwrap()).unwrap();
+        crate::wt_edit::check_parses(&text).unwrap();
+        assert!(text.contains("\"$schema\": \"https://aka.ms/terminal-profiles-schema\""));
+        assert!(text.contains("\"name\": \"CMD Studio\""));
+        assert!(text.contains(&format!(
+            "\"defaultProfile\": \"{}\"",
+            crate::generate::wt::CMD_PROFILE_GUID
+        )));
+        // The undo takes the file out again: the machine is as it was, byte for byte.
+        let UndoResult::Done { outcome, .. } = undo(m.system(), &later(&ctx, 1)).unwrap().result
+        else {
+            panic!("nothing undone")
+        };
+        assert_eq!(outcome, Outcome::Committed);
+        assert!(!m.fs.exists(Path::new(WT)));
+        assert_eq!(everything(&m), before);
+        assert_eq!(m.fs.file(ctx.paths.state_file()), None);
+    }
+
+    #[test]
+    fn a_second_apply_edits_the_file_the_first_made_and_state_still_knows_it() {
+        // The first apply made the file; the next one finds it, edits it, and is undone to it.
+        let (m, ctx) = machine();
+        m.fs.remove_file(Path::new(WT)).unwrap();
+        let p = prepare_apply(m.system(), &ctx, &terracotta(), &request(Target::All)).unwrap();
+        assert_eq!(run_apply(m.system(), &ctx, p), Outcome::Committed);
+        let made = m.fs.file(WT);
+        let p = prepare_apply(
+            m.system(),
+            &later(&ctx, 1),
+            &terracotta(),
+            &request(Target::Wt),
+        )
+        .unwrap();
+        assert!(p
+            .ops
+            .iter()
+            .any(|o| matches!(o, Op::WtApply { create: false, .. })));
+        assert!(!p
+            .plan
+            .summary_en
+            .contains(&"Set up Windows Terminal's settings so cmd gets this theme"));
+        // The first apply's record stays: CMD Studio made the file, from nothing.
+        assert!(p.state_after.baseline.wt.iter().all(|f| f.from_template));
+        assert_eq!(
+            run_apply(m.system(), &later(&ctx, 1), p),
+            Outcome::Committed
+        );
+        undo(m.system(), &later(&ctx, 2)).unwrap();
+        assert_eq!(m.fs.file(WT), made);
+        undo(m.system(), &later(&ctx, 3)).unwrap();
+        assert!(!m.fs.exists(Path::new(WT)));
     }
 
     #[test]

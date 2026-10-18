@@ -74,7 +74,11 @@ pub fn run_gui() {
 /// `create: false`, so that WebView2's data folder can be set here: `webview`, a folder of CMD
 /// Studio's choosing in its data folder, which `--cleanup` knows (spec §5.3). Tauri's own
 /// default would be the data folder itself, where WebView2 makes an `EBWebView` folder of its
-/// own.
+/// own. The window's size is the config's, 1100x760 and no less than 900x620, made smaller to fit
+/// the primary monitor's work area when the screen is smaller than that (`preventOverflow` in
+/// tauri.conf.json, pinned by `config_guard`): Tauri subtracts the title bar and the frame, works in
+/// physical pixels with the monitor's scale factor, and keeps the config's size when no monitor
+/// can be read. A 1024x768 screen's window used to run under the taskbar.
 #[cfg(windows)]
 fn open_main_window(app: &tauri::App, webview: std::path::PathBuf) -> Result<(), String> {
     let config = main_window_config(&app.config().app.windows)?;

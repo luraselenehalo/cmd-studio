@@ -259,7 +259,7 @@ fn d2(sys: System<'_>, ctx: &Ctx, state: &Result<State, StateError>) -> Check {
             "D2",
             Status::Ok,
             None,
-            "ตัวสร้าง prompt ทำงานได้",
+            "ตัวสร้างพร้อมท์ทำงานได้",
             "The prompt add-on runs",
             format!("oh-my-posh version: {OMP_VERSION}"),
         ),
@@ -267,7 +267,7 @@ fn d2(sys: System<'_>, ctx: &Ctx, state: &Result<State, StateError>) -> Check {
             "D2",
             Status::Fail,
             Some("E_RUNTIME_MISSING"),
-            format!("ตัวสร้าง prompt ไม่ใช่รุ่นที่แนบมา {SEE_D1_TH}"),
+            format!("ตัวสร้างพร้อมท์ไม่ใช่เวอร์ชันที่แนบมา {SEE_D1_TH}"),
             format!("The prompt add-on is not the bundled version. {SEE_D1_EN}"),
             format!(
                 "oh-my-posh version printed \"{}\" (exit {})",
@@ -279,7 +279,7 @@ fn d2(sys: System<'_>, ctx: &Ctx, state: &Result<State, StateError>) -> Check {
             "D2",
             Status::Fail,
             Some("E_RUNTIME_MISSING"),
-            format!("ตัวสร้าง prompt ทำงานไม่ได้ {SEE_D1_TH}"),
+            format!("ตัวสร้างพร้อมท์ทำงานไม่ได้ {SEE_D1_TH}"),
             format!("The prompt add-on does not run. {SEE_D1_EN}"),
             e.to_string(),
         ),
@@ -522,7 +522,7 @@ fn d4(sys: System<'_>, ctx: &Ctx, state: &Result<State, StateError>) -> Check {
             "D4",
             Status::Fail,
             Some("E_AUTORUN_WRITE"),
-            "การตั้งค่าที่เปิดธีมไม่ได้อยู่หน้าสุด หรือเป็นของรุ่นเก่า ให้ใช้ธีมซ้ำ",
+            "การตั้งค่าที่เปิดธีมไม่ได้อยู่หน้าสุด หรือเป็นของเวอร์ชันเก่า ให้ใช้ธีมซ้ำ",
             "The setting that loads the theme is not first, or is an older one. Apply the theme \
              again",
             current,
@@ -609,7 +609,7 @@ fn d5(sys: System<'_>, ctx: &Ctx) -> Check {
             "D5",
             Status::Warn,
             Some("E_AUTORUN_FOREIGN_CLINK"),
-            "มีส่วนเสริมของ cmd ตัวอื่นตั้งไว้ prompt ของธีมอาจไม่ขึ้น \
+            "มีส่วนเสริมของ cmd ตัวอื่นตั้งไว้ พร้อมท์ของธีมอาจไม่ขึ้น \
              ให้ใช้ธีมซ้ำแล้วเลือก \"ใช้ของ CMD Studio แทน\"",
             "Another cmd add-on is set up; the theme's prompt may not show. Apply the theme again \
              and choose to use CMD Studio's instead",
@@ -621,7 +621,7 @@ fn d5(sys: System<'_>, ctx: &Ctx) -> Check {
             "D5",
             Status::Warn,
             Some("E_AUTORUN_FOREIGN_CLINK"),
-            "มีส่วนเสริมของ cmd ที่ติดตั้งไว้ทั้งเครื่อง prompt ของธีมอาจไม่ทำงาน \
+            "มีส่วนเสริมของ cmd ที่ติดตั้งไว้ทั้งเครื่อง พร้อมท์ของธีมอาจไม่ทำงาน \
              แต่สีใน Windows Terminal ยังใช้ได้",
             "A cmd add-on is set up for the whole machine; the theme's prompt may not work, but \
              the colors in Windows Terminal still do",
@@ -703,13 +703,18 @@ fn d6(sys: System<'_>) -> Check {
         present += 1;
     }
     if present == 0 {
-        return if locations.iter().any(|l| l.installed) {
+        // Installed but never opened: an apply sets it up from the template (founder 2026-10-17,
+        // spec §5.4), so there is nothing to open first. The same reading as the planner's: an
+        // unpackaged folder without a settings.json is no Terminal to set up.
+        let never_opened = crate::detect::never_opened(&locations, |l| sys.fs.exists(&l.settings));
+        return if !never_opened.is_empty() {
             check(
                 "D6",
                 Status::Warn,
                 Some("E_WT_NOT_FOUND"),
-                "Windows Terminal ยังไม่เคยเปิด ให้เปิดสักครั้งแล้วใช้ธีมซ้ำ",
-                "Windows Terminal has never been opened. Open it once, then apply the theme again",
+                "Windows Terminal ยังไม่เคยเปิด จึงยังไม่มีการตั้งค่า ใช้ธีมแล้ว CMD Studio จะตั้งค่าให้เอง",
+                "Windows Terminal has never been opened, so it has no settings yet. Applying a \
+                 theme sets them up",
                 "settings.json does not exist yet",
             )
         } else {
@@ -891,8 +896,8 @@ fn d9(sys: System<'_>, state: &Result<State, StateError>) -> Check {
                      moment",
                 ),
                 StateError::Newer { .. } => (
-                    "บันทึกของ CMD Studio (state.json) มาจาก CMD Studio รุ่นที่ใหม่กว่า \
-                     ให้ใช้รุ่นนั้น หรืออัปเดต CMD Studio",
+                    "บันทึกของ CMD Studio (state.json) มาจาก CMD Studio เวอร์ชันที่ใหม่กว่า \
+                     ให้ใช้เวอร์ชันนั้น หรืออัปเดต CMD Studio",
                     "CMD Studio's record (state.json) was written by a newer CMD Studio. Use that \
                      version, or update CMD Studio",
                 ),
@@ -1004,7 +1009,7 @@ fn d11(sys: System<'_>) -> Check {
             "D11",
             Status::Skipped,
             None,
-            format!("ตรวจข้อนี้ไม่ได้ เพราะอ่านรุ่นของ Windows ไม่ได้: {why}"),
+            format!("ตรวจข้อนี้ไม่ได้ เพราะอ่านเวอร์ชันของ Windows ไม่ได้: {why}"),
             format!("Not checked: could not read the Windows build: {why}"),
             "",
         );
@@ -1444,23 +1449,68 @@ mod tests {
     }
 
     #[test]
-    fn windows_terminal_never_opened_is_a_warning_with_a_way_out() {
-        // Review Focus 1: a fresh Windows 11 has WT installed but no settings.json yet.
+    fn windows_terminal_never_opened_is_a_warning_that_an_apply_puts_right() {
+        // Review Focus 1: a fresh Windows 11 has WT installed but no settings.json yet. This
+        // pinned "never created" until the founder's decision of 2026-10-17 ("รวมเลย"): the
+        // apply now sets Terminal up from the template, so D6 says so instead of "open it once".
         let (m, ctx) = machine();
         m.fs.remove_file(std::path::Path::new(WT)).unwrap();
         let d6 = by_id(&doctor(m.system(), &ctx), "D6");
         assert_eq!((d6.status, d6.code), (Status::Warn, Some("E_WT_NOT_FOUND")));
-        assert!(d6.message_en.contains("Open it once"), "{d6:?}");
+        assert_eq!(
+            d6.message_en,
+            "Windows Terminal has never been opened, so it has no settings yet. Applying a theme \
+             sets them up"
+        );
+        assert_eq!(
+            d6.message_th,
+            "Windows Terminal ยังไม่เคยเปิด จึงยังไม่มีการตั้งค่า ใช้ธีมแล้ว CMD Studio จะตั้งค่าให้เอง"
+        );
         let p = prepare_apply(m.system(), &ctx, &terracotta(), &request(Target::All)).unwrap();
-        assert!(p
+        assert!(!p
             .plan
             .warnings
             .contains(&crate::plan::Warning::NoWindowsTerminal));
-        assert!(!p
+        assert!(p
             .ops
             .iter()
-            .any(|o| matches!(o, crate::plan::Op::WtApply { .. })));
-        assert!(!m.fs.exists(std::path::Path::new(WT)), "never created");
+            .any(|o| matches!(o, crate::plan::Op::WtApply { create: true, .. })));
+        assert!(
+            !m.fs.exists(std::path::Path::new(WT)),
+            "planning makes nothing"
+        );
+        assert_eq!(
+            run_apply(m.system(), &ctx, p),
+            crate::txn::Outcome::Committed
+        );
+        // D6 and D7 read the file the apply made as any other.
+        let checks = doctor(m.system(), &ctx);
+        assert_eq!(by_id(&checks, "D6").status, Status::Ok);
+        assert_eq!(by_id(&checks, "D7").status, Status::Ok, "{checks:?}");
+        // Not installed at all: the warning it always was. So is an unpackaged folder without a
+        // settings.json, which no apply sets up (coordinator's ruling on the Task WT review).
+        let leftover = crate::adapters::WtLocation {
+            variant: crate::adapters::WtVariant::Unpackaged,
+            installed: true,
+            settings: PathBuf::from(
+                r"C:\Users\tester\AppData\Local\Microsoft\Windows Terminal\settings.json",
+            ),
+        };
+        for locations in [vec![], vec![leftover]] {
+            let (mut m, ctx) = machine();
+            m.wt.locations = locations;
+            let d6 = by_id(&doctor(m.system(), &ctx), "D6");
+            assert_eq!(
+                (d6.status, d6.code, d6.message_en.as_str()),
+                (
+                    Status::Warn,
+                    Some("E_WT_NOT_FOUND"),
+                    "Windows Terminal is not installed"
+                ),
+                "{:?}",
+                m.wt.locations
+            );
+        }
     }
 
     #[test]
@@ -1533,6 +1583,8 @@ mod tests {
         let thai = |s: &str| s.chars().any(|c| ('\u{0e00}'..='\u{0e7f}').contains(&c));
         for c in &checks {
             assert!(thai(&c.message_th), "no Thai text: {c:?}");
+            // The UI shows this text, so it keeps th.ts's words (V4).
+            crate::actions::testing::assert_thai_words(&c.message_th, c);
             assert!(!c.message_en.is_empty() && !thai(&c.message_en), "{c:?}");
             match c.status {
                 Status::Ok => assert_eq!(c.code, None, "{c:?}"),
@@ -2265,22 +2317,18 @@ mod tests {
     }
 
     #[test]
-    fn d8_says_no_settings_file_was_there_when_the_theme_set_no_font() {
-        // Windows Terminal installed but never opened has no settings.json: the planner wrote
-        // no font, though Windows Terminal is installed.
+    fn d8_checks_the_font_of_a_terminal_the_apply_set_up() {
+        // Windows Terminal installed but never opened has no settings.json. Until the founder's
+        // decision of 2026-10-17 the planner then wrote no font and D8 was skipped; now the
+        // apply makes the file, with the font, and D8 checks it as for any other file.
         let (m, ctx) = machine();
         m.fs.remove_file(std::path::Path::new(WT)).unwrap();
         m.process.answer("oh-my-posh.exe", "version", 0, "31.5.0\n");
         let p = prepare_apply(m.system(), &ctx, &terracotta(), &request(Target::All)).unwrap();
         assert_eq!(run_apply(m.system(), &ctx, p), Outcome::Committed);
         let d8 = by_id(&run(&m, &ctx), "D8");
-        assert_eq!((d8.status, d8.code), (Status::Skipped, None));
-        assert!(
-            d8.message_en
-                .contains("no Windows Terminal settings file was found"),
-            "{d8:?}"
-        );
-        assert!(!d8.message_en.contains("not installed"), "{d8:?}");
+        assert_eq!((d8.status, d8.code), (Status::Ok, None), "{d8:?}");
+        assert!(d8.details.starts_with(NERD_FONT_FAMILY), "{d8:?}");
     }
 
     /// Settings.json after `themed`, with `from` replaced by `to` once (which must be there).

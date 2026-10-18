@@ -1,11 +1,22 @@
 // Paints the spans the core drew (spec §5.6): a mock cmd window whose background, font and
 // opacity come from the theme. Nothing here decides a color: `fg`/`bg` are the core's. The
 // theme's opacity fades only the window's background, on a layer of its own under the text, as
-// Windows Terminal's opacity does; the text stays opaque.
+// Windows Terminal's opacity does; the text stays opaque. A glyph the font may lack, which a
+// fallback font would draw wider than its cells, sits in a box as many ch wide as the core counts
+// its cells (cells.ts: one, or two for a Thai letter with SARA AM such as น้ำ), so the welcome
+// box's right edge lines up; the text itself is not changed.
 import type { PreviewResult } from "../bindings/PreviewResult";
 import type { Theme } from "../bindings/Theme";
 import type { Line } from "../bindings/Line";
 import { useT } from "../i18n";
+import { pieces } from "./cells";
+
+/** The box of a glyph of `cells` cells (1 but for Thai SARA AM): `cells` ch wide, the glyph
+ * centered, so a fallback font's wider glyph spills out evenly on both sides instead of pushing
+ * what follows. */
+function cellStyle(cells: number) {
+  return { display: "inline-flex", justifyContent: "center", width: `${cells}ch` } as const;
+}
 
 function Row({ line }: { line: Line }) {
   return (
@@ -19,7 +30,15 @@ function Row({ line }: { line: Line }) {
             fontWeight: span.bold ? 700 : 400,
           }}
         >
-          {span.text}
+          {pieces(span.text).map((piece, j) =>
+            piece.cell ? (
+              <span key={j} className="cell" style={cellStyle(piece.cells)}>
+                {piece.text}
+              </span>
+            ) : (
+              piece.text
+            ),
+          )}
         </span>
       ))}
       {"\n"}
