@@ -22,8 +22,9 @@ use windows_sys::Win32::System::EventLog::{
 /// How long one read of the log may take (recovery spec §4.3).
 pub const READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// The most events one read takes, newest first: far more than the crashes that pause the theme.
-/// The query names no program, so this is also what keeps another program's crash loop from
-/// pushing cmd's crashes out of the read.
+/// The query names no program, so another program's crash loop of more than this many events
+/// inside the span could push cmd's crashes out of the read (the check would then count too few,
+/// never too many); a cap this high makes that unlikely.
 pub const MOST_EVENTS: usize = 1000;
 /// How many handles `EvtNext` gives at a time.
 const BATCH: usize = 16;
