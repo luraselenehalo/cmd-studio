@@ -15,15 +15,19 @@ const CLINK_DLL: &str = "clink_dll";
 const APP_FIELD: &str = "AppName";
 const MODULE_FIELD: &str = "ModuleName";
 
-/// The XPath query of the Application log for the "Application Error" events 1000 of cmd.exe in
-/// the last `within_ms` milliseconds (`timediff` counts back from the clock of the Event Log
-/// service when it runs). `EventData[Data='cmd.exe']` keeps another program's crash loop from
-/// filling the reader's cap before cmd's crashes come; `is_clink_crash` still checks the
-/// module. Spike S10 ran this text on English and Thai Windows (plan 3b-1 Task 4b).
+/// The XPath query of the Application log for the "Application Error" events 1000 of the last
+/// `within_ms` milliseconds (`timediff` counts back from the clock of the Event Log service
+/// when it runs). Spike S10 ran this text on English and Thai Windows.
+///
+/// There is no filter on the program (`EventData[Data='cmd.exe']`): XPath has no case folding,
+/// and `AppName` follows the string cmd.exe was launched with (`CMD.EXE` is a possible
+/// spelling, as `System32` and `system32` both occur in `os.gethost`), so such a filter would
+/// drop a crash silently. Every program's events 1000 come back, newest first and capped by
+/// the reader; `is_clink_crash` decides which are cmd's in Clink, with case ignored.
 pub fn crash_query(within_ms: u64) -> String {
     format!(
         "*[System[Provider[@Name='Application Error'] and (EventID=1000) and \
-         TimeCreated[timediff(@SystemTime) <= {within_ms}]] and EventData[Data='cmd.exe']]"
+         TimeCreated[timediff(@SystemTime) <= {within_ms}]]]"
     )
 }
 
@@ -31,8 +35,10 @@ pub fn crash_query(within_ms: u64) -> String {
 /// its EventData, and its time. The fields are read by name (`AppName`, `ModuleName`); an event
 /// whose fields have no names gives them in their order, the program first and the module fourth
 /// (the order of the names).
-/// An event whose time can't be read is given `fallback_ms`: the query asked for its time span
-/// already. `None` when the program or the module is missing.
+/// An event whose time can't be read is given `fallback_ms`; the Application log reader passes
+/// the start of the span it asked for, so such an event counts as inside it. The query looks
+/// back up to 60 s further than that start, so the event may in fact be a little older. `None`
+/// when the program or the module is missing.
 pub fn parse_crash(xml: &str, fallback_ms: u64) -> Option<AppCrash> {
     let fields = data_fields(xml);
     let named = |name: &str| {
@@ -267,11 +273,11 @@ mod tests {
             data_fields(xml).into_iter().map(|(n, _)| n).collect()
         };
         assert_eq!(names_of(recorded[0].0), names_of(recorded[1].0));
-        // Both are crashes of Clink, and the older one (Thai) comes first.
+        // Both are crashes of Clink. The log gives the newest first (English, then Thai), and
+        // `clink_crashes` puts the older one (Thai) first.
         let log = Log {
             crashes: recorded
                 .iter()
-                .rev()
                 .filter_map(|(xml, _)| parse_crash(xml, 0))
                 .collect(),
             asked: RefCell::new(Vec::new()),
@@ -383,13 +389,17 @@ mod tests {
     fn the_query_asks_for_application_error_1000_since_the_time() {
         // Spike S10 (Task 1, F10's events) ran exactly this text through the Event Log service
         // on English and on Thai Windows, and it found the 3 crashes on each: `Get-WinEvent
-        // -FilterXPath` in `spikes/vm/guest/recovery-crash.ps1` (`$query2`).
+        // -FilterXPath` in `spikes/vm/guest/recovery-crash.ps1` (`$query`).
         assert_eq!(
             crash_query(604_800_000),
             "*[System[Provider[@Name='Application Error'] and (EventID=1000) and \
-             TimeCreated[timediff(@SystemTime) <= 604800000]] and EventData[Data='cmd.exe']]"
+             TimeCreated[timediff(@SystemTime) <= 604800000]]]"
         );
         // Only the span changes with the argument.
-        assert!(crash_query(61_000).contains("timediff(@SystemTime) <= 61000]]"));
+        assert!(crash_query(61_000).contains("timediff(@SystemTime) <= 61000]]]"));
+        // No filter on EventData: XPath compares text case-sensitively, `AppName` follows the
+        // string cmd.exe was launched with (`System32` or `system32`, `CMD.EXE`), and
+        // `is_clink_crash` is the one that decides, with case ignored.
+        assert!(!crash_query(1).contains("EventData"));
     }
 }

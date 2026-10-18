@@ -21,8 +21,10 @@ use windows_sys::Win32::System::EventLog::{
 
 /// How long one read of the log may take (recovery spec §4.3).
 pub const READ_TIMEOUT: Duration = Duration::from_secs(5);
-/// The most events one read takes, newest first: far more crashes than pause the theme.
-pub const MOST_EVENTS: usize = 200;
+/// The most events one read takes, newest first: far more than the crashes that pause the theme.
+/// The query names no program, so this is also what keeps another program's crash loop from
+/// pushing cmd's crashes out of the read.
+pub const MOST_EVENTS: usize = 1000;
 /// How many handles `EvtNext` gives at a time.
 const BATCH: usize = 16;
 /// How much further back than the caller's span the query looks, in milliseconds.
@@ -550,6 +552,14 @@ mod tests {
     }
 
     #[test]
+    fn one_read_takes_up_to_a_thousand_events() {
+        // Another program's crash loop is far less likely to push cmd's crashes out of a read
+        // that takes a thousand events. The 5 s deadline still bounds the read, and one that
+        // runs out of time is an error ("could not be read"), never a short answer.
+        assert_eq!(MOST_EVENTS, 1000);
+    }
+
+    #[test]
     fn the_query_looks_back_a_margin_past_the_span_so_a_late_clock_misses_no_event() {
         let (since, now) = (1_791_694_700_000u64, 1_791_694_710_000u64);
         // The span from `since` to `now`, and a margin of 60 s on top of it.
@@ -559,18 +569,6 @@ mod tests {
             crash_query(10_000 + QUERY_MARGIN_MS)
         );
         assert!(query_since(since, now).contains("<= 70000]]"));
-        // The service counts back from its own clock when it runs, `late` after the caller's
-        // `now`. An event right at `since` (the apply) has a timediff of `10 s + late`, which
-        // is in the span as long as the call came within the margin and no later.
-        let within = |query: String| -> u64 {
-            let (_, after) = query.split_once("<= ").unwrap();
-            after.split_once("]]").unwrap().0.parse().unwrap()
-        };
-        let within = within(query_since(since, now));
-        for late in [0, 1, 1000, QUERY_MARGIN_MS - 1, QUERY_MARGIN_MS] {
-            assert!(now + late - since <= within, "a call {late} ms after now");
-        }
-        assert!(now + QUERY_MARGIN_MS + 1 - since > within);
         // A `since` that is after `now` (a clock set back) still asks for the margin; the
         // largest span cannot overflow.
         assert_eq!(query_since(now, since), crash_query(QUERY_MARGIN_MS));
