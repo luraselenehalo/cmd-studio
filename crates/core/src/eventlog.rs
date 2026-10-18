@@ -9,18 +9,21 @@ use crate::utc;
 /// The faulting module of a crash in Clink: `clink_dll_x64.dll`, ASCII case ignored.
 const CLINK_DLL: &str = "clink_dll";
 /// The EventData fields of the crashed program and of the faulting module, as Windows 10 and 11
-/// name them. Spike S9 (`docs/spikes/phase3b-recovery/`) has not confirmed them on English and
-/// Thai Windows yet (plan 3b-1 Task 4b); until it does, `parse_crash` falls back to the fields'
+/// name them: spike S9 (`docs/spikes/phase3b-recovery/results.md`) recorded them with these
+/// names on English and on Thai Windows alike. `parse_crash` still falls back to the fields'
 /// positions when none has a name.
 const APP_FIELD: &str = "AppName";
 const MODULE_FIELD: &str = "ModuleName";
 
-/// The XPath query of the Application log for the "Application Error" events 1000 of the last
-/// `within_ms` milliseconds (`timediff` counts back from now).
+/// The XPath query of the Application log for the "Application Error" events 1000 of cmd.exe in
+/// the last `within_ms` milliseconds (`timediff` counts back from the clock of the Event Log
+/// service when it runs). `EventData[Data='cmd.exe']` keeps another program's crash loop from
+/// filling the reader's cap before cmd's crashes come; `is_clink_crash` still checks the
+/// module. Spike S10 ran this text on English and Thai Windows (plan 3b-1 Task 4b).
 pub fn crash_query(within_ms: u64) -> String {
     format!(
         "*[System[Provider[@Name='Application Error'] and (EventID=1000) and \
-         TimeCreated[timediff(@SystemTime) <= {within_ms}]]]"
+         TimeCreated[timediff(@SystemTime) <= {within_ms}]] and EventData[Data='cmd.exe']]"
     )
 }
 
@@ -223,6 +226,64 @@ mod tests {
     }
 
     #[test]
+    fn reads_the_events_the_spike_recorded_on_english_and_thai_windows() {
+        // Real "Application Error" events of a program named cmd.exe crashing in a module named
+        // clink_dll_x64.dll, saved by plan 3b-1 Task 1 (spike S9, F10's program) on VM-A
+        // (English) and VM-C (Thai), one event each. Only their UserID was replaced.
+        let recorded = [
+            (
+                include_str!("../tests/fixtures/eventlog/event1000-en.xml"),
+                // 2026-10-18T07:47:36.9305383Z
+                1_792_309_656_930,
+            ),
+            (
+                include_str!("../tests/fixtures/eventlog/event1000-th.xml"),
+                // 2026-10-18T07:18:27.0507989Z
+                1_792_307_907_050,
+            ),
+        ];
+        for (xml, at_ms) in recorded {
+            // 7 is the fallback for a time that can't be read; neither event gets it.
+            assert_eq!(
+                parse_crash(xml, 7),
+                Some(AppCrash {
+                    at_ms,
+                    app: "cmd.exe".to_string(),
+                    module: "clink_dll_x64.dll".to_string(),
+                })
+            );
+            // S9: the fields have names in both languages, so they are read by name and
+            // never by position; all fifteen of them, the two empty ones included.
+            let names: Vec<_> = data_fields(xml).into_iter().map(|(n, _)| n).collect();
+            assert_eq!(names.len(), 15, "{names:?}");
+            assert!(names.iter().all(Option::is_some), "{names:?}");
+            assert_eq!(names[0].as_deref(), Some(APP_FIELD));
+            assert_eq!(names[3].as_deref(), Some(MODULE_FIELD));
+            let crash = parse_crash(xml, 7).unwrap();
+            assert!(is_clink_crash(&crash), "{crash:?}");
+        }
+        // The same fifteen names on English and on Thai Windows.
+        let names_of = |xml: &str| -> Vec<Option<String>> {
+            data_fields(xml).into_iter().map(|(n, _)| n).collect()
+        };
+        assert_eq!(names_of(recorded[0].0), names_of(recorded[1].0));
+        // Both are crashes of Clink, and the older one (Thai) comes first.
+        let log = Log {
+            crashes: recorded
+                .iter()
+                .rev()
+                .filter_map(|(xml, _)| parse_crash(xml, 0))
+                .collect(),
+            asked: RefCell::new(Vec::new()),
+        };
+        let found = clink_crashes(&log, 1_792_300_000_000, 1_792_310_000_000).unwrap();
+        assert_eq!(
+            found.iter().map(|c| c.at_ms).collect::<Vec<_>>(),
+            [1_792_307_907_050, 1_792_309_656_930]
+        );
+    }
+
+    #[test]
     fn fields_without_names_are_read_in_their_order() {
         let xml = "<Event><System><TimeCreated SystemTime='2026-10-11T04:58:29Z'/></System>\
                    <EventData><Data>cmd.exe</Data><Data>10.0</Data><Data>1</Data>\
@@ -320,10 +381,15 @@ mod tests {
 
     #[test]
     fn the_query_asks_for_application_error_1000_since_the_time() {
+        // Spike S10 (Task 1, F10's events) ran exactly this text through the Event Log service
+        // on English and on Thai Windows, and it found the 3 crashes on each: `Get-WinEvent
+        // -FilterXPath` in `spikes/vm/guest/recovery-crash.ps1` (`$query2`).
         assert_eq!(
             crash_query(604_800_000),
             "*[System[Provider[@Name='Application Error'] and (EventID=1000) and \
-             TimeCreated[timediff(@SystemTime) <= 604800000]]]"
+             TimeCreated[timediff(@SystemTime) <= 604800000]] and EventData[Data='cmd.exe']]"
         );
+        // Only the span changes with the argument.
+        assert!(crash_query(61_000).contains("timediff(@SystemTime) <= 61000]]"));
     }
 }

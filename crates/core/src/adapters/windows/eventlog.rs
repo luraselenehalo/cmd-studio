@@ -25,6 +25,8 @@ pub const READ_TIMEOUT: Duration = Duration::from_secs(5);
 pub const MOST_EVENTS: usize = 200;
 /// How many handles `EvtNext` gives at a time.
 const BATCH: usize = 16;
+/// How much further back than the caller's span the query looks, in milliseconds.
+const QUERY_MARGIN_MS: u64 = 60_000;
 
 /// Set while a reader thread of this process runs, also one whose caller gave up waiting.
 static READING: AtomicBool = AtomicBool::new(false);
@@ -45,13 +47,28 @@ impl WinEventLog {
 
 impl EventLog for WinEventLog {
     fn app_crashes(&self, since_ms: u64, now_ms: u64) -> Result<Vec<AppCrash>, AdapterError> {
-        let within = now_ms.saturating_sub(since_ms);
+        let query = query_since(since_ms, now_ms);
         let timeout = self.timeout;
         let events = within_time(timeout, &READING, move || {
-            read_events(&crash_query(within), MOST_EVENTS, timeout)
+            read_events(&query, MOST_EVENTS, timeout)
         })?;
         Ok(crashes_in(&events, since_ms, now_ms))
     }
+}
+
+/// The query for the crashes from `since_ms` on, as the caller's clock stood at `now_ms`.
+///
+/// `timediff` counts back from the clock of the Event Log service at the moment it runs, which
+/// is later than `now_ms` by the time the call took to get there. A span of exactly
+/// `now_ms - since_ms` would then leave out the events of the first moments after `since_ms`
+/// (the apply), the ones that matter most. The span is [`QUERY_MARGIN_MS`] longer; the events
+/// before `since_ms` that this lets in are dropped by `crashes_in`.
+fn query_since(since_ms: u64, now_ms: u64) -> String {
+    crash_query(
+        now_ms
+            .saturating_sub(since_ms)
+            .saturating_add(QUERY_MARGIN_MS),
+    )
 }
 
 /// The crashes among `xmls` (events as XML) that happened from `since_ms` to `now_ms`, both
@@ -530,6 +547,34 @@ mod tests {
              </EventData></Event>",
             crate::utc::iso(ms)
         )
+    }
+
+    #[test]
+    fn the_query_looks_back_a_margin_past_the_span_so_a_late_clock_misses_no_event() {
+        let (since, now) = (1_791_694_700_000u64, 1_791_694_710_000u64);
+        // The span from `since` to `now`, and a margin of 60 s on top of it.
+        assert_eq!(QUERY_MARGIN_MS, 60_000);
+        assert_eq!(
+            query_since(since, now),
+            crash_query(10_000 + QUERY_MARGIN_MS)
+        );
+        assert!(query_since(since, now).contains("<= 70000]]"));
+        // The service counts back from its own clock when it runs, `late` after the caller's
+        // `now`. An event right at `since` (the apply) has a timediff of `10 s + late`, which
+        // is in the span as long as the call came within the margin and no later.
+        let within = |query: String| -> u64 {
+            let (_, after) = query.split_once("<= ").unwrap();
+            after.split_once("]]").unwrap().0.parse().unwrap()
+        };
+        let within = within(query_since(since, now));
+        for late in [0, 1, 1000, QUERY_MARGIN_MS - 1, QUERY_MARGIN_MS] {
+            assert!(now + late - since <= within, "a call {late} ms after now");
+        }
+        assert!(now + QUERY_MARGIN_MS + 1 - since > within);
+        // A `since` that is after `now` (a clock set back) still asks for the margin; the
+        // largest span cannot overflow.
+        assert_eq!(query_since(now, since), crash_query(QUERY_MARGIN_MS));
+        assert_eq!(query_since(0, u64::MAX), crash_query(u64::MAX));
     }
 
     #[test]
