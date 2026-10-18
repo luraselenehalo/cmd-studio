@@ -155,8 +155,11 @@ code,
   overflow-wrap: anywhere;
 }
 
+/* `overflow-wrap: normal` on the button itself: `anywhere`, passed down from a card, a notice or a
+   list, would otherwise break a squeezed label in the middle of a word. */
 button,
 .button {
+  overflow-wrap: normal;
   font: inherit;
   color: var(--text);
   background: var(--surface);
@@ -417,9 +420,12 @@ legend {
    columns; the 900 px minimum leaves 38.2rem (the form would be 8.7rem) and stacks, as does a
    1024 px screen at Text size 150 % (the box is then 25rem). The room is measured on
    `.editor-box`, which holds only the two columns: a container's contents cannot be positioned
-   against the window (`position: fixed`), and the dialogs are outside it. The preview is the
-   later in the page, so it is lifted with `order`, which moves it on the screen and leaves the
-   Tab order as it is. */
+   against the window (`position: fixed`), and the dialogs are outside it. The preview column is
+   the later in the page, and `order` moves things on the screen without moving them for Tab, so
+   only what is looked at is lifted: the column's own box goes (`display: contents`, which also
+   ends its sticking), and its top group (the heading, the preview and its error notice,
+   `.preview-top`) takes `order: -1`. The sample fields (`.preview-sample`) are not lifted, so
+   they come after the form on the screen as they do for Tab. */
 .editor-box {
   container-name: editor;
   container-type: inline-size;
@@ -439,7 +445,9 @@ legend {
     grid-template-columns: minmax(0, 1fr);
   }
   .editor .preview-column {
-    position: static;
+    display: contents;
+  }
+  .editor .preview-top {
     order: -1;
   }
 }
