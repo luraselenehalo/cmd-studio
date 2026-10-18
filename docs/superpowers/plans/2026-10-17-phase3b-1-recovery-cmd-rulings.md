@@ -2,10 +2,11 @@
 
 Every decision the controller made on the founder's behalf while executing `2026-10-17-phase3b-1-recovery-cmd.md` (subagent-driven, 2026-10-17 to 2026-10-18), in the order made, each with its reason and what it costs if wrong; the founder's own decisions during the run; every minor finding a reviewer raised that this plan did not fix; every item handed on. Then the controller's rulings files in full, which override the plan's text where they differ. Source: the execution ledger and the rulings files; the git history has the commits and their evidence.
 
-## The founder's decisions during the run (2)
+## The founder's decisions during the run (3)
 
 - Founder (2026-10-18): "โอเค 10 นาทีได้ ทำต่อเลย" — FORGET_AFTER_SECS 600 confirmed.
 - Founder (2026-10-18): "อนุญาต" — download the artifact cmdstudio-exe of CI run 39137518009 (8f08c72), about 33 MB, for VM-A and VM-C only.
+- Founder (2026-10-19): "เอาออกใน 3b-2" — plan 3b-2 drops the tasklist liveness check (the fourth window pauses even while hung windows stay open; no 0.6 s tasklist).
 
 ## Rulings (57)
 
