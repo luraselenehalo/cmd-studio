@@ -15,6 +15,8 @@ if ($Open) {
   New-Item -ItemType Directory -Force (Split-Path $list) | Out-Null
   $pids = New-Object System.Collections.Generic.List[string]
   foreach ($i in 1..$Count) {
+    # Start-Process quotes an argument that holds a space, so the command line is
+    # cmd.exe /k "ping -t localhost": the form the rulings name.
     $p = Start-Process -FilePath "$env:SystemRoot\System32\cmd.exe" -ArgumentList '/k', 'ping -t localhost' -PassThru
     "ping window ${i}: cmd pid $($p.Id) opened at $((Get-Date).ToString('HH:mm:ss'))"
     $pids.Add("$($p.Id)")

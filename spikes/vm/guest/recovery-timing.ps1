@@ -42,5 +42,10 @@ $times = foreach ($i in 1..($Warmup + $Runs)) {
 }
 $times
 $ms = @($times | Where-Object { $_ -is [int] })
-if ($ms.Count) { "average of $($ms.Count): $([int](($ms | Measure-Object -Average).Average)) ms" }
+if ($ms.Count) {
+  $sorted = @($ms | Sort-Object)
+  $mid = [int][Math]::Floor($sorted.Count / 2)
+  $median = if ($sorted.Count % 2) { $sorted[$mid] } else { [int](($sorted[$mid - 1] + $sorted[$mid]) / 2) }
+  "average of $($ms.Count): $([int](($ms | Measure-Object -Average).Average)) ms; median $median ms; min $($sorted[0]) ms; max $($sorted[-1]) ms"
+}
 "start tags of the timed windows taken away: $tagsFound of $($Warmup + $Runs)"

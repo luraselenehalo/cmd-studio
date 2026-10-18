@@ -4,8 +4,9 @@
 # adapters\windows\eventlog.rs) events 1000 of the last seven days. They are no crash of cmd's:
 # Write-EventLog puts the message into one EventData field without a name, and parse_crash
 # (crates\core\src\eventlog.rs) takes the program and the module from the first and the fourth
-# of unnamed fields, so these have no module and count for nothing; the real crashes of the steps
-# before are older than the fillers, so the newest 1000 the reader keeps hold none of them. The
+# of unnamed fields, so each filler has a program (the message) and no module, and counts for
+# nothing; the real crashes of the steps before are older than the fillers, so the newest 1000
+# the reader keeps hold none of them. The
 # source "Application Error" is Windows' own (WER) and is registered on every Windows; the
 # Application log lets an interactive user write (if Write-EventLog is refused all the same,
 # record it: the step is then not run). The events stay until the log rolls over or the VM goes
