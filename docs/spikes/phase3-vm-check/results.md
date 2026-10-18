@@ -212,3 +212,70 @@ VM-C's guestcontrol failure was found and fixed (see "VM-C" below), and its Step
 - **Run 1 step 6's founder mouse walk** and the "Results" mouse-click count: no founder at the VM window.
 - **Check 15** (a failed settings save): not a VM step (unit tests).
 - `fresh`, `fresh2`, `fresh3` existed only on the cold boots; `clean` is restored and unchanged (`snapshot list`: `clean` only, same UUIDs).
+
+## Second session (build d7fb389)
+
+- **Build:** CI run 39078781267, artifact `cmdstudio-exe`, commit `d7fb389`. `cmdstudio.exe` sha256 `87502EB49969850FDEB8AE57AF5E922BB5D4D715043499893CAC0F0316BC8A73`, 9 files under `resources\`; every install printed `same exe: True`.
+- **What changed in it:** the Thai font rule no longer reaches the preview (F1); the shell's grid is `13rem minmax(0, 1fr)` and wraps (F2); the window is made with `preventOverflow: true`; the editor stacks with the preview on top below 49.5rem.
+- **Conditions:** the host was locked from 06:57 to 08:26, so VM-A ran on its cold-boot path again: `snapshot restore clean`, `discardstate`, `startvm`, the boot-time "Installing", and VBoxService started by hand. Each VM-A run was a separate boot from `clean`, with OS 26H2 26300.9457 and Terminal never-opened at the start of each boot. Screenshots are `cmdstudio-win11-s2-*.png`. At 12:43 the host was found unlocked. VM-C was restored from its saved state then, and Run 6 ran on that one boot. The host was locked again at 12:48, so no second restore was possible.
+
+### Run 5 again — Text size 150 % at 1024×768: PASS
+
+| Item | Result | What decided it | Screenshot |
+|---|---|---|---|
+| Text size | done | set in Settings (slider focused, Right ×50 → 150, Tab, Apply); `TextScaleFactor` = 150; the app was started after it | s2-r5-slider-150 |
+| The window against the work area | PASS, with a 1-px border | read in the guest (user32, dwmapi): `GetWindowRect` L −8 T 0 R 1032 B 728; DWM visible frame **L −1 T 0 R 1025 B 721** (1026×721); work area **L 0 T 0 R 1024 B 720**; taskbar 0,720–1024,768; not maximized; DPI 96. The page and its scrollbar end above row 720. The scrollbar's down arrow sits at about y 708. The frame's 1-px border lies on the taskbar's first row and on one column each side; the taskbar is drawn over that row (pixel row 720 is #CACACA). At Text size 100 % the rect is the same | s2-r5-p1, s2-r5-p3-next |
+| Page 3's Next | PASS | Tab 10 from the heading puts the focus on Next and scrolls it into view; the page's vertical scrollbar shows both arrows above the taskbar | s2-r5-p3-next |
+| Page 5's Back | PASS | Tab 3 scrolls Back into view; ShiftTab 1 back to Apply, Enter | s2-r5-p5-back |
+| Page 6's buttons | PASS | Tab 1 is the preview (a scrollable group), Tab 2 is Try cmd and Tab 3 is "Go to the home page"; both buttons scroll into view | s2-r5-p6-buttons |
+| Home: no overflow to the right | PASS | the widest element's right edge is 1002 against the page's 1025 (−23 px); the cards end inside the window, the preview scrolls inside its own box, and the buttons wrap | s2-r5-home, s2-r5-home-2 |
+| Help → Report a problem: no overflow | PASS | −23 px as above; the tabs wrap and the details box scrolls inside | s2-r5-help-4 |
+| The editor stacks | PASS | Create a theme: the toolbar first; "Preview" at T 295 and the preview image from T 347 to T 734; "Theme name" at T 1076, below the preview | s2-r5-editor |
+| The other screens | PASS | Themes, Settings, Advanced and Help tabs 1–6: −23 px each | s2-r5-themes, s2-r5-settings, s2-r5-advanced, s2-r5-help-1..6 |
+| The five clicks | PASS | **5 activations, 0 characters**; 26 navigation keys, which is the walk's 24 plus Tab 3 and ShiftTab 1 on page 5 to show Back | — |
+
+### Run 2 steps 1–8 again (smoke test, never-opened Terminal): PASS
+
+| Step | Result | What decided it |
+|---|---|---|
+| R2.1 | recorded | Step 0: `neverOpened` (empty `LocalState`), alias present, no `FINDING:`; AutoRun `(absent)`; no data folder |
+| R2.2–R2.3 | PASS | only cmdstudio (no WindowsTerminal, OpenConsole or cmd); `webview\EBWebView` |
+| R2.4–R2.5 | PASS | **5 activations, 0 characters, 24 navigation keys**; 40.4 s; page 5 as in the first session (s2-r2-p5); AutoRun `[REG_SZ]` with CMD Studio's entry; `fromTemplate` true; CMD Studio's 1515-byte Terminal file; `cmd=apply ms=1344 ok` |
+| R2.6 | PASS | `#0C0C0C` 0 in the base shot and in try-1/2/3; one WindowsTerminal and 0 console hosts with a window; near `#1F1E1D` 158,805 → 490,181 (rise 331,376); after Terminal's first start the file is 2180 B with "CMD Studio" twice |
+| R2.7 | PASS | one cmd.exe with `clink_dll_x64.dll`; frame rise 1,739; accent rise 2,230 (s2-r2-wt) |
+| R2.8 | PASS | one cmd.exe with Clink; frame rise 1,850, accent rise 2,001, near rise 428,760 (s2-r2-second). The box still shows `*`, not `✻` (F3, not changed in this build) |
+
+### Run 6 — VM-C, the Thai user (12:43–13:08): PASS
+
+**The boot.** VM-C was restored from `clean`'s saved state at 12:43, while the host was unlocked. guestcontrol failed at first (`Failed to accept session 54 (client ID 1): VERR_NOT_FOUND`, lesson 4). At 3 min the guest bugchecked (0x21) and rebooted, which did lesson 4's restart. guestcontrol answered for the Thai user at 12:48. Phase 3b-1's spike ran on the same boot after Run 6 (its own report).
+
+**Step 0 on that boot** matches the first session:
+- `present`, with `settings.json` 1533 B and `state.json` 162 B;
+- the alias is present, with no `FINDING:`;
+- OS 26H2 26300.9457, system locale th-TH, ANSI code page 874.
+
+Screenshots are `cmdstudio-th-r6-*.png`. The keyboard was switched to ENG with Win+Space and checked in the tray. One AutoRun read typed its Run line in Thai, because Win+Space had been pressed once too often; it was dismissed and read again in ENG.
+
+| Step | Result | What decided it | Screenshot |
+|---|---|---|---|
+| R6.1 | recorded | `$before`: Terminal file 1533 B, sha256 `3353F73E…3E26`; `AutoRun: (absent)` | — |
+| R6.2: Run 2 steps 2–3 | PASS | plain start; only cmdstudio; `webview\EBWebView` | r6-p1 |
+| R6.2: the walk in Thai | PASS | ไทย first (Tab 2, Space), then Tab 2, Enter, then the keys of Run 2 step 4: **6 activations, 0 characters, 24 navigation keys**. Page 2: "Windows บิลด์ 26300", "มี Windows Terminal แล้ว หน้าต่าง cmd ของคุณจะได้สีของธีม". Page 5: four Thai lines and the button "ใช้ธีม", with no "keep the add-on outside your user folder" line. Page 6: "เสร็จแล้ว", "ใช้ธีมแล้ว เปิด cmd หน้าต่างใหม่เพื่อดูกล่องต้อนรับกับพร้อมท์", "ลองเปิด cmd", "ไปหน้าแรก"; 43.0 s | r6-p1-th, r6-p2, r6-p5, r6-p6 |
+| R6.2: the Thai name does not stop the apply | PASS | `cmd=apply ms=3091 ok`; `state.json` `launch` **`shortPath`**, exe `C:\Users\3607~1\AppData\Local\AIRESI~1.CMD\runtime\clink-1.9.34\clink_x64.exe`; AutoRun `[REG_SZ] (if exist "<8.3 exe>" "<8.3 exe>" inject --autorun --quiet --profile "C:\Users\ผู้ทดสอบ ไทย\AppData\Local\ai.resincore.cmdstudio\clink-profile")`; Terminal file 2650 B with scheme "CMD Studio" and `defaultProfile` 0caa0dad | — |
+| R6.2: Run 2 step 6 | PASS | `#0C0C0C` 1 in base and in try-1/2/3; one WindowsTerminal and 0 console hosts with a window; near `#1F1E1D` 158,337 → 489,934 (rise 331,597) | r6-wt |
+| R6.2: Run 2 step 7 | PASS | one cmd.exe with `clink_dll_x64.dll`; frame rise 1,739, accent rise 2,122; "Welcome back, ผู้ทดสอบ ไทย!", English tips | r6-wt |
+| R6.2: Run 2 step 8 | PASS | one cmd.exe with Clink; frame rise 1,850, accent rise 1,893, near rise 429,014 | r6-second |
+| R6.3 (check 13) | PASS | new cmd in `%USERPROFILE%\น้ำ ทดสอบ`: Clink loaded; box "Welcome back, ผู้ทดสอบ ไทย!", `cwd: C:\Users\ผู้ทดสอบ ไทย\น้ำ ทดสอบ`, prompt `~\น้ำ ทดสอบ`, น้ำ whole. Box edges (`Get-ColorColumns` of the accent `#D97757`, the box's frame color): left 96/97, right **501/502**, runs 91 and 85. VM-A's r2-wt has 44/45 and 476/477, runs 91 and 85: one pair each, no second pair a cell away. The box shows `*` (F3) | r6-thai-box |
+| R6.4 (preview, F1 fix) | PASS | the box's right edge per row: page 6 in Thai at x **585 for 78 rows** (VM-A English r2-p6: 571 ×78); Thai Home at **686 ×78**. In the first session on build 04e36f6 the Thai Home had x 531/570/589 | r6-p6, r6-home-th |
+| R6.5 (check 12) | PASS | 2,573 characters; `%USERNAME% present: True`; `user name present: False`; `8.3 name … (3607~1) present: False`; `any account SID present: False` | r6-copied |
+| R6.6 (check 10) | PASS | the "ลองเปิด cmd" tab shows the English box and tips; generated files: Thai letters False ×3; `doctor.txt` with the Thai UI: D1–D11 all ok, Thai letters False; Settings → English (Tab 4, Up): `"language": "en"` | r6-wt |
+| R2.9 on VM-C | PASS | Thai Home: สถานะ "ทุกอย่างปกติดี", Terracotta and the preview; bar "ย้อนกลับ" / "ปิดข้อความ" | r6-home-th |
+| R2.11 on VM-C (checks 2, 4) | PASS | `doctor.txt` complete (D1–D11 ok), `help.txt`; in cmd `help=0`, `doctor=0`, `bad=2`; `exit-code.vbs` 0 / 2 / 0 / 0 | r6-step11-cmd |
+| R2.13 on VM-C | PASS | Explorer at `file:///C:/Users/ผู้ทดสอบ ไทย/AppData/Local/ai.resincore.cmdstudio` and `…/logs` | r6-folders |
+| R2.16 on VM-C, **`present` path** | PASS | Undo by name: "Undone: everything is as it was before."; Home "No theme is applied yet."; Terminal's file 1533 B with **the same sha256** as before; `Compare-Object` nothing; AutoRun `(absent)` = before (and the applied read had a value); plain cmd: Clink no, frame rise 0, accent −229, near −899 | r6-undone, r6-plain |
+| R2.18 on VM-C (checks 2, 8) | PASS | `--cleanup --data-dir "C:\Users\ผู้ทดสอบ ไทย\AppData\Local\ai.resincore.cmdstudio"` (one argument, with the space): `exit=0`; data folder gone (no themes were made in this run); AutoRun `(absent)` | — |
+
+### Not run in the second session
+
+- **Run 2 on VM-A's `present` path:** VM-A needs a restore of its saved state, and the host was locked again by the time VM-C was done. VM-C covered the `present` path: walk, colors, both windows and Undo, on Thai Windows.
+- **Run 2 steps 12–15 and 17 on VM-C:** not in Run 6's list. The clipboard and the Thai UI were checked in R6.5 and R6.6.
