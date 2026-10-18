@@ -317,6 +317,8 @@ export const en = {
   "help.doctor.fix.installWindowsTerminal": "Install Windows Terminal",
   "help.doctor.fix.openNewCmdWindow": "Open a new cmd window",
   "help.doctor.fix.reinstall": "Reinstall CMD Studio",
+  "help.doctor.fix.resume": "Turn the theme back on",
+  "help.doctor.fix.pause": "Pause the theme",
   "help.restore.title": "Restore points",
   "help.restore.none": "No restore points yet.",
   "help.restore.restore": "Go back to this point",

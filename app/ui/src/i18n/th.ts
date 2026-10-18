@@ -321,6 +321,8 @@ export const th: Dictionary = {
   "help.doctor.fix.installWindowsTerminal": "ติดตั้ง Windows Terminal",
   "help.doctor.fix.openNewCmdWindow": "เปิด cmd หน้าต่างใหม่",
   "help.doctor.fix.reinstall": "ติดตั้ง CMD Studio ใหม่",
+  "help.doctor.fix.resume": "เปิดธีมกลับ",
+  "help.doctor.fix.pause": "หยุดธีม",
   "help.restore.title": "จุดย้อนกลับ",
   "help.restore.none": "ยังไม่มีจุดย้อนกลับ",
   "help.restore.restore": "กลับไปที่จุดนี้",

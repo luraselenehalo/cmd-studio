@@ -12,6 +12,7 @@ use cmdstudio_core::cleanup;
 use cmdstudio_core::exec::{self, CLEANUP_FIX_EN, CLEANUP_FIX_TH};
 use cmdstudio_core::model::{Target, Theme};
 use cmdstudio_core::plan::{autorun_summary, Component, Op, Paths, PlanError, Request, Warning};
+use cmdstudio_core::recovery::{clear_pause, read_pause, Paused, PausedBy};
 use cmdstudio_core::resources::sha256_hex;
 use cmdstudio_core::snapshot::{SnapshotKind, SnapshotStore, ThemeRef, Unrestored};
 use cmdstudio_core::txn::Outcome;
@@ -573,6 +574,24 @@ impl<M: Machine> Backend<M> {
         let result = self.transaction_result(&outcome, &ctx);
         notes.extend(result.notes);
         unrestored.extend(result.unrestored);
+        // A theme applied is the theme on again (recovery spec §4.1): its pause goes, and with
+        // it every start tag of the theme before. The apply stands either way. `clear_pause`
+        // can fail at a tag it cannot delete (the pause then stays on purpose), at the listing,
+        // at paused.json or at making the folder, and there may be no pause at all, so the note
+        // speaks of the start records, as the CLI's line does; `{e}` names the file.
+        if result.status == TxnStatus::Committed {
+            if let Err(e) = clear_pause(self.sys().fs, &ctx.paths) {
+                notes.push(note(
+                    "E_DATA_WRITE",
+                    format!(
+                        "the theme was applied, but CMD Studio's start records in {} could not \
+                         be cleared ({e}): if cmd windows open without the theme, delete the \
+                         files in that folder, or turn the theme back on from the home page",
+                        ctx.paths.health().display()
+                    ),
+                ));
+            }
+        }
         Ok(ApplyOutcome {
             status: match result.status {
                 TxnStatus::Committed => ApplyStatus::Committed,
@@ -790,26 +809,52 @@ impl<M: Machine> Backend<M> {
     pub fn revert_all(&self) -> Result<RevertOutcome, AppError> {
         let ctx = self.ctx();
         let report = cleanup::revert_all(self.sys(), &ctx)?;
+        let mut out = self.revert_outcome(&ctx, &report);
+        // Everything CMD Studio changed is out, so a pause in cmd has nothing left to pause (the
+        // banner's "Undo everything", recovery spec §4.2). A pause of this computer stays: it
+        // holds the theme to turn back on.
+        if out.ok {
+            if let Ok(Some(Paused {
+                by: PausedBy::Clink,
+                ..
+            })) = read_pause(self.sys().fs, &ctx.paths)
+            {
+                if let Err(e) = clear_pause(self.sys().fs, &ctx.paths) {
+                    out.notes.push(note(
+                        "E_DATA_WRITE",
+                        format!(
+                            "everything was undone, but the pause in cmd could not be lifted ({e})"
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// What the core's Revert everything did, for the UI: each step, what its start found, and
+    /// how its transaction ended. `revert_all` and the theme's pause (`recovery`) say it alike.
+    pub(crate) fn revert_outcome(&self, ctx: &Ctx, report: &cleanup::Report) -> RevertOutcome {
         let mut notes = start_notes(&report.start);
         let mut unrestored = start_unrestored(&report.start);
         let steps = report.steps.iter().map(step_report).collect();
         let (status, error) = match &report.outcome {
             None => (None, None),
             Some(outcome) => {
-                let result = self.transaction_result(outcome, &ctx);
+                let result = self.transaction_result(outcome, ctx);
                 notes.extend(result.notes);
                 unrestored.extend(result.unrestored);
                 (Some(result.status), result.error)
             }
         };
-        Ok(RevertOutcome {
+        RevertOutcome {
             ok: report.ok(),
             steps,
             notes,
             status,
             error,
             unrestored,
-        })
+        }
     }
 }
 
