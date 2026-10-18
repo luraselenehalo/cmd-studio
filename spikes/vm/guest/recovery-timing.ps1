@@ -2,7 +2,9 @@
 # 3b-1 Task 12 step 7: starts cmd.exe $Runs times, each time waits for zz-timing.lua's marker of
 # the window's first edit line (the first clink.onbeginedit: after every script has loaded, the
 # start counter included, and before the prompt filters; a filter after Oh My Posh's never runs,
-# spike S6), and prints the time from the process's start to the marker, then the average.
+# spike S6), and prints the time from the process's start to the marker, then on one line the
+# average, the median, the minimum and the maximum of the counted runs
+# (`average of N: <n> ms; median <n> ms; min <n> ms; max <n> ms`).
 # -Data points at another data folder (Task 12: CMD Studio's own); -InstallMarker first writes
 # zz-timing.lua into its generated\ folder from C:\cmdstudio\spikes\recovery\timing.lua.
 # Each window is closed as soon as its marker is there, before its prompt, so the window's own
