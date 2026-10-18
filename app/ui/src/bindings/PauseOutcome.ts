@@ -10,8 +10,9 @@ import type { RevertOutcome } from "./RevertOutcome";
 export type PauseOutcome = { 
 /**
  * The pause went through: Revert everything ended well, and its record was saved. When
- * not, the fields below say why, and a theme still applied is paused again at the next
- * start.
+ * not, the fields below say why; the theme stays applied, cmd opens without it while the
+ * record is there, and the pause is tried again the next time the app starts, unless a
+ * theme is applied after the record (then it is a pause in cmd only).
  */
 pausedNow: boolean, 
 /**

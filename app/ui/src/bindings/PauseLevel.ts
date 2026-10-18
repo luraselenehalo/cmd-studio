@@ -2,7 +2,9 @@
 
 /**
  * How far a pause reaches now (recovery spec §4.1): who wrote its record, and for one of the
- * app's, whether CMD Studio's changes are out, as state.json says. The app's record is written
- * before Revert everything runs, so it does not say by itself that the theme is out.
+ * app's, whether CMD Studio's changes are out, as state.json says, and whether the record is
+ * as new as the theme applied now. The app's record is written before Revert everything runs,
+ * so it does not say by itself that the theme is out; and an apply that commits keeps its
+ * record when the lift fails, so an older record does not say that a pause is still wanted.
  */
 export type PauseLevel = "cmd" | "computer" | "computerNotYet" | "computerUnknown";

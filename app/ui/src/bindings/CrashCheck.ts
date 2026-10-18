@@ -14,14 +14,16 @@ pausedNow: boolean,
  * What the pause this check tried did, to say the way every change is said (spec §4.1,
  * §5.5): a revert that was refused or rolled back, a record that could not be saved.
  * It tries one for three crashes or more, and one an earlier pause of this computer
- * did not get through (its record, with a theme still applied), with that pause's
- * reason. One that does not go through is tried again at the next start. `None` when
- * it tried none.
+ * did not get through (its record, no older than the theme applied now), with that
+ * pause's reason. One that does not go through is tried again the next time the app
+ * starts. `None` when it tried none: a record older than the theme applied now is a
+ * pause in cmd only, never a reason to revert.
  */
 pause: PauseOutcome | null, } | { "kind": "unreadable", why: string, 
 /**
- * A pause of this computer that had not gone through, tried again all the same: it
- * comes from its record, not from the reports. `None` when there was none, and always
- * when state.json could not be read (whether a theme is applied is not known).
+ * A pause of this computer that had not gone through (its record no older than the
+ * theme applied now), tried again all the same: it comes from its record, not from
+ * the reports. `None` when there was none, and always when state.json could not be
+ * read (whether a theme is applied is not known).
  */
 pause: PauseOutcome | null, };

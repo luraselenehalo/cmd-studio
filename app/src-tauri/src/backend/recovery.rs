@@ -5,8 +5,10 @@
 //!
 //! Two levels of pause (spec §4.1): init.lua pauses the theme in cmd (`by: clink`) and changes
 //! nothing on the computer; the app pauses it on this computer (`by: app`) through Revert
-//! everything, and notes the theme to apply again. Turning the theme back on lifts a pause in cmd
-//! at once (nothing on the computer changed, so no transaction), and for a pause of this computer
+//! everything, and notes the theme to apply again. How far a record reaches now is the core's
+//! one rule, `Paused::level`: an app record older than the theme applied now is one an apply
+//! could not lift, a pause in cmd only. Turning the theme back on lifts a pause in cmd at once
+//! (nothing on the computer is held by it, so no transaction), and for a pause of this computer
 //! gives the UI the request to apply the paused theme again through the plan; that apply's
 //! commit lifts the pause (`Backend::apply`). Undo everything, and an undo or a restore that
 //! leaves no theme applied, lift a pause in cmd too, since nothing of CMD Studio's is left for it
@@ -54,9 +56,10 @@ pub struct ResumeInfo {
 pub struct PauseInfo {
     pub by: PausedBy,
     /// How far the pause reaches now: a pause of this computer is in effect (`computer`) only
-    /// while no theme is applied; with one still applied it has not gone through
-    /// (`computerNotYet`), and with a state.json that can't be read it is not known
-    /// (`computerUnknown`).
+    /// while no theme is applied; with one applied no earlier than the record it has not gone
+    /// through (`computerNotYet`); with one applied after the record it is a pause in cmd only
+    /// (`cmd`), which an apply could not lift; and with a state.json that can't be read it is
+    /// not known (`computerUnknown`).
     pub level: PauseLevel,
     /// `None` when paused.json can't be read as a pause record: cmd still opens without the
     /// theme, and turning it back on deletes the file.
@@ -87,9 +90,10 @@ pub enum CrashCheck {
         /// What the pause this check tried did, to say the way every change is said (spec §4.1,
         /// §5.5): a revert that was refused or rolled back, a record that could not be saved.
         /// It tries one for three crashes or more, and one an earlier pause of this computer
-        /// did not get through (its record, with a theme still applied), with that pause's
-        /// reason. One that does not go through is tried again at the next start. `None` when
-        /// it tried none.
+        /// did not get through (its record, no older than the theme applied now), with that
+        /// pause's reason. One that does not go through is tried again the next time the app
+        /// starts. `None` when it tried none: a record older than the theme applied now is a
+        /// pause in cmd only, never a reason to revert.
         pause: Option<Box<PauseOutcome>>,
     },
     /// The reports could not be read (the log is off, this user may not read it, it did not
@@ -97,9 +101,10 @@ pub enum CrashCheck {
     /// be, so nothing was done for them.
     Unreadable {
         why: String,
-        /// A pause of this computer that had not gone through, tried again all the same: it
-        /// comes from its record, not from the reports. `None` when there was none, and always
-        /// when state.json could not be read (whether a theme is applied is not known).
+        /// A pause of this computer that had not gone through (its record no older than the
+        /// theme applied now), tried again all the same: it comes from its record, not from
+        /// the reports. `None` when there was none, and always when state.json could not be
+        /// read (whether a theme is applied is not known).
         pause: Option<Box<PauseOutcome>>,
     },
 }
@@ -122,8 +127,9 @@ pub struct RecoveryStatus {
 #[ts(export)]
 pub struct PauseOutcome {
     /// The pause went through: Revert everything ended well, and its record was saved. When
-    /// not, the fields below say why, and a theme still applied is paused again at the next
-    /// start.
+    /// not, the fields below say why; the theme stays applied, cmd opens without it while the
+    /// record is there, and the pause is tried again the next time the app starts, unless a
+    /// theme is applied after the record (then it is a pause in cmd only).
     pub paused_now: bool,
     /// What Revert everything did; `None` when it was refused before it changed anything.
     pub revert: Option<RevertOutcome>,
@@ -265,13 +271,16 @@ impl<M: Machine> Backend<M> {
     ///
     /// A record of a pause of this computer counts as one only while no theme is applied,
     /// because a pause that went through takes the theme out ([`PauseLevel`]). One whose revert
-    /// was refused or rolled back is tried again at this start, with its own reason and count,
-    /// keeping the theme it noted, also with fewer crashes or reports that can't be read: it
-    /// comes from its record, not from the reports. A pause in cmd does not count, because
-    /// Clink still injects and its DLL still loads. Reports that can't be read pause nothing of
-    /// their own, and a state.json that can't be read nothing at all. One log line, never the
-    /// user's data. A panic in it is an `Unreadable` answer, never a `recovery_status` that waits
-    /// for nothing.
+    /// was refused or rolled back, its record no older than the theme applied now, is tried
+    /// again at this start, with its own reason and count, keeping the theme it noted, also
+    /// with fewer crashes or reports that can't be read: it comes from its record, not from
+    /// the reports. One older than the theme applied now is one an apply could not lift: a
+    /// pause in cmd, never retried, so a theme the user turned back on is never reverted
+    /// unasked (`Paused::level` is the one rule, shared with doctor D12). A pause in cmd does
+    /// not count, because Clink still injects and its DLL still loads. Reports that can't be
+    /// read pause nothing of their own, and a state.json that can't be read nothing at all.
+    /// One log line, never the user's data. A panic in it is an `Unreadable` answer, never a
+    /// `recovery_status` that waits for nothing.
     pub fn crash_check(&self) -> CrashCheck {
         self.crash.start();
         // UNWIND SAFETY: the check only reads, and a pause it starts is a journaled
@@ -295,11 +304,12 @@ impl<M: Machine> Backend<M> {
     fn run_crash_check(&self) -> CrashCheck {
         let sys = self.sys();
         let ctx = self.ctx();
-        let applied = match State::load(sys.fs, &ctx.paths.state_file()) {
+        let state = State::load(sys.fs, &ctx.paths.state_file());
+        let applied_at_ms = match &state {
             Ok(State {
                 applied: Some(applied),
                 ..
-            }) => applied,
+            }) => applied.applied_at_ms,
             Ok(State { applied: None, .. }) => {
                 self.note_line("crash_check theme=none");
                 return CrashCheck::NoTheme;
@@ -314,19 +324,19 @@ impl<M: Machine> Backend<M> {
                 };
             }
         };
-        // A theme is applied, so a record of the app's is a pause of this computer that has not
-        // gone through (`PauseLevel::ComputerNotYet`): it is tried again, with its reason and
-        // count, and `pause_machine` keeps the theme it noted.
+        // A record of the app's at or after the theme applied now is a pause of this computer
+        // that has not gone through (`PauseLevel::ComputerNotYet`, the one rule, in
+        // `Paused::level`): it is tried again, with its reason and count, and `pause_machine`
+        // keeps the theme it noted. One older than the apply is one an apply could not lift: a
+        // pause in cmd, which the user turns back on, and never a reason to revert the theme
+        // applied since.
         let not_yet = match read_pause(sys.fs, &ctx.paths) {
-            Ok(Some(Paused {
-                by: PausedBy::App,
-                reason: Some(reason),
-                count,
-                ..
-            })) => Some((reason, count)),
+            Ok(Some(p)) if p.level(&state) == PauseLevel::ComputerNotYet => {
+                p.reason.map(|reason| (reason, p.count))
+            }
             _ => None,
         };
-        let crashes = match clink_crashes(sys.event_log, applied.applied_at_ms, ctx.now_ms) {
+        let crashes = match clink_crashes(sys.event_log, applied_at_ms, ctx.now_ms) {
             Ok(crashes) => crashes,
             Err(e) => {
                 // Never a pause for reports that can't be read (spec §4.3); one that had not
@@ -394,9 +404,11 @@ impl<M: Machine> Backend<M> {
     /// the cut-off revert back), never a reverted machine with nothing that says which theme it
     /// had. Revert everything runs however the write went, so that cmd opens either way. A
     /// revert that is refused or rolls back leaves the record as it is: init.lua loads no theme
-    /// while it is there, so the theme is paused in cmd, and while a theme is still applied the
-    /// next start's crash check tries the pause again ([`PauseOutcome::paused_now`]). Phase
-    /// 3b-2's `--recovery` pauses through here too (`recovery`).
+    /// while it is there, so the theme is paused in cmd, and while the theme applied is no newer
+    /// than the record the next start's crash check tries the pause again
+    /// ([`PauseOutcome::paused_now`]). The record's time is `ctx.now_ms`, so a retry makes it
+    /// newer than the theme again. Phase 3b-2's `--recovery` pauses through here too
+    /// (`recovery`).
     pub(crate) fn pause_machine(&self, reason: PauseReason, count: u32) -> PauseOutcome {
         let sys = self.sys();
         let ctx = self.ctx();
@@ -453,9 +465,11 @@ impl<M: Machine> Backend<M> {
         }
     }
 
-    /// "Turn the theme back on" (spec §4.1, §8): a pause in cmd is lifted at once; for a pause
-    /// of this computer the request (the paused theme, its target, the settings' choice for
-    /// Windows Terminal's default profile) and its plan, which the UI shows before `apply`.
+    /// "Turn the theme back on" (spec §4.1, §8): a pause in cmd ([`PauseLevel::Cmd`]: init.lua's,
+    /// a record that can't be read, or an app record older than the theme applied now) is
+    /// lifted at once; for a pause of this computer the request (the paused theme, its target,
+    /// the settings' choice for Windows Terminal's default profile) and its plan, which the UI
+    /// shows before `apply`.
     pub fn theme_resume(&self) -> Result<ResumeOutcome, AppError> {
         let fs = self.sys().fs;
         let paused = read_pause(fs, self.paths())
@@ -463,14 +477,19 @@ impl<M: Machine> Backend<M> {
         let Some(p) = paused else {
             return Ok(ResumeOutcome::NotPaused);
         };
-        match (p.by, p.resume) {
-            (PausedBy::Clink, _) => {
+        let level = p.level(&State::load(fs, &self.paths().state_file()));
+        match (level, p.resume) {
+            (PauseLevel::Cmd, _) => {
                 clear_pause(fs, self.paths())
                     .map_err(|e| AppError::coded("E_DATA_WRITE", e.to_string()))?;
-                self.note_line("resume by=clink");
+                let by = match p.by {
+                    PausedBy::Clink => "clink",
+                    PausedBy::App => "app",
+                };
+                self.note_line(&format!("resume by={by} level=cmd"));
                 Ok(ResumeOutcome::Resumed)
             }
-            (PausedBy::App, Some(r)) if self.find_theme(r.theme_id).is_ok() => {
+            (_, Some(r)) if self.find_theme(r.theme_id).is_ok() => {
                 let request = ApplyRequest {
                     theme_id: r.theme_id,
                     target: r.target,
@@ -483,7 +502,7 @@ impl<M: Machine> Backend<M> {
                     plan: Box::new(plan),
                 })
             }
-            (PausedBy::App, _) => Ok(ResumeOutcome::PickTheme),
+            (_, _) => Ok(ResumeOutcome::PickTheme),
         }
     }
 }
@@ -902,6 +921,134 @@ mod tests {
             CrashCheck::Unreadable { pause: None, .. }
         ));
         assert!(b.sys().autorun.read_user().unwrap().is_some());
+    }
+
+    #[test]
+    fn a_pause_record_older_than_the_theme_applied_now_is_never_retried_and_is_lifted_at_once() {
+        // The user's pause was refused, then the user turned the theme back on (an apply),
+        // and that apply's lift failed at paused.json: the apply stands, with its note, and
+        // the record is older than the theme in use. The next start must not run Revert
+        // everything on a theme the user asked for.
+        let b = backend();
+        assert_eq!(apply_terracotta(&b).0.status, ApplyStatus::Committed);
+        pause_refused(&b);
+        fake_fs(&b).fail_removes_of(b.paths().paused_file());
+        let (done, _) = apply_terracotta(&b);
+        assert_eq!(done.status, ApplyStatus::Committed);
+        assert!(
+            done.notes.iter().any(|n| n.code == "E_DATA_WRITE"),
+            "{:?}",
+            done.notes
+        );
+        fake_fs(&b).stop_failing(b.paths().paused_file());
+        let record = read_pause(b.sys().fs, b.paths()).unwrap().unwrap();
+        assert!(
+            record.at_ms.unwrap() < applied_at(&b),
+            "the record is older than the apply"
+        );
+        let on = b.sys().autorun.read_user().unwrap();
+        assert!(on.is_some(), "the theme is on");
+        // The next start: nothing is reverted, and nothing was tried.
+        assert_eq!(
+            b.crash_check(),
+            CrashCheck::Read {
+                count: 0,
+                paused_now: false,
+                pause: None,
+            }
+        );
+        assert_eq!(
+            b.sys().autorun.read_user().unwrap(),
+            on,
+            "the theme the user turned back on stays"
+        );
+        assert!(
+            fake_fs(&b).exists(&b.paths().paused_file()),
+            "the record is left for the lift"
+        );
+        // The status says a pause in cmd, and so does D12, with the cmd-level words.
+        let paused = b.recovery_status().unwrap().paused.unwrap();
+        assert_eq!(
+            (paused.by, paused.level, paused.reason),
+            (PausedBy::App, PauseLevel::Cmd, Some(PauseReason::User))
+        );
+        let d12 = b
+            .doctor_run()
+            .unwrap()
+            .checks
+            .into_iter()
+            .find(|c| c.id == "D12")
+            .unwrap();
+        assert_eq!(
+            (d12.status, d12.code.as_deref(), d12.fix),
+            (Status::Warn, Some("E_THEME_PAUSED"), Some(FixKind::Resume))
+        );
+        assert!(
+            d12.message_en
+                .starts_with("The theme is paused in cmd only:"),
+            "{d12:?}"
+        );
+        assert!(d12.details.starts_with("paused: cmd only"), "{d12:?}");
+        // "Turn the theme back on" lifts it at once: the theme is on already.
+        assert_eq!(b.theme_resume().unwrap(), ResumeOutcome::Resumed);
+        assert!(!fake_fs(&b).exists(&b.paths().paused_file()));
+        assert!(health_is_empty(&b));
+        assert_eq!(b.sys().autorun.read_user().unwrap(), on);
+        assert_eq!(b.recovery_status().unwrap().paused, None);
+    }
+
+    #[test]
+    fn a_pause_record_at_the_applied_themes_own_time_is_still_retried() {
+        // The boundary of the one rule (`Paused::level`): a record at the apply's own
+        // `applied_at_ms` is "not yet" and is retried; one millisecond before is a pause in
+        // cmd, and nothing is tried.
+        let at_the_apply = |b: &Backend<FakeMachine>, before_ms: u64| {
+            let record = PauseRecord {
+                version: PAUSED_VERSION,
+                reason: PauseReason::User,
+                at: applied_at(b) - before_ms,
+                count: 0,
+                by: PausedBy::App,
+                resume: Some(Resume {
+                    theme_id: terracotta_id(),
+                    target: Target::All,
+                }),
+            };
+            write_pause(b.sys().fs, b.paths(), &record).unwrap();
+        };
+        let b = backend();
+        assert_eq!(apply_terracotta(&b).0.status, ApplyStatus::Committed);
+        at_the_apply(&b, 0);
+        assert_eq!(
+            b.recovery_status().unwrap().paused.unwrap().level,
+            PauseLevel::ComputerNotYet
+        );
+        let check = b.crash_check();
+        assert_eq!(counted(&check), (0, true), "{check:?}");
+        assert_eq!(
+            b.sys().autorun.read_user().unwrap(),
+            None,
+            "the theme is out"
+        );
+        let b = backend();
+        assert_eq!(apply_terracotta(&b).0.status, ApplyStatus::Committed);
+        at_the_apply(&b, 1);
+        assert_eq!(
+            b.recovery_status().unwrap().paused.unwrap().level,
+            PauseLevel::Cmd
+        );
+        assert_eq!(
+            b.crash_check(),
+            CrashCheck::Read {
+                count: 0,
+                paused_now: false,
+                pause: None,
+            }
+        );
+        assert!(
+            b.sys().autorun.read_user().unwrap().is_some(),
+            "the theme is still on"
+        );
     }
 
     #[test]

@@ -117,20 +117,24 @@ pub struct Paused {
 }
 
 /// How far a pause reaches now (recovery spec §4.1): who wrote its record, and for one of the
-/// app's, whether CMD Studio's changes are out, as state.json says. The app's record is written
-/// before Revert everything runs, so it does not say by itself that the theme is out.
+/// app's, whether CMD Studio's changes are out, as state.json says, and whether the record is
+/// as new as the theme applied now. The app's record is written before Revert everything runs,
+/// so it does not say by itself that the theme is out; and an apply that commits keeps its
+/// record when the lift fails, so an older record does not say that a pause is still wanted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum PauseLevel {
-    /// init.lua's pause, or a paused.json that can't be read as a record: cmd loads no theme,
-    /// and nothing on the computer was changed.
+    /// A pause in cmd only: init.lua's, a paused.json that can't be read as a record, or an
+    /// app record older than the theme applied now (an apply after it could not lift it). cmd
+    /// loads no theme while the file is there, and turning the theme back on lifts it; it is
+    /// never a reason to revert.
     Cmd,
     /// A pause of this computer in effect: no theme is applied, CMD Studio's changes are out.
     Computer,
     /// A pause of this computer that has not gone through: a theme is still applied, because
     /// Revert everything was refused or rolled back. cmd loads no theme while the record is
-    /// there, and the app's next start tries the pause again.
+    /// there, and the app tries the pause again the next time it starts.
     ComputerNotYet,
     /// A pause of this computer whose state can't be told: state.json can't be read, so
     /// whether CMD Studio's changes are out is not known. Never taken for one in effect.
@@ -138,7 +142,10 @@ pub enum PauseLevel {
 }
 
 impl Paused {
-    /// How far this pause reaches now, with `state` as `State::load` read it.
+    /// How far this pause reaches now, with `state` as `State::load` read it. The one rule for
+    /// "not yet", which doctor D12 and the app's start go by: an app record whose time is at
+    /// or after the applied theme's `applied_at_ms`. One older than that, or with no time (a
+    /// record that can't be read), is a pause in cmd.
     pub fn level(&self, state: &Result<State, StateError>) -> PauseLevel {
         match (self.by, state) {
             (PausedBy::Clink, _) => PauseLevel::Cmd,
@@ -146,9 +153,13 @@ impl Paused {
             (
                 PausedBy::App,
                 Ok(State {
-                    applied: Some(_), ..
+                    applied: Some(applied),
+                    ..
                 }),
-            ) => PauseLevel::ComputerNotYet,
+            ) => match self.at_ms {
+                Some(at) if at >= applied.applied_at_ms => PauseLevel::ComputerNotYet,
+                _ => PauseLevel::Cmd,
+            },
             (PausedBy::App, Err(_)) => PauseLevel::ComputerUnknown,
         }
     }
@@ -469,6 +480,69 @@ mod tests {
         for state in [&none, &applied, &unreadable] {
             assert_eq!(in_cmd.level(state), PauseLevel::Cmd);
         }
+    }
+
+    #[test]
+    fn an_app_record_older_than_the_theme_applied_now_is_a_pause_in_cmd_never_not_yet() {
+        use crate::state::{Applied, Launch};
+        // An apply that commits keeps its record when its lift fails. That record is older
+        // than the theme in use: it is no reason to revert, only a pause in cmd (init.lua still
+        // loads no theme while the file is there). "Not yet" is a record at or after the
+        // apply, and never one with no time.
+        let applied_at_ms = 1_791_694_709_000;
+        let state: Result<State, StateError> = Ok(State {
+            applied: Some(Applied {
+                theme_id: uuid::Uuid::nil(),
+                theme_name: "Terracotta".to_string(),
+                target: Target::All,
+                set_default: true,
+                launch: Launch::Direct {
+                    exe: PathBuf::from(r"C:\x\clink_x64.exe"),
+                },
+                omp_version: "31.5.0".to_string(),
+                clink_version: "1.9.34".to_string(),
+                generated: Default::default(),
+                wt_font: None,
+                clink_log_len: 0,
+                snapshot_id: "1".to_string(),
+                applied_at_ms,
+            }),
+            ..State::default()
+        });
+        let at = |at_ms: Option<u64>| Paused {
+            by: PausedBy::App,
+            reason: Some(PauseReason::User),
+            at_ms,
+            count: 0,
+            resume: None,
+        };
+        assert_eq!(
+            at(Some(applied_at_ms - 1)).level(&state),
+            PauseLevel::Cmd,
+            "older than the apply"
+        );
+        assert_eq!(at(None).level(&state), PauseLevel::Cmd, "no time");
+        assert_eq!(
+            at(Some(applied_at_ms)).level(&state),
+            PauseLevel::ComputerNotYet,
+            "at the apply's own time"
+        );
+        assert_eq!(
+            at(Some(applied_at_ms + 1)).level(&state),
+            PauseLevel::ComputerNotYet,
+            "after the apply"
+        );
+        // With no theme applied, or a state.json that can't be read, the time says nothing.
+        let none: Result<State, StateError> = Ok(State::default());
+        let unreadable: Result<State, StateError> = Err(StateError::Read("locked".to_string()));
+        assert_eq!(
+            at(Some(applied_at_ms - 1)).level(&none),
+            PauseLevel::Computer
+        );
+        assert_eq!(
+            at(Some(applied_at_ms - 1)).level(&unreadable),
+            PauseLevel::ComputerUnknown
+        );
     }
 
     #[test]
