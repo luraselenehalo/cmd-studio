@@ -1188,52 +1188,42 @@ fn d12(sys: System<'_>, ctx: &Ctx, state: &Result<State, StateError>) -> Check {
 
 /// D12 while the theme is paused: who paused it, why and since when (recovery spec §4.5), and how
 /// far it reaches now ([`Paused::level`]). The app's record is written before Revert everything
-/// runs, so a pause of this computer is said as one that took CMD Studio's changes out only while
-/// no theme is applied. Otherwise the details also come in Thai (`details_th`): they tell the user
-/// that the pause has not gone through, or can't be known to have.
+/// runs, so a pause of this computer is said as a pause, one that took CMD Studio's changes out,
+/// only while no theme is applied: with one applied it is not paused yet, and with a state.json
+/// that can't be read it may be. Then the details also come in Thai (`details_th`). A record
+/// that can't be read is said as such: it may be a damaged or newer one of the app's, so nothing
+/// claims that the computer was left unchanged.
 fn paused_check(p: &Paused, state: &Result<State, StateError>) -> Check {
     let n = p.count;
-    let (th, en) = match (p.by, p.reason) {
-        (PausedBy::Clink, Some(PauseReason::CmdStarts)) => (
-            format!(
-                "ธีมถูกหยุดไว้ใน cmd เพราะ cmd เปิดไม่ถึงพร้อมท์ {n} ครั้งติดกัน \
-                 เปิดธีมกลับได้ที่หน้าแรกของ CMD Studio"
-            ),
-            format!(
-                "The theme is paused in cmd: cmd failed to reach its prompt {n} times in a row. \
-                 Turn it back on from CMD Studio's home page"
-            ),
-        ),
-        (PausedBy::App, Some(PauseReason::ClinkCrash)) => (
-            format!(
-                "CMD Studio หยุดธีมของเครื่องนี้ไว้ เพราะ cmd แครชในส่วนเสริม {n} ครั้ง \
-                 เปิดธีมกลับได้ที่หน้าแรกของ CMD Studio"
-            ),
-            format!(
-                "CMD Studio paused the theme on this computer: cmd crashed in its add-on {n} \
-                 times. Turn it back on from CMD Studio's home page"
-            ),
-        ),
-        (PausedBy::App, Some(PauseReason::Recovery)) => (
-            "CMD Studio หยุดธีมของเครื่องนี้ไว้จากทางลัด CMD Studio Recovery \
-             เปิดธีมกลับได้ที่หน้าแรกของ CMD Studio"
-                .to_string(),
-            "CMD Studio paused the theme on this computer from the CMD Studio Recovery shortcut. \
-             Turn it back on from CMD Studio's home page"
+    let level_now = p.level(state);
+    let (th, en) = match (level_now, p.by, p.reason) {
+        (PauseLevel::ComputerNotYet, _, _) => (
+            "ยังหยุดธีมไม่สำเร็จ: CMD Studio เอาการเปลี่ยนแปลงออกไม่ได้ และจะลองใหม่ตอนเปิดครั้งหน้า".to_string(),
+            "The theme is not paused yet: CMD Studio could not take its changes out and tries \
+             again at the next start"
                 .to_string(),
         ),
-        (PausedBy::App, Some(PauseReason::User)) => (
-            "ธีมของเครื่องนี้ถูกหยุดไว้ตามที่คุณสั่ง เปิดธีมกลับได้ที่หน้าแรกของ CMD Studio".to_string(),
-            "The theme is paused on this computer, as you asked. Turn it back on from CMD \
-             Studio's home page"
+        (PauseLevel::ComputerUnknown, _, _) => (
+            "อาจมีการหยุดธีมของเครื่องนี้อยู่ แต่อ่าน state.json ไม่ได้".to_string(),
+            "A pause of this computer may be in place, but state.json could not be read"
                 .to_string(),
         ),
-        _ => (
-            "ธีมถูกหยุดไว้ เปิดธีมกลับได้ที่หน้าแรกของ CMD Studio".to_string(),
-            "The theme is paused. Turn it back on from CMD Studio's home page".to_string(),
+        (_, _, None) => (
+            "CMD Studio อ่านบันทึกการหยุดธีม (paused.json) ไม่ได้ จึงถือว่าธีมถูกหยุดไว้ใน cmd \
+             การเปิดธีมกลับที่หน้าแรกของ CMD Studio จะยกเลิกการหยุดนี้"
+                .to_string(),
+            "CMD Studio can't read its pause record (paused.json), so it treats the theme as \
+             paused in cmd. Turning the theme back on from CMD Studio's home page lifts it"
+                .to_string(),
         ),
+        (_, by, reason) => paused_words(by, reason, n),
     };
-    let (level, level_th) = match p.level(state) {
+    let (level, level_th) = match level_now {
+        PauseLevel::Cmd if p.reason.is_none() => (
+            "treated as in cmd (the record can't be read: it may be damaged, or written by a \
+             newer CMD Studio)",
+            None,
+        ),
         PauseLevel::Cmd => ("cmd only (nothing on this computer was changed)", None),
         PauseLevel::Computer => ("this computer (CMD Studio took its changes out)", None),
         PauseLevel::ComputerNotYet => (
@@ -1273,6 +1263,51 @@ fn paused_check(p: &Paused, state: &Result<State, StateError>) -> Check {
     );
     found.details_th = details_th.map(|lines| Box::new(lines.join("\n")));
     found
+}
+
+/// D12's words, Thai then English, for a pause that is what its record says: one in cmd, or one
+/// of this computer in effect. `n` is the record's count.
+fn paused_words(by: PausedBy, reason: Option<PauseReason>, n: u32) -> (String, String) {
+    match (by, reason) {
+        (PausedBy::Clink, Some(PauseReason::CmdStarts)) => (
+            format!(
+                "ธีมถูกหยุดไว้ใน cmd เพราะ cmd เปิดไม่ถึงพร้อมท์ {n} ครั้งติดกัน \
+                 เปิดธีมกลับได้ที่หน้าแรกของ CMD Studio"
+            ),
+            format!(
+                "The theme is paused in cmd: cmd failed to reach its prompt {n} times in a row. \
+                 Turn it back on from CMD Studio's home page"
+            ),
+        ),
+        (PausedBy::App, Some(PauseReason::ClinkCrash)) => (
+            format!(
+                "CMD Studio หยุดธีมของเครื่องนี้ไว้ เพราะ cmd แครชในส่วนเสริม {n} ครั้ง \
+                 เปิดธีมกลับได้ที่หน้าแรกของ CMD Studio"
+            ),
+            format!(
+                "CMD Studio paused the theme on this computer: cmd crashed in its add-on {n} \
+                 times. Turn it back on from CMD Studio's home page"
+            ),
+        ),
+        (PausedBy::App, Some(PauseReason::Recovery)) => (
+            "CMD Studio หยุดธีมของเครื่องนี้ไว้จากทางลัด CMD Studio Recovery \
+             เปิดธีมกลับได้ที่หน้าแรกของ CMD Studio"
+                .to_string(),
+            "CMD Studio paused the theme on this computer from the CMD Studio Recovery shortcut. \
+             Turn it back on from CMD Studio's home page"
+                .to_string(),
+        ),
+        (PausedBy::App, Some(PauseReason::User)) => (
+            "ธีมของเครื่องนี้ถูกหยุดไว้ตามที่คุณสั่ง เปิดธีมกลับได้ที่หน้าแรกของ CMD Studio".to_string(),
+            "The theme is paused on this computer, as you asked. Turn it back on from CMD \
+             Studio's home page"
+                .to_string(),
+        ),
+        _ => (
+            "ธีมถูกหยุดไว้ เปิดธีมกลับได้ที่หน้าแรกของ CMD Studio".to_string(),
+            "The theme is paused. Turn it back on from CMD Studio's home page".to_string(),
+        ),
+    }
 }
 
 /// What doctor finds wrong with CMD Studio's restore points, one entry for each problem, read
@@ -2744,7 +2779,9 @@ mod tests {
              since: 2026-10-11T04:58:29Z"
         );
         assert!(m.event_log.asked().is_empty());
-        // The app's pause of this computer, for each of its reasons, and a record it can't read.
+        // The app's pause of this computer in effect (it took the theme out: no theme is
+        // applied), for each of its reasons, and a record it can't read.
+        let (m, ctx) = machine();
         for (text, says) in [
             (
                 r#"{"version":1,"reason":"clinkCrash","at":1,"count":4,"by":"app"}"#,
@@ -2758,9 +2795,9 @@ mod tests {
                 r#"{"version":1,"reason":"recovery","at":1,"count":0,"by":"app"}"#,
                 "CMD Studio Recovery shortcut",
             ),
-            ("{ not json", "The theme is paused. Turn it back on"),
+            ("{ not json", "can't read its pause record"),
         ] {
-            m.fs.put(&pause, text);
+            m.fs.put(ctx.paths.paused_file(), text);
             let d12 = by_id(&run(&m, &ctx), "D12");
             assert_eq!(
                 (d12.status, d12.code),
@@ -2769,13 +2806,6 @@ mod tests {
             );
             assert!(d12.message_en.contains(says), "{text}: {d12:?}");
         }
-        // A pause of this computer took the theme out: no theme is applied, and it is said.
-        let (m, ctx) = machine();
-        m.fs.put(
-            ctx.paths.paused_file(),
-            br#"{"version":1,"reason":"user","at":1,"count":0,"by":"app"}"#,
-        );
-        assert_eq!(by_id(&run(&m, &ctx), "D12").code, Some("E_THEME_PAUSED"));
     }
 
     #[test]
@@ -2831,6 +2861,84 @@ mod tests {
              since: 2026-10-11T04:58:29Z"
         );
         assert_eq!(d12.details_th, None, "{d12:?}");
+    }
+
+    #[test]
+    fn d12_says_each_level_of_pause_plainly_in_both_languages() {
+        let user = br#"{"version":1,"reason":"user","at":1791694709000,"count":0,"by":"app"}"#;
+        let messages = |c: &Check| (c.message_en.clone(), c.message_th.clone());
+        // Not paused yet: a theme is still applied.
+        let (m, ctx) = themed(Target::All);
+        m.fs.put(ctx.paths.paused_file(), user);
+        let d12 = by_id(&run(&m, &ctx), "D12");
+        assert_eq!(
+            (d12.status, d12.code),
+            (Status::Warn, Some("E_THEME_PAUSED"))
+        );
+        assert_eq!(
+            messages(&d12),
+            (
+                "The theme is not paused yet: CMD Studio could not take its changes out and \
+                 tries again at the next start"
+                    .to_string(),
+                "ยังหยุดธีมไม่สำเร็จ: CMD Studio เอาการเปลี่ยนแปลงออกไม่ได้ และจะลองใหม่ตอนเปิดครั้งหน้า"
+                    .to_string()
+            )
+        );
+        // Not known: state.json can't be read.
+        m.fs.fail_reads_of(ctx.paths.state_file());
+        let d12 = by_id(&run(&m, &ctx), "D12");
+        assert_eq!(d12.code, Some("E_THEME_PAUSED"));
+        assert_eq!(
+            messages(&d12),
+            (
+                "A pause of this computer may be in place, but state.json could not be read"
+                    .to_string(),
+                "อาจมีการหยุดธีมของเครื่องนี้อยู่ แต่อ่าน state.json ไม่ได้".to_string()
+            )
+        );
+        // In effect: no theme is applied, and the pause is said as before.
+        let (m, ctx) = machine();
+        m.fs.put(ctx.paths.paused_file(), user);
+        let d12 = by_id(&run(&m, &ctx), "D12");
+        assert_eq!(
+            d12.message_en,
+            "The theme is paused on this computer, as you asked. Turn it back on from CMD \
+             Studio's home page"
+        );
+        // A record that can't be read may be a damaged or newer one of the app's: never
+        // "nothing on this computer was changed", with a theme applied or not.
+        for (m, ctx) in [themed(Target::All), machine()] {
+            m.fs.put(ctx.paths.paused_file(), b"{ not json");
+            let d12 = by_id(&run(&m, &ctx), "D12");
+            assert_eq!(
+                (d12.status, d12.code),
+                (Status::Warn, Some("E_THEME_PAUSED"))
+            );
+            assert_eq!(
+                messages(&d12),
+                (
+                    "CMD Studio can't read its pause record (paused.json), so it treats the \
+                     theme as paused in cmd. Turning the theme back on from CMD Studio's home \
+                     page lifts it"
+                        .to_string(),
+                    "CMD Studio อ่านบันทึกการหยุดธีม (paused.json) ไม่ได้ จึงถือว่าธีมถูกหยุดไว้ใน cmd \
+                     การเปิดธีมกลับที่หน้าแรกของ CMD Studio จะยกเลิกการหยุดนี้"
+                        .to_string()
+                )
+            );
+            assert!(
+                !d12.details.contains("nothing on this computer was changed"),
+                "{d12:?}"
+            );
+            assert!(
+                d12.details.starts_with(
+                    "paused: treated as in cmd (the record can't be read: it may be damaged, \
+                     or written by a newer CMD Studio)\n"
+                ),
+                "{d12:?}"
+            );
+        }
     }
 
     #[test]
