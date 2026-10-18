@@ -21,8 +21,10 @@ local function step(name)
   say("order " .. seq .. " " .. name)
 end
 -- S1, S4, S5: the process id, the host program, the clock, Oh My Posh's priority variable.
+-- os.getenv of an unset variable returns no value in Clink 1.9.34, and tostring() of no value
+-- raises: the extra parentheses make it nil.
 say("load host=" .. tostring(host) .. " time=" .. tostring(os.time()) ..
-  " zl=" .. tostring(os.getenv("_ZL_CLINK_PROMPT_PRIORITY")))
+  " zl=" .. tostring((os.getenv("_ZL_CLINK_PROMPT_PRIORITY"))))
 say("api getpid=" .. type(os.getpid) .. " gethost=" .. type(os.gethost) .. " globfiles=" ..
   type(os.globfiles) .. " find_files=" .. type(clink.find_files) .. " promptfilter=" ..
   type(clink.promptfilter) .. " onbeginedit=" .. type(clink.onbeginedit) .. " onendedit=" ..

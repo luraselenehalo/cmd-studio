@@ -12,6 +12,7 @@ $changers = [ordered]@{
   'font-persist.ps1' = @(); 'thai-prefs.ps1' = @(); 'run-ci-probe.ps1' = @('-Probe', 'fonts')
   'add-thai-user.ps1' = @(); 'phase1b-check.ps1' = @('-Step', 'Snapshot')
   'recovery-setup.ps1' = @(); 'recovery-crash.ps1' = @('-Swap'); 'recovery-timing.ps1' = @(); 'recovery-cmdc.ps1' = @()
+  'recovery-s6b.ps1' = @('-Setup')
 }
 
 function Run-Guest($script, [string[]] $argv, $computer, $localAppData) {
