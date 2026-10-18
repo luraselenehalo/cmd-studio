@@ -15,6 +15,9 @@ import { describe, expect, it, vi } from "vitest";
 import type { AppSettings } from "./bindings/AppSettings";
 import type { ApplyOutcome } from "./bindings/ApplyOutcome";
 import type { ApplyRequest } from "./bindings/ApplyRequest";
+import type { AppError } from "./bindings/AppError";
+import type { PauseInfo } from "./bindings/PauseInfo";
+import type { RevertOutcome } from "./bindings/RevertOutcome";
 import type { SystemReport } from "./bindings/SystemReport";
 import { App } from "./App";
 import { Wizard } from "./screens/Wizard";
@@ -858,6 +861,376 @@ describe("Help through the final shell", () => {
   });
 });
 
+describe("the theme's pause", () => {
+  const PAUSED_AT = 1791694709000;
+  /** The theme paused in cmd by init.lua after three windows in a row (recovery spec §3). */
+  const PAUSED_IN_CMD: PauseInfo = { by: "clink", level: "cmd", reason: "cmdStarts", atMs: PAUSED_AT, count: 3, resume: null };
+
+  /** Terracotta applied before the app mounts, then paused in cmd. */
+  const pausedInCmd = async (m: MockIpc) => {
+    await applyIn(m, "Terracotta");
+    m.state.paused = structuredClone(PAUSED_IN_CMD);
+  };
+
+  /** Terracotta applied, then the given pause (an apply lifts any pause, so the pause comes last). */
+  const pausedWith = (paused: PauseInfo) => async (m: MockIpc) => {
+    await applyIn(m, "Terracotta");
+    m.state.paused = structuredClone(paused);
+  };
+
+  /** The theme a pause of this computer applies again. */
+  const resumeTerracotta = () => ({ themeId: presetId("Terracotta"), target: "all" as const, themeName: "Terracotta" });
+
+  const appError = (code: string): AppError => ({ code, messageTh: `(${code})`, messageEn: `(${code})`, details: `why ${code}` });
+  const committed: RevertOutcome = { ok: true, steps: [], notes: [], status: "committed", error: null, unrestored: [] };
+  const rolledBack: RevertOutcome = { ok: false, steps: [], notes: [], status: "rolledBack", error: appError("E_AUTORUN_WRITE"), unrestored: [] };
+
+  /** The words of the pause that did not go through (ruling R3), and the banner's (ruling R2). */
+  const NOT_YET_DIALOG =
+    "The theme is paused in cmd only for now: CMD Studio could not take its changes out of this computer, and tries again the next time the CMD Studio app starts.";
+  const NOT_YET_BANNER =
+    "It is paused in cmd only for now, not yet on this computer: CMD Studio could not take its changes out, and tries again the next time the CMD Studio app starts.";
+
+  /** The banner, found by its heading. */
+  const banner = async () => (await screen.findByRole("heading", { name: "The theme is paused" })).closest(".card") as HTMLElement;
+
+  it("says on Home that cmd paused the theme, and turns it back on in one click (criterion 1)", async () => {
+    const { ipc, user } = await home({}, pausedInCmd);
+    const card = await banner();
+    expect(within(card).getByText("cmd failed to reach its prompt 3 times in a row, so CMD Studio paused the theme in cmd.")).toBeTruthy();
+    expect(within(card).getByText(/^Since /)).toBeTruthy();
+    expect(within(card).getByText("Only cmd windows open without it: nothing on this computer was changed.")).toBeTruthy();
+    expect(within(card).getByRole("button", { name: "Undo everything" })).toBeTruthy();
+    expect(within(card).getByRole("button", { name: "Report a problem" })).toBeTruthy();
+    // No "Pause the theme" while it is paused.
+    expect(screen.queryByRole("button", { name: "Pause the theme" })).toBeNull();
+    await user.click(within(card).getByRole("button", { name: "Turn the theme back on" }));
+    expect(await screen.findByText("The theme is back on. Open a new cmd window to see it.")).toBeTruthy();
+    await waitFor(() => expect(screen.queryByRole("heading", { name: "The theme is paused" })).toBeNull());
+    expect(ipc.state.paused).toBeNull();
+    // Nothing on the computer was changed: no apply besides the one before the app started.
+    expect(ipc.state.calls.filter((c) => c === "apply")).toHaveLength(1);
+    expect(await screen.findByRole("button", { name: "Pause the theme" })).toBeTruthy();
+  });
+
+  it("pauses the theme on this computer after asking, and turns it back on through the plan", async () => {
+    const { ipc, user } = await home({}, (m) => applyIn(m, "Terracotta"));
+    const active = (await screen.findByRole("heading", { name: "Theme in use" })).closest(".card") as HTMLElement;
+    await user.click(await within(active).findByRole("button", { name: "Pause the theme" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(
+      within(dialog).getByText(
+        "CMD Studio takes its changes out of this computer, so cmd windows open without the theme. You can turn it back on from the home page at any time.",
+      ),
+    ).toBeTruthy();
+    expect(ipc.state.calls.some((c) => c.startsWith("themePause"))).toBe(false);
+    await user.click(within(dialog).getByRole("button", { name: "Pause the theme" }));
+    expect(await within(dialog).findByText("The theme is paused: cmd windows open without it.")).toBeTruthy();
+    expect(ipc.state.calls).toContain("themePause:user");
+    expect(ipc.state.applied).toBeNull();
+    await user.click(within(dialog).getByRole("button", { name: "Close" }));
+    const card = await banner();
+    expect(within(card).getByText("You paused the theme.")).toBeTruthy();
+    expect(within(card).getByText("CMD Studio took its changes out of this computer. Turning it back on applies Terracotta again.")).toBeTruthy();
+    expect(within(card).queryByRole("button", { name: "Undo everything" })).toBeNull();
+    // Focus is on Home's heading, not on the page's body: the button that opened the dialog went.
+    expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Home" }));
+    await user.click(within(card).getByRole("button", { name: "Turn the theme back on" }));
+    const plan = await screen.findByRole("dialog");
+    await user.click(await within(plan).findByRole("button", { name: "Apply" }));
+    expect(await within(plan).findByText(/Theme "Terracotta" applied/)).toBeTruthy();
+    expect(ipc.state.applied?.theme.name).toBe("Terracotta");
+    expect(ipc.state.paused).toBeNull();
+    await user.click(within(plan).getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(screen.queryByRole("heading", { name: "The theme is paused" })).toBeNull());
+  });
+
+  it("does not leave the line that the theme is back on beside a new pause", async () => {
+    const { user } = await home({}, pausedInCmd);
+    await user.click(within(await banner()).getByRole("button", { name: "Turn the theme back on" }));
+    expect(await screen.findByText("The theme is back on. Open a new cmd window to see it.")).toBeTruthy();
+    await user.click(await screen.findByRole("button", { name: "Pause the theme" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Pause the theme" }));
+    await within(dialog).findByText("The theme is paused: cmd windows open without it.");
+    await user.click(within(dialog).getByRole("button", { name: "Close" }));
+    await banner();
+    expect(screen.queryByText("The theme is back on. Open a new cmd window to see it.")).toBeNull();
+  });
+
+  it("takes the user to the Themes page when the paused theme is no longer there", async () => {
+    const gone: PauseInfo = {
+      by: "app",
+      level: "computer",
+      reason: "clinkCrash",
+      atMs: PAUSED_AT,
+      count: 3,
+      resume: { themeId: "00000000-0000-4000-8000-000000000000", target: "all", themeName: null },
+    };
+    const { user } = await home({ paused: gone });
+    const card = await banner();
+    expect(within(card).getByText("cmd crashed in its add-on 3 times, so CMD Studio paused the theme.")).toBeTruthy();
+    expect(
+      within(card).getByText("CMD Studio took its changes out of this computer. Turning it back on takes you to the Themes page to choose a theme."),
+    ).toBeTruthy();
+    await user.click(within(card).getByRole("button", { name: "Turn the theme back on" }));
+    expect(await screen.findByRole("heading", { name: "Themes" })).toBeTruthy();
+  });
+
+  it("takes Undo everything of a pause in cmd to Help, and the pause goes with the theme", async () => {
+    const { ipc, user } = await home({}, pausedInCmd);
+    await user.click(within(await banner()).getByRole("button", { name: "Undo everything" }));
+    expect(await screen.findByRole("button", { name: "Undo everything", pressed: true })).toBeTruthy();
+    const action = (await screen.findAllByRole("button", { name: "Undo everything" })).find((b) => !b.closest('[role="group"]'))!;
+    await user.click(action);
+    await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Undo everything" }));
+    expect(await screen.findByText("Done: everything CMD Studio changed is back as it was.")).toBeTruthy();
+    expect(ipc.state.paused).toBeNull();
+  });
+
+  it("takes Report a problem of the banner to Help's report", async () => {
+    const { user } = await home({}, pausedInCmd);
+    await user.click(within(await banner()).getByRole("button", { name: "Report a problem" }));
+    expect(await screen.findByRole("button", { name: "Report a problem", pressed: true })).toBeTruthy();
+  });
+
+  it("says when whether the theme is paused could not be read, and the rest of Home is still there", async () => {
+    await home({ failRecoveryWith: "E_MACHINE_READ" }, (m) => applyIn(m, "Terracotta"));
+    expect(await screen.findByText("Whether the theme is paused could not be read")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Theme in use" })).toBeTruthy();
+    // Not known, so no Pause: it could pause a theme that is paused already.
+    expect(screen.queryByRole("button", { name: "Pause the theme" })).toBeNull();
+  });
+
+  it("offers on the health check to pause after cmd crashed in its add-on, and to turn back on while paused", async () => {
+    const { ipc, user } = await home({ cmdCrashes: 2 }, (m) => applyIn(m, "Terracotta"));
+    await open(user, "Help");
+    await screen.findByText(/D12/);
+    await user.click(await screen.findByRole("button", { name: "Pause the theme" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Pause the theme" }));
+    expect(await within(dialog).findByText("The theme is paused: cmd windows open without it.")).toBeTruthy();
+    expect(ipc.state.calls).toContain("themePause:clinkCrash");
+    await user.click(within(dialog).getByRole("button", { name: "Close" }));
+    // Checked again: D12 says it is paused, and turning it back on goes through the plan.
+    await user.click(await screen.findByRole("button", { name: "Turn the theme back on" }));
+    const plan = await screen.findByRole("dialog");
+    expect(await within(plan).findByRole("button", { name: "Apply" })).toBeTruthy();
+  });
+
+  it("reads Home again when the start's crash check paused the theme while Home was reading", async () => {
+    const { ipc } = await home({ cmdCrashes: 3 }, (m) => applyIn(m, "Terracotta"));
+    const card = await banner();
+    expect(within(card).getByText("cmd crashed in its add-on 3 times, so CMD Studio paused the theme.")).toBeTruthy();
+    expect(within(card).getByText("CMD Studio took its changes out of this computer. Turning it back on applies Terracotta again.")).toBeTruthy();
+    // What Home read before the pause is out of date: it reads again, and no theme is applied now.
+    expect(await screen.findByText("No theme is applied yet.")).toBeTruthy();
+    expect(ipc.state.applied).toBeNull();
+    expect(ipc.state.calls.filter((c) => c === "themesList").length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("reads Home again once, never in a loop (R5)", async () => {
+    const { ipc } = await home({ cmdCrashes: 3 }, (m) => applyIn(m, "Terracotta"));
+    await banner();
+    for (let i = 0; i < 3; i++) await settle();
+    expect(ipc.state.calls.filter((c) => c === "themesList")).toHaveLength(2);
+    expect(ipc.state.calls.filter((c) => c === "recoveryStatus")).toHaveLength(2);
+  });
+
+  it("says a pause that has not gone through as in cmd only for now, and offers no Pause (ruling R2)", async () => {
+    const notYet: PauseInfo = { by: "app", level: "computerNotYet", reason: "user", atMs: PAUSED_AT, count: 0, resume: resumeTerracotta() };
+    await home({}, pausedWith(notYet));
+    const card = await banner();
+    expect(within(card).getByText("You paused the theme.")).toBeTruthy();
+    expect(within(card).getByText(NOT_YET_BANNER)).toBeTruthy();
+    expect(within(card).queryByRole("button", { name: "Undo everything" })).toBeNull();
+    // Terracotta is still the theme in use, and "Pause the theme" is not offered again.
+    expect(screen.getByRole("heading", { name: "Theme in use" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Pause the theme" })).toBeNull();
+  });
+
+  it("says the not-yet banner in Thai", async () => {
+    const notYet: PauseInfo = { by: "app", level: "computerNotYet", reason: "user", atMs: PAUSED_AT, count: 0, resume: resumeTerracotta() };
+    await home({ settings: { language: "th" } }, pausedWith(notYet));
+    const card = (await screen.findByRole("heading", { name: "ธีมถูกหยุดไว้" })).closest(".card") as HTMLElement;
+    expect(within(card).getByText("คุณหยุดธีมไว้")).toBeTruthy();
+    expect(
+      within(card).getByText(
+        "ตอนนี้หยุดธีมไว้ใน cmd เท่านั้น ยังหยุดทั้งเครื่องไม่สำเร็จ CMD Studio เอาการเปลี่ยนแปลงออกไม่ได้ และจะลองใหม่ตอนเปิดแอป CMD Studio ครั้งหน้า",
+      ),
+    ).toBeTruthy();
+    expect(within(card).getByRole("button", { name: "เปิดธีมกลับ" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "หยุดธีม" })).toBeNull();
+  });
+
+  it("says a pause record that cannot be read, and that turning it back on only removes it", async () => {
+    const unreadable: PauseInfo = { by: "clink", level: "cmd", reason: null, atMs: null, count: 0, resume: null };
+    const { ipc, user } = await home({}, pausedWith(unreadable));
+    const card = await banner();
+    expect(
+      within(card).getByText("CMD Studio's note of the pause can't be read; cmd windows open without the theme until it is turned back on."),
+    ).toBeTruthy();
+    expect(within(card).getByText("Turning it back on only removes the note: it applies no theme.")).toBeTruthy();
+    // Neither a time nor "nothing was changed": nothing of it is known.
+    expect(within(card).queryByText(/^Since /)).toBeNull();
+    expect(within(card).queryByText(/nothing on this computer was changed/)).toBeNull();
+    expect(within(card).getByRole("button", { name: "Undo everything" })).toBeTruthy();
+    await user.click(within(card).getByRole("button", { name: "Turn the theme back on" }));
+    expect(await screen.findByText("The theme is back on. Open a new cmd window to see it.")).toBeTruthy();
+    // Lifted at once: no plan, no apply.
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(ipc.state.paused).toBeNull();
+    expect(ipc.state.calls.filter((c) => c === "planApply")).toHaveLength(1);
+    expect(ipc.state.calls.filter((c) => c === "apply")).toHaveLength(1);
+  });
+
+  it("never says 0 times or 1 times for the crashes that paused the theme", async () => {
+    const crashes = (count: number): PauseInfo => ({ by: "app", level: "computer", reason: "clinkCrash", atMs: PAUSED_AT, count, resume: resumeTerracotta() });
+    const words = [
+      [0, "cmd crashed in its add-on, so CMD Studio paused the theme."],
+      [1, "cmd crashed in its add-on once, so CMD Studio paused the theme."],
+      [3, "cmd crashed in its add-on 3 times, so CMD Studio paused the theme."],
+    ] as const;
+    for (const [count, text] of words) {
+      const { view } = await home({ paused: crashes(count) });
+      const card = await banner();
+      expect(within(card).getByText(text)).toBeTruthy();
+      expect(card.textContent).not.toMatch(/\b[01] times\b/);
+      view.unmount();
+    }
+  });
+
+  it("turns an older app record back on at once, and never names the theme it noted", async () => {
+    // An app record older than the theme in use: a theme was applied after it, and its lift failed.
+    const older: PauseInfo = { by: "app", level: "cmd", reason: "user", atMs: PAUSED_AT, count: 0, resume: resumeTerracotta() };
+    const { ipc, user } = await home({}, pausedWith(older));
+    const card = await banner();
+    expect(
+      within(card).getByText(
+        "A theme was applied after this pause, but the pause could not be lifted, so cmd windows still open without it. Turning it back on lifts the pause.",
+      ),
+    ).toBeTruthy();
+    expect(card.textContent).not.toContain("Terracotta");
+    expect(within(card).queryByRole("button", { name: "Undo everything" })).toBeNull();
+    await user.click(within(card).getByRole("button", { name: "Turn the theme back on" }));
+    expect(await screen.findByText("The theme is back on. Open a new cmd window to see it.")).toBeTruthy();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(ipc.state.paused).toBeNull();
+    expect(ipc.state.calls.filter((c) => c === "apply")).toHaveLength(1);
+    await waitFor(() => expect(screen.queryByRole("heading", { name: "The theme is paused" })).toBeNull());
+  });
+
+  it("says when whether CMD Studio's changes are out could not be read", async () => {
+    const unknown: PauseInfo = { by: "app", level: "computerUnknown", reason: "user", atMs: PAUSED_AT, count: 0, resume: resumeTerracotta() };
+    await home({}, pausedWith(unknown));
+    const card = await banner();
+    expect(within(card).getByText("You paused the theme.")).toBeTruthy();
+    expect(
+      within(card).getByText("A pause of this computer may be in place, but CMD Studio could not read whether its changes are out (state.json)."),
+    ).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Pause the theme" })).toBeNull();
+  });
+
+  it("says a pause that was refused as in cmd only for now, with why, and the banner says it after Close", async () => {
+    const { ipc, user } = await home({ failPause: "refused" }, (m) => applyIn(m, "Terracotta"));
+    await user.click(await screen.findByRole("button", { name: "Pause the theme" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Pause the theme" }));
+    expect(await within(dialog).findByText(NOT_YET_DIALOG)).toBeTruthy();
+    expect(within(dialog).getByText("(E_BUSY)")).toBeTruthy();
+    expect(within(dialog).queryByText("The theme is paused: cmd windows open without it.")).toBeNull();
+    // Nothing was taken out of this computer.
+    expect(ipc.state.applied).not.toBeNull();
+    await user.click(within(dialog).getByRole("button", { name: "Close" }));
+    const card = await banner();
+    expect(within(card).getByText("You paused the theme.")).toBeTruthy();
+    expect(within(card).getByText(NOT_YET_BANNER)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Pause the theme" })).toBeNull();
+  });
+
+  it("says a pause whose note could not be saved: the changes are out, and applying again turns it back on", async () => {
+    const { ipc, user } = await home({ failPause: "notSaved" }, (m) => applyIn(m, "Terracotta"));
+    await user.click(await screen.findByRole("button", { name: "Pause the theme" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Pause the theme" }));
+    expect(
+      await within(dialog).findByText(
+        "CMD Studio took its changes out, but could not note the pause: to turn the theme back on, apply it again from the Themes page.",
+      ),
+    ).toBeTruthy();
+    expect(within(dialog).getByText("(E_DATA_WRITE)")).toBeTruthy();
+    await user.click(within(dialog).getByRole("button", { name: "Close" }));
+    // Nothing is noted, so no banner: the theme is simply out.
+    expect(await screen.findByText("No theme is applied yet.")).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "The theme is paused" })).toBeNull();
+    expect(ipc.state.paused).toBeNull();
+  });
+
+  it("shows at once a pause the start tried that did not go through, and reads Home no more than the once", async () => {
+    const notYet: PauseInfo = { by: "app", level: "computerNotYet", reason: "clinkCrash", atMs: PAUSED_AT, count: 3, resume: resumeTerracotta() };
+    const { ipc } = await home(
+      { crashCheck: { kind: "read", count: 3, pausedNow: false, pause: { pausedNow: false, revert: null, refused: appError("E_BUSY"), notSaved: null } } },
+      pausedWith(notYet),
+    );
+    const card = await banner();
+    expect(within(card).getByText("cmd crashed in its add-on 3 times, so CMD Studio paused the theme.")).toBeTruthy();
+    expect(within(card).getByText(NOT_YET_BANNER)).toBeTruthy();
+    const tried = (await screen.findByText("When CMD Studio started, it tried to pause the theme on this computer:")).closest(".card") as HTMLElement;
+    expect(within(tried).getByText(NOT_YET_DIALOG)).toBeTruthy();
+    expect(within(tried).getByText("(E_BUSY)")).toBeTruthy();
+    await settle();
+    expect(ipc.state.calls.filter((c) => c === "themesList")).toHaveLength(1);
+  });
+
+  it("shows a start pause whose note was not saved, by whether the theme is out", async () => {
+    const notSaved = (revert: RevertOutcome) => ({
+      kind: "read" as const,
+      count: 3,
+      pausedNow: false,
+      pause: { pausedNow: false, revert, refused: null, notSaved: appError("E_DATA_WRITE") },
+    });
+    // The theme is out and nothing is noted: said, since no banner says why.
+    let mounted = await home({ crashCheck: notSaved(committed) });
+    const out = (await screen.findByText("When CMD Studio started, it tried to pause the theme on this computer:")).closest(".card") as HTMLElement;
+    expect(
+      within(out).getByText("CMD Studio took its changes out, but could not note the pause: to turn the theme back on, apply it again from the Themes page."),
+    ).toBeTruthy();
+    expect(within(out).getByText("(E_DATA_WRITE)")).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "The theme is paused" })).toBeNull();
+    expect(mounted.ipc.state.calls.filter((c) => c === "themesList")).toHaveLength(1);
+    mounted.view.unmount();
+    // Nothing was taken out and nothing is noted: cmd still opens with the theme.
+    mounted = await home({ crashCheck: notSaved(rolledBack) }, (m) => applyIn(m, "Terracotta"));
+    const failed = (await screen.findByText("When CMD Studio started, it tried to pause the theme on this computer:")).closest(".card") as HTMLElement;
+    expect(
+      within(failed).getByText(
+        "The theme could not be paused: CMD Studio could not note the pause or take its changes out, so cmd windows still open with it.",
+      ),
+    ).toBeTruthy();
+    expect(mounted.ipc.state.calls.filter((c) => c === "themesList")).toHaveLength(1);
+  });
+
+  it("reads Home again once for a start pause that took the theme out and was not saved, and says nothing while the theme still reads as applied", async () => {
+    const { ipc } = await home(
+      { crashCheck: { kind: "read", count: 3, pausedNow: false, pause: { pausedNow: false, revert: committed, refused: null, notSaved: appError("E_DATA_WRITE") } } },
+      (m) => applyIn(m, "Terracotta"),
+    );
+    await screen.findByRole("heading", { name: "Theme in use" });
+    for (let i = 0; i < 3; i++) await settle();
+    // The mock keeps Terracotta applied (it was given the check, not run it): once, never in a loop.
+    expect(ipc.state.calls.filter((c) => c === "themesList")).toHaveLength(2);
+    expect(screen.queryByText("When CMD Studio started, it tried to pause the theme on this computer:")).toBeNull();
+  });
+
+  it("asks for the pause once, never on a timer, while the start's crash check has not finished (R8)", async () => {
+    const { ipc } = await home({ crashCheck: null }, (m) => applyIn(m, "Terracotta"));
+    expect(await screen.findByRole("heading", { name: "Theme in use" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "Pause the theme" })).toBeTruthy();
+    for (let i = 0; i < 10; i++) await settle();
+    expect(ipc.state.calls.filter((c) => c === "recoveryStatus")).toHaveLength(1);
+  });
+});
+
 describe("accessibility", () => {
   /** Every button has a name: its label, the text it is labelled by, or its own text. */
   function expectNamedButtons(where: string) {
@@ -967,4 +1340,26 @@ describe("accessibility", () => {
     },
     60000,
   );
+
+  it("names every button of the pause banner and its dialogs, in English and in Thai", async () => {
+    for (const language of ["en", "th"] as Language[]) {
+      const d = language === "th" ? th : en;
+      const { user, view } = await home({ settings: { language } }, (m) => applyIn(m, "Terracotta"));
+      await user.click(await screen.findByRole("button", { name: d["home.active.pause"] }));
+      const dialog = await screen.findByRole("dialog");
+      expectNamedButtons(`${language}: the pause dialog`);
+      await user.click(within(dialog).getByRole("button", { name: d["pause.button"] }));
+      await within(dialog).findByText(d["pause.done"]);
+      expectNamedButtons(`${language}: the pause dialog, done`);
+      await user.click(within(dialog).getByRole("button", { name: d["a11y.closeDialog"] }));
+      await screen.findByRole("heading", { name: d["home.paused.title"] });
+      await settle();
+      expectNamedButtons(`${language}: Home, paused`);
+      await user.click(screen.getByRole("button", { name: d["resume.button"] }));
+      const plan = await screen.findByRole("dialog");
+      await within(plan).findByRole("button", { name: d["apply.start"] });
+      expectNamedButtons(`${language}: the plan that turns the theme back on`);
+      view.unmount();
+    }
+  });
 });

@@ -3,7 +3,11 @@
 // used most recently (through the plan, as every apply), and the latest restore point. A line is
 // kept for Phase 4's "Updated to vX" notice (`home.update.placeholder`). Each part loads on its
 // own, so one that fails is said and the others still show; a state.json that could not be read
-// is said as such, never as "no theme is applied" (spec §5.8 D9).
+// is said as such, never as "no theme is applied" (spec §5.8 D9). While the theme is paused a
+// banner says why, since when and how far it reaches, with "Turn the theme back on"; under the
+// theme in use, "Pause the theme" asks first (recovery spec §4.2). A pause the start tried that did
+// not go through is shown at once, and a start that took the theme out while this page was reading
+// makes it read again, once (§4.3). The pause is asked for once, never on a timer.
 import { useEffect, useRef, useState } from "react";
 import type { ApplyRequest } from "../bindings/ApplyRequest";
 import type { PreviewResult } from "../bindings/PreviewResult";
@@ -13,6 +17,7 @@ import type { ThemeSummary } from "../bindings/ThemeSummary";
 import { ApplyFlow } from "../components/ApplyFlow";
 import { Dialog } from "../components/Dialog";
 import { ErrorNotice } from "../components/Notices";
+import { PausedBanner, PauseResult, usePause, useResume } from "../components/Pause";
 import { TerminalPreview } from "../components/TerminalPreview";
 import { formatTime, useI18n } from "../i18n";
 import { useIpc } from "../ipc/context";
@@ -51,6 +56,7 @@ function useRead<T>(read: (ipc: Ipc) => Promise<T>, version: number): { value: T
 const readLibrary = (ipc: Ipc) => ipc.themesList();
 const readChecks = (ipc: Ipc) => ipc.doctorRun();
 const readPoints = (ipc: Ipc) => ipc.snapshotsList();
+const readRecovery = (ipc: Ipc) => ipc.recoveryStatus();
 
 export function Home() {
   const ipc = useIpc();
@@ -60,6 +66,7 @@ export function Home() {
   const library = useRead(readLibrary, version);
   const checks = useRead(readChecks, version);
   const points = useRead(readPoints, version);
+  const recovery = useRead(readRecovery, version);
   const [preview, setPreview] = useState<{ theme: Theme; result: PreviewResult | null } | null>(null);
   const [previewError, setPreviewError] = useState<unknown>(null);
   /** `system_detect` failed for the preview, which then uses the core's sample. */
@@ -72,9 +79,38 @@ export function Home() {
   const applies = useRef(0);
   const heading = useRef<HTMLHeadingElement>(null);
   const closing = useRef(false);
+  const pause = usePause(heading);
+  const resume = useResume(heading);
 
   const lib = library.value;
   const appliedId = lib?.applied?.themeId ?? null;
+  const paused = recovery.value?.paused ?? null;
+  // The pause the start's crash check tried, when it tried one (§4.3).
+  const crashes = recovery.value?.crashes ?? null;
+  const startPause = crashes && crashes.kind !== "noTheme" ? crashes.pause : null;
+  const startTookThemeOut = startPause?.revert?.status === "committed";
+
+  // The start's crash check took the theme out of this computer while this page was reading: what
+  // it read before says a theme is applied, so it reads again, once. It is decided on the first
+  // answers only (the reads that follow are the right ones), so it is never a loop.
+  const decidedReread = useRef(false);
+  useEffect(() => {
+    if (decidedReread.current || lib === null || recovery.value === null) return;
+    decidedReread.current = true;
+    if (startTookThemeOut && lib.applied) bump();
+  }, [lib, recovery.value, startTookThemeOut, bump]);
+
+  // A pause the start tried that did not go through (ruling R4): the pause of this computer is not
+  // yet in effect; or it could not be noted and either did not take the theme out or the theme is
+  // out now (a theme still read as applied is the read above, about to be done again).
+  const themeIsOut = lib ? lib.applied === null : library.error !== null;
+  const startPauseShown =
+    startPause !== null &&
+    !startPause.pausedNow &&
+    (paused?.level === "computerNotYet" ||
+      (paused === null && startPause.notSaved !== null && (!startTookThemeOut || themeIsOut)))
+      ? startPause
+      : null;
 
   /**
    * This computer's user, host and home for the preview (ruling R1), read when a preview needs
@@ -198,6 +234,16 @@ export function Home() {
       <h1 ref={heading} tabIndex={-1}>
         {t("home.title")}
       </h1>
+      {recovery.error !== null && <ErrorNotice error={recovery.error} title={t("home.paused.unreadable")} />}
+      {paused && <PausedBanner paused={paused} onResume={() => void resume.resume()} />}
+      {startPauseShown && (
+        <div className="card">
+          <p>{t("home.paused.startTried")}</p>
+          <PauseResult outcome={startPauseShown} live />
+        </div>
+      )}
+      {resume.view}
+      {pause.view}
       <div className="card">
         <h2 style={{ marginTop: 0 }}>{t("home.status.title")}</h2>
         {/* Always there, its text toggled (2c item 10): checking, then what the checks found. */}
@@ -245,6 +291,18 @@ export function Home() {
               <button type="button" onClick={() => void openCmd()}>
                 {t("home.active.openCmd")}
               </button>
+              {/* Only once it is known that the theme is not paused already. */}
+              {recovery.value !== null && recovery.value.paused === null && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    resume.reset();
+                    pause.ask("user");
+                  }}
+                >
+                  {t("home.active.pause")}
+                </button>
+              )}
             </div>
           </>
         )}

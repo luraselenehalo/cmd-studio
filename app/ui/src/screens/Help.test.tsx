@@ -827,10 +827,10 @@ describe("report a problem", () => {
 });
 
 describe("the guide and the credits", () => {
-  it("has the five paragraphs of the guide", async () => {
+  it("has the five paragraphs of the guide and what to do when cmd won't open", async () => {
     const { user } = mount(createMockIpc());
     await openTab(user, "Short guide");
-    for (const p of ["p1", "p2", "p3", "p4", "p5"] as const) {
+    for (const p of ["p1", "p2", "p3", "p4", "p5", "cmdWontOpen"] as const) {
       expect(screen.getByText(en[`help.guide.${p}`])).toBeTruthy();
     }
   });

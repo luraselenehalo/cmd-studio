@@ -4,8 +4,10 @@
 // mapping: an apply goes through the plan, the Store and a new cmd window open from here, and
 // the step only the user can take is said in words); every restore point with "Go back to
 // this point"; "Undo everything"; "Report a problem" (the diagnostics, the user name replaced,
-// copied for a GitHub issue); the short guide; the credits and licenses. Every failure, a window
-// that could not be opened included, is shown (spec §5.9).
+// copied for a GitHub issue); the short guide, with what to do when cmd won't open; the credits
+// and licenses. D12's fixes pause the theme or turn it back on as the home page does
+// (components/Pause, recovery spec §4.5). Every failure, a window that could not be opened
+// included, is shown (spec §5.9).
 import { useEffect, useRef, useState } from "react";
 import type { ApplyRequest } from "../bindings/ApplyRequest";
 import type { CheckReport } from "../bindings/CheckReport";
@@ -18,6 +20,7 @@ import type { RevertOutcome } from "../bindings/RevertOutcome";
 import { ApplyFlow, useCopyDiagnostics } from "../components/ApplyFlow";
 import { Dialog } from "../components/Dialog";
 import { ErrorNotice, Notice, NotesList, UnrestoredList } from "../components/Notices";
+import { usePause, useResume } from "../components/Pause";
 import { formatTime, pick, pickedLanguage, useI18n, type Key, type Language, type Translate } from "../i18n";
 import { useIpc } from "../ipc/context";
 import { IpcError } from "../ipc/types";
@@ -27,14 +30,17 @@ import { BUNDLED, SCHEMES, type Credit } from "./credits";
 
 const TABS: HelpTab[] = ["doctor", "restore", "revert", "report", "guide", "credits"];
 
-/** The fixes this page runs (F2): an apply through the plan, the Store, a new cmd window.
- * Reinstalling only the user can do: it is said, not a button. A Windows Terminal that was
- * never opened needs nothing of the user's, since an apply sets it up (founder 2026-10-17). */
+/** The fixes this page runs (F2): an apply through the plan, the Store, a new cmd window, and
+ * D12's pause and turning back on. Reinstalling only the user can do: it is said, not a button.
+ * A Windows Terminal that was never opened needs nothing of the user's, since an apply sets it
+ * up (founder 2026-10-17). */
 const RUNNABLE: ReadonlySet<FixKind> = new Set<FixKind>([
   "reapply",
   "replaceOtherClink",
   "installWindowsTerminal",
   "openNewCmdWindow",
+  "resume",
+  "pause",
 ]);
 
 export function Help({ tab }: { tab: HelpTab }) {
@@ -79,6 +85,8 @@ function Doctor() {
   const heading = useRef<HTMLHeadingElement>(null);
   /** The fix's dialog was just closed: where focus lands is checked once it is gone. */
   const closing = useRef(false);
+  const pause = usePause(heading);
+  const resume = useResume(heading);
 
   useEffect(() => {
     let alive = true;
@@ -159,6 +167,12 @@ function Doctor() {
         await ipc.openExternal("windowsTerminalStore");
       } else if (kind === "openNewCmdWindow") {
         await ipc.openCmd();
+      } else if (kind === "pause") {
+        // It asks first, in a dialog; "back on" said by an earlier turn-on is not left beside it.
+        resume.reset();
+        pause.ask("clinkCrash");
+      } else if (kind === "resume") {
+        await resume.resume();
       }
     } catch (e) {
       setFixError(e);
@@ -205,6 +219,8 @@ function Doctor() {
           />
         </Dialog>
       )}
+      {pause.view}
+      {resume.view}
     </div>
   );
 }
@@ -636,6 +652,7 @@ function Guide() {
       {(["p1", "p2", "p3", "p4", "p5"] as const).map((p) => (
         <p key={p}>{t(`help.guide.${p}`)}</p>
       ))}
+      <p>{t("help.guide.cmdWontOpen")}</p>
     </div>
   );
 }
