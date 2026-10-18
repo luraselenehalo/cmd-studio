@@ -54,7 +54,7 @@ const T: u64 = 1_791_694_709;
 ///   raises, and filters the prompt once more when one has completed, as Clink does.
 /// - `__new_line()` is the next input line: the coroutines of the last one are dropped.
 ///
-/// `io.popen` answers `tasklist …` with `__tasklist` (`nil`: the command cannot start;
+/// `io.popen` answers a command that runs tasklist, by any path, with `__tasklist` (`nil`: the command cannot start;
 /// `__tasklist_raises`: the call raises) and every other command, Oh My Posh's, with
 /// `__popen_result`. Each command is noted in `__popen_cmds`.
 const STUBS: &str = r#"
@@ -138,7 +138,7 @@ end
 io.popen = function(cmd)
   __popen_cmds[#__popen_cmds + 1] = cmd
   local answer = __popen_result
-  if cmd:find("^tasklist") then
+  if cmd:find("tasklist", 1, true) then
     if __tasklist_raises then error("io.popen: access denied") end
     answer = __tasklist
   end
@@ -479,7 +479,7 @@ fn open_steps(
         omp: commands.iter().any(|c| c.contains("oh-my-posh.exe")),
         tasklists: commands
             .into_iter()
-            .filter(|c| c.starts_with("tasklist"))
+            .filter(|c| c.contains("tasklist"))
             .collect(),
         paused: truthy(&lua, "CMDSTUDIO_PAUSED")?,
         prompt,
@@ -1017,9 +1017,48 @@ fn tasklist_runs_once_and_only_when_the_theme_would_pause() -> mlua::Result<()> 
     let mut disk = tags_of_age(&[1, 2, 3, 4, 5], 600);
     let w = open(&mut disk, window(6, T))?;
     assert!(w.paused);
-    assert_eq!(w.tasklists, ["tasklist /FO CSV /NH 2>nul"]);
+    assert_eq!(
+        w.tasklists,
+        [r#"""C:\Windows\System32\tasklist.exe" /FO CSV /NH 2>nul""#]
+    );
     let w = open(&mut disk, window(7, T).prompted())?;
     assert!(w.paused && w.tasklists.is_empty(), "{:?}", w.tasklists);
+    Ok(())
+}
+
+#[test]
+fn tasklist_is_run_by_its_full_system32_path_and_never_by_its_bare_name() -> mlua::Result<()> {
+    // `cmd /c` looks for a bare `tasklist` in the window's folder before PATH, and init.lua runs
+    // in the folder cmd was opened in: a tasklist.bat in a downloaded repo would run. The path is
+    // absolute, from SystemRoot (C:\Windows when it is unset or empty), and quoted as Oh My Posh's
+    // is: `cmd /c` drops the outer quotes and keeps the ones around the path (spec §5.4, G17).
+    for (root, want) in [
+        (
+            Some(r"C:\WINDOWS"),
+            r#"""C:\WINDOWS\System32\tasklist.exe" /FO CSV /NH 2>nul""#,
+        ),
+        (
+            Some(r"D:\Win dows"),
+            r#"""D:\Win dows\System32\tasklist.exe" /FO CSV /NH 2>nul""#,
+        ),
+        (
+            Some(""),
+            r#"""C:\Windows\System32\tasklist.exe" /FO CSV /NH 2>nul""#,
+        ),
+        (
+            None,
+            r#"""C:\Windows\System32\tasklist.exe" /FO CSV /NH 2>nul""#,
+        ),
+    ] {
+        let mut disk = tags_of_age(&[1, 2, 3], 600);
+        let w = open_with(&mut disk, window(4, T), |lua| match root {
+            Some(r) => lua.globals().get::<Table>("__env")?.set("SystemRoot", r),
+            None => Ok(()),
+        })?;
+        assert_eq!(w.tasklists, [want], "{root:?}");
+        // and its answer is read as before: none of the three is running
+        assert!(w.paused, "{root:?}");
+    }
     Ok(())
 }
 

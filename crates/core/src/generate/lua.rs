@@ -50,7 +50,10 @@ pub const PAUSED_STILL: &str = "CMD Studio's theme is paused. Open CMD Studio to
 ///   as `cmd /k <a long command>` that has not reached its prompt yet, not one that failed. It
 ///   is neither counted nor deleted. Only the first two fields of each row are read, the image
 ///   name and the pid, which tasklist never translates. A tasklist that cannot be run or read
-///   counts every stale tag, as before.
+///   counts every stale tag, as before. tasklist is run by its full path,
+///   `<SystemRoot>\System32\tasklist.exe` (`C:\Windows` when `SystemRoot` is unset or empty),
+///   quoted as Oh My Posh's command is (spec §5.4, G17): `cmd /c` looks in the window's folder
+///   before PATH, so a bare `tasklist` would run a `tasklist.bat` that sits there.
 /// - Oh My Posh registers its filter at `_ZL_CLINK_PROMPT_PRIORITY + 1`, 1 when that is unset,
 ///   and Clink calls the lower number first: CMD Studio's is at 0, or lower when the variable
 ///   puts Oh My Posh's at 0 or below.
@@ -117,9 +120,14 @@ end
 -- The pids of the cmd windows still running, from one tasklist, asked only when the theme would
 -- pause: a window started as `cmd /k <a long command>` keeps its tag until that command ends.
 -- Only a row's first two fields are read, the image name and the pid, which tasklist never
--- translates. nil when tasklist gives no row: then every stale tag counts.
+-- translates. nil when tasklist gives no row: then every stale tag counts. It is run by its full
+-- path: cmd /c looks in the window's folder before PATH, and a tasklist.bat there would run.
+-- The quotes are wrapped once more, as Oh My Posh's are below (spec gate G17).
 local function running_cmds()
-  local handle = io.popen("tasklist /FO CSV /NH 2>nul")
+  local root = os.getenv("SystemRoot")
+  if root == nil or root == "" then root = "C:\\Windows" end
+  local exe = root .. "\\System32\\tasklist.exe"
+  local handle = io.popen('"' .. '"' .. exe .. '" /FO CSV /NH 2>nul' .. '"')
   if not handle then return nil end
   local text = handle:read("*a") or ""
   handle:close()
