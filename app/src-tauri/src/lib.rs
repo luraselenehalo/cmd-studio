@@ -84,24 +84,33 @@ pub fn run_gui(how: backend::run::GuiStart) {
             // asks the Yes/No question instead, on a thread of its own (WebView2's thread must
             // not block), then ends the app.
             if let Some(window) = app.get_webview_window("main") {
-                let b = for_window.clone();
-                let watched = webview_watch::watch_renderer(&window, move || {
-                    let b = b.clone();
-                    let _ = std::thread::Builder::new()
-                        .name("renderer-gave-up".to_string())
-                        .spawn(move || {
-                            let logs = b.paths().logs();
-                            let why = "its page stopped three times in a minute";
-                            if console::ask_yes_no(&window_question(why, &logs)) {
-                                console::fatal(&revert_said(&b.revert_all(), &logs));
-                            }
-                            // The run had reached its UI: this end is the app's own choice,
-                            // not a crash. `exit` raises no Tauri event, so the record goes
-                            // here (K14); the next start shows no notice.
-                            b.end_run();
-                            std::process::exit(1);
-                        });
-                });
+                let (for_note, b) = (for_window.clone(), for_window.clone());
+                let watched = webview_watch::watch_renderer(
+                    &window,
+                    move |line| for_note.note_line(line),
+                    move || {
+                        let on_thread = b.clone();
+                        let spawned = std::thread::Builder::new()
+                            .name("renderer-gave-up".to_string())
+                            .spawn(move || {
+                                let b = on_thread;
+                                let logs = b.paths().logs();
+                                let why = "its page stopped three times in a minute";
+                                if console::ask_yes_no(&window_question(why, &logs)) {
+                                    console::fatal(&revert_said(&b.revert_all(), &logs));
+                                }
+                                // The run had reached its UI: this end is the app's own choice,
+                                // not a crash. `exit` raises no Tauri event, so the record goes
+                                // here (K14); the next start shows no notice.
+                                b.end_run();
+                                std::process::exit(1);
+                            });
+                        // The box never shows if the thread cannot start: say so in the log.
+                        if let Err(e) = spawned {
+                            b.note_line(&format!("renderer gave-up thread=not_started {e}"));
+                        }
+                    },
+                );
                 if let Err(e) = watched {
                     for_window.note_line(&format!("renderer watch=not_registered {e}"));
                 }
@@ -537,8 +546,12 @@ mod tests {
         assert!(console.contains("message_box(message, MB_YESNO | MB_ICONQUESTION) == IDYES"));
         assert!(console.contains("message_box(message, MB_OK | MB_ICONERROR)"));
         assert!(
-            text.contains("webview_watch::watch_renderer(&window,"),
+            text.contains("webview_watch::watch_renderer("),
             "the renderer is watched"
+        );
+        assert!(
+            text.contains("renderer gave-up thread=not_started"),
+            "a failed give-up spawn is said"
         );
     }
 

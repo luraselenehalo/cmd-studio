@@ -3,6 +3,7 @@
 //! app gives up and asks the Yes/No question of §5.4 instead (`give_up`). Registered once the
 //! window is built (`lib.rs`). Only the renderer's two kinds count: the GPU or a utility
 //! process going is WebView2's own business, and the browser process going ends the window.
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -15,12 +16,14 @@ pub const RENDERER_FAILURES: u32 = 3;
 /// is the one to give up on (`false`). Pure, so it is tested without WebView2.
 pub struct Failures {
     seen: Mutex<Vec<Instant>>,
+    gave_up: AtomicBool,
 }
 
 impl Failures {
     pub fn new() -> Self {
         Failures {
             seen: Mutex::new(Vec::new()),
+            gave_up: AtomicBool::new(false),
         }
     }
 
@@ -29,6 +32,12 @@ impl Failures {
         seen.retain(|t| now.duration_since(*t) < Duration::from_millis(RENDERER_WINDOW_MS));
         seen.push(now);
         u32::try_from(seen.len()).unwrap_or(u32::MAX) < RENDERER_FAILURES
+    }
+
+    /// Whether this is the first give-up: a further failure after it (the page dies again
+    /// while the box is up) must not start a second box and a second undo.
+    pub fn give_up_once(&self) -> bool {
+        !self.gave_up.swap(true, Ordering::SeqCst)
     }
 }
 
@@ -43,6 +52,7 @@ impl Default for Failures {
 #[cfg(windows)]
 pub fn watch_renderer(
     window: &tauri::WebviewWindow,
+    note: impl Fn(&str) + Send + Sync + 'static,
     give_up: impl Fn() + Send + Sync + 'static,
 ) -> Result<(), String> {
     use webview2_com::Microsoft::Web::WebView2::Win32::{
@@ -59,7 +69,10 @@ pub fn watch_renderer(
             // the window's thread; the call reads one COM property into a new reference.
             let core: ICoreWebView2 = match unsafe { controller.CoreWebView2() } {
                 Ok(c) => c,
-                Err(_) => return,
+                Err(e) => {
+                    note(&format!("renderer watch=not_registered {e}"));
+                    return;
+                }
             };
             let reloader = core.clone();
             let handler = ProcessFailedEventHandler::create(Box::new(move |_sender, args| {
@@ -76,7 +89,9 @@ pub fn watch_renderer(
                     return Ok(());
                 }
                 if !failures.note(Instant::now()) {
-                    give_up();
+                    if failures.give_up_once() {
+                        give_up();
+                    }
                     return Ok(());
                 }
                 // SAFETY: `reloader` is the live `ICoreWebView2` of this window.
@@ -84,8 +99,13 @@ pub fn watch_renderer(
             }));
             let mut token: i64 = 0;
             // SAFETY: `handler` is a COM object WebView2 keeps a reference to for as long as the
-            // registration lives; `token` is a stack value that outlives the call.
-            let _ = unsafe { core.add_ProcessFailed(&handler, &mut token) };
+            // registration lives; `token` is a stack value that outlives the call. The token is
+            // dropped on purpose: the registration lives for the window's whole life, and
+            // WebView2 releases its handlers when the controller is closed (`Close()`), so
+            // there is no `remove_ProcessFailed` to call.
+            if let Err(e) = unsafe { core.add_ProcessFailed(&handler, &mut token) } {
+                note(&format!("renderer watch=not_registered {e}"));
+            }
         })
         .map_err(|e| e.to_string())
 }
@@ -105,5 +125,35 @@ mod tests {
         assert!(!f.note(t0 + Duration::from_secs(20)));
         // The two oldest are out of the window now: this one is the second again.
         assert!(f.note(t0 + Duration::from_secs(71)));
+    }
+}
+
+#[cfg(test)]
+mod once_tests {
+    use super::*;
+
+    /// A further failure after the give-up must not start a second box: only the first
+    /// `give_up_once` answers true.
+    #[test]
+    fn the_give_up_happens_once() {
+        let f = Failures::new();
+        assert!(f.give_up_once());
+        assert!(!f.give_up_once());
+        assert!(!f.give_up_once());
+    }
+
+    /// Both real registration failures are said through the note, in the one line of
+    /// `lib.rs`'s fallback; none is dropped with `let _ =` or a bare `return`.
+    #[test]
+    fn both_registration_failures_are_logged() {
+        let text = include_str!("webview_watch.rs");
+        let prod = text.split_once("\n#[cfg(test)]").map_or("", |(p, _)| p);
+        assert_eq!(
+            prod.matches("renderer watch=not_registered").count(),
+            2,
+            "{prod}"
+        );
+        assert!(!prod.contains("let _ = unsafe { core.add_ProcessFailed"));
+        assert!(!prod.contains("Err(_) => return"));
     }
 }

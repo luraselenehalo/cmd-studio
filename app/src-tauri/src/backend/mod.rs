@@ -257,6 +257,11 @@ impl<M: Machine> Backend<M> {
                     ),
                 )
             })?;
+            // The earlier damaged file's name can't be told as well (one name per answer): it
+            // goes to the log, so it is not lost silently.
+            if let Some(name) = &pending {
+                self.note_line(&format!("settings reset pending={name}"));
+            }
             aside.file_name().map(|n| n.to_string_lossy().into_owned())
         } else {
             pending
@@ -678,6 +683,28 @@ mod tests {
             .starts_with("settings.json.reset-"));
         assert!(!b.sys().fs.exists(&file));
         assert_eq!(b.settings_get().unwrap().settings, AppSettings::default());
+    }
+
+    /// A damaged file an earlier read set aside, not yet told to the page, is not lost silently
+    /// when a reset then sets another file aside: its name goes to the log.
+    #[test]
+    fn a_reset_that_sets_a_file_aside_logs_the_damaged_name_it_could_not_tell() {
+        let b = backend();
+        let file = b.paths().settings_file();
+        b.sys().fs.write_atomic(&file, b"{ not json").unwrap();
+        assert_eq!(b.settings_or_default(), AppSettings::default());
+        b.settings_set(AppSettings::default()).unwrap();
+        assert!(b.sys().fs.exists(&file));
+        let reset = b.settings_reset().unwrap();
+        assert!(reset
+            .reset_from
+            .unwrap()
+            .starts_with("settings.json.reset-"));
+        let log = b.log_tail(10);
+        assert!(
+            log.contains("settings reset pending=settings.json.damaged-"),
+            "{log}"
+        );
     }
 
     #[test]
