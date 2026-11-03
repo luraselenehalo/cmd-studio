@@ -68,7 +68,9 @@ function reachText(paused: PauseInfo, t: Translate): string {
  */
 export function PausedBanner({ paused, onResume }: { paused: PauseInfo; onResume: () => void }) {
   const { t, language } = useI18n();
-  const { go } = useNav();
+  const { go, route } = useNav();
+  // Recovery mode stays on its one page: it has its own Undo everything and Report (§5.2).
+  const inRecovery = route.name === "recovery";
   return (
     <div className="card notice warn">
       <h2 style={{ marginTop: 0 }}>{t("home.paused.title")}</h2>
@@ -79,14 +81,16 @@ export function PausedBanner({ paused, onResume }: { paused: PauseInfo; onResume
         <button type="button" className="primary" onClick={onResume}>
           {t("resume.button")}
         </button>
-        {paused.by === "clink" && (
+        {paused.by === "clink" && !inRecovery && (
           <button type="button" onClick={() => go({ name: "help", tab: "revert" })}>
             {t("home.paused.revert")}
           </button>
         )}
-        <button type="button" onClick={() => go({ name: "help", tab: "report" })}>
-          {t("home.paused.report")}
-        </button>
+        {!inRecovery && (
+          <button type="button" onClick={() => go({ name: "help", tab: "report" })}>
+            {t("home.paused.report")}
+          </button>
+        )}
       </div>
     </div>
   );
@@ -226,6 +230,13 @@ export function PauseResult({ outcome, live = false }: { outcome: PauseOutcome; 
   );
 }
 
+const RESUMED_TEXT = {
+  themeOn: "resume.done",
+  noteRemoved: "resume.noteRemoved",
+  notKnown: "resume.notKnown",
+  chooseLater: "resume.chooseLater",
+} as const satisfies Record<string, Key>;
+
 /**
  * "Turn the theme back on": `resume()` asks the backend, which lifts a pause in cmd at once
  * (said in the status line of `view`), gives a request for a pause of this computer (applied
@@ -243,13 +254,13 @@ export function useResume(
 ): { resume: () => Promise<void>; reset: () => void; view: ReactNode } {
   const ipc = useIpc();
   const { t } = useI18n();
-  const { go } = useNav();
+  const { go, route } = useNav();
   const { bump, setLastApply, markRecoveryActed } = useAppState();
   const [applying, setApplying] = useState<{ key: number; request: ApplyRequest } | null>(null);
   const [applyBusy, setApplyBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   /** What a lift at once did, for the status line: the theme is back on, or only the note went. */
-  const [resumed, setResumed] = useState<"themeOn" | "noteRemoved" | "notKnown" | null>(null);
+  const [resumed, setResumed] = useState<"themeOn" | "noteRemoved" | "notKnown" | "chooseLater" | null>(null);
   const keys = useRef(0);
   const running = useRef(false);
   /** The element that had focus when the pause was lifted at once, until it has left the page. */
@@ -290,7 +301,9 @@ export function useResume(
         // Nothing was lifted: the pause stays, and the words say why (recovery spec §5.4).
         setResumed("notKnown");
       } else if (outcome.kind === "pickTheme") {
-        go({ name: "themes" });
+        // Recovery mode does not open the library: the words say when to choose.
+        if (route.name === "recovery") setResumed("chooseLater");
+        else go({ name: "themes" });
       } else {
         bump();
       }
@@ -308,7 +321,7 @@ export function useResume(
   const view = (
     <>
       {/* Always there, its text toggled (2c item 10). */}
-      <div role="status">{resumed && <p>{t(resumed === "noteRemoved" ? "resume.noteRemoved" : resumed === "notKnown" ? "resume.notKnown" : "resume.done")}</p>}</div>
+      <div role="status">{resumed && <p>{t(RESUMED_TEXT[resumed])}</p>}</div>
       {error !== null && <ErrorNotice error={error} />}
       {applying && (
         // No Close while the apply runs (ruling R7), and the outcome is read in the dialog.

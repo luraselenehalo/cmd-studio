@@ -6,7 +6,7 @@
 // drafts, no preview, no quick switch are read here. A line is kept for phase 4's "Update now".
 import { useEffect, useRef, useState } from "react";
 import { Dialog } from "../components/Dialog";
-import { ErrorNotice, Notice, NotesList, UnrestoredList } from "../components/Notices";
+import { ErrorNotice, NotesList, UnrestoredList } from "../components/Notices";
 import { PausedBanner, PauseResult, useResume } from "../components/Pause";
 import { useI18n } from "../i18n";
 import { useIpc } from "../ipc/context";
@@ -91,10 +91,13 @@ export function Recovery() {
           {t("advanced.openLogs")}
         </button>
       </div>
-      <Report />
+      <div id="recovery-report" tabIndex={-1}>
+        <Report />
+      </div>
       <h2>{t("recovery.reset.title")}</h2>
       <p>{t("recovery.reset.text")}</p>
-      {resetTo && <Notice kind="ok">{t("recovery.reset.done", { file: resetTo })}</Notice>}
+      {/* Always there, its text toggled (2c item 10). */}
+      <div role="status">{resetTo && <div className="notice ok">{t("recovery.reset.done", { file: resetTo })}</div>}</div>
       <div className="row-actions">
         <button type="button" onClick={() => setAsking("reset")}>
           {t("recovery.reset.button")}

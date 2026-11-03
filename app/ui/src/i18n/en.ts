@@ -184,6 +184,7 @@ export const en = {
   "resume.button": "Turn the theme back on",
   "resume.done": "The theme is back on. Open a new cmd window to see it.",
   "resume.notKnown": "Whether the theme is on this computer could not be read (state.json). Fix state.json first: the health check says what is wrong with it.",
+  "resume.chooseLater": "Choose a theme after you leave recovery mode.",
   "resume.noteRemoved": "The note was removed: cmd windows open without a pause again.",
   "start.busy": "A theme is still being applied. CMD Studio waits for it to finish…",
   "start.recovering": "CMD Studio is putting back a change that was cut off and pausing the theme…",

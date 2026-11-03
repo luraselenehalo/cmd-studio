@@ -68,6 +68,8 @@ export function App() {
   const [recoveryActed, setRecoveryActed] = useState(false);
   const [startError, setStartError] = useState<unknown>(null);
   const [resetFrom, setResetFrom] = useState<string | null>(null);
+  /** The crash notice was closed: it stays closed whatever screen draws the notices next. */
+  const [crashClosed, setCrashClosed] = useState(false);
   /** Why the wizard's settings could not be saved as it went home: they are kept in memory, the
    * next save that goes through writes them, and the shell says so until then (fix I1). */
   const [unsaved, setUnsaved] = useState<unknown>(null);
@@ -187,6 +189,15 @@ export function App() {
     [ipc, settings, startError, readAgain],
   );
 
+  /** The user's own reset of the settings (the Recovery page): the defaults stand at once, and
+   * the "could not be read" notice does not apply, so none is shown (the page says what it did). */
+  const adoptReset = useCallback((loaded: SettingsLoad) => {
+    setSettings(loaded.settings);
+    setLanguage(loaded.settings.language);
+    setResetFrom(null);
+    setStartError(null);
+  }, []);
+
   const keepUnsaved = useCallback((next: AppSettings, error: unknown) => {
     setSettings(next);
     setLanguage(next.language);
@@ -196,8 +207,8 @@ export function App() {
   const bump = useCallback(() => setVersion((v) => v + 1), []);
   const markRecoveryActed = useCallback(() => setRecoveryActed(true), []);
   const appState = useMemo<AppState>(
-    () => ({ settings, saveSettings, lastApply, setLastApply, draftProblems, version, bump, recoveryActed, markRecoveryActed, appStatus: status, adoptSettings: adopt }),
-    [settings, saveSettings, lastApply, draftProblems, version, bump, recoveryActed, markRecoveryActed, status, adopt],
+    () => ({ settings, saveSettings, lastApply, setLastApply, draftProblems, version, bump, recoveryActed, markRecoveryActed, appStatus: crashClosed && status ? { ...status, crashNotice: null } : status, adoptSettings: adoptReset }),
+    [settings, saveSettings, lastApply, draftProblems, version, bump, recoveryActed, markRecoveryActed, status, crashClosed, adoptReset],
   );
   const nav = useMemo<Nav>(() => ({ route: route ?? { name: "home" }, go: (r: Route) => setRoute(r) }), [route]);
 
@@ -219,6 +230,7 @@ export function App() {
                 onRetry={tryAgain}
                 resetFrom={resetFrom}
                 unsaved={unsaved}
+                onCrashClosed={() => setCrashClosed(true)}
                 onUnsaved={keepUnsaved}
               />
             )}
@@ -240,6 +252,8 @@ interface StartProblems {
   resetFrom: string | null;
   /** The wizard's settings could not be saved (fix I1). */
   unsaved: unknown;
+  /** The crash notice was closed. */
+  onCrashClosed: () => void;
 }
 
 /**
@@ -272,7 +286,7 @@ function Screens({ onUnsaved, ...problems }: StartProblems & { onUnsaved: (setti
 
 /** The settings could not be read as the app started, were reset, or could not be saved by the
  * wizard: then the wizard shows again at the next start, as the notice says. */
-function StartNotices({ startError, onRetry, resetFrom, unsaved }: StartProblems) {
+function StartNotices({ startError, onRetry, resetFrom, unsaved, onCrashClosed }: StartProblems) {
   const { t } = useI18n();
   const [reading, setReading] = useState(false);
   const retry = async () => {
@@ -286,7 +300,7 @@ function StartNotices({ startError, onRetry, resetFrom, unsaved }: StartProblems
   const { appStatus } = useAppState();
   return (
     <>
-      {appStatus?.crashNotice && <CrashClosed notice={appStatus.crashNotice} />}
+      {appStatus?.crashNotice && <CrashClosed notice={appStatus.crashNotice} onClosed={onCrashClosed} />}
       {startError !== null && (
         <>
           <ErrorNotice error={startError} title={t("settings.startFailed")} />
@@ -305,24 +319,29 @@ function StartNotices({ startError, onRetry, resetFrom, unsaved }: StartProblems
 
 /** The earlier run ended abnormally (recovery spec §5.3): when, and one click to the report with
  * the crash note. Closing it tells the backend, which forgets the notice. */
-function CrashClosed({ notice }: { notice: CrashNotice }) {
+function CrashClosed({ notice, onClosed }: { notice: CrashNotice; onClosed: () => void }) {
   const { t, language } = useI18n();
   const ipc = useIpc();
-  const { go } = useNav();
-  const [closed, setClosed] = useState(false);
-  if (closed) return null;
+  const { go, route } = useNav();
   const time = formatTime(notice.atMs, language);
   return (
     <Notice kind="warn">
       <p>{notice.hasReport ? t("start.crashed", { time }) : t("start.crashedNoReport", { time })}</p>
       <div className="row-actions">
-        <button type="button" className="primary" onClick={() => go({ name: "help", tab: "report" })}>
+        <button type="button" className="primary" onClick={() => {
+            if (route.name !== "recovery") return go({ name: "help", tab: "report" });
+            // Recovery mode stays on its page: the report section is on it.
+            const section = document.getElementById("recovery-report");
+            section?.scrollIntoView?.();
+            section?.focus();
+          }}
+        >
           {t("home.paused.report")}
         </button>
         <button
           type="button"
           onClick={() => {
-            setClosed(true);
+            onClosed();
             ipc.crashDismiss().catch(() => {});
           }}
         >

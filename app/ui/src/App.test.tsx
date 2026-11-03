@@ -194,9 +194,22 @@ describe("recovery mode (recovery spec §5.2)", () => {
   });
 
   it("safe mode shows the Recovery page first and says ready only after it is drawn (Task 9 carry)", async () => {
-    const { ipc } = await mount({ safeMode: { kind: "recovery" }, settings: { wizardDone: true } });
+    const ipc = createMockIpc({ safeMode: { kind: "recovery" }, settings: { wizardDone: true } });
+    // What the window shows at the moment the app says ready.
+    const shown: string[] = [];
+    const appReady = ipc.appReady.bind(ipc);
+    vi.spyOn(ipc, "appReady").mockImplementation(async () => {
+      shown.push(screen.queryByRole("heading", { name: "Recovery mode" }) ? "recovery" : screen.queryByRole("heading", { name: "Home" }) ? "home" : "nothing");
+      return appReady();
+    });
+    render(
+      <IpcProvider ipc={ipc}>
+        <App />
+      </IpcProvider>,
+    );
     await screen.findByRole("heading", { name: "Recovery mode" });
     await waitFor(() => expect(ipc.state.ready).toBe(true));
+    expect(shown).toEqual(["recovery"]);
     expect(screen.queryByRole("heading", { name: "Home" })).toBeNull();
     expect(ipc.state.calls.filter((c) => c === "appReady")).toHaveLength(1);
   });
@@ -224,11 +237,14 @@ describe("recovery mode (recovery spec §5.2)", () => {
     expect(screen.getByText("ไม่ได้หยุดธีม:", { exact: false }).textContent).toContain("no theme is applied");
     await user.click(screen.getByRole("button", { name: "รีเซ็ตการตั้งค่าของแอป" }));
     const dialog = await screen.findByRole("dialog", { name: "รีเซ็ตการตั้งค่าของแอป" });
-    expect(dialog.textContent).toContain("ภาษา ที่ที่ธีมไป และตัวเลือกอื่นของแอปกลับเป็นค่าตั้งต้น ไฟล์เดิมเก็บไว้ให้ดู ธีมของคุณไม่หาย");
+    expect(dialog.textContent).toContain("ภาษา ที่ที่ธีมไป และตัวเลือกอื่นของแอปกลับเป็นค่าเริ่มต้น ไฟล์เดิมเก็บไว้ให้ดู ธีมของคุณไม่หาย");
     await user.click(within(dialog).getByRole("button", { name: "รีเซ็ตการตั้งค่าของแอป" }));
     await waitFor(() => expect(ipc.state.calls).toContain("settingsReset"));
     // The defaults stand: English from now on.
-    expect(await screen.findByText(/^The settings were reset\. The old file is kept as settings\.json\.reset-\d+\.$/)).toBeTruthy();
+    const done = await screen.findByText(/^The settings were reset\. The old file is kept as settings\.json\.reset-\d+\.$/);
+    expect(done.closest('[role="status"]')).toBeTruthy();
+    // The user chose this reset: the "could not be read" notice is not also shown.
+    expect(screen.queryByText(/could not be read and were reset/)).toBeNull();
   });
 
   it("shows the crash notice on the home page and reaches the report with the crash note in two clicks (recovery spec §1.4)", async () => {
@@ -247,6 +263,58 @@ describe("recovery mode (recovery spec §5.2)", () => {
     await user.click(screen.getByRole("button", { name: "Home" }));
     await user.click(within(screen.getByRole("alert")).getByRole("button", { name: "Close" }));
     await waitFor(() => expect(ipc.state.calls).toContain("crashDismiss"));
+    expect(screen.queryByText(/closed unexpectedly/)).toBeNull();
+  });
+
+it("stays on the Recovery page when the crash notice's Report is pressed in safe mode (no sidebar, no library)", async () => {
+    const { ipc, user } = await mount({
+      safeMode: { kind: "recovery" },
+      settings: { wizardDone: true },
+      crashNotice: { atMs: Date.UTC(2026, 9, 11, 4, 58), hasReport: true },
+    });
+    await screen.findByRole("heading", { name: "Recovery mode" });
+    const notice = screen.getAllByRole("alert").find((n) => /closed unexpectedly/.test(n.textContent ?? ""))!;
+    await user.click(within(notice).getByRole("button", { name: "Report a problem" }));
+    expect(screen.getByRole("heading", { name: "Recovery mode" })).toBeTruthy();
+    expect(screen.queryByRole("navigation")).toBeNull();
+    expect(ipc.state.calls).not.toContain("themesList");
+  });
+
+  it("the pause banner on the Recovery page has no way out of it (no Undo everything, no Report)", async () => {
+    await mount({
+      safeMode: { kind: "recovery" },
+      settings: { wizardDone: true },
+      paused: { by: "clink", level: "cmd", reason: "cmdStarts", atMs: 1791694709000, count: 3, resume: null },
+    });
+    const title = await screen.findByRole("heading", { name: "The theme is paused" });
+    const banner = title.closest(".card") as HTMLElement;
+    expect(within(banner).getByRole("button", { name: "Turn the theme back on" })).toBeTruthy();
+    expect(within(banner).queryByRole("button", { name: "Undo everything" })).toBeNull();
+    expect(within(banner).queryByRole("button", { name: "Report a problem" })).toBeNull();
+  });
+
+  it("says to choose a theme after leaving recovery mode, and does not go to Themes", async () => {
+    const { ipc, user } = await mount({
+      safeMode: { kind: "recovery" },
+      settings: { wizardDone: true },
+      paused: { by: "app", level: "computer", reason: "user", atMs: 1791694709000, count: 0, resume: { themeId: "gone", target: "all", themeName: "Gone" } },
+    });
+    await screen.findByRole("heading", { name: "The theme is paused" });
+    await user.click(screen.getAllByRole("button", { name: "Turn the theme back on" })[0]!);
+    expect(await screen.findByText("Choose a theme after you leave recovery mode.")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Recovery mode" })).toBeTruthy();
+    expect(screen.queryByRole("navigation")).toBeNull();
+    expect(ipc.state.calls).not.toContain("themesList");
+  });
+
+  it("a closed crash notice stays closed when the screen changes under it", async () => {
+    const { user } = await mount({ crashNotice: { atMs: Date.UTC(2026, 9, 11, 4, 58), hasReport: false } });
+    const notice = await screen.findByRole("alert");
+    await user.click(within(notice).getByRole("button", { name: "Close" }));
+    expect(screen.queryByText(/closed unexpectedly/)).toBeNull();
+    // The wizard gives way to Home: the notices are drawn again there.
+    await user.click(await screen.findByRole("button", { name: "Skip, set up myself" }));
+    await screen.findByRole("heading", { name: "Home" });
     expect(screen.queryByText(/closed unexpectedly/)).toBeNull();
   });
 
