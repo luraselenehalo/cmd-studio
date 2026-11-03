@@ -16,6 +16,7 @@ import { ErrorNotice, Notice } from "./components/Notices";
 import { WorkingBar } from "./components/WorkingBar";
 import { formatTime, I18nProvider, useI18n, type Key, type Language } from "./i18n";
 import { useIpc } from "./ipc/context";
+import { taskOf } from "./ipc/work";
 import { NavContext, useNav, type Nav, type Route } from "./router";
 import { Advanced } from "./screens/Advanced";
 import { Editor } from "./screens/Editor";
@@ -41,13 +42,14 @@ function withChanges(loaded: AppSettings, base: AppSettings, next: AppSettings):
 /** How often the start asks `app_status` again while a change still runs (recovery spec §6.3). */
 export const APP_STATUS_POLL_MS = 2000;
 
-/** Recovery spec §6.3: a change of this process still runs; the start waits for it.
+/** Recovery spec §6.3: a change of this process still runs; the start waits for it and names it
+ * by the bar's task of that change (`taskOf`: the backend's snake_case name mapped once).
  * `recovery_entry` is RECOVERY_ENTRY_BUSY of backend/run.rs: the `--recovery` entry's own name. */
 function StartWait({ busy }: { busy: string }) {
   const { t } = useI18n();
   return (
     <p role="status" style={{ padding: "2rem" }}>
-      {t(busy === "recovery_entry" ? "start.recovering" : "start.busy")}
+      {busy === "recovery_entry" ? t("start.recovering") : t("start.busyWith", { task: t(taskOf(busy)) })}
     </p>
   );
 }

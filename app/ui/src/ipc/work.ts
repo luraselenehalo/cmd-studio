@@ -120,6 +120,14 @@ function snake(method: string): string {
   return method.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
 }
 
+/** The bar's task of a change named as the backend names it (`app_status.busy`: snake_case,
+ * one of `CHANGES_MACHINE`), for the start's wait (recovery spec §6.3). A name the list does
+ * not know is said as an apply, which is what the start used to assume for every change. */
+export function taskOf(busy: string): Key {
+  const method = busy.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase());
+  return Object.hasOwn(TASK, method) ? TASK[method as keyof Ipc] : TASK.apply;
+}
+
 interface Pending {
   method: keyof Ipc;
   startedAt: number;

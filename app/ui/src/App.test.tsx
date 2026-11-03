@@ -151,12 +151,25 @@ describe("the start (recovery spec §5.1, §6.3)", () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       const { ipc } = await mount({ busy: "apply", settings: { wizardDone: true } });
-      expect(await screen.findByText("A theme is still being applied. CMD Studio waits for it to finish…")).toBeTruthy();
+      expect(await screen.findByText("CMD Studio is still applying the theme. It waits for that to finish…")).toBeTruthy();
       expect(ipc.state.calls).not.toContain("settingsGet");
       ipc.state.busy = null;
       await vi.advanceTimersByTimeAsync(2100);
       await screen.findByRole("heading", { name: "Home" });
       expect(ipc.state.calls.filter((c) => c === "appStatus").length).toBeGreaterThanOrEqual(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("names the change that still runs, whichever of the five it is (M1)", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const { ipc } = await mount({ busy: "undo_last", settings: { wizardDone: true } });
+      expect(await screen.findByText("CMD Studio is still putting things back. It waits for that to finish…")).toBeTruthy();
+      ipc.state.busy = null;
+      await vi.advanceTimersByTimeAsync(2100);
+      await screen.findByRole("heading", { name: "Home" });
     } finally {
       vi.useRealTimers();
     }
@@ -234,7 +247,11 @@ describe("recovery mode (recovery spec §5.2)", () => {
   it("says why no pause was made, and resets the settings after asking", async () => {
     const { ipc, user } = await mount({ safeMode: { kind: "recovery" }, recoveryEntry: { notes: [], unrestored: [], pause: null, skipped: "no theme is applied" }, settings: { language: "th" } });
     await screen.findByRole("heading", { name: "โหมดกู้คืน" });
-    expect(screen.getByText("ไม่ได้หยุดธีม:", { exact: false }).textContent).toContain("no theme is applied");
+    // M3: the card's one sentence says the theme was not paused; the pause's sentence is not there.
+    const card = screen.getByText(th["recovery.entry.didSkip"]).closest(".card") as HTMLElement;
+    expect(card.textContent).toContain("no theme is applied");
+    expect(within(card).getByText("no theme is applied").closest("[lang]")?.getAttribute("lang")).toBe("en");
+    expect(screen.queryByText(/และหยุดธีมของเครื่องนี้/)).toBeNull();
     await user.click(screen.getByRole("button", { name: "รีเซ็ตการตั้งค่าของแอป" }));
     const dialog = await screen.findByRole("dialog", { name: "รีเซ็ตการตั้งค่าของแอป" });
     expect(dialog.textContent).toContain("ภาษา ที่ที่ธีมไป และตัวเลือกอื่นของแอปกลับเป็นค่าเริ่มต้น ไฟล์เดิมเก็บไว้ให้ดู ธีมของคุณไม่หาย");
@@ -816,6 +833,21 @@ describe("the home page", () => {
     expect(await screen.findByText("Which theme is in use could not be read")).toBeTruthy();
     expect(screen.getByText("state.json can't be used")).toBeTruthy();
     expect(screen.queryByText("No theme is applied yet.")).toBeNull();
+  });
+
+  it("offers Try again on a read that timed out, and the retry's answer is shown (I2, recovery spec §6.2)", async () => {
+    const { ipc, user } = await home({}, async (m) => {
+      await applyIn(m, "Terracotta");
+      vi.spyOn(m, "themesList").mockRejectedValueOnce(ipcError("E_TIMEOUT", "themes_list did not answer within 60 s"));
+    });
+    expect(await screen.findByText("themes_list did not answer within 60 s")).toBeTruthy();
+    expect(screen.queryByText("Terracotta")).toBeNull();
+    const notice = screen.getByText("themes_list did not answer within 60 s").closest(".notice") as HTMLElement;
+    const reads = ipc.state.calls.filter((c) => c === "themesList").length;
+    await user.click(within(notice).getByRole("button", { name: "Try again" }));
+    expect(await screen.findByText("Terracotta")).toBeTruthy();
+    expect(screen.queryByText("themes_list did not answer within 60 s")).toBeNull();
+    expect(ipc.state.calls.filter((c) => c === "themesList").length).toBe(reads + 1);
   });
 
   it("loads each part on its own: what failed is said, and the rest is still there", async () => {

@@ -20,7 +20,7 @@ const readRecovery = (ipc: Ipc) => ipc.recoveryStatus();
 export function Recovery() {
   const { t } = useI18n();
   const ipc = useIpc();
-  const { appStatus, version, adoptSettings } = useAppState();
+  const { appStatus, version, bump, adoptSettings } = useAppState();
   const heading = useRef<HTMLHeadingElement>(null);
   const recovery = useRead(readRecovery, version);
   const paused = recovery.value?.paused ?? null;
@@ -67,18 +67,17 @@ export function Recovery() {
       <p className="update-line">{t("recovery.update.placeholder")}</p>
       {entry && (
         <div className="card">
-          <p>{t("recovery.entry.did")}</p>
+          {/* M3: one sentence, by whether the entry paused the theme or said why it did not. */}
+          <p>{t(entry.pause ? "recovery.entry.didPause" : "recovery.entry.didSkip")}</p>
           <NotesList notes={entry.notes} />
           <UnrestoredList steps={entry.unrestored} live={false} />
           {entry.pause && <PauseResult outcome={entry.pause} />}
           {entry.skipped && (
-            <p>
-              {t("recovery.entry.skipped")} <span lang="en">{entry.skipped}</span>
-            </p>
+            <p lang="en">{entry.skipped}</p>
           )}
         </div>
       )}
-      {recovery.error !== null && <ErrorNotice error={recovery.error} title={t("home.paused.unreadable")} />}
+      {recovery.error !== null && <ErrorNotice error={recovery.error} title={t("home.paused.unreadable")} onRetry={bump} />}
       {paused && <PausedBanner paused={paused} onResume={() => void resume.resume()} />}
       {resume.view}
       {error !== null && <ErrorNotice error={error} />}

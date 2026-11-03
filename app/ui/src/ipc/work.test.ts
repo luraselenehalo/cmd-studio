@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { en } from "../i18n/en";
 import { createMockIpc } from "./mock";
 import { IpcError, type Ipc } from "./types";
-import { KINDS, READ_DEADLINE_MS, RESTART_AFTER_MS, STILL_WORKING_MS, TASK, TIMEOUT_ROW, withWork } from "./work";
+import { KINDS, READ_DEADLINE_MS, RESTART_AFTER_MS, STILL_WORKING_MS, TASK, TIMEOUT_ROW, taskOf, withWork } from "./work";
 
 /** The E_TIMEOUT row of `MEANINGS` in error.rs (spec §5.9), as the Rust source has it. */
 function timeoutRow(): { th: string; en: string } {
@@ -43,6 +43,16 @@ describe("the one list of commands", () => {
     expect(KINDS.appRestart).toBe("exit");
     expect(Object.values(KINDS).filter((k) => k === "changes")).toHaveLength(5);
     for (const key of Object.values(TASK)) expect(key in en, key).toBe(true);
+  });
+
+  it("names the task of a change by the backend's own name of it, for the start's wait (M1)", () => {
+    expect(taskOf("apply")).toBe("work.applying");
+    expect(taskOf("undo_last")).toBe("work.undoing");
+    expect(taskOf("snapshot_restore")).toBe("work.undoing");
+    expect(taskOf("revert_all")).toBe("work.undoing");
+    expect(taskOf("theme_pause")).toBe("work.pausing");
+    // A name the list does not know is said as the apply the old text assumed.
+    expect(taskOf("something_new")).toBe("work.applying");
   });
 
   it("carries the E_TIMEOUT row of spec §5.9 as error.rs has it", () => {

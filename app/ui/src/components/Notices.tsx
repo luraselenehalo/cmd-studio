@@ -9,8 +9,20 @@ import { isAppError, toIpcError } from "../ipc/types";
 
 /** An error in the UI's language with its code; anything that is not an `AppError` (all four
  * fields) is shown as `toIpcError` makes it: E_INTERNAL, with what was thrown as the details.
- * `live={false}` drops the alert role, for a box that takes focus and is read by that (item 11). */
-export function ErrorNotice({ error, title, live = true }: { error: AppError | unknown; title?: string; live?: boolean }) {
+ * `live={false}` drops the alert role, for a box that takes focus and is read by that (item 11).
+ * `onRetry` adds a "Try again" button (recovery spec §6.2: a read that timed out is tried again
+ * from the notice itself); the pages that read pass their `bump`. */
+export function ErrorNotice({
+  error,
+  title,
+  live = true,
+  onRetry,
+}: {
+  error: AppError | unknown;
+  title?: string;
+  live?: boolean;
+  onRetry?: () => void;
+}) {
   const { language, t } = useI18n();
   const e: AppError = isAppError(error) ? error : toIpcError(error).toAppError();
   return (
@@ -24,6 +36,13 @@ export function ErrorNotice({ error, title, live = true }: { error: AppError | u
         {/* The core's own text, in English whatever the UI's language is. */}
         {e.details && <pre lang="en">{e.details}</pre>}
       </details>
+      {onRetry && (
+        <div className="row-actions">
+          <button type="button" onClick={onRetry}>
+            {t("common.retry")}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

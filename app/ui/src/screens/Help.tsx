@@ -207,7 +207,7 @@ export function Doctor() {
         <span role="status">{checking ? t("help.doctor.checking") : ""}</span>
         <span role="status">{changed ? t("help.doctor.fixChanged") : ""}</span>
       </div>
-      {loadError !== null && <ErrorNotice error={loadError} />}
+      {loadError !== null && <ErrorNotice error={loadError} onRetry={bump} />}
       {fixError !== null && <ErrorNotice error={fixError} />}
       {report && (
         <ul className="check-list">
@@ -350,7 +350,7 @@ export function RestorePointsTab() {
   return (
     <div>
       <h2>{t("help.restore.title")}</h2>
-      {loadError !== null && <ErrorNotice error={loadError} />}
+      {loadError !== null && <ErrorNotice error={loadError} onRetry={bump} />}
       <div role="status">{busy ? t("help.restore.working") : ""}</div>
       {result && (
         <div ref={resultBox} tabIndex={-1}>
@@ -593,6 +593,7 @@ function RevertResultView({ outcome }: { outcome: RevertOutcome }) {
 export function Report() {
   const ipc = useIpc();
   const { t } = useI18n();
+  const { version, bump } = useAppState();
   const [text, setText] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<unknown>(null);
   const [openError, setOpenError] = useState<unknown>(null);
@@ -605,7 +606,9 @@ export function Report() {
     let alive = true;
     ipc.diagnosticsCopy().then(
       (d) => {
-        if (alive) setText(d);
+        if (!alive) return;
+        setText(d);
+        setLoadError(null);
       },
       (e: unknown) => {
         if (alive) setLoadError(e);
@@ -614,7 +617,7 @@ export function Report() {
     return () => {
       alive = false;
     };
-  }, [ipc]);
+  }, [ipc, version]);
 
   useEffect(() => {
     let alive = true;
@@ -662,7 +665,7 @@ export function Report() {
       </div>
       {copied instanceof IpcError && <ErrorNotice error={copied} title={t("apply.copyFailed")} />}
       {openError !== null && <ErrorNotice error={openError} />}
-      {loadError !== null && <ErrorNotice error={loadError} />}
+      {loadError !== null && <ErrorNotice error={loadError} onRetry={bump} />}
       {text === null && loadError === null && <p role="status">{t("common.loading")}</p>}
       {text !== null && (
         <pre className="log" lang="en">

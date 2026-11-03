@@ -310,6 +310,17 @@ describe("Notices", () => {
     expect(langOf(screen.getByText("Take out our part by hand"))).toBe("en");
   });
 
+  it("offers Try again when given something to run, and nothing to press otherwise (I2)", async () => {
+    const error = { code: "E_TIMEOUT", messageTh: "(E_TIMEOUT)", messageEn: "(E_TIMEOUT)", details: "doctor_run did not answer within 60 s" };
+    const plain = mount(<ErrorNotice error={error} />);
+    expect(screen.queryByRole("button")).toBeNull();
+    plain.unmount();
+    const retry = vi.fn();
+    mount(<ErrorNotice error={error} onRetry={retry} />, { language: "th" });
+    await userEvent.setup().click(screen.getByRole("button", { name: "ลองใหม่" }));
+    expect(retry).toHaveBeenCalledTimes(1);
+  });
+
   it("tells an AppError by all four fields, so a partial one is an internal problem, not a crash", () => {
     mount(<ErrorNotice error={{ code: "E_WT_PARSE", messageEn: "Windows Terminal's settings could not be read" }} />, {
       language: "th",
