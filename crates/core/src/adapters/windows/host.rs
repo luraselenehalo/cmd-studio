@@ -3,7 +3,8 @@
 use super::registry::RegLocation;
 use super::{english_io_error, io_err, last_error, wide};
 use crate::adapters::{
-    AdapterError, Arch, Created, DefaultTerminal, DirState, Host, RegValue, SystemInfo,
+    AdapterError, Arch, Created, DefaultTerminal, DirState, Host, ProcessStamp, RegValue,
+    SystemInfo,
 };
 use std::ffi::{c_void, OsStr, OsString};
 use std::io::ErrorKind;
@@ -629,6 +630,68 @@ impl Host for WinHost {
     fn system_info(&self) -> SystemInfo {
         system_info_with(&|loc, name| loc.read_raw(name))
     }
+
+    fn this_process(&self) -> ProcessStamp {
+        let pid = current_pid();
+        ProcessStamp {
+            pid,
+            created_at_ms: process_created_at(pid).ok().flatten(),
+        }
+    }
+    fn process_created_at(&self, pid: u32) -> Result<Option<u64>, AdapterError> {
+        process_created_at(pid)
+    }
+}
+
+/// When the process `pid` was created, in milliseconds since 1970 (`GetProcessTimes`), or `None`
+/// when there is no such process: `OpenProcess` fails with `ERROR_INVALID_PARAMETER` for a pid
+/// that is not in use. Any other failure is an error.
+pub fn process_created_at(pid: u32) -> Result<Option<u64>, AdapterError> {
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, ERROR_INVALID_PARAMETER, FILETIME,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    // SAFETY: `OpenProcess` takes three plain values and returns a handle or null; it touches
+    // no memory of ours.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        // SAFETY: reads the calling thread's last error code; no arguments.
+        let code = unsafe { GetLastError() };
+        if code == ERROR_INVALID_PARAMETER {
+            return Ok(None);
+        }
+        return Err(last_error("OpenProcess"));
+    }
+    let zero = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let (mut created, mut exited, mut kernel, mut user) = (zero, zero, zero, zero);
+    // SAFETY: `handle` is open (above), and the four out-pointers point at stack `FILETIME`s
+    // that outlive the call.
+    let ok = unsafe { GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user) };
+    // SAFETY: `handle` came from the successful `OpenProcess` above and is closed once, here.
+    unsafe { CloseHandle(handle) };
+    if ok == 0 {
+        return Err(last_error("GetProcessTimes"));
+    }
+    Ok(Some(filetime_unix_ms(created)))
+}
+
+/// A `FILETIME` (100-nanosecond ticks since 1601) as milliseconds since 1970; 0 for a time
+/// before 1970.
+pub fn filetime_unix_ms(t: windows_sys::Win32::Foundation::FILETIME) -> u64 {
+    const TICKS_1601_TO_1970: u64 = 116_444_736_000_000_000;
+    let ticks = (u64::from(t.dwHighDateTime) << 32) | u64::from(t.dwLowDateTime);
+    ticks.saturating_sub(TICKS_1601_TO_1970) / 10_000
+}
+
+/// This process's id.
+pub fn current_pid() -> u32 {
+    // SAFETY: no arguments, and it touches no memory of ours.
+    unsafe { windows_sys::Win32::System::Threading::GetCurrentProcessId() }
 }
 
 #[cfg(test)]
@@ -1509,5 +1572,29 @@ mod tests {
         assert_eq!(info.webview2.as_deref(), Some("154.0.4258.62"));
         assert!(info.unreadable.is_empty(), "{:?}", info.unreadable);
         assert_ne!(info.ui_language, 0);
+    }
+}
+
+#[cfg(test)]
+mod process_stamp_tests {
+    use super::*;
+
+    /// This process was created within the last minute; a pid that nothing uses is `None`
+    /// (spike S3). Pid 4_294_967_294 is `u32::MAX - 1`: Windows pids are multiples of 4 below
+    /// that, so nothing holds it.
+    #[test]
+    fn this_process_has_a_creation_time_and_a_missing_pid_is_none() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+            .unwrap_or(0);
+        let mine = process_created_at(current_pid()).unwrap().unwrap();
+        assert!(now.saturating_sub(mine) < 60_000, "{mine} vs {now}");
+        assert_eq!(process_created_at(4_294_967_294).unwrap(), None);
+        let t = windows_sys::Win32::Foundation::FILETIME {
+            dwLowDateTime: 0xD53E_8000,
+            dwHighDateTime: 0x019D_B1DE,
+        };
+        assert_eq!(filetime_unix_ms(t), 0);
     }
 }

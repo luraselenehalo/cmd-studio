@@ -172,6 +172,11 @@ const MEANINGS: &[(&str, &str, &str)] = &[
         r#"cmd แครชในส่วนเสริมของ cmd (Clink) ตั้งแต่ใช้ธีม ตามรายงานแครชของ Windows (D12)"#,
         r#"cmd crashed in its add-on (Clink) since the theme was applied, as Windows' crash reports say (D12)"#,
     ),
+    (
+        "E_TIMEOUT",
+        r#"CMD Studio ไม่ตอบภายใน 60 วินาที สำหรับคำสั่งที่ไม่เปลี่ยนเครื่อง ให้ลองใหม่ ถ้ายังเป็นอยู่ให้เริ่ม CMD Studio ใหม่ (recovery spec §6.2)"#,
+        r#"CMD Studio did not answer within 60 seconds for a command that changes nothing; try again, and if it stays, restart CMD Studio (recovery spec §6.2)"#,
+    ),
 ];
 
 /// The Thai and English meaning of a code of spec §5.9.
@@ -278,6 +283,16 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
     use std::path::Path;
+
+    #[test]
+    fn a_timed_out_command_has_its_row() {
+        let (th, en) = meaning("E_TIMEOUT").unwrap();
+        assert!(th.contains("60 วินาที"), "{th}");
+        assert!(
+            en.starts_with("CMD Studio did not answer within 60 seconds"),
+            "{en}"
+        );
+    }
 
     /// The spec, found from this crate upwards: `docs/superpowers/specs/…` in the nearest ancestor
     /// that has it (the repository root).

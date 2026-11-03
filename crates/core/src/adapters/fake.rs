@@ -2,7 +2,8 @@
 //! feature, crates/cli's). They never touch the machine.
 use super::{
     AdapterError, AppCrash, Arch, AutoRun, Created, DefaultTerminal, DirEntry, DirState, EventLog,
-    Fonts, Fs, FsLock, Host, Output, Process, RegValue, System, SystemInfo, WtLocation, WtSettings,
+    Fonts, Fs, FsLock, Host, Output, Process, ProcessStamp, RegValue, System, SystemInfo,
+    WtLocation, WtSettings,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -642,6 +643,11 @@ pub struct FakeHost {
     /// Long path → what `GetShortPathNameW` returns. Paths not listed come back unchanged.
     pub short: BTreeMap<PathBuf, PathBuf>,
     pub info: SystemInfo,
+    /// This process, as the run record names it (recovery spec §5.1).
+    pub pid: u32,
+    pub created_at_ms: Option<u64>,
+    /// The processes alive now, pid → creation time; this process is in it by its own fields.
+    pub processes: RefCell<BTreeMap<u32, u64>>,
     private: RefCell<BTreeMap<PathBuf, DirState>>,
 }
 
@@ -661,6 +667,9 @@ impl Default for FakeHost {
                 ui_language: 0x0409,
                 unreadable: Vec::new(),
             },
+            pid: 4242,
+            created_at_ms: Some(1_791_694_000_000),
+            processes: RefCell::new(BTreeMap::new()),
             private: RefCell::new(BTreeMap::new()),
         }
     }
@@ -709,6 +718,18 @@ impl Host for FakeHost {
     }
     fn system_info(&self) -> SystemInfo {
         self.info.clone()
+    }
+    fn this_process(&self) -> ProcessStamp {
+        ProcessStamp {
+            pid: self.pid,
+            created_at_ms: self.created_at_ms,
+        }
+    }
+    fn process_created_at(&self, pid: u32) -> Result<Option<u64>, AdapterError> {
+        if pid == self.pid {
+            return Ok(self.created_at_ms);
+        }
+        Ok(self.processes.borrow().get(&pid).copied())
     }
 }
 
@@ -1209,5 +1230,19 @@ mod tests {
             .unwrap();
         assert_eq!(out.stdout, "31.5.0\n");
         assert_eq!(p.calls().len(), 1);
+    }
+
+    #[test]
+    fn the_fake_host_knows_this_process_and_the_processes_it_is_told_of() {
+        let host = FakeHost::default();
+        assert_eq!(host.this_process().pid, 4242);
+        assert_eq!(host.this_process().created_at_ms, Some(1_791_694_000_000));
+        assert_eq!(
+            host.process_created_at(4242).unwrap(),
+            Some(1_791_694_000_000)
+        );
+        assert_eq!(host.process_created_at(99).unwrap(), None);
+        host.processes.borrow_mut().insert(99, 7);
+        assert_eq!(host.process_created_at(99).unwrap(), Some(7));
     }
 }

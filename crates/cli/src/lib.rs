@@ -1013,10 +1013,17 @@ fn put_there_by_cmd_studio(paths: &Paths, entry: &DirEntry) -> bool {
 /// itself writes there, and that every data folder it used holds until a `--cleanup` empties
 /// it: `cmdstudio.lock` (made by the first command that takes the lock, before any other write,
 /// and left when the lock is let go), `state.json`, `settings.json` (the app writes it the first
-/// time a setting changes), or a damaged copy of the last two set aside as `<name>.damaged-<ms>`.
+/// time a setting changes), or a damaged copy of the last two set aside as `<name>.damaged-<ms>`,
+/// or the settings the Recovery page set aside as `settings.json.reset-<ms>` (recovery spec
+/// §5.2); and `run.json`, the app's record of its run (recovery spec §5.1).
 /// Names compare without regard to ASCII letter case. The kind is the caller's to check.
 fn cmd_studios_own_file(paths: &Paths, entry: &DirEntry) -> bool {
-    let own = [paths.state_file(), paths.settings_file(), paths.lock_file()];
+    let own = [
+        paths.state_file(),
+        paths.settings_file(),
+        paths.lock_file(),
+        paths.run_file(),
+    ];
     if own.iter().any(|ours| same_name(ours, &entry.path)) {
         return true;
     }
@@ -1024,12 +1031,26 @@ fn cmd_studios_own_file(paths: &Paths, entry: &DirEntry) -> bool {
         return false;
     };
     let name = name.to_ascii_lowercase();
+    let is_ms = |ms: &str| !ms.is_empty() && ms.bytes().all(|b| b.is_ascii_digit());
+    let settings_name = paths
+        .settings_file()
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(str::to_ascii_lowercase);
+    if let Some(settings) = &settings_name {
+        if name
+            .strip_prefix(&format!("{settings}.reset-"))
+            .is_some_and(is_ms)
+        {
+            return true;
+        }
+    }
     [paths.state_file(), paths.settings_file()]
         .iter()
         .filter_map(|file| file.file_name().and_then(|n| n.to_str()))
         .any(|file| {
             name.strip_prefix(&format!("{}.damaged-", file.to_ascii_lowercase()))
-                .is_some_and(|ms| !ms.is_empty() && ms.bytes().all(|b| b.is_ascii_digit()))
+                .is_some_and(is_ms)
         })
 }
 
@@ -2482,6 +2503,9 @@ mod tests {
             r"webview\EBWebView\Default\Cache\data_0",
             r"health\start-4242",
             r"health\paused.json",
+            "run.json",
+            "settings.json.reset-1791694709000",
+            r"logs\crash-1791694709000.txt",
             "settings.json",
             "settings.json.damaged-1791694709000",
             ".settings.json.0123456789abcdef0123456789abcdef.cmdstudio-tmp",

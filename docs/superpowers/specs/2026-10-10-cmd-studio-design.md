@@ -653,6 +653,7 @@ exit code: `0` สำเร็จ · `1` ล้มเหลวและย้อ
 | `E_INTERNAL` | CMD Studio เองมีปัญหา รายละเอียดบอกว่าตรงไหน ลองใหม่อีกครั้ง ถ้ายังเป็นอยู่ให้แจ้งปัญหาพร้อมข้อมูลวินิจฉัย | CMD Studio itself ran into a problem; the details say where. Try again, and if it stays, report it with the diagnostics |
 | `E_THEME_PAUSED` | ธีมถูกหยุดไว้ ใน cmd เพราะ cmd เปิดไม่ถึงพร้อมท์ซ้ำๆ หรือทั้งเครื่อง เพราะ cmd แครชในส่วนเสริมหรือผู้ใช้หยุดเอง เปิดธีมกลับได้ที่หน้าแรก (D12) | The theme is paused, in cmd because cmd failed to reach its prompt again and again, or on this computer because cmd crashed in its add-on or it was paused by hand; turn it back on from the home page (D12) |
 | `E_CMD_CRASHED` | cmd แครชในส่วนเสริมของ cmd (Clink) ตั้งแต่ใช้ธีม ตามรายงานแครชของ Windows (D12) | cmd crashed in its add-on (Clink) since the theme was applied, as Windows' crash reports say (D12) |
+| `E_TIMEOUT` | CMD Studio ไม่ตอบภายใน 60 วินาที สำหรับคำสั่งที่ไม่เปลี่ยนเครื่อง ให้ลองใหม่ ถ้ายังเป็นอยู่ให้เริ่ม CMD Studio ใหม่ (recovery spec §6.2) | CMD Studio did not answer within 60 seconds for a command that changes nothing; try again, and if it stays, restart CMD Studio (recovery spec §6.2) |
 
 ### 5.10 Log ความเป็นส่วนตัว และความปลอดภัยของแอป
 - ไม่มี telemetry ใดๆ
