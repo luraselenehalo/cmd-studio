@@ -74,3 +74,9 @@ pub const COMMANDS: &[&str] = &[
     THEME_PAUSE,
     THEME_RESUME,
 ];
+
+/// The commands that change the machine (recovery spec §6.3): each runs one of the core's
+/// journaled transactions, and `app_status` names the one that runs. `plan_apply` takes the
+/// lock and changes nothing; `theme_resume` at the cmd level writes only `health`; `doctor_fix`
+/// proposes.
+pub const CHANGES_MACHINE: &[&str] = &[APPLY, UNDO_LAST, SNAPSHOT_RESTORE, REVERT_ALL, THEME_PAUSE];

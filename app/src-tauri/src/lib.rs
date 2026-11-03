@@ -17,6 +17,9 @@ pub mod machine;
 pub mod open;
 pub mod settings;
 
+/// The one argument that opens the window instead of the CLI (recovery spec §4.4, §8).
+pub const RECOVERY_ARG: &str = "--recovery";
+
 #[cfg(test)]
 mod config_guard;
 
@@ -28,10 +31,9 @@ mod config_guard;
 /// WebView2, a `<data>\webview` folder that cannot be made) is handled inside `setup` and never
 /// returned to Tauri. After that, Tauri owns the thread.
 #[cfg(windows)]
-pub fn run_gui() {
+pub fn run_gui(how: backend::run::GuiStart) {
+    use backend::run::GuiStart;
     use tauri::Manager;
-    // The backend over this computer, with the preview's sample identity read from the
-    // environment (`machine::real_backend` is the one place that reads it).
     let backend = match machine::real_backend() {
         Ok(backend) => std::sync::Arc::new(backend),
         Err(why) => {
@@ -39,17 +41,27 @@ pub fn run_gui() {
             std::process::exit(1);
         }
     };
+    // The run's record, before the window (recovery spec §5.1); `--recovery`'s own steps run on
+    // a thread once the window is up, so a slow rollback never delays the window.
+    let decided = backend.start_run(how);
     let for_window = backend.clone();
+    let for_instance = backend.clone();
+    let for_exit = backend.clone();
     let built = tauri::Builder::default()
-        // A second start focuses this window instead of opening another (spec §5.7). The plugin
-        // has no JS commands, so the capability file does not change. Registered first, as the
-        // plugin asks: a second start hands its arguments over and exits before the window.
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.unminimize();
-                let _ = window.set_focus();
-            }
-        }))
+        // A second start focuses this window instead of opening another (spec §5.7); one with
+        // `--recovery` makes this instance do the shortcut's work and reload into recovery mode
+        // (recovery spec §4.4). Registered first, as the plugin asks.
+        .plugin(tauri_plugin_single_instance::init(
+            move |app, args, _cwd| {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.unminimize();
+                    let _ = window.set_focus();
+                    if args.iter().any(|a| a == RECOVERY_ARG) {
+                        recover_in_place(&for_instance, window);
+                    }
+                }
+            },
+        ))
         .manage(backend)
         .invoke_handler(ipc::handler())
         .setup(move |app| {
@@ -58,17 +70,66 @@ pub fn run_gui() {
                 console::fatal(&window_failed(&why));
                 std::process::exit(1);
             }
-            start_crash_check(&for_window);
+            if how == GuiStart::Recovery {
+                start_recovery_entry(&for_window);
+            } else if decided.safe_mode.is_none() {
+                // Recovery mode starts no crash check (recovery spec §4.3).
+                start_crash_check(&for_window);
+            }
             Ok(())
         })
         .build(tauri::generate_context!());
     match built {
-        Ok(app) => app.run(|_, _| {}),
+        Ok(app) => app.run(move |_, event| {
+            if let tauri::RunEvent::Exit = event {
+                for_exit.end_run();
+            }
+        }),
         Err(e) => {
             console::fatal(&start_failed(&e.to_string()));
             std::process::exit(1);
         }
     }
+}
+
+/// `--recovery`'s steps 1–2 on a thread of their own (recovery spec §4.4), then `after`. The
+/// entry is `busy` under its own name while it runs, so the UI's start waits for it (§6.3). A
+/// thread that cannot be started is logged; nothing waits on the window's thread.
+#[cfg(windows)]
+fn spawn_recovery_entry(
+    backend: &std::sync::Arc<backend::Backend<machine::RealMachine>>,
+    after: impl FnOnce() + Send + 'static,
+) {
+    let b = backend.clone();
+    let spawned = std::thread::Builder::new()
+        .name("recovery-entry".to_string())
+        .spawn(move || {
+            let _ = b.recovery_entry();
+            after();
+        });
+    if spawned.is_err() {
+        backend.note_line("recovery_entry not_run");
+    }
+}
+
+/// The start with `--recovery`: the entry once the window is up; the window's first
+/// `app_status` finds it busy and asks again until it has ended.
+#[cfg(windows)]
+fn start_recovery_entry(backend: &std::sync::Arc<backend::Backend<machine::RealMachine>>) {
+    spawn_recovery_entry(backend, || {});
+}
+
+/// A second start with `--recovery` while this one runs (recovery spec §4.4): the entry, then
+/// the page is loaded again; the reloaded UI asks `app_status` first and finds safe mode on.
+#[cfg(windows)]
+fn recover_in_place(
+    backend: &std::sync::Arc<backend::Backend<machine::RealMachine>>,
+    window: tauri::WebviewWindow,
+) {
+    backend.enter_safe_mode(backend::run::SafeModeReason::Recovery);
+    spawn_recovery_entry(backend, move || {
+        let _ = window.eval("window.location.reload()");
+    });
 }
 
 /// Builds the window, the only place it is made. It is in tauri.conf.json with
@@ -254,10 +315,33 @@ mod tests {
         let window = text.find("open_main_window(app, ").unwrap();
         let check = text.find("start_crash_check(&for_window)").unwrap();
         assert!(window < check, "the check starts once the window is up");
+        let record = text.find("backend.start_run(how)").unwrap();
+        assert!(record < window, "the run's record comes before the window");
+        assert!(
+            text.contains("tauri::RunEvent::Exit"),
+            "a normal exit ends the run"
+        );
+        assert!(production().contains("for_exit.end_run()"));
+    }
+
+    /// `--recovery` alone opens the window in recovery mode; every other argument is the CLI's
+    /// (recovery spec §4.4, §8). `main.rs` is read as text: the binary is never started here.
+    #[test]
+    fn only_the_recovery_argument_opens_the_window() {
+        let main = include_str!("main.rs");
+        assert_eq!(RECOVERY_ARG, "--recovery");
+        assert!(
+            main.contains("[one] if one == cmdstudio_app::RECOVERY_ARG"),
+            "{main}"
+        );
+        assert!(main.contains("GuiStart::Recovery"));
+        let gui = main.find("run_gui(GuiStart::Normal)").unwrap();
+        let cli = main.find("cmdstudio_cli::run(").unwrap();
+        assert!(gui < cli, "the window's cases come before the CLI");
     }
 }
 
 #[cfg(not(windows))]
-pub fn run_gui() {
+pub fn run_gui(_how: backend::run::GuiStart) {
     console::fatal("CMD Studio runs on Windows only.");
 }

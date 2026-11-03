@@ -1,5 +1,6 @@
 //! `cmdstudio.exe`: the app and the CLI in one exe (spec §5.7). Started with no arguments it
-//! opens the window; with any, it runs `cmdstudio_cli::run` and exits with its code, so the
+//! opens the window; with `--recovery` alone, the window in recovery mode (recovery spec §4.4);
+//! with any other, it runs `cmdstudio_cli::run` and exits with its code, so the
 //! uninstaller's `--cleanup`, `cmdstudio doctor` and the rest are the same program.
 //!
 //! A release build is a Windows-subsystem exe (no console window flashes when the app starts),
@@ -12,10 +13,16 @@
 
 #[cfg(windows)]
 fn main() {
+    use cmdstudio_app::backend::run::GuiStart;
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
-    if args.is_empty() {
-        cmdstudio_app::run_gui();
-        return;
+    // `--recovery` alone opens the window in recovery mode (recovery spec §4.4, §8): the
+    // Start-menu shortcut "CMD Studio Recovery". Every other argument is the CLI's.
+    match args.as_slice() {
+        [] => return cmdstudio_app::run_gui(GuiStart::Normal),
+        [one] if one == cmdstudio_app::RECOVERY_ARG => {
+            return cmdstudio_app::run_gui(GuiStart::Recovery)
+        }
+        _ => {}
     }
     cmdstudio_app::console::attach_parent();
     let (mut out, mut err) = (std::io::stdout(), std::io::stderr());

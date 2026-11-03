@@ -28,6 +28,7 @@ pub mod doctor;
 pub mod launch;
 pub mod preview;
 pub mod recovery;
+pub mod run;
 pub mod system;
 
 /// What the backend runs on: the real adapters (`crate::machine::RealMachine`) or the core's
@@ -80,6 +81,8 @@ pub struct Backend<M> {
     /// Where the start's check of Windows' crash reports leaves its answer for
     /// `recovery_status` (recovery spec §4.3).
     crash: recovery::CrashSlot,
+    /// This run: the record, safe mode, the crash notice, what runs now (recovery spec §5).
+    run: run::RunState,
 }
 
 impl<M: Machine> Backend<M> {
@@ -106,6 +109,7 @@ impl<M: Machine> Backend<M> {
             library_lock: Mutex::new(()),
             sample,
             crash: recovery::CrashSlot::new(),
+            run: run::RunState::new(),
         }
     }
 
@@ -141,6 +145,11 @@ impl<M: Machine> Backend<M> {
         f: impl FnOnce(&Self) -> Result<T, AppError>,
     ) -> Result<T, AppError> {
         let started = Instant::now();
+        // Named as what runs now while it runs (recovery spec §6.3); the guard clears it also
+        // when `f` panics (the worker then answers E_INTERNAL).
+        let _busy = crate::command_names::CHANGES_MACHINE
+            .contains(&name)
+            .then(|| self.busy(name));
         let result = f(self);
         let ms = started.elapsed().as_millis();
         let ended = match &result {
@@ -475,6 +484,11 @@ pub(crate) mod testing {
     /// through here.
     pub(crate) fn fake_fs(b: &Backend<FakeMachine>) -> &FakeFs {
         &b.machine.fs
+    }
+
+    /// The fake host under the backend (see [`fake_fs`]).
+    pub(crate) fn fake_host(b: &Backend<FakeMachine>) -> &cmdstudio_core::adapters::fake::FakeHost {
+        &b.machine.host
     }
 
     /// The fake crash reports under the backend (see [`fake_fs`]).
