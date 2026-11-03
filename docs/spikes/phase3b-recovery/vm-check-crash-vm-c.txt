@@ -1,0 +1,78 @@
+# vm-check.md step 4 on VM-C (cmdstudio-th, the Thai user with a space; th-TH, code page 874)
+
+## recovery-fakecrash.ps1
+fake cmd.exe: 4E8B65AD218A84377F55A997B9F3628A3729F1F6D40753B203D6C7A7C66AB672
+stand-in dll: D52A20C769D0DFF30D8E67575AF78E389FC8D245F441D23B06FFD03675928A2E
+fake cmd.exe run 1: pid 1052 exited=True at 01:08:18
+fake cmd.exe run 2: pid 5932 exited=True at 01:08:32
+fake cmd.exe run 3: pid 6436 exited=True at 01:08:46
+WerFault processes now: 0
+
+## recovery-crash.ps1 -Events -Data <LOCALAPPDATA>\ai.resincore.cmdstudio
+events 1000: 3
+--- event 1 at 2026-10-18T18:08:45.4337221Z
+  [AppName] = [cmd.exe]
+  [AppVersion] = [0.0.0.0]
+  [AppTimeStamp] = [6ad46762]
+  [ModuleName] = [clink_dll_x64.dll]
+  [ModuleVersion] = [1.9.34.0]
+  [ModuleTimeStamp] = [6ad40453]
+  [ExceptionCode] = [c000001d]
+  [FaultingOffset] = [000000000000100d]
+  [ProcessId] = [0x1924]
+  [ProcessCreationTime] = [0x1dd5f2bb6a2cdc3]
+  [AppPath] = [C:\cmdstudio\fake\cmd.exe]
+  [ModulePath] = [C:\cmdstudio\crash-dll\clink_dll_x64.dll]
+  [IntegratorReportId] = [468933f6-a762-409c-9829-eb598ded7396]
+  [PackageFullName] = []
+  [PackageRelativeAppId] = []
+--- event 2 at 2026-10-18T18:08:31.2848505Z
+  [AppName] = [cmd.exe]
+  [AppVersion] = [0.0.0.0]
+  [AppTimeStamp] = [6ad46762]
+  [ModuleName] = [clink_dll_x64.dll]
+  [ModuleVersion] = [1.9.34.0]
+  [ModuleTimeStamp] = [6ad40453]
+  [ExceptionCode] = [c000001d]
+  [FaultingOffset] = [000000000000100d]
+  [ProcessId] = [0x172c]
+  [ProcessCreationTime] = [0x1dd5f2bae30204e]
+  [AppPath] = [C:\cmdstudio\fake\cmd.exe]
+  [ModulePath] = [C:\cmdstudio\crash-dll\clink_dll_x64.dll]
+  [IntegratorReportId] = [30ac7aec-8fd2-4b83-afe5-190a3a07fced]
+  [PackageFullName] = []
+  [PackageRelativeAppId] = []
+--- event 3 at 2026-10-18T18:08:16.8809838Z
+  [AppName] = [cmd.exe]
+  [AppVersion] = [0.0.0.0]
+  [AppTimeStamp] = [6ad46762]
+  [ModuleName] = [clink_dll_x64.dll]
+  [ModuleVersion] = [1.9.34.0]
+  [ModuleTimeStamp] = [6ad40453]
+  [ExceptionCode] = [c000001d]
+  [FaultingOffset] = [000000000000100d]
+  [ProcessId] = [0x41c]
+  [ProcessCreationTime] = [0x1dd5f2ba538609f]
+  [AppPath] = [C:\cmdstudio\fake\cmd.exe]
+  [ModulePath] = [C:\cmdstudio\crash-dll\clink_dll_x64.dll]
+  [IntegratorReportId] = [faecb4bc-935b-4f84-910f-d70f7938dbac]
+  [PackageFullName] = []
+  [PackageRelativeAppId] = []
+the app's query finds: 3
+with EventData[Data='cmd.exe']: 3
+--- clink.log, last lines
+11f4 hook_setter::hook_setter  139 >>> Started hook transaction.
+11f4 hook_setter::detach_iat   315 Unhooking GetEnvironmentVariableW in IAT for module 00007FF763500000 in 'api-ms-win-core-processenvironment-l1-1-0.dll' at 00007FFA71198340.
+11f4 hook_setter::commit       198 <<< Hook transaction committed.
+11f4 hook_setter::hook_setter  139 >>> Started hook transaction.
+11f4 hook_setter::attach_iat   271 Hooking ReadConsoleW in IAT for module 00007FF763500000 in 'api-ms-win-core-console-l1-1-0.dll' at 00007FF76353BAC8 (value was 00007FFAC80CEEF0).
+11f4 hook_setter::attach_iat   271 Hooking SetConsoleTitleW in IAT for module 00007FF763500000 in 'api-ms-win-core-console-l2-2-0.dll' at 00007FF76353BB30 (value was 00007FFAC80DF0B0).
+11f4 hook_setter::commit       198 <<< Hook transaction committed.
+11f4 win_screen_buffer::begin  693 Using native terminal support (auto mode found 'OpenConsoleProxy.dll').
+11f4 reset_handle              144 resetting mismatched stdout handle
+11f4 reset_handle              144 resetting mismatched stderr handle
+11f4 @C:\Users\ผู้ทดสอบ ไทย\AppData\Local\ai.resincore.cmdstudio\generated\init.lua  241 cmdstudio: prompt loaded
+11f4 host_lua::load_scripts    214 Loaded 2 Lua scripts in 349 ms
+11f4 @~clink~/app/update.lua   924 Clink updater: clink.autoupdate is off.
+11f4 history_db::initialise   1328 master bank ctag: |CTAG_1792346571_551015_10116_0
+11f4 history_db::compact      1618 History:  1 active, 0 deleted

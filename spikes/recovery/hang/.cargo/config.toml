@@ -1,0 +1,12 @@
+# The test VMs' clean snapshots may have no Visual C++ runtime: without this the program imports
+# VCRUNTIME140.dll and Windows refuses to start it (error 126 or a missing-DLL box) before main,
+# so init.lua's `oh-my-posh init cmd` would end at once with nothing instead of never answering,
+# and steps 3 and 3b of the VM check would fail for a reason that is not the counter's. With the
+# C runtime linked in, it imports Windows' own DLLs only.
+#
+# This file applies only when cargo runs from this crate's folder (cargo reads .cargo\config.toml
+# from the working directory upwards, not from --manifest-path). After a build, the exe's bytes
+# must hold neither VCRUNTIME140 nor api-ms-win-crt (`dumpbin /dependents hang.exe` lists system
+# DLLs only, KERNEL32.dll first).
+[build]
+rustflags = ["-C", "target-feature=+crt-static"]

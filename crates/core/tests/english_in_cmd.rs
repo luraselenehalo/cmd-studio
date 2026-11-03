@@ -42,6 +42,7 @@ fn no_file_that_cmd_shows_holds_a_thai_character() {
     let omp_exe = under_data(r"runtime\omp-31.5.0\oh-my-posh.exe");
     let omp_config = under_data(r"generated\theme.omp.json");
     let scripts = under_data("generated");
+    let health = under_data("health");
     let presets = presets::builtin().unwrap();
     assert!(!presets.is_empty());
     let mut found = Vec::new();
@@ -56,7 +57,7 @@ fn no_file_that_cmd_shows_holds_a_thai_character() {
                 theme.prompt.transient = transient;
                 let files = [
                     ("banner.lua", banner_lua(&theme)),
-                    ("init.lua", init_lua(&omp_exe, &omp_config)),
+                    ("init.lua", init_lua(&omp_exe, &omp_config, &health)),
                     ("clink_settings", clink::settings(transient, &scripts)),
                     ("theme.omp.json", omp::config_text(&theme).unwrap()),
                 ];

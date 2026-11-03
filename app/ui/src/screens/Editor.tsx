@@ -842,18 +842,24 @@ export function Editor({ id }: { id: string }) {
           </div>
 
           <div className="preview-column">
-            <h2 style={{ marginTop: 0 }}>{t("editor.preview.title")}</h2>
-            <TerminalPreview theme={theme} result={preview} />
-            {previewError !== null && <ErrorNotice error={previewError} />}
-            <label>
-              {t("editor.preview.user")}
-              <input type="text" value={sample.user} maxLength={64} onChange={(e) => setSample({ ...sample, user: e.target.value })} />
-            </label>
-            <label>
-              {t("editor.preview.folder")}
-              <input type="text" value={sample.cwd} maxLength={200} onChange={(e) => setSample({ ...sample, cwd: e.target.value })} />
-            </label>
-            <NumberField label={t("editor.preview.width")} value={sample.width} min={20} max={200} onChange={(width) => setSample({ ...sample, width })} />
+            {/* What the stacked layout lifts above the form (styles.css): the heading, the preview
+                and its error notice. The sample fields below stay in the page's order. */}
+            <div className="preview-top">
+              <h2 style={{ marginTop: 0 }}>{t("editor.preview.title")}</h2>
+              <TerminalPreview theme={theme} result={preview} />
+              {previewError !== null && <ErrorNotice error={previewError} />}
+            </div>
+            <div className="preview-sample">
+              <label>
+                {t("editor.preview.user")}
+                <input type="text" value={sample.user} maxLength={64} onChange={(e) => setSample({ ...sample, user: e.target.value })} />
+              </label>
+              <label>
+                {t("editor.preview.folder")}
+                <input type="text" value={sample.cwd} maxLength={200} onChange={(e) => setSample({ ...sample, cwd: e.target.value })} />
+              </label>
+              <NumberField label={t("editor.preview.width")} value={sample.width} min={20} max={200} onChange={(width) => setSample({ ...sample, width })} />
+            </div>
           </div>
         </div>
       </div>

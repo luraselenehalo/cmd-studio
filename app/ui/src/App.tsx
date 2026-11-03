@@ -44,6 +44,7 @@ export function App() {
   const [lastApply, setLastApply] = useState<LastApply | null>(null);
   const draftProblems = useDraftProblems();
   const [version, setVersion] = useState(0);
+  const [recoveryActed, setRecoveryActed] = useState(false);
   const [startError, setStartError] = useState<unknown>(null);
   const [resetFrom, setResetFrom] = useState<string | null>(null);
   /** Why the wizard's settings could not be saved as it went home: they are kept in memory, the
@@ -134,9 +135,10 @@ export function App() {
   }, []);
 
   const bump = useCallback(() => setVersion((v) => v + 1), []);
+  const markRecoveryActed = useCallback(() => setRecoveryActed(true), []);
   const appState = useMemo<AppState>(
-    () => ({ settings, saveSettings, lastApply, setLastApply, draftProblems, version, bump }),
-    [settings, saveSettings, lastApply, draftProblems, version, bump],
+    () => ({ settings, saveSettings, lastApply, setLastApply, draftProblems, version, bump, recoveryActed, markRecoveryActed }),
+    [settings, saveSettings, lastApply, draftProblems, version, bump, recoveryActed, markRecoveryActed],
   );
   const nav = useMemo<Nav>(() => ({ route: route ?? { name: "home" }, go: (r: Route) => setRoute(r) }), [route]);
 

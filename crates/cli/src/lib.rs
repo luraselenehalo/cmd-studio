@@ -27,6 +27,7 @@ use cmdstudio_core::model::{parse_theme, Target};
 use cmdstudio_core::plan::{
     Op, Paths, PlanError, Request, Warning, AUTORUN_NOT_TEXT, NERD_FONT_FAMILY,
 };
+use cmdstudio_core::recovery::clear_pause;
 use cmdstudio_core::resources::Resources;
 use cmdstudio_core::snapshot::{Incomplete, SetAside, SnapshotStore, Unrestored};
 use cmdstudio_core::txn::{Failure, Outcome};
@@ -559,17 +560,40 @@ impl<'s, 'a> Say<'s, 'a> {
         }
         let ops = prepared.ops.clone();
         let outcome = run_apply(sys, ctx, prepared);
-        let done = match req.target {
-            Target::All => format!(
+        // A theme applied is the theme on again (recovery spec §4.1): its pause goes, and with
+        // it every start tag of the theme before. This comes before anything is said, so that the
+        // hint to open a new window is not said when the lift failed. The apply stands either way.
+        let lift = if outcome == Outcome::Committed {
+            clear_pause(sys.fs, &ctx.paths).err()
+        } else {
+            None
+        };
+        let done = match (&lift, req.target) {
+            // The line on stderr says what to do instead.
+            (Some(_), _) => format!("Applied \"{name}\"."),
+            (None, Target::All) => format!(
                 "Applied \"{name}\". Open a new cmd window to see the prompt and the welcome \
                  box."
             ),
-            Target::Wt => format!(
+            (None, Target::Wt) => format!(
                 "Applied \"{name}\". Open a new cmd tab in Windows Terminal to see the prompt \
                  and the welcome box."
             ),
         };
-        self.finish(sys, ctx, &outcome, &ops, done)
+        let code = self.finish(sys, ctx, &outcome, &ops, done);
+        if let Some(e) = lift {
+            // `clear_pause` fails at a tag it cannot delete (the pause stays on purpose, or three
+            // stale tags would pause the next window at once), at the listing, at paused.json or
+            // at making the folder; there may be no pause at all. `{e}` names the file, so the
+            // advice is for the folder and does not name a pause.
+            self.err(format!(
+                "E_DATA_WRITE: the theme was applied, but CMD Studio's start records in {} could \
+                 not be cleared ({e}); if cmd windows open without the theme, delete the files \
+                 in that folder, or turn the theme back on in CMD Studio",
+                ctx.paths.health().display()
+            ));
+        }
+        code
     }
 
     fn undo(&mut self, sys: System<'_>, ctx: &Ctx) -> i32 {
@@ -937,8 +961,9 @@ fn same_name(a: &Path, b: &Path) -> bool {
 /// Whether an entry directly in the data folder is one CMD Studio itself puts there, of the
 /// kind it writes, as the core's `Paths` and its writers make them:
 /// - the folders `generated\`, `clink-profile\`, `runtime\`, `snapshots\`, `themes\`, and the
-///   app's `drafts\` (autosaved drafts), `logs\` (its log) and `webview\` (WebView2's own data,
-///   put there by the app on purpose; spec §5.3);
+///   app's `drafts\` (autosaved drafts), `logs\` (its log), `webview\` (WebView2's own data,
+///   put there by the app on purpose; spec §5.3), and `health\` (init.lua's start tags and the
+///   theme's pause, recovery spec §7);
 /// - the files `state.json`, `settings.json` (the app's settings) and `cmdstudio.lock` (made by
 ///   `Fs::try_lock`);
 /// - `state.json.damaged-<ms>` and `settings.json.damaged-<ms>`: a damaged file that Revert
@@ -947,7 +972,7 @@ fn same_name(a: &Path, b: &Path) -> bool {
 ///   file `WinFs::write_atomic` writes beside the file, left behind when a run is cut off in
 ///   that write. state.json and settings.json are the only files CMD Studio writes directly in
 ///   the data folder: the generated files, Clink's profile, the runtimes, the restore points, the
-///   drafts and the log, with their own temp files, are in the folders above.
+///   drafts, the log and the pause, with their own temp files, are in the folders above.
 ///
 /// Names compare without regard to ASCII letter case, as Windows does.
 fn put_there_by_cmd_studio(paths: &Paths, entry: &DirEntry) -> bool {
@@ -965,6 +990,7 @@ fn put_there_by_cmd_studio(paths: &Paths, entry: &DirEntry) -> bool {
             paths.drafts(),
             paths.logs(),
             paths.webview(),
+            paths.health(),
         ]
         .into_iter()
         .any(named);
@@ -1046,8 +1072,8 @@ pub fn now_ms() -> u64 {
 #[cfg(windows)]
 pub fn run(args: &[OsString], io: &mut Io<'_>) -> i32 {
     use cmdstudio_core::adapters::windows::{
-        fonts::WinFonts, fs::WinFs, host::WinHost, process::WinProcess, registry::WinAutoRun,
-        wt::WinWt,
+        eventlog::WinEventLog, fonts::WinFonts, fs::WinFs, host::WinHost, process::WinProcess,
+        registry::WinAutoRun, wt::WinWt,
     };
     use cmdstudio_core::adapters::{program_data_dir, Host};
     let host = WinHost;
@@ -1088,6 +1114,7 @@ pub fn run(args: &[OsString], io: &mut Io<'_>) -> i32 {
         WinWt::new(local.clone()),
     );
     let process = WinProcess::new(allowed, std::time::Duration::from_secs(60));
+    let event_log = WinEventLog::real();
     let sys = System {
         fs: &fs,
         autorun: &autorun,
@@ -1095,6 +1122,7 @@ pub fn run(args: &[OsString], io: &mut Io<'_>) -> i32 {
         wt: &wt,
         process: &process,
         host: &host,
+        event_log: &event_log,
     };
     run_with(args, io, sys, &defaults)
 }
@@ -1196,7 +1224,7 @@ mod tests {
         assert!(out.contains("Plan for \"Terracotta\":\n  - "), "{out}");
         let (code, out, _) = cli(&m, &later(&d, 1), &["doctor", "--json"]);
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(v["checks"].as_array().unwrap().len(), 11);
+        assert_eq!(v["checks"].as_array().unwrap().len(), 12);
         // English only: the Thai text of a check is for the app's own UI.
         assert!(v["checks"][0]["messageEn"].is_string(), "{out}");
         assert!(v["checks"][0].get("messageTh").is_none(), "{out}");
@@ -1773,13 +1801,17 @@ mod tests {
                 "\"state.json\\\"",
             ),
             (r"C:\x\b", r"C:\x\b\runtime", "\"runtime\""),
-            // The app's names too: a file called drafts, a folder called settings.json.
+            // The app's names too: a file called drafts, a folder called settings.json, and a
+            // file called health (the folder of the start tags and the pause).
             (r"C:\x\d", r"C:\x\d\drafts", "\"drafts\""),
+            (r"C:\x\f", r"C:\x\f\health", "\"health\""),
             (
                 r"C:\x\e",
                 r"C:\x\e\settings.json\inside.txt",
                 "\"settings.json\\\"",
             ),
+            // A lookalike of a name of CMD Studio's is anybody's.
+            (r"C:\x\g", r"C:\x\g\healthy\inside.txt", "\"healthy\\\""),
         ] {
             m.fs.put(put, b"x");
             let before = m.fs.snapshot();
@@ -1811,6 +1843,8 @@ mod tests {
             let folder = r"D:\work";
             m.fs.put(format!(r"{folder}\runtime\tool.exe"), b"mine");
             m.fs.put(format!(r"{folder}\snapshots\2026\notes.txt"), b"mine");
+            // health\ is CMD Studio's name, and by itself no more proof than the others.
+            m.fs.put(format!(r"{folder}\health\start-1"), b"mine");
             let before = (m.fs.snapshot(), m.autorun.snapshot());
             for args in [
                 vec!["--cleanup", "--data-dir", folder],
@@ -2016,10 +2050,10 @@ mod tests {
         let (code, out, _) = cli(&m, &later(&d, 1), &["doctor", "--json"]);
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         let checks = v["checks"].as_array().unwrap();
-        assert_eq!((code, checks.len()), (EXIT_FAILED, 12), "{out}");
-        assert_eq!(checks[11]["id"], "R1");
-        assert_eq!(checks[11]["code"], "E_SNAPSHOT_READ");
-        assert!(checks[11]["messageEn"].as_str().unwrap().contains(&way_out));
+        assert_eq!((code, checks.len()), (EXIT_FAILED, 13), "{out}");
+        assert_eq!(checks[12]["id"], "R1");
+        assert_eq!(checks[12]["code"], "E_SNAPSHOT_READ");
+        assert!(checks[12]["messageEn"].as_str().unwrap().contains(&way_out));
         // Every command that changes the machine refuses, changes nothing and names the way out.
         for args in [vec!["apply", THEME], vec!["undo"], vec!["--cleanup"]] {
             let (code, out, err) = cli(&m, &later(&d, 1), &args);
@@ -2446,6 +2480,8 @@ mod tests {
             r"logs\cmdstudio.log",
             r"logs\cmdstudio.log.1",
             r"webview\EBWebView\Default\Cache\data_0",
+            r"health\start-4242",
+            r"health\paused.json",
             "settings.json",
             "settings.json.damaged-1791694709000",
             ".settings.json.0123456789abcdef0123456789abcdef.cmdstudio-tmp",
@@ -2474,13 +2510,208 @@ mod tests {
         let (code, out, err) = cli(&m, &later(&d, 2), &["--cleanup", "--data-dir", fresh]);
         assert_eq!(code, EXIT_OK, "{out}{err}");
         assert!(!m.fs.exists(Path::new(fresh)));
+        // Windows compares names without regard to case: HEALTH\ is health\.
+        let upper = r"C:\Users\tester\upper";
+        m.fs.put(format!(r"{upper}\settings.json"), b"{}");
+        m.fs.put(format!(r"{upper}\HEALTH\paused.json"), b"{}");
+        let (code, out, err) = cli(&m, &later(&d, 3), &["--cleanup", "--data-dir", upper]);
+        assert_eq!(code, EXIT_OK, "{out}{err}");
+        assert!(!m.fs.exists(Path::new(upper)));
         // A file CMD Studio never writes there is still refused, nothing deleted.
         m.fs.put(format!(r"{fresh}\settings.json"), b"{}");
         m.fs.put(format!(r"{fresh}\webview.txt"), b"x");
         let before = m.fs.snapshot();
-        let (code, _, err) = cli(&m, &later(&d, 3), &["--cleanup", "--data-dir", fresh]);
+        let (code, _, err) = cli(&m, &later(&d, 4), &["--cleanup", "--data-dir", fresh]);
         assert_eq!(code, EXIT_INVALID, "{err}");
         assert!(err.contains("\"webview.txt\""), "{err}");
         assert_eq!(m.fs.snapshot(), before);
+    }
+
+    /// The theme paused in cmd, as init.lua leaves it: `paused.json` and two start tags.
+    fn paused_in_cmd(m: &FakeMachine, d: &Defaults) -> Paths {
+        let paths = Paths {
+            data: d.data_dir.clone(),
+        };
+        m.fs.put(
+            paths.paused_file(),
+            br#"{"version":1,"reason":"cmdStarts","at":1791694709000,"count":3,"by":"clink"}"#,
+        );
+        for pid in [11, 12] {
+            m.fs.put(
+                paths.health().join(format!("start-{pid}")),
+                b"v1 1791694709\n",
+            );
+        }
+        paths
+    }
+
+    /// How the apply's failure to clear the start records begins, whichever step failed.
+    const NOT_CLEARED: &str =
+        "E_DATA_WRITE: the theme was applied, but CMD Studio's start records in ";
+
+    /// What a run said when the start records could not be cleared: the apply stands (exit 0, the
+    /// "Applied" line, no hint to open a new window, which the line on stderr contradicts), and
+    /// stderr says it once, in CMD Studio's own English words, and without claiming a pause.
+    fn assert_applied_but_not_cleared(code: i32, out: &str, err: &str, paths: &Paths) {
+        assert_eq!(code, EXIT_OK, "{out}{err}");
+        assert!(out.contains("Applied \"Terracotta\"."), "{out}");
+        assert!(!out.contains("Open a new"), "no hint to a window: {out}");
+        assert_eq!(err.lines().count(), 1, "said once: {err}");
+        let health = paths.health();
+        assert!(
+            err.starts_with(&format!(
+                "{NOT_CLEARED}{} could not be cleared (",
+                health.display()
+            )),
+            "{err}"
+        );
+        assert!(
+            err.contains(
+                "); if cmd windows open without the theme, delete the files in that folder, or \
+                 turn the theme back on in CMD Studio"
+            ),
+            "{err}"
+        );
+        assert!(err.is_ascii(), "English only in cmd: {err}");
+        assert!(!err.contains("until"), "no second path or deadline: {err}");
+    }
+
+    #[test]
+    fn an_apply_lifts_the_pause_and_every_tag() {
+        // Review Focus 5: a theme applied from the command line is the theme on again; a pause
+        // left behind would keep every cmd window plain under the new theme.
+        let (m, d) = machine();
+        let paths = paused_in_cmd(&m, &d);
+        let (code, out, err) = cli(&m, &d, &["apply", THEME]);
+        assert_eq!((code, err.as_str()), (EXIT_OK, ""), "{out}");
+        assert!(
+            out.contains("Open a new cmd window to see the prompt and the welcome box."),
+            "{out}"
+        );
+        assert!(!m.fs.exists(&paths.paused_file()));
+        assert!(m.fs.list_dir(&paths.health()).unwrap().is_empty());
+        // An apply that rolls back (here its check: Oh My Posh draws nothing) leaves the pause
+        // and every tag.
+        let paths = paused_in_cmd(&m, &d);
+        m.process.answer("oh-my-posh.exe", "print", 1, "");
+        let (code, _, err) = cli(&m, &later(&d, 1), &["apply", THEME]);
+        assert_eq!(code, EXIT_FAILED, "{err}");
+        assert!(m.fs.exists(&paths.paused_file()));
+        for pid in [11, 12] {
+            assert!(
+                m.fs.exists(&paths.health().join(format!("start-{pid}"))),
+                "start-{pid} stays with the pause: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_apply_with_no_pause_still_makes_the_folder_init_lua_writes_its_tags_in() {
+        // A fresh machine has no health\ at all; the first window's tag needs it (a fake's `put`
+        // makes parent folders, so this is the one way to see `clear_pause` make it).
+        let (m, d) = machine();
+        let health = Paths {
+            data: d.data_dir.clone(),
+        }
+        .health();
+        assert!(
+            !m.fs.exists(&health),
+            "a fresh machine has no health folder"
+        );
+        let (code, out, err) = cli(&m, &d, &["apply", THEME]);
+        assert_eq!((code, err.as_str()), (EXIT_OK, ""), "{out}");
+        assert!(m.fs.is_dir(&health), "init.lua writes its tags there");
+        assert!(m.fs.list_dir(&health).unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_apply_to_windows_terminal_only_lifts_the_pause_too() {
+        // Review Focus 5: every committed apply lifts it, whatever the target.
+        let (m, d) = machine();
+        let paths = paused_in_cmd(&m, &d);
+        let (code, out, err) = cli(&m, &d, &["apply", THEME, "--target", "wt"]);
+        assert_eq!((code, err.as_str()), (EXIT_OK, ""), "{out}");
+        assert!(
+            out.contains("Open a new cmd tab in Windows Terminal"),
+            "{out}"
+        );
+        assert!(!m.fs.exists(&paths.paused_file()));
+        assert!(m.fs.list_dir(&paths.health()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_pause_that_cannot_be_lifted_is_said_and_the_apply_stands() {
+        // Whatever the target, the hint to open a new window is not said: the line on stderr says
+        // what to do instead.
+        for target in ["all", "wt"] {
+            let (m, d) = machine();
+            let paths = paused_in_cmd(&m, &d);
+            m.fs.fail_removes_of(paths.paused_file());
+            let (code, out, err) = cli(&m, &d, &["apply", THEME, "--target", target]);
+            assert_applied_but_not_cleared(code, &out, &err, &paths);
+            assert!(m.fs.exists(&paths.paused_file()), "{target}");
+        }
+    }
+
+    #[test]
+    fn a_tag_that_cannot_be_deleted_is_said_without_telling_to_delete_the_pause_alone() {
+        // A virus scanner holds a tag: `clear_pause` stops before the pause, which stays on
+        // purpose, so the next window does not pause the theme again at once on three stale
+        // tags. Deleting paused.json alone would do just that, so the line must not say it.
+        let (m, d) = machine();
+        let paths = paused_in_cmd(&m, &d);
+        m.fs.fail_removes_of(paths.health().join("start-12"));
+        let (code, out, err) = cli(&m, &d, &["apply", THEME]);
+        assert_applied_but_not_cleared(code, &out, &err, &paths);
+        assert!(!err.contains("paused.json"), "{err}");
+        assert!(err.contains("start-12"), "the file held is named: {err}");
+        assert!(m.fs.exists(&paths.paused_file()));
+        assert!(m.fs.exists(&paths.health().join("start-12")));
+    }
+
+    #[test]
+    fn records_that_cannot_be_cleared_with_no_pause_never_claim_a_pause() {
+        // Windows that never reached their prompt leave tags; a held one fails the clean-up of
+        // an apply with no pause at all. The line must not talk about a pause that is not there.
+        let (m, d) = machine();
+        let paths = Paths {
+            data: d.data_dir.clone(),
+        };
+        for pid in [11, 12] {
+            m.fs.put(
+                paths.health().join(format!("start-{pid}")),
+                b"v1 1791694709\n",
+            );
+        }
+        m.fs.fail_removes_of(paths.health().join("start-12"));
+        let (code, out, err) = cli(&m, &d, &["apply", THEME]);
+        assert_applied_but_not_cleared(code, &out, &err, &paths);
+        assert!(!err.contains("pause"), "{err}");
+        assert!(!m.fs.exists(&paths.paused_file()));
+    }
+
+    #[test]
+    fn the_failure_to_clear_shows_a_thai_data_folder_as_written_in_english_words() {
+        let (m, d) = machine();
+        let d = Defaults {
+            data_dir: PathBuf::from(r"C:\Users\tester\AppData\Local\ข้อมูล"),
+            ..d
+        };
+        let paths = paused_in_cmd(&m, &d);
+        m.fs.fail_removes_of(paths.paused_file());
+        let (code, out, err) = cli(&m, &d, &["apply", THEME]);
+        assert_eq!(code, EXIT_OK, "{out}{err}");
+        assert!(err.starts_with(NOT_CLEARED), "{err}");
+        let data = d.data_dir.display().to_string();
+        assert!(err.contains(&data), "{err}");
+        assert!(!err.contains("\\u{"), "{err}");
+        // The folder's name is the only Thai there is, each time the path is shown (the folder
+        // and the file the error names); the words around it are CMD Studio's, and ASCII.
+        assert_eq!(
+            thai(&err),
+            thai(&data).repeat(err.matches(&data).count()),
+            "{err}"
+        );
+        assert!(err.replace(&data, "").is_ascii(), "{err}");
     }
 }

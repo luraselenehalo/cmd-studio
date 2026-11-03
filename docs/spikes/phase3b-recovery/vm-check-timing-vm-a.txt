@@ -1,0 +1,16 @@
+# vm-check.md step 7 on VM-A (cmdstudio-win11, tester), recovery-timing.ps1 -InstallMarker -Data <LOCALAPPDATA>\ai.resincore.cmdstudio
+# ten windows after one warm-up, from cmd.exe's start to zz-timing.lua's marker at the first clink.onbeginedit; the spike without the counter: timing-vm-a.txt 5i 815 ms
+
+warm-up, not counted: 1479
+1270
+1265
+1322
+1304
+1290
+1262
+1297
+1330
+1279
+1262
+average of 10: 1288 ms; median 1284 ms; min 1262 ms; max 1330 ms
+start tags of the timed windows taken away: 11 of 11

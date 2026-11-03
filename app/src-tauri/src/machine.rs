@@ -4,7 +4,8 @@
 use crate::backend::preview::SampleIdentity;
 use crate::backend::{Backend, Machine};
 use cmdstudio_core::adapters::windows::{
-    fonts::WinFonts, fs::WinFs, host::WinHost, process::WinProcess, registry::WinAutoRun, wt::WinWt,
+    eventlog::WinEventLog, fonts::WinFonts, fs::WinFs, host::WinHost, process::WinProcess,
+    registry::WinAutoRun, wt::WinWt,
 };
 use cmdstudio_core::adapters::{program_data_dir, Host, System};
 use std::path::PathBuf;
@@ -17,6 +18,7 @@ pub struct RealMachine {
     wt: WinWt,
     process: WinProcess,
     host: WinHost,
+    event_log: WinEventLog,
 }
 
 impl Machine for RealMachine {
@@ -28,6 +30,7 @@ impl Machine for RealMachine {
             wt: &self.wt,
             process: &self.process,
             host: &self.host,
+            event_log: &self.event_log,
         }
     }
 }
@@ -57,6 +60,7 @@ pub fn real_backend() -> Result<Backend<RealMachine>, String> {
         wt: WinWt::new(local.clone()),
         process: WinProcess::new(allowed, Duration::from_secs(60)),
         host,
+        event_log: WinEventLog::real(),
     };
     // The one place the app reads the environment for the preview's sample (spec §5.6); a test
     // builds a `SampleIdentity` from a table instead.

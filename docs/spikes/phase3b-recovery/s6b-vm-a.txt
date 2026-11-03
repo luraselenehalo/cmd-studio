@@ -1,0 +1,412 @@
+# VM-A (cmdstudio-win11, tester, Windows 11 26H2 en-US), round 2 (commit 14bcaeb), 2026-10-18 14:32-14:48: S6b with probe-s6b.lua
+# VM-A ran on its normal path this time: clean restored from its saved state while the host was unlocked (14:30); the guest bugchecked (0x0A) 23 s after the resume and rebooted; guestcontrol from 14:32. Terminal is "present" on this path.
+# Extra beyond the list: -Run 1 -Hang -HangKind popen with the full wait (pid 4448); -Run 2 -Hang -HangKind popen -WaitSeconds 20 (pids 5716, 5656), because at 10 s VM-A's windows were closed before their hang began (5700 had reached only its load lines, 4100 none). One Win+R window for a screenshot (pid 7900, cmdstudio-win11-s6b-a-prompt.png).
+
+### s6b-a-setup.log
+## VM-A round 2: recovery-s6b.ps1 -Setup 2026-10-18T14:32:38.7499796+07:00 (normal path: saved state, bugcheck 0x0A, reboot)
+clink set said:
+        Name: clink.logo
+ Description: Controls what startup logo to show
+     Options: none,full,short
+       Value: none
+     Default: full
+
+The default is 'full' which shows the full copyright logo when Clink is
+injected.  A value of 'short' shows an abbreviated startup logo with version
+information.  A value of 'none' omits the startup logo entirely.
+AutoRun: (if exist "C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\runtime\clink-1.9.34\clink_x64.exe" "C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\runtime\clink-1.9.34\clink_x64.exe" inject --autorun --quiet --profile "C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\clink-profile")
+data: C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b
+health: C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\health
+clink set said:
+p3b2 10096 load host=C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\runtime\clink-1.9.34\clink_x64.exe time=1792308798
+p3b2 10096 api addcoroutine=function promptcoroutine=function onendedit=function oncommand=function onaftercommand=function sleep=function popen=function pack=function unpack=function version_encoded=10090034 clock=0.032
+        Name: clink.logo
+ Description: Controls what startup logo to show
+     Options: none,full,short
+       Value: none
+     Default: full
+
+The default is 'full' which shows the full copyright logo when Clink is
+injected.  A value of 'short' shows an abbreviated startup logo with version
+information.  A value of 'none' omits the startup logo entirely.
+probe: C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua
+profile: C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\clink-profile
+
+### s6b-a-run3.log
+## VM-A -Run 3 (no hang) 2026-10-18T14:33:38.3340107+07:00
+window 1 pid=10036 hang=none opened=14:34:06 waited=30s closed by the script
+window 2 pid=5736 hang=none opened=14:34:39 waited=30s closed by the script
+window 3 pid=2076 hang=none opened=14:35:11 waited=30s closed by the script
+
+### s6b-a-run-loop.log
+## VM-A -Run 2 -Hang -HangKind loop 2026-10-18T14:35:50.5750269+07:00
+hang file written (loop): C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\clink-profile\p3b2-hang
+window 1 pid=8572 hang=loop opened=14:36:38 waited=50s closed by the script
+window 2 pid=5364 hang=loop opened=14:37:31 waited=50s closed by the script
+hang file removed
+
+### s6b-a-run-popen.log
+## VM-A -Run 2 -Hang -HangKind popen -WaitSeconds 10 2026-10-18T14:38:57.9477109+07:00
+hang file written (popen): C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\clink-profile\p3b2-hang
+window 1 pid=5700 hang=popen opened=14:39:44 waited=10s closed by the script
+window 2 pid=4100 hang=popen opened=14:39:57 waited=10s closed by the script
+hang file removed
+## VM-A extra: -Run 1 -Hang -HangKind popen (full wait) 2026-10-18T14:40:15.9069450+07:00
+hang file written (popen): C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\clink-profile\p3b2-hang
+window 1 pid=4448 hang=popen opened=14:40:57 waited=50s closed by the script
+hang file removed
+
+### s6b-a-report.log
+## VM-A -Report (cumulative) 2026-10-18T14:41:55.0707803+07:00
+--- clink.log: p3b2 lines (and init.lua's cmdstudio: lines)
+1160 @C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua   31 p3b2 4448 load host=C:\WINDOWS\System32\cmd.exe time=1792309264
+1160 @C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua   31 p3b2 4448 api addcoroutine=function promptcoroutine=function onendedit=function oncommand=function onaftercommand=function sleep=function popen=function pack=function unpack=function version_encoded=10090034 clock=2.711
+1160 @C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\init.lua   29 cmdstudio: prompt loaded
+1160 @C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua   31 p3b2 4448 beginedit t=4.470 wall=1792309265
+1160 @C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua   31 p3b2 4448 wrapped 3 methods of 1 filters: filter@1,rightfilter@1,transientfilter@1
+1160 @C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua   31 p3b2 4448 addcoroutine ok=true ret=nil status=suspended
+1160 @C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua   31 p3b2 4448 promptcoroutine call ok=true ret=nil
+1160 @C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua   31 p3b2 4448 filter0 hanging kind=popen t=4.802 wall=1792309266
+1160 @C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua   31 p3b2 4448 filter0 t=26.883 wall=1792309288 hung=22s clock=22.079
+1160 @C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua   31 p3b2 4448 omp filter start prio=1 n=1 t=26.884 wall=1792309288
+1160 @C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua   31 p3b2 4448 omp filter end prio=1 n=1 t=32.212 wall=1792309293 results=1 second=nil
+1160 @C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua   31 p3b2 4448 omp rightfilter start prio=1 n=1 t=32.214 wall=1792309293
+1160 @C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua   31 p3b2 4448 omp rightfilter end prio=1 n=1 t=32.214 wall=1792309293 results=2 second=false
+1160 @C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua   31 p3b2 4448 coroutine t=32.892 after=28.422 wall=1792309294
+1160 @C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua   31 p3b2 4448 promptcoroutine t=32.894 wall=1792309294 after=28.424
+1160 @C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua   31 p3b2 4448 filter0 again n=2 t=33.963 wall=1792309295
+1160 @C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua   31 p3b2 4448 omp filter start prio=1 n=2 t=33.974 wall=1792309295
+1160 @C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua   31 p3b2 4448 omp filter end prio=1 n=2 t=33.975 wall=1792309295 results=1 second=nil
+1160 @C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua   31 p3b2 4448 omp rightfilter start prio=1 n=2 t=34.033 wall=1792309295
+1160 @C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua   31 p3b2 4448 omp rightfilter end prio=1 n=2 t=34.034 wall=1792309295 results=2 second=false
+1160 @C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua   31 p3b2 4448 filter0 again n=3 t=34.945 wall=1792309296
+1160 @C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua   31 p3b2 4448 omp filter start prio=1 n=3 t=34.946 wall=1792309296
+1160 @C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua   31 p3b2 4448 omp filter end prio=1 n=3 t=34.951 wall=1792309296 results=1 second=nil
+1160 @C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua   31 p3b2 4448 omp rightfilter start prio=1 n=3 t=34.960 wall=1792309296
+1160 @C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua   31 p3b2 4448 omp rightfilter end prio=1 n=3 t=34.963 wall=1792309296 results=2 second=false
+--- p3b2.txt (written by io.open, line by line)
+p3b2 10036 load host=C:\WINDOWS\System32\cmd.exe time=1792308854
+p3b2 10036 api addcoroutine=function promptcoroutine=function onendedit=function oncommand=function onaftercommand=function sleep=function popen=function pack=function unpack=function version_encoded=10090034 clock=1.587
+p3b2 10036 beginedit t=3.522 wall=1792308856
+p3b2 10036 wrapped 3 methods of 1 filters: filter@1,rightfilter@1,transientfilter@1
+p3b2 10036 addcoroutine ok=true ret=nil status=suspended
+p3b2 10036 promptcoroutine call ok=true ret=nil
+p3b2 10036 filter0 t=3.699 wall=1792308856
+p3b2 10036 omp filter start prio=1 n=1 t=3.722 wall=1792308856
+p3b2 10036 omp filter end prio=1 n=1 t=6.498 wall=1792308859 results=1 second=nil
+p3b2 10036 omp rightfilter start prio=1 n=1 t=6.514 wall=1792308859
+p3b2 10036 omp rightfilter end prio=1 n=1 t=6.522 wall=1792308859 results=2 second=false
+p3b2 10036 coroutine t=6.691 after=3.169 wall=1792308859
+p3b2 10036 promptcoroutine t=6.693 wall=1792308859 after=3.171
+p3b2 10036 filter0 again n=2 t=6.950 wall=1792308859
+p3b2 10036 omp filter start prio=1 n=2 t=6.956 wall=1792308859
+p3b2 10036 omp filter end prio=1 n=2 t=6.957 wall=1792308859 results=1 second=nil
+p3b2 10036 omp rightfilter start prio=1 n=2 t=6.958 wall=1792308859
+p3b2 10036 omp rightfilter end prio=1 n=2 t=6.959 wall=1792308859 results=2 second=false
+p3b2 10036 filter0 again n=3 t=7.607 wall=1792308860
+p3b2 10036 omp filter start prio=1 n=3 t=7.609 wall=1792308860
+p3b2 10036 omp filter end prio=1 n=3 t=7.614 wall=1792308860 results=1 second=nil
+p3b2 10036 omp rightfilter start prio=1 n=3 t=7.618 wall=1792308860
+p3b2 10036 omp rightfilter end prio=1 n=3 t=7.623 wall=1792308860 results=2 second=false
+p3b2 5736 load host=C:\WINDOWS\System32\cmd.exe time=1792308882
+p3b2 5736 api addcoroutine=function promptcoroutine=function onendedit=function oncommand=function onaftercommand=function sleep=function popen=function pack=function unpack=function version_encoded=10090034 clock=0.418
+p3b2 5736 beginedit t=3.090 wall=1792308884
+p3b2 5736 wrapped 3 methods of 1 filters: filter@1,rightfilter@1,transientfilter@1
+p3b2 5736 addcoroutine ok=true ret=nil status=suspended
+p3b2 5736 promptcoroutine call ok=true ret=nil
+p3b2 5736 filter0 t=3.150 wall=1792308885
+p3b2 5736 omp filter start prio=1 n=1 t=3.153 wall=1792308885
+p3b2 5736 omp filter end prio=1 n=1 t=3.663 wall=1792308885 results=1 second=nil
+p3b2 5736 omp rightfilter start prio=1 n=1 t=3.665 wall=1792308885
+p3b2 5736 omp rightfilter end prio=1 n=1 t=3.669 wall=1792308885 results=2 second=false
+p3b2 5736 promptcoroutine t=3.791 wall=1792308885 after=0.702
+p3b2 5736 coroutine t=3.822 after=0.732 wall=1792308885
+p3b2 5736 filter0 again n=2 t=3.912 wall=1792308885
+p3b2 5736 omp filter start prio=1 n=2 t=3.940 wall=1792308885
+p3b2 5736 omp filter end prio=1 n=2 t=3.954 wall=1792308885 results=1 second=nil
+p3b2 5736 omp rightfilter start prio=1 n=2 t=3.955 wall=1792308885
+p3b2 5736 omp rightfilter end prio=1 n=2 t=3.958 wall=1792308885 results=2 second=false
+p3b2 5736 filter0 again n=3 t=4.143 wall=1792308886
+p3b2 5736 omp filter start prio=1 n=3 t=4.146 wall=1792308886
+p3b2 5736 omp filter end prio=1 n=3 t=4.148 wall=1792308886 results=1 second=nil
+p3b2 5736 omp rightfilter start prio=1 n=3 t=4.151 wall=1792308886
+p3b2 5736 omp rightfilter end prio=1 n=3 t=4.153 wall=1792308886 results=2 second=false
+p3b2 2076 load host=C:\WINDOWS\System32\cmd.exe time=1792308917
+p3b2 2076 api addcoroutine=function promptcoroutine=function onendedit=function oncommand=function onaftercommand=function sleep=function popen=function pack=function unpack=function version_encoded=10090034 clock=1.341
+p3b2 2076 beginedit t=9.961 wall=1792308926
+p3b2 2076 wrapped 3 methods of 1 filters: filter@1,rightfilter@1,transientfilter@1
+p3b2 2076 addcoroutine ok=true ret=nil status=suspended
+p3b2 2076 promptcoroutine call ok=true ret=nil
+p3b2 2076 filter0 t=10.287 wall=1792308926
+p3b2 2076 omp filter start prio=1 n=1 t=10.335 wall=1792308926
+p3b2 2076 omp filter end prio=1 n=1 t=24.203 wall=1792308940 results=1 second=nil
+p3b2 2076 omp rightfilter start prio=1 n=1 t=24.222 wall=1792308940
+p3b2 2076 omp rightfilter end prio=1 n=1 t=24.228 wall=1792308940 results=2 second=false
+p3b2 8572 load host=C:\WINDOWS\System32\cmd.exe time=1792309008
+p3b2 8572 api addcoroutine=function promptcoroutine=function onendedit=function oncommand=function onaftercommand=function sleep=function popen=function pack=function unpack=function version_encoded=10090034 clock=0.882
+p3b2 8572 beginedit t=20.179 wall=1792309027
+p3b2 8572 wrapped 3 methods of 1 filters: filter@1,rightfilter@1,transientfilter@1
+p3b2 8572 addcoroutine ok=true ret=nil status=suspended
+p3b2 8572 promptcoroutine call ok=true ret=nil
+p3b2 8572 filter0 hanging kind=loop t=20.370 wall=1792309027
+p3b2 8572 filter0 t=40.372 wall=1792309047 hung=20s clock=20.001
+p3b2 8572 omp filter start prio=1 n=1 t=40.404 wall=1792309047
+p3b2 8572 omp filter end prio=1 n=1 t=40.818 wall=1792309048 results=1 second=nil
+p3b2 8572 omp rightfilter start prio=1 n=1 t=40.819 wall=1792309048
+p3b2 8572 omp rightfilter end prio=1 n=1 t=40.820 wall=1792309048 results=2 second=false
+p3b2 8572 promptcoroutine t=40.917 wall=1792309048 after=20.738
+p3b2 8572 coroutine t=41.072 after=20.893 wall=1792309048
+p3b2 8572 filter0 again n=2 t=41.086 wall=1792309048
+p3b2 8572 omp filter start prio=1 n=2 t=41.088 wall=1792309048
+p3b2 8572 omp filter end prio=1 n=2 t=41.174 wall=1792309048 results=1 second=nil
+p3b2 8572 omp rightfilter start prio=1 n=2 t=41.177 wall=1792309048
+p3b2 8572 omp rightfilter end prio=1 n=2 t=41.181 wall=1792309048 results=2 second=false
+p3b2 8572 filter0 again n=3 t=41.452 wall=1792309048
+p3b2 8572 omp filter start prio=1 n=3 t=41.456 wall=1792309048
+p3b2 8572 omp filter end prio=1 n=3 t=41.459 wall=1792309048 results=1 second=nil
+p3b2 8572 omp rightfilter start prio=1 n=3 t=41.461 wall=1792309048
+p3b2 8572 omp rightfilter end prio=1 n=3 t=41.465 wall=1792309048 results=2 second=false
+p3b2 5364 load host=C:\WINDOWS\System32\cmd.exe time=1792309053
+p3b2 5364 api addcoroutine=function promptcoroutine=function onendedit=function oncommand=function onaftercommand=function sleep=function popen=function pack=function unpack=function version_encoded=10090034 clock=0.205
+p3b2 5364 beginedit t=0.536 wall=1792309053
+p3b2 5364 wrapped 3 methods of 1 filters: filter@1,rightfilter@1,transientfilter@1
+p3b2 5364 addcoroutine ok=true ret=nil status=suspended
+p3b2 5364 promptcoroutine call ok=true ret=nil
+p3b2 5364 filter0 hanging kind=loop t=0.556 wall=1792309053
+p3b2 5364 filter0 t=20.557 wall=1792309073 hung=20s clock=20.000
+p3b2 5364 omp filter start prio=1 n=1 t=20.560 wall=1792309073
+p3b2 5364 omp filter end prio=1 n=1 t=20.977 wall=1792309074 results=1 second=nil
+p3b2 5364 omp rightfilter start prio=1 n=1 t=20.978 wall=1792309074
+p3b2 5364 omp rightfilter end prio=1 n=1 t=20.980 wall=1792309074 results=2 second=false
+p3b2 5364 promptcoroutine t=21.173 wall=1792309074 after=20.637
+p3b2 5364 coroutine t=21.175 after=20.639 wall=1792309074
+p3b2 5364 filter0 again n=2 t=21.181 wall=1792309074
+p3b2 5364 omp filter start prio=1 n=2 t=21.183 wall=1792309074
+p3b2 5364 omp filter end prio=1 n=2 t=21.186 wall=1792309074 results=1 second=nil
+p3b2 5364 omp rightfilter start prio=1 n=2 t=21.188 wall=1792309074
+p3b2 5364 omp rightfilter end prio=1 n=2 t=21.190 wall=1792309074 results=2 second=false
+p3b2 5364 filter0 again n=3 t=21.424 wall=1792309074
+p3b2 5364 omp filter start prio=1 n=3 t=21.428 wall=1792309074
+p3b2 5364 omp filter end prio=1 n=3 t=21.429 wall=1792309074 results=1 second=nil
+p3b2 5364 omp rightfilter start prio=1 n=3 t=21.432 wall=1792309074
+p3b2 5364 omp rightfilter end prio=1 n=3 t=21.433 wall=1792309074 results=2 second=false
+p3b2 5700 load host=C:\WINDOWS\System32\cmd.exe time=1792309190
+p3b2 5700 api addcoroutine=function promptcoroutine=function onendedit=function oncommand=function onaftercommand=function sleep=function popen=function pack=function unpack=function version_encoded=10090034 clock=0.769
+p3b2 4448 load host=C:\WINDOWS\System32\cmd.exe time=1792309264
+p3b2 4448 api addcoroutine=function promptcoroutine=function onendedit=function oncommand=function onaftercommand=function sleep=function popen=function pack=function unpack=function version_encoded=10090034 clock=2.711
+p3b2 4448 beginedit t=4.470 wall=1792309265
+p3b2 4448 wrapped 3 methods of 1 filters: filter@1,rightfilter@1,transientfilter@1
+p3b2 4448 addcoroutine ok=true ret=nil status=suspended
+p3b2 4448 promptcoroutine call ok=true ret=nil
+p3b2 4448 filter0 hanging kind=popen t=4.802 wall=1792309266
+p3b2 4448 filter0 t=26.883 wall=1792309288 hung=22s clock=22.079
+p3b2 4448 omp filter start prio=1 n=1 t=26.884 wall=1792309288
+p3b2 4448 omp filter end prio=1 n=1 t=32.212 wall=1792309293 results=1 second=nil
+p3b2 4448 omp rightfilter start prio=1 n=1 t=32.214 wall=1792309293
+p3b2 4448 omp rightfilter end prio=1 n=1 t=32.214 wall=1792309293 results=2 second=false
+p3b2 4448 coroutine t=32.892 after=28.422 wall=1792309294
+p3b2 4448 promptcoroutine t=32.894 wall=1792309294 after=28.424
+p3b2 4448 filter0 again n=2 t=33.963 wall=1792309295
+p3b2 4448 omp filter start prio=1 n=2 t=33.974 wall=1792309295
+p3b2 4448 omp filter end prio=1 n=2 t=33.975 wall=1792309295 results=1 second=nil
+p3b2 4448 omp rightfilter start prio=1 n=2 t=34.033 wall=1792309295
+p3b2 4448 omp rightfilter end prio=1 n=2 t=34.034 wall=1792309295 results=2 second=false
+p3b2 4448 filter0 again n=3 t=34.945 wall=1792309296
+p3b2 4448 omp filter start prio=1 n=3 t=34.946 wall=1792309296
+p3b2 4448 omp filter end prio=1 n=3 t=34.951 wall=1792309296 results=1 second=nil
+p3b2 4448 omp rightfilter start prio=1 n=3 t=34.960 wall=1792309296
+p3b2 4448 omp rightfilter end prio=1 n=3 t=34.963 wall=1792309296 results=2 second=false
+--- windows opened by -Run
+window 1 pid=10036 hang=none opened=14:34:06 waited=30s closed by the script
+window 2 pid=5736 hang=none opened=14:34:39 waited=30s closed by the script
+window 3 pid=2076 hang=none opened=14:35:11 waited=30s closed by the script
+window 1 pid=8572 hang=loop opened=14:36:38 waited=50s closed by the script
+window 2 pid=5364 hang=loop opened=14:37:31 waited=50s closed by the script
+window 1 pid=5700 hang=popen opened=14:39:44 waited=10s closed by the script
+window 2 pid=4100 hang=popen opened=14:39:57 waited=10s closed by the script
+window 1 pid=4448 hang=popen opened=14:40:57 waited=50s closed by the script
+--- hang file now: absent
+## clink set prompt.async (this profile)
+        Name: prompt.async
+       Value: True
+     Default: True
+
+### s6b-a-run-popen20.log
+## VM-A -Run 2 -Hang -HangKind popen -WaitSeconds 20 (VM-A reaches beginedit later than VM-C; at 10 s the windows were closed before the hang began) 2026-10-18T14:44:04.4397931+07:00
+hang file written (popen): C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\clink-profile\p3b2-hang
+window 1 pid=5716 hang=popen opened=14:44:44 waited=20s closed by the script
+window 2 pid=5656 hang=popen opened=14:45:06 waited=20s closed by the script
+hang file removed
+
+### s6b-a-report2.log
+## VM-A -Report (cumulative) 2026-10-18T14:45:37.2551797+07:00
+--- clink.log: p3b2 lines (and init.lua's cmdstudio: lines)
+1618 @C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua   31 p3b2 5656 load host=C:\WINDOWS\System32\cmd.exe time=1792309508
+1618 @C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua   31 p3b2 5656 api addcoroutine=function promptcoroutine=function onendedit=function oncommand=function onaftercommand=function sleep=function popen=function pack=function unpack=function version_encoded=10090034 clock=0.340
+1618 @C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\init.lua   29 cmdstudio: prompt loaded
+1618 @C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua   31 p3b2 5656 beginedit t=4.048 wall=1792309512
+1618 @C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua   31 p3b2 5656 wrapped 3 methods of 1 filters: filter@1,rightfilter@1,transientfilter@1
+1618 @C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua   31 p3b2 5656 addcoroutine ok=true ret=nil status=suspended
+1618 @C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua   31 p3b2 5656 promptcoroutine call ok=true ret=nil
+1618 @C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\generated\aa-probe.lua   31 p3b2 5656 filter0 hanging kind=popen t=4.222 wall=1792309512
+--- p3b2.txt (written by io.open, line by line)
+p3b2 10036 load host=C:\WINDOWS\System32\cmd.exe time=1792308854
+p3b2 10036 api addcoroutine=function promptcoroutine=function onendedit=function oncommand=function onaftercommand=function sleep=function popen=function pack=function unpack=function version_encoded=10090034 clock=1.587
+p3b2 10036 beginedit t=3.522 wall=1792308856
+p3b2 10036 wrapped 3 methods of 1 filters: filter@1,rightfilter@1,transientfilter@1
+p3b2 10036 addcoroutine ok=true ret=nil status=suspended
+p3b2 10036 promptcoroutine call ok=true ret=nil
+p3b2 10036 filter0 t=3.699 wall=1792308856
+p3b2 10036 omp filter start prio=1 n=1 t=3.722 wall=1792308856
+p3b2 10036 omp filter end prio=1 n=1 t=6.498 wall=1792308859 results=1 second=nil
+p3b2 10036 omp rightfilter start prio=1 n=1 t=6.514 wall=1792308859
+p3b2 10036 omp rightfilter end prio=1 n=1 t=6.522 wall=1792308859 results=2 second=false
+p3b2 10036 coroutine t=6.691 after=3.169 wall=1792308859
+p3b2 10036 promptcoroutine t=6.693 wall=1792308859 after=3.171
+p3b2 10036 filter0 again n=2 t=6.950 wall=1792308859
+p3b2 10036 omp filter start prio=1 n=2 t=6.956 wall=1792308859
+p3b2 10036 omp filter end prio=1 n=2 t=6.957 wall=1792308859 results=1 second=nil
+p3b2 10036 omp rightfilter start prio=1 n=2 t=6.958 wall=1792308859
+p3b2 10036 omp rightfilter end prio=1 n=2 t=6.959 wall=1792308859 results=2 second=false
+p3b2 10036 filter0 again n=3 t=7.607 wall=1792308860
+p3b2 10036 omp filter start prio=1 n=3 t=7.609 wall=1792308860
+p3b2 10036 omp filter end prio=1 n=3 t=7.614 wall=1792308860 results=1 second=nil
+p3b2 10036 omp rightfilter start prio=1 n=3 t=7.618 wall=1792308860
+p3b2 10036 omp rightfilter end prio=1 n=3 t=7.623 wall=1792308860 results=2 second=false
+p3b2 5736 load host=C:\WINDOWS\System32\cmd.exe time=1792308882
+p3b2 5736 api addcoroutine=function promptcoroutine=function onendedit=function oncommand=function onaftercommand=function sleep=function popen=function pack=function unpack=function version_encoded=10090034 clock=0.418
+p3b2 5736 beginedit t=3.090 wall=1792308884
+p3b2 5736 wrapped 3 methods of 1 filters: filter@1,rightfilter@1,transientfilter@1
+p3b2 5736 addcoroutine ok=true ret=nil status=suspended
+p3b2 5736 promptcoroutine call ok=true ret=nil
+p3b2 5736 filter0 t=3.150 wall=1792308885
+p3b2 5736 omp filter start prio=1 n=1 t=3.153 wall=1792308885
+p3b2 5736 omp filter end prio=1 n=1 t=3.663 wall=1792308885 results=1 second=nil
+p3b2 5736 omp rightfilter start prio=1 n=1 t=3.665 wall=1792308885
+p3b2 5736 omp rightfilter end prio=1 n=1 t=3.669 wall=1792308885 results=2 second=false
+p3b2 5736 promptcoroutine t=3.791 wall=1792308885 after=0.702
+p3b2 5736 coroutine t=3.822 after=0.732 wall=1792308885
+p3b2 5736 filter0 again n=2 t=3.912 wall=1792308885
+p3b2 5736 omp filter start prio=1 n=2 t=3.940 wall=1792308885
+p3b2 5736 omp filter end prio=1 n=2 t=3.954 wall=1792308885 results=1 second=nil
+p3b2 5736 omp rightfilter start prio=1 n=2 t=3.955 wall=1792308885
+p3b2 5736 omp rightfilter end prio=1 n=2 t=3.958 wall=1792308885 results=2 second=false
+p3b2 5736 filter0 again n=3 t=4.143 wall=1792308886
+p3b2 5736 omp filter start prio=1 n=3 t=4.146 wall=1792308886
+p3b2 5736 omp filter end prio=1 n=3 t=4.148 wall=1792308886 results=1 second=nil
+p3b2 5736 omp rightfilter start prio=1 n=3 t=4.151 wall=1792308886
+p3b2 5736 omp rightfilter end prio=1 n=3 t=4.153 wall=1792308886 results=2 second=false
+p3b2 2076 load host=C:\WINDOWS\System32\cmd.exe time=1792308917
+p3b2 2076 api addcoroutine=function promptcoroutine=function onendedit=function oncommand=function onaftercommand=function sleep=function popen=function pack=function unpack=function version_encoded=10090034 clock=1.341
+p3b2 2076 beginedit t=9.961 wall=1792308926
+p3b2 2076 wrapped 3 methods of 1 filters: filter@1,rightfilter@1,transientfilter@1
+p3b2 2076 addcoroutine ok=true ret=nil status=suspended
+p3b2 2076 promptcoroutine call ok=true ret=nil
+p3b2 2076 filter0 t=10.287 wall=1792308926
+p3b2 2076 omp filter start prio=1 n=1 t=10.335 wall=1792308926
+p3b2 2076 omp filter end prio=1 n=1 t=24.203 wall=1792308940 results=1 second=nil
+p3b2 2076 omp rightfilter start prio=1 n=1 t=24.222 wall=1792308940
+p3b2 2076 omp rightfilter end prio=1 n=1 t=24.228 wall=1792308940 results=2 second=false
+p3b2 8572 load host=C:\WINDOWS\System32\cmd.exe time=1792309008
+p3b2 8572 api addcoroutine=function promptcoroutine=function onendedit=function oncommand=function onaftercommand=function sleep=function popen=function pack=function unpack=function version_encoded=10090034 clock=0.882
+p3b2 8572 beginedit t=20.179 wall=1792309027
+p3b2 8572 wrapped 3 methods of 1 filters: filter@1,rightfilter@1,transientfilter@1
+p3b2 8572 addcoroutine ok=true ret=nil status=suspended
+p3b2 8572 promptcoroutine call ok=true ret=nil
+p3b2 8572 filter0 hanging kind=loop t=20.370 wall=1792309027
+p3b2 8572 filter0 t=40.372 wall=1792309047 hung=20s clock=20.001
+p3b2 8572 omp filter start prio=1 n=1 t=40.404 wall=1792309047
+p3b2 8572 omp filter end prio=1 n=1 t=40.818 wall=1792309048 results=1 second=nil
+p3b2 8572 omp rightfilter start prio=1 n=1 t=40.819 wall=1792309048
+p3b2 8572 omp rightfilter end prio=1 n=1 t=40.820 wall=1792309048 results=2 second=false
+p3b2 8572 promptcoroutine t=40.917 wall=1792309048 after=20.738
+p3b2 8572 coroutine t=41.072 after=20.893 wall=1792309048
+p3b2 8572 filter0 again n=2 t=41.086 wall=1792309048
+p3b2 8572 omp filter start prio=1 n=2 t=41.088 wall=1792309048
+p3b2 8572 omp filter end prio=1 n=2 t=41.174 wall=1792309048 results=1 second=nil
+p3b2 8572 omp rightfilter start prio=1 n=2 t=41.177 wall=1792309048
+p3b2 8572 omp rightfilter end prio=1 n=2 t=41.181 wall=1792309048 results=2 second=false
+p3b2 8572 filter0 again n=3 t=41.452 wall=1792309048
+p3b2 8572 omp filter start prio=1 n=3 t=41.456 wall=1792309048
+p3b2 8572 omp filter end prio=1 n=3 t=41.459 wall=1792309048 results=1 second=nil
+p3b2 8572 omp rightfilter start prio=1 n=3 t=41.461 wall=1792309048
+p3b2 8572 omp rightfilter end prio=1 n=3 t=41.465 wall=1792309048 results=2 second=false
+p3b2 5364 load host=C:\WINDOWS\System32\cmd.exe time=1792309053
+p3b2 5364 api addcoroutine=function promptcoroutine=function onendedit=function oncommand=function onaftercommand=function sleep=function popen=function pack=function unpack=function version_encoded=10090034 clock=0.205
+p3b2 5364 beginedit t=0.536 wall=1792309053
+p3b2 5364 wrapped 3 methods of 1 filters: filter@1,rightfilter@1,transientfilter@1
+p3b2 5364 addcoroutine ok=true ret=nil status=suspended
+p3b2 5364 promptcoroutine call ok=true ret=nil
+p3b2 5364 filter0 hanging kind=loop t=0.556 wall=1792309053
+p3b2 5364 filter0 t=20.557 wall=1792309073 hung=20s clock=20.000
+p3b2 5364 omp filter start prio=1 n=1 t=20.560 wall=1792309073
+p3b2 5364 omp filter end prio=1 n=1 t=20.977 wall=1792309074 results=1 second=nil
+p3b2 5364 omp rightfilter start prio=1 n=1 t=20.978 wall=1792309074
+p3b2 5364 omp rightfilter end prio=1 n=1 t=20.980 wall=1792309074 results=2 second=false
+p3b2 5364 promptcoroutine t=21.173 wall=1792309074 after=20.637
+p3b2 5364 coroutine t=21.175 after=20.639 wall=1792309074
+p3b2 5364 filter0 again n=2 t=21.181 wall=1792309074
+p3b2 5364 omp filter start prio=1 n=2 t=21.183 wall=1792309074
+p3b2 5364 omp filter end prio=1 n=2 t=21.186 wall=1792309074 results=1 second=nil
+p3b2 5364 omp rightfilter start prio=1 n=2 t=21.188 wall=1792309074
+p3b2 5364 omp rightfilter end prio=1 n=2 t=21.190 wall=1792309074 results=2 second=false
+p3b2 5364 filter0 again n=3 t=21.424 wall=1792309074
+p3b2 5364 omp filter start prio=1 n=3 t=21.428 wall=1792309074
+p3b2 5364 omp filter end prio=1 n=3 t=21.429 wall=1792309074 results=1 second=nil
+p3b2 5364 omp rightfilter start prio=1 n=3 t=21.432 wall=1792309074
+p3b2 5364 omp rightfilter end prio=1 n=3 t=21.433 wall=1792309074 results=2 second=false
+p3b2 5700 load host=C:\WINDOWS\System32\cmd.exe time=1792309190
+p3b2 5700 api addcoroutine=function promptcoroutine=function onendedit=function oncommand=function onaftercommand=function sleep=function popen=function pack=function unpack=function version_encoded=10090034 clock=0.769
+p3b2 4448 load host=C:\WINDOWS\System32\cmd.exe time=1792309264
+p3b2 4448 api addcoroutine=function promptcoroutine=function onendedit=function oncommand=function onaftercommand=function sleep=function popen=function pack=function unpack=function version_encoded=10090034 clock=2.711
+p3b2 4448 beginedit t=4.470 wall=1792309265
+p3b2 4448 wrapped 3 methods of 1 filters: filter@1,rightfilter@1,transientfilter@1
+p3b2 4448 addcoroutine ok=true ret=nil status=suspended
+p3b2 4448 promptcoroutine call ok=true ret=nil
+p3b2 4448 filter0 hanging kind=popen t=4.802 wall=1792309266
+p3b2 4448 filter0 t=26.883 wall=1792309288 hung=22s clock=22.079
+p3b2 4448 omp filter start prio=1 n=1 t=26.884 wall=1792309288
+p3b2 4448 omp filter end prio=1 n=1 t=32.212 wall=1792309293 results=1 second=nil
+p3b2 4448 omp rightfilter start prio=1 n=1 t=32.214 wall=1792309293
+p3b2 4448 omp rightfilter end prio=1 n=1 t=32.214 wall=1792309293 results=2 second=false
+p3b2 4448 coroutine t=32.892 after=28.422 wall=1792309294
+p3b2 4448 promptcoroutine t=32.894 wall=1792309294 after=28.424
+p3b2 4448 filter0 again n=2 t=33.963 wall=1792309295
+p3b2 4448 omp filter start prio=1 n=2 t=33.974 wall=1792309295
+p3b2 4448 omp filter end prio=1 n=2 t=33.975 wall=1792309295 results=1 second=nil
+p3b2 4448 omp rightfilter start prio=1 n=2 t=34.033 wall=1792309295
+p3b2 4448 omp rightfilter end prio=1 n=2 t=34.034 wall=1792309295 results=2 second=false
+p3b2 4448 filter0 again n=3 t=34.945 wall=1792309296
+p3b2 4448 omp filter start prio=1 n=3 t=34.946 wall=1792309296
+p3b2 4448 omp filter end prio=1 n=3 t=34.951 wall=1792309296 results=1 second=nil
+p3b2 4448 omp rightfilter start prio=1 n=3 t=34.960 wall=1792309296
+p3b2 4448 omp rightfilter end prio=1 n=3 t=34.963 wall=1792309296 results=2 second=false
+p3b2 6344 load host=C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\runtime\clink-1.9.34\clink_x64.exe time=1792309386
+p3b2 6344 api addcoroutine=function promptcoroutine=function onendedit=function oncommand=function onaftercommand=function sleep=function popen=function pack=function unpack=function version_encoded=10090034 clock=2.334
+p3b2 5716 load host=C:\WINDOWS\System32\cmd.exe time=1792309488
+p3b2 5716 api addcoroutine=function promptcoroutine=function onendedit=function oncommand=function onaftercommand=function sleep=function popen=function pack=function unpack=function version_encoded=10090034 clock=0.918
+p3b2 5716 beginedit t=3.025 wall=1792309490
+p3b2 5716 wrapped 3 methods of 1 filters: filter@1,rightfilter@1,transientfilter@1
+p3b2 5716 addcoroutine ok=true ret=nil status=suspended
+p3b2 5716 promptcoroutine call ok=true ret=nil
+p3b2 5716 filter0 hanging kind=popen t=3.051 wall=1792309490
+p3b2 5656 load host=C:\WINDOWS\System32\cmd.exe time=1792309508
+p3b2 5656 api addcoroutine=function promptcoroutine=function onendedit=function oncommand=function onaftercommand=function sleep=function popen=function pack=function unpack=function version_encoded=10090034 clock=0.340
+p3b2 5656 beginedit t=4.048 wall=1792309512
+p3b2 5656 wrapped 3 methods of 1 filters: filter@1,rightfilter@1,transientfilter@1
+p3b2 5656 addcoroutine ok=true ret=nil status=suspended
+p3b2 5656 promptcoroutine call ok=true ret=nil
+p3b2 5656 filter0 hanging kind=popen t=4.222 wall=1792309512
+--- windows opened by -Run
+window 1 pid=10036 hang=none opened=14:34:06 waited=30s closed by the script
+window 2 pid=5736 hang=none opened=14:34:39 waited=30s closed by the script
+window 3 pid=2076 hang=none opened=14:35:11 waited=30s closed by the script
+window 1 pid=8572 hang=loop opened=14:36:38 waited=50s closed by the script
+window 2 pid=5364 hang=loop opened=14:37:31 waited=50s closed by the script
+window 1 pid=5700 hang=popen opened=14:39:44 waited=10s closed by the script
+window 2 pid=4100 hang=popen opened=14:39:57 waited=10s closed by the script
+window 1 pid=4448 hang=popen opened=14:40:57 waited=50s closed by the script
+window 1 pid=5716 hang=popen opened=14:44:44 waited=20s closed by the script
+window 2 pid=5656 hang=popen opened=14:45:06 waited=20s closed by the script
+--- hang file now: absent
+

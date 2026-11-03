@@ -162,6 +162,16 @@ const MEANINGS: &[(&str, &str, &str)] = &[
         r#"CMD Studio เองมีปัญหา รายละเอียดบอกว่าตรงไหน ลองใหม่อีกครั้ง ถ้ายังเป็นอยู่ให้แจ้งปัญหาพร้อมข้อมูลวินิจฉัย"#,
         r#"CMD Studio itself ran into a problem; the details say where. Try again, and if it stays, report it with the diagnostics"#,
     ),
+    (
+        "E_THEME_PAUSED",
+        r#"ธีมถูกหยุดไว้ ใน cmd เพราะ cmd เปิดไม่ถึงพร้อมท์ซ้ำๆ หรือทั้งเครื่อง เพราะ cmd แครชในส่วนเสริมหรือผู้ใช้หยุดเอง เปิดธีมกลับได้ที่หน้าแรก (D12)"#,
+        r#"The theme is paused, in cmd because cmd failed to reach its prompt again and again, or on this computer because cmd crashed in its add-on or it was paused by hand; turn it back on from the home page (D12)"#,
+    ),
+    (
+        "E_CMD_CRASHED",
+        r#"cmd แครชในส่วนเสริมของ cmd (Clink) ตั้งแต่ใช้ธีม ตามรายงานแครชของ Windows (D12)"#,
+        r#"cmd crashed in its add-on (Clink) since the theme was applied, as Windows' crash reports say (D12)"#,
+    ),
 ];
 
 /// The Thai and English meaning of a code of spec §5.9.

@@ -266,6 +266,7 @@ golden_tests! {
     init_script: "init.lua" = lua::init_lua(
         &under_data(r"runtime\omp-31.5.0\oh-my-posh.exe"),
         &under_data(r"generated\theme.omp.json"),
+        &under_data("health"),
     );
     // the welcome box, English on every Windows
     english_banner: "terracotta.banner.en.lua" = lua::banner_lua(&terracotta());

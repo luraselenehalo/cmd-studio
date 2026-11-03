@@ -1,8 +1,8 @@
 //! In-memory adapters for tests (this crate's and, through the `fake`
 //! feature, crates/cli's). They never touch the machine.
 use super::{
-    AdapterError, Arch, AutoRun, Created, DefaultTerminal, DirEntry, DirState, Fonts, Fs, FsLock,
-    Host, Output, Process, RegValue, System, SystemInfo, WtLocation, WtSettings,
+    AdapterError, AppCrash, Arch, AutoRun, Created, DefaultTerminal, DirEntry, DirState, EventLog,
+    Fonts, Fs, FsLock, Host, Output, Process, RegValue, System, SystemInfo, WtLocation, WtSettings,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -740,6 +740,60 @@ pub fn not_text_values() -> Vec<RegValue> {
     ]
 }
 
+/// Windows' crash reports in memory: the crashes a test records, or a log that can't be read.
+/// It starts empty: no program ever crashed.
+#[derive(Default)]
+pub struct FakeEventLog {
+    state: RefCell<EventLogState>,
+}
+
+#[derive(Default)]
+struct EventLogState {
+    crashes: Vec<AppCrash>,
+    unreadable: Option<String>,
+    asked: Vec<(u64, u64)>,
+}
+
+impl FakeEventLog {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// Records that `app` crashed in `module` at `at_ms`.
+    pub fn crash(&self, at_ms: u64, app: &str, module: &str) {
+        self.state.borrow_mut().crashes.push(AppCrash {
+            at_ms,
+            app: app.to_string(),
+            module: module.to_string(),
+        });
+    }
+    /// Every read fails with `why`, as a log that is off, or that this user may not read.
+    pub fn fail_reads(&self, why: &str) {
+        self.state.borrow_mut().unreadable = Some(why.to_string());
+    }
+    /// The span each read asked for, `(since_ms, now_ms)`, in order.
+    pub fn asked(&self) -> Vec<(u64, u64)> {
+        self.state.borrow().asked.clone()
+    }
+}
+
+impl EventLog for FakeEventLog {
+    fn app_crashes(&self, since_ms: u64, now_ms: u64) -> Result<Vec<AppCrash>, AdapterError> {
+        let mut s = self.state.borrow_mut();
+        s.asked.push((since_ms, now_ms));
+        if let Some(why) = &s.unreadable {
+            return Err(AdapterError::new(
+                "read the Application event log",
+                why.clone(),
+            ));
+        }
+        Ok(s.crashes
+            .iter()
+            .filter(|c| (since_ms..=now_ms).contains(&c.at_ms))
+            .cloned()
+            .collect())
+    }
+}
+
 /// One of each fake, for tests that need a whole `System`.
 pub struct FakeMachine {
     pub fs: FakeFs,
@@ -748,6 +802,7 @@ pub struct FakeMachine {
     pub wt: FakeWt,
     pub process: FakeProcess,
     pub host: FakeHost,
+    pub event_log: FakeEventLog,
 }
 
 impl FakeMachine {
@@ -762,6 +817,7 @@ impl FakeMachine {
             wt: FakeWt::default(),
             process: FakeProcess::new(),
             host: FakeHost::default(),
+            event_log: FakeEventLog::new(),
         }
     }
 
@@ -773,6 +829,7 @@ impl FakeMachine {
             wt: &self.wt,
             process: &self.process,
             host: &self.host,
+            event_log: &self.event_log,
         }
     }
 }
@@ -787,6 +844,38 @@ impl Default for FakeMachine {
 mod tests {
     use super::*;
     use crate::adapters::REG_SZ;
+
+    #[test]
+    fn fake_event_log_gives_the_crashes_of_the_span_asked_and_fails_when_told_to() {
+        let log = FakeEventLog::new();
+        // No program ever crashed.
+        assert_eq!(log.app_crashes(0, 100).unwrap(), []);
+        log.crash(50, "cmd.exe", "clink_dll_x64.dll");
+        log.crash(150, "notepad.exe", "ntdll.dll");
+        // The ends of the span are in it.
+        let found = log.app_crashes(50, 150).unwrap();
+        assert_eq!(found.iter().map(|c| c.at_ms).collect::<Vec<_>>(), [50, 150]);
+        assert_eq!(
+            found.first().map(|c| (c.app.as_str(), c.module.as_str())),
+            Some(("cmd.exe", "clink_dll_x64.dll"))
+        );
+        assert_eq!(log.app_crashes(51, 149).unwrap(), []);
+        // A log that can't be read is an error, never an empty answer; the span is still noted.
+        log.fail_reads("Access is denied.");
+        let e = log.app_crashes(0, 200).unwrap_err();
+        assert_eq!(e.message, "Access is denied.");
+        assert_eq!(log.asked(), [(0, 100), (50, 150), (51, 149), (0, 200)]);
+    }
+
+    #[test]
+    fn a_fake_machines_system_reads_the_crashes_its_fake_log_holds() {
+        let m = FakeMachine::new();
+        m.event_log.crash(10, "cmd.exe", "clink_dll_x64.dll");
+        let sys = m.system();
+        let found = sys.event_log.app_crashes(0, 20).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(m.event_log.asked(), [(0, 20)]);
+    }
 
     #[test]
     fn fake_fs_behaves_like_a_disk() {

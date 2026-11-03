@@ -1,7 +1,8 @@
 // The IPC surface the screens use (spec §5.7, with preview_render, open_external and
-// advanced_read). One interface, two implementations: `tauri.ts` over Tauri's invoke, and
-// `mock.ts` in memory for tests and the visual check. The types are the ts-rs bindings the
-// Rust side exports (app/ui/src/bindings, committed; CI fails when they are stale).
+// advanced_read, and the theme's pause of recovery spec §8). One interface, two
+// implementations: `tauri.ts` over Tauri's invoke, and `mock.ts` in memory for tests and the
+// visual check. The types are the ts-rs bindings the Rust side exports (app/ui/src/bindings,
+// committed; CI fails when they are stale).
 import type { AdvancedInfo } from "../bindings/AdvancedInfo";
 import type { AppError } from "../bindings/AppError";
 import type { AppSettings } from "../bindings/AppSettings";
@@ -15,11 +16,15 @@ import type { ExternalTarget } from "../bindings/ExternalTarget";
 import type { FixProposal } from "../bindings/FixProposal";
 import type { ImportPreview } from "../bindings/ImportPreview";
 import type { Library } from "../bindings/Library";
+import type { PauseOutcome } from "../bindings/PauseOutcome";
+import type { PauseReason } from "../bindings/PauseReason";
 import type { PlanOutcome } from "../bindings/PlanOutcome";
 import type { PreviewContext } from "../bindings/PreviewContext";
 import type { PreviewResult } from "../bindings/PreviewResult";
+import type { RecoveryStatus } from "../bindings/RecoveryStatus";
 import type { RestoreOutcome } from "../bindings/RestoreOutcome";
 import type { RestorePoints } from "../bindings/RestorePoints";
+import type { ResumeOutcome } from "../bindings/ResumeOutcome";
 import type { RevertOutcome } from "../bindings/RevertOutcome";
 import type { SettingsLoad } from "../bindings/SettingsLoad";
 import type { SystemReport } from "../bindings/SystemReport";
@@ -64,6 +69,17 @@ export interface Ipc {
   openExternal(target: ExternalTarget): Promise<void>;
   diagnosticsCopy(): Promise<string>;
   advancedRead(): Promise<AdvancedInfo>;
+  /** Whether the theme is paused, and what the start's check of Windows' crash reports found
+   * (recovery spec §4.2, §4.3). Not for polling: while the start's check runs, one call can wait
+   * for it (up to 30 s), so it is read when Home loads and after a pause, a resume or an apply. */
+  recoveryStatus(): Promise<RecoveryStatus>;
+  /** Pauses the theme on this computer (Revert everything underneath): `user` from Home,
+   * `clinkCrash` from the health check's D12. The backend refuses any other reason with
+   * `E_INTERNAL`; they are in the type because it is the generated one. */
+  themePause(reason: PauseReason): Promise<PauseOutcome>;
+  /** Turns the theme back on: a pause in cmd at once, one of this computer as a request to
+   * apply through the plan. */
+  themeResume(): Promise<ResumeOutcome>;
 }
 
 /** A command failed: the Rust side's `AppError` (spec §5.9), as a JavaScript error. */

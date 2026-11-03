@@ -169,6 +169,19 @@ fn disabled_banner_registers_no_callback() -> mlua::Result<()> {
     Ok(())
 }
 
+#[test]
+fn a_paused_theme_prints_no_box_and_leaves_its_variable_unset() -> mlua::Result<()> {
+    // init.lua sets CMDSTUDIO_PAUSED when it loaded no prompt (recovery spec §3.3); the box
+    // waits for it, and a window started later, once the theme is back on, still gets its box.
+    let lua = load(&banner_lua(&terracotta()), &CMD_HEADER)?;
+    lua.globals().set("CMDSTUDIO_PAUSED", true)?;
+    inject(&lua)?;
+    assert!(printed(&lua)?.is_empty());
+    let env: Table = lua.globals().get("__env")?;
+    assert_eq!(env.pairs::<Value, Value>().count(), 0);
+    Ok(())
+}
+
 // ---- Beyond the eight above: the icon, the dates, the options, text from the theme, init.lua ----
 
 /// What cmd prints on top of a fresh window (spec §3.6, G4).
@@ -733,11 +746,14 @@ fn every_theme_prints_one_valid_box_once_per_session() -> mlua::Result<()> {
 /// A stand-in for `io.popen` that records each command and answers `__popen_result`, or nil
 /// when that is unset, which is what `io.popen` gives when the command cannot start. `print`
 /// is a stand-in too, so that anything init.lua prints shows up in `printed` like `clink.print`.
+/// `io.open` finds no file: the start counter's own tests are `tests/health_lua.rs`, and these
+/// run as a `clink set` does, with no `os.gethost` to call this a cmd window.
 const INIT_STUBS: &str = r#"
 __popen_cmds = {}
 __logs = {}
 log = { info = function(s) __logs[#__logs + 1] = s end }
 print = function(...) __out[#__out + 1] = "<print>" .. table.concat({...}, " ") end
+io.open = function(path) return nil, path .. ": No such file or directory" end
 io.popen = function(cmd)
   __popen_cmds[#__popen_cmds + 1] = cmd
   if __popen_result == nil then return nil end
@@ -757,7 +773,8 @@ fn load_init(exe: &str, config: &str, popen_result: Option<&str>) -> mlua::Resul
     if let Some(result) = popen_result {
         lua.globals().set("__popen_result", result)?;
     }
-    lua.load(init_lua(Path::new(exe), Path::new(config)))
+    let health = Path::new(r"C:\Users\tester\AppData\Local\ai.resincore.cmdstudio\health");
+    lua.load(init_lua(Path::new(exe), Path::new(config), health))
         .set_name("init.lua")
         .exec()?;
     Ok(lua)

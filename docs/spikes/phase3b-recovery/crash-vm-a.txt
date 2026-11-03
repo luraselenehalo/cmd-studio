@@ -1,0 +1,49 @@
+# VM-A (cmdstudio-win11, tester), 2026-10-18, spike step 6 (S9, S10, S11)
+# After -Swap, each Win+R cmd window stopped at the AutoRun line: Windows showed "clink_x64.exe - Entry Point Not Found: The procedure entry point ?loader_main_thunk@@YAHXZ could not be located in the dynamic link library ...\runtime\clink-1.9.34\clink_x64.exe." (screenshot cmdstudio-win11-p3b-crash.png). clink_x64.exe imports loader_main_thunk from clink_dll_x64.dll, which the stand-in does not export, so the loader never starts and cmd.exe never loads the stand-in: no crash, no event 1000.
+# Three clink_x64.exe and three cmd.exe were left waiting behind the error box; they were stopped and the box dismissed before -Restore.
+
+### p3b-a-6-crash.log
+cmd left: 0
+## 6a. recovery-setup.ps1 -NoProbe (clears health\ and the counter) 2026-10-18T08:00:39.7581379+07:00
+clink set said:
+AutoRun: (if exist "C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\runtime\clink-1.9.34\clink_x64.exe" "C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\runtime\clink-1.9.34\clink_x64.exe" inject --autorun --quiet --profile "C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\clink-profile")
+data: C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b
+health: C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\health
+## 6b. recovery-crash.ps1 -Swap 2026-10-18T08:00:51.9481047+07:00
+swapped: 1.9.34.4e8ae4 D52A20C769D0DFF30D8E67575AF78E389FC8D245F441D23B06FFD03675928A2E
+## 6c. Win+R cmd #1 2026-10-18T08:01:01.3436210+07:00
+foreground: pid 8008 WindowsTerminal, minimized: False
+window: csrss (pid 736) "clink_x64.exe - Entry Point Not Found"
+window: explorer (pid 6244) ""
+window: WindowsTerminal (pid 8008) "C:\WINDOWS\system32\cmd.exe - "C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\runtime\clink-1.9.34\clink_x64.exe"  inject --autorun --quiet --profile "C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\clink-profile""
+## 6c. Win+R cmd #2 2026-10-18T08:01:29.1876645+07:00
+## 6c. Win+R cmd #3 2026-10-18T08:01:46.9059847+07:00
+
+### p3b-a-6-events-1.log
+events 1000: 0
+  error: NoMatchingEventsFound,Microsoft.PowerShell.Commands.GetWinEventCommand: No events were found that match the specified selection criteria.
+the app's query finds: 0
+  error: NoMatchingEventsFound,Microsoft.PowerShell.Commands.GetWinEventCommand: No events were found that match the specified selection criteria.
+with EventData[Data='cmd.exe']: 0
+  error: NoMatchingEventsFound,Microsoft.PowerShell.Commands.GetWinEventCommand: No events were found that match the specified selection criteria.
+--- clink.log, last lines
+
+### p3b-a-6-restore.log
+clink_x64 6592
+clink_x64 6664
+clink_x64 7716
+cmd 6172
+cmd 6276
+cmd 10900
+left: 1
+## 6d. recovery-crash.ps1 -Restore 2026-10-18T08:03:56.7308858+07:00
+restored: 889B712037886DFDE205E4B637A021848734ED218EE21C5718E2BF23A9E9D8F2
+
+### p3b-a-7-cleanup.log
+## 6e. a cmd window after -Restore 2026-10-18T08:05:25.6931313+07:00
+cmd.exe processes: 1
+cmd pid 5276 started 8:05:28 AM, Clink loaded: clink_dll_x64.dll
+## 7. recovery-setup.ps1 -Remove 2026-10-18T08:05:52.3083989+07:00
+AutoRun restored (there was none)
+AutoRun now: (absent)
+

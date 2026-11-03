@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { PauseInfo } from "../bindings/PauseInfo";
 import type { PreviewContext } from "../bindings/PreviewContext";
 import type { Theme } from "../bindings/Theme";
 import { createMockIpc } from "./mock";
@@ -243,5 +244,381 @@ describe("the mock IPC", () => {
     expect((await d6({ noWindowsTerminal: true })).fix).toBe("installWindowsTerminal");
     expect((await d6({ noWindowsTerminal: true, build: 18363, storeAvailable: false })).fix).toBeNull();
     expect((await d6({ noWindowsTerminal: true, build: null, storeAvailable: false })).fix).toBeNull();
+  });
+
+  it("pauses and turns the theme back on as the backend does: in cmd at once, on this computer through the plan", async () => {
+    const ipc = createMockIpc();
+    const terracotta = (await ipc.themesList()).themes[0]!;
+    const request = { themeId: terracotta.id, target: "all" as const, setWtDefaultProfile: true, replaceOtherClink: false };
+    const planned = await ipc.planApply(request);
+    if (planned.kind !== "ready") throw new Error("not ready");
+    await ipc.apply(request, planned.plan.digest, () => {});
+    expect(await ipc.recoveryStatus()).toEqual({ paused: null, crashes: { kind: "read", count: 0, pausedNow: false, pause: null } });
+    const paused = await ipc.themePause("user");
+    expect(paused).toMatchObject({ pausedNow: true, refused: null, notSaved: null });
+    expect(paused.revert?.status).toBe("committed");
+    expect(ipc.state.applied).toBeNull();
+    expect((await ipc.recoveryStatus()).paused).toMatchObject({
+      by: "app",
+      level: "computer",
+      reason: "user",
+      count: 0,
+      resume: { themeId: terracotta.id, target: "all", themeName: "Terracotta" },
+    });
+    const resumed = await ipc.themeResume();
+    if (resumed.kind !== "apply" || resumed.plan.kind !== "ready") throw new Error(resumed.kind);
+    expect(resumed.request).toEqual(request);
+    // The pause stays until that apply commits.
+    expect((await ipc.recoveryStatus()).paused).not.toBeNull();
+    expect((await ipc.apply(resumed.request, resumed.plan.plan.digest, () => {})).status).toBe("committed");
+    expect((await ipc.recoveryStatus()).paused).toBeNull();
+    // A pause in cmd is lifted at once, and Undo everything takes it too.
+    const inCmd = { by: "clink", level: "cmd", reason: "cmdStarts", atMs: 1, count: 3, resume: null } as const;
+    ipc.state.paused = { ...inCmd };
+    expect(await ipc.themeResume()).toEqual({ kind: "resumed" });
+    expect(await ipc.themeResume()).toEqual({ kind: "notPaused" });
+    ipc.state.paused = { ...inCmd };
+    await ipc.revertAll();
+    expect(ipc.state.paused).toBeNull();
+    // A pause of this computer stays through Undo everything: it holds the theme to turn back on.
+    ipc.state.paused = { by: "app", level: "computer", reason: "user", atMs: 1, count: 0, resume: { themeId: terracotta.id, target: "all", themeName: "Terracotta" } };
+    await ipc.revertAll();
+    expect(ipc.state.paused).not.toBeNull();
+    // Only the user and cmd's crashes are the app's reasons.
+    await expect(ipc.themePause("cmdStarts")).rejects.toMatchObject({ code: "E_INTERNAL" });
+    await expect(ipc.themePause("recovery")).rejects.toMatchObject({ code: "E_INTERNAL" });
+    expect(ipc.state.calls.filter((c) => c.startsWith("themePause") || c === "themeResume" || c === "recoveryStatus")).toEqual([
+      "recoveryStatus",
+      "themePause:user",
+      "recoveryStatus",
+      "themeResume",
+      "recoveryStatus",
+      "recoveryStatus",
+      "themeResume",
+      "themeResume",
+      "themePause:cmdStarts",
+      "themePause:recovery",
+    ]);
+  });
+
+  it("says D12 as the core does: paused first, then the crashes it is given", async () => {
+    const d12 = async (ipc: ReturnType<typeof createMockIpc>) => (await ipc.doctorRun()).checks.find((c) => c.id === "D12")!;
+    const theme = PRESETS[0]!;
+    const applied = async (options: Parameters<typeof createMockIpc>[0]) => {
+      const ipc = createMockIpc(options);
+      const request = { themeId: theme.id, target: "all" as const, setWtDefaultProfile: true, replaceOtherClink: false };
+      const planned = await ipc.planApply(request);
+      if (planned.kind !== "ready") throw new Error("not ready");
+      await ipc.apply(request, planned.plan.digest, () => {});
+      return ipc;
+    };
+    expect((await d12(createMockIpc())).status).toBe("skipped");
+    expect(await d12(await applied({}))).toMatchObject({ status: "ok", code: null, fix: null });
+    // The count words are the pause rows' (the core's `crashed_times`): "once", else "{n} times",
+    // never "time(s)".
+    const one = await d12(await applied({ cmdCrashes: 1 }));
+    expect(one).toMatchObject({ status: "warn", code: "E_CMD_CRASHED", fix: "pause" });
+    expect(one.messageEn).toBe(
+      "cmd crashed in its add-on once since the theme was applied. If it happens again, pause the theme in CMD Studio so that cmd opens",
+    );
+    expect(one.messageTh).toBe("cmd แครชในส่วนเสริม 1 ครั้งตั้งแต่ใช้ธีม ถ้ายังเกิดอีก ให้หยุดธีมใน CMD Studio เพื่อให้ cmd เปิดได้");
+    const two = await d12(await applied({ cmdCrashes: 2 }));
+    expect(two).toMatchObject({ status: "warn", code: "E_CMD_CRASHED", fix: "pause" });
+    expect(two.messageEn).toBe(
+      "cmd crashed in its add-on 2 times since the theme was applied. If it happens again, pause the theme in CMD Studio so that cmd opens",
+    );
+    const three = await d12(await applied({ cmdCrashes: 3 }));
+    expect(three).toMatchObject({ status: "fail", code: "E_CMD_CRASHED", fix: "pause" });
+    expect(three.messageEn).toBe(
+      "cmd crashed in its add-on 3 times since the theme was applied, and the theme is still on. Pause the theme in CMD Studio so that cmd opens",
+    );
+    for (const check of [one, two, three]) expect(check.messageEn).not.toContain("time(s)");
+    // Crash reports that can't be read are "not checked", never "no crash".
+    expect(await d12(await applied({ crashCheck: { kind: "unreadable", why: "access is denied", pause: null } }))).toMatchObject({
+      status: "skipped",
+      code: null,
+      fix: null,
+    });
+    const paused = createMockIpc({ paused: { by: "clink", level: "cmd", reason: "cmdStarts", atMs: 1, count: 3, resume: null } });
+    expect(await d12(paused)).toMatchObject({ status: "warn", code: "E_THEME_PAUSED", fix: "resume" });
+    for (const word of ["prompt", "เรา", "สำรอง", "รุ่น"]) expect((await d12(paused)).messageTh).not.toContain(word);
+    // A pause comes before the crashes, and its fix is the way back on. (An apply lifts a pause, so
+    // it is set after the apply.)
+    const both = await applied({ cmdCrashes: 3 });
+    both.state.paused = { by: "clink", level: "cmd", reason: "cmdStarts", atMs: 1, count: 3, resume: null };
+    expect(await d12(both)).toMatchObject({ code: "E_THEME_PAUSED", fix: "resume" });
+    expect((await both.doctorFix("D12")).kind).toBe("resume");
+    expect((await (await applied({ cmdCrashes: 3 })).doctorFix("D12")).kind).toBe("pause");
+  });
+
+  it("runs the start's crash check once, at the first status, and pauses for three crashes as the backend does", async () => {
+    const ipc = createMockIpc({ cmdCrashes: 3 });
+    const theme = PRESETS[0]!;
+    const request = { themeId: theme.id, target: "all" as const, setWtDefaultProfile: true, replaceOtherClink: false };
+    const planned = await ipc.planApply(request);
+    if (planned.kind !== "ready") throw new Error("not ready");
+    await ipc.apply(request, planned.plan.digest, () => {});
+    const first = await ipc.recoveryStatus();
+    expect(first.crashes).toMatchObject({ kind: "read", count: 3, pausedNow: true, pause: { pausedNow: true, refused: null, notSaved: null } });
+    expect(first.paused).toMatchObject({ by: "app", level: "computer", reason: "clinkCrash", count: 3, resume: { themeId: theme.id, target: "all" } });
+    expect(ipc.state.applied).toBeNull();
+    // Once per start: the same answer, and nothing paused again.
+    const pausedAt = first.paused?.atMs;
+    const again = await ipc.recoveryStatus();
+    expect(again.crashes).toEqual(first.crashes);
+    expect(again.paused?.atMs).toBe(pausedAt);
+    // Fewer than three crashes pause nothing; with no theme applied there is nothing to look for.
+    const two = createMockIpc({ cmdCrashes: 2 });
+    expect((await two.recoveryStatus()).crashes).toEqual({ kind: "noTheme" });
+    const planned2 = await two.planApply(request);
+    if (planned2.kind !== "ready") throw new Error("not ready");
+    await two.apply(request, planned2.plan.digest, () => {});
+    // The check ran at the first status, when no theme was applied: it is not run again.
+    expect(await two.recoveryStatus()).toEqual({ paused: null, crashes: { kind: "noTheme" } });
+    await two.themePause("clinkCrash");
+    expect((await two.recoveryStatus()).paused).toMatchObject({ reason: "clinkCrash", count: 2 });
+    const one = createMockIpc({ cmdCrashes: 2 });
+    const planned1 = await one.planApply(request);
+    if (planned1.kind !== "ready") throw new Error("not ready");
+    await one.apply(request, planned1.plan.digest, () => {});
+    expect(await one.recoveryStatus()).toEqual({ paused: null, crashes: { kind: "read", count: 2, pausedNow: false, pause: null } });
+    // A status that fails, with the code it is told.
+    const failing = createMockIpc({ failRecoveryWith: "E_MACHINE_READ" });
+    await expect(failing.recoveryStatus()).rejects.toMatchObject({ code: "E_MACHINE_READ" });
+    expect(failing.state.calls).toEqual(["recoveryStatus"]);
+  });
+
+  it("gives each shape of the pause as fixed data from its option, and words it as the core does", async () => {
+    const terracotta = PRESETS[0]!;
+    const resume = { themeId: terracotta.id, target: "all" as const, themeName: "Terracotta" };
+    const crash = { by: "app", reason: "clinkCrash", atMs: 1791694709000, count: 3, resume } as const;
+    const d12 = async (ipc: ReturnType<typeof createMockIpc>) => (await ipc.doctorRun()).checks.find((c) => c.id === "D12")!;
+    const shape = async (paused: PauseInfo) => {
+      const ipc = createMockIpc({ paused });
+      expect((await ipc.recoveryStatus()).paused).toEqual(paused);
+      return { ipc, check: await d12(ipc) };
+    };
+    // In effect: the theme is out. Never "not yet".
+    let row = await shape({ ...crash, level: "computer" });
+    expect(row.check).toMatchObject({ status: "warn", code: "E_THEME_PAUSED", fix: "resume" });
+    expect(row.check.messageEn).toBe(
+      "CMD Studio paused the theme on this computer: cmd crashed in its add-on 3 times. Turn it back on from CMD Studio's home page",
+    );
+    expect(row.check.messageTh).toBe("CMD Studio หยุดธีมของเครื่องนี้ไว้ เพราะ cmd แครชในส่วนเสริม 3 ครั้ง เปิดธีมกลับได้ที่หน้าแรกของ CMD Studio");
+    // Not yet: CMD Studio could not take its changes out; the theme is paused in cmd only.
+    row = await shape({ ...crash, level: "computerNotYet" });
+    expect(row.check.messageEn).toBe(
+      "The theme is paused in cmd only, not yet on this computer: CMD Studio could not take its changes out and tries again the next time the CMD Studio app starts",
+    );
+    expect(row.check.messageEn).not.toContain("paused on this computer");
+    expect(row.check.detailsTh).toContain("ยังไม่สำเร็จ");
+    // Not known: state.json can't be read.
+    row = await shape({ ...crash, level: "computerUnknown" });
+    expect(row.check.messageEn).toBe("A pause of this computer may be in place, but state.json could not be read");
+    expect(row.check.messageTh).toBe("อาจมีการหยุดธีมของเครื่องนี้อยู่ แต่อ่าน state.json ไม่ได้");
+    // A record that can't be read: no reason, no time; turning back on only lifts it.
+    row = await shape({ by: "clink", level: "cmd", reason: null, atMs: null, count: 0, resume: null });
+    expect(row.check.messageEn).toContain("can't read its pause record");
+    expect(row.check.details).not.toContain("nothing on this computer was changed");
+    expect(await row.ipc.themeResume()).toEqual({ kind: "resumed" });
+    expect((await row.ipc.recoveryStatus()).paused).toBeNull();
+    // A count of 0 is never said as "0 times": the crash reports could not be read.
+    row = await shape({ ...crash, level: "computer", count: 0 });
+    expect(row.check.messageEn).toBe(
+      "CMD Studio paused the theme on this computer: cmd crashed in its add-on. Turn it back on from CMD Studio's home page",
+    );
+    expect(row.check.messageTh).not.toContain("0 ครั้ง");
+    // And one time is said once.
+    row = await shape({ ...crash, level: "computer", count: 1 });
+    expect(row.check.messageEn).toContain("crashed in its add-on once.");
+    // An app record older than the theme in use is a pause in cmd: the lift is at once, and the
+    // theme it noted is not applied again.
+    row = await shape({ by: "app", level: "cmd", reason: "user", atMs: 1, count: 0, resume });
+    expect(row.check.messageEn).toContain("a theme was applied after this pause");
+    expect(await row.ipc.themeResume()).toEqual({ kind: "resumed" });
+    // Not yet or in effect, with a theme to apply: through the plan. Without one, or with one that
+    // is no longer in the library: the Themes page.
+    expect((await (await shape({ ...crash, level: "computerNotYet" })).ipc.themeResume()).kind).toBe("apply");
+    expect((await (await shape({ ...crash, level: "computer", resume: null })).ipc.themeResume()).kind).toBe("pickTheme");
+    const gone = { ...resume, themeId: "00000000-0000-4000-8000-000000000000", themeName: null };
+    expect((await (await shape({ ...crash, level: "computerUnknown", resume: gone })).ipc.themeResume()).kind).toBe("pickTheme");
+    // Every Thai text of the pause rows is free of the words the app never says.
+    for (const level of ["computer", "computerNotYet", "computerUnknown", "cmd"] as const) {
+      for (const reason of ["cmdStarts", "clinkCrash", "recovery", "user", null] as const) {
+        for (const by of ["clink", "app"] as const) {
+          const check = (await shape({ by, level, reason, atMs: 1, count: 3, resume: null })).check;
+          for (const word of ["prompt", "เรา", "สำรอง", "รุ่น"]) {
+            expect(check.messageTh, `${by}/${level}/${reason}`).not.toContain(word);
+            expect(check.detailsTh ?? "", `${by}/${level}/${reason}`).not.toContain(word);
+          }
+        }
+      }
+    }
+    // Taking the theme out makes a pause of the app's one in effect, as the backend's level says.
+    const applied = createMockIpc({ paused: { ...crash, level: "computerNotYet" } });
+    const request = { themeId: terracotta.id, target: "all" as const, setWtDefaultProfile: true, replaceOtherClink: false };
+    const planned = await applied.planApply(request);
+    if (planned.kind !== "ready") throw new Error("not ready");
+    await applied.apply(request, planned.plan.digest, () => {});
+    // (An apply lifts any pause; the pause comes back as the test sets it.)
+    applied.state.paused = { ...crash, level: "computerNotYet" };
+    await applied.revertAll();
+    expect(applied.state.paused).toMatchObject({ by: "app", level: "computer" });
+  });
+
+  it("gives the start's crash check as fixed data when it is told to, whatever shape", async () => {
+    const terracotta = PRESETS[0]!;
+    const refused = { pausedNow: false, revert: null, refused: { code: "E_BUSY", messageTh: "(E_BUSY)", messageEn: "(E_BUSY)", details: "x" }, notSaved: null };
+    for (const crashCheck of [
+      { kind: "read", count: 0, pausedNow: false, pause: refused },
+      { kind: "unreadable", why: "the Application log is off", pause: null },
+      { kind: "unreadable", why: "the Application log is off", pause: refused },
+    ] as const) {
+      const ipc = createMockIpc({ crashCheck });
+      // As given at the first status, and the same at every later one; nothing else is worked out.
+      expect((await ipc.recoveryStatus()).crashes).toEqual(crashCheck);
+      expect((await ipc.recoveryStatus()).crashes).toEqual(crashCheck);
+      expect(ipc.state.paused).toBeNull();
+    }
+    // Windows' crash reports that can't be read: D12 says it was not checked, with the reason.
+    const ipc = createMockIpc({ crashCheck: { kind: "unreadable", why: "the Application log is off", pause: null } });
+    const request = { themeId: terracotta.id, target: "all" as const, setWtDefaultProfile: true, replaceOtherClink: false };
+    const planned = await ipc.planApply(request);
+    if (planned.kind !== "ready") throw new Error("not ready");
+    await ipc.apply(request, planned.plan.digest, () => {});
+    const d12 = (await ipc.doctorRun()).checks.find((c) => c.id === "D12")!;
+    expect(d12.status).toBe("skipped");
+    expect(d12.messageEn).toBe("Not checked: Windows' crash reports (the Application event log) could not be read: the Application log is off");
+    expect(d12.messageTh).toContain("the Application log is off");
+  });
+
+  it("says a pause that did not go through the way the backend does: refused, rolled back, or not saved", async () => {
+    const terracotta = PRESETS[0]!;
+    const request = { themeId: terracotta.id, target: "all" as const, setWtDefaultProfile: true, replaceOtherClink: false };
+    const applied = async (failPause: "refused" | "rolledBack" | "notSaved") => {
+      const ipc = createMockIpc({ failPause });
+      const planned = await ipc.planApply(request);
+      if (planned.kind !== "ready") throw new Error("not ready");
+      await ipc.apply(request, planned.plan.digest, () => {});
+      return ipc;
+    };
+    // Revert everything was refused: nothing changed but the record, and the theme is applied.
+    let ipc = await applied("refused");
+    let out = await ipc.themePause("user");
+    expect(out).toMatchObject({ pausedNow: false, revert: null, refused: { code: "E_BUSY" }, notSaved: null });
+    expect(ipc.state.applied).not.toBeNull();
+    expect((await ipc.recoveryStatus()).paused).toMatchObject({ by: "app", level: "computerNotYet", reason: "user", resume: { themeId: terracotta.id } });
+    expect((await ipc.doctorRun()).checks.find((c) => c.id === "D12")?.messageEn).toContain("not yet on this computer");
+    // Rolled back: the revert ran and did not hold.
+    ipc = await applied("rolledBack");
+    out = await ipc.themePause("user");
+    expect(out).toMatchObject({ pausedNow: false, refused: null, notSaved: null });
+    expect(out.revert).toMatchObject({ ok: false, status: "rolledBack", error: { code: "E_AUTORUN_WRITE" } });
+    expect(ipc.state.applied).not.toBeNull();
+    expect((await ipc.recoveryStatus()).paused?.level).toBe("computerNotYet");
+    // The record could not be written: the theme is out all the same, and no pause is there.
+    ipc = await applied("notSaved");
+    out = await ipc.themePause("user");
+    expect(out).toMatchObject({ pausedNow: false, refused: null, notSaved: { code: "E_DATA_WRITE" } });
+    expect(out.revert?.ok).toBe(true);
+    expect(ipc.state.applied).toBeNull();
+    expect((await ipc.recoveryStatus()).paused).toBeNull();
+    // The start's own pause for three crashes goes the same way, and says so in the check.
+    const crashing = createMockIpc({ cmdCrashes: 3, failPause: "refused" });
+    const planned = await crashing.planApply(request);
+    if (planned.kind !== "ready") throw new Error("not ready");
+    await crashing.apply(request, planned.plan.digest, () => {});
+    const status = await crashing.recoveryStatus();
+    expect(status.crashes).toMatchObject({ kind: "read", count: 3, pausedNow: false, pause: { pausedNow: false, refused: { code: "E_BUSY" } } });
+    expect(status.paused).toMatchObject({ level: "computerNotYet", reason: "clinkCrash", count: 3 });
+  });
+
+  it("says a pause whose Revert everything committed with a step that failed: the theme is out, the record is there, and it is not done", async () => {
+    const terracotta = PRESETS[0]!;
+    const request = { themeId: terracotta.id, target: "all" as const, setWtDefaultProfile: true, replaceOtherClink: false };
+    const ipc = createMockIpc({ failPause: "partial" });
+    const planned = await ipc.planApply(request);
+    if (planned.kind !== "ready") throw new Error("not ready");
+    await ipc.apply(request, planned.plan.digest, () => {});
+    const out = await ipc.themePause("user");
+    // The backend's paused_now is "the revert ended well and the record was saved".
+    expect(out).toMatchObject({ pausedNow: false, refused: null, notSaved: null });
+    expect(out.revert).toMatchObject({ ok: false, status: "committed", error: null, unrestored: [] });
+    const failed = out.revert?.steps.filter((s) => !s.ok) ?? [];
+    expect(failed).toHaveLength(1);
+    expect(failed[0]).toMatchObject({ code: "E_FONT_INSTALL", error: { code: "E_FONT_INSTALL" } });
+    // The theme is out, so the pause is one of this computer in effect, and not "not yet".
+    expect(ipc.state.applied).toBeNull();
+    expect((await ipc.recoveryStatus()).paused).toMatchObject({ by: "app", level: "computer", reason: "user", resume: { themeId: terracotta.id } });
+  });
+
+  it("lifts a pause in cmd when an undo or a restore leaves no theme, and keeps the app's, as the backend does", async () => {
+    const [first, second] = PRESETS;
+    const apply = async (ipc: ReturnType<typeof createMockIpc>, themeId: string) => {
+      const request = { themeId, target: "all" as const, setWtDefaultProfile: true, replaceOtherClink: false };
+      const planned = await ipc.planApply(request);
+      if (planned.kind !== "ready") throw new Error("not ready");
+      await ipc.apply(request, planned.plan.digest, () => {});
+    };
+    const inCmd = { by: "clink", level: "cmd", reason: "cmdStarts", atMs: 1, count: 3, resume: null } as const;
+    const resume = { themeId: first!.id, target: "all" as const, themeName: first!.name };
+    // A restore that undoes the only apply leaves no theme: init.lua's pause is lifted.
+    const restoring = createMockIpc();
+    await apply(restoring, first!.id);
+    restoring.state.paused = { ...inCmd };
+    const point = (await restoring.snapshotsList()).points[0]!;
+    expect((await restoring.snapshotRestore(point.id)).status).toBe("done");
+    expect(restoring.state.applied).toBeNull();
+    expect(restoring.state.paused).toBeNull();
+    // An undo that leaves a theme lifts nothing and keeps the level as it was.
+    const undoing = createMockIpc();
+    await apply(undoing, first!.id);
+    await apply(undoing, second!.id);
+    undoing.state.paused = { ...inCmd };
+    expect((await undoing.undoLast()).status).toBe("committed");
+    expect(undoing.state.applied?.theme.id).toBe(first!.id);
+    expect(undoing.state.paused).toEqual(inCmd);
+    undoing.state.paused = { by: "app", level: "computerNotYet", reason: "user", atMs: 1, count: 0, resume };
+    await undoing.undoLast();
+    expect(undoing.state.applied).toBeNull();
+    // An undo that leaves no theme: the app's pause is one in effect now, and stays.
+    expect((await undoing.recoveryStatus()).paused).toMatchObject({ by: "app", level: "computer", reason: "user" });
+    // The same for a pause of the app's that was older than the theme (level cmd), and "not known"
+    // stays not known.
+    const older = createMockIpc();
+    await apply(older, first!.id);
+    older.state.paused = { by: "app", level: "cmd", reason: "user", atMs: 1, count: 0, resume };
+    await older.undoLast();
+    expect(older.state.paused?.level).toBe("computer");
+    const unknown = createMockIpc();
+    await apply(unknown, first!.id);
+    unknown.state.paused = { by: "app", level: "computerUnknown", reason: "user", atMs: 1, count: 0, resume };
+    await unknown.undoLast();
+    expect(unknown.state.paused?.level).toBe("computerUnknown");
+    // Pausing the theme runs Revert everything, which never lifts init.lua's pause (the core's
+    // revert leaves paused.json): a record that could not be saved leaves it as it was.
+    const notSaved = createMockIpc({ failPause: "notSaved" });
+    await apply(notSaved, first!.id);
+    notSaved.state.paused = { ...inCmd };
+    await notSaved.themePause("user");
+    expect(notSaved.state.applied).toBeNull();
+    expect(notSaved.state.paused).toEqual(inCmd);
+  });
+
+  it("answers a status whose crash check has not finished as crashes: null, whatever happens", async () => {
+    const paused = { by: "clink", level: "cmd", reason: "cmdStarts", atMs: 1, count: 3, resume: null } as const;
+    const ipc = createMockIpc({ crashCheck: null, paused });
+    expect(await ipc.recoveryStatus()).toEqual({ paused, crashes: null });
+    expect(await ipc.recoveryStatus()).toEqual({ paused, crashes: null });
+    // Not even a theme applied and three crashes make a check: it has not finished.
+    const crashing = createMockIpc({ crashCheck: null, cmdCrashes: 3 });
+    const request = { themeId: PRESETS[0]!.id, target: "all" as const, setWtDefaultProfile: true, replaceOtherClink: false };
+    const planned = await crashing.planApply(request);
+    if (planned.kind !== "ready") throw new Error("not ready");
+    await crashing.apply(request, planned.plan.digest, () => {});
+    expect(await crashing.recoveryStatus()).toEqual({ paused: null, crashes: null });
+    expect(crashing.state.applied).not.toBeNull();
+    // A crashCheck that is not given keeps the check that runs once.
+    expect((await createMockIpc().recoveryStatus()).crashes).toEqual({ kind: "noTheme" });
   });
 });

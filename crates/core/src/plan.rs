@@ -400,7 +400,7 @@ pub fn plan(
         },
         Op::WriteFile {
             path: paths.generated().join("init.lua"),
-            contents: lua::init_lua(&paths.omp_exe(), &paths.omp_config()),
+            contents: lua::init_lua(&paths.omp_exe(), &paths.omp_config(), &paths.health()),
         },
         Op::WriteFile {
             path: paths.generated().join("banner.lua"),

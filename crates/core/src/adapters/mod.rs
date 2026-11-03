@@ -314,6 +314,26 @@ pub trait Host {
     fn system_info(&self) -> SystemInfo;
 }
 
+/// One "Application Error" event (ID 1000) of Windows' Application log: a program that crashed,
+/// as the event's EventData names it (recovery spec §4.3).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AppCrash {
+    /// When Windows recorded it, in milliseconds since 1970.
+    pub at_ms: u64,
+    /// The program that crashed, as the event names it: `cmd.exe`.
+    pub app: String,
+    /// The module it crashed in: `clink_dll_x64.dll`.
+    pub module: String,
+}
+
+/// Windows' crash reports (recovery spec §4.3). Read only.
+pub trait EventLog {
+    /// Every program's "Application Error" events 1000 from `since_ms` to `now_ms`
+    /// (milliseconds since 1970). `Err` when the log can't be read: it is off, this user may not
+    /// read it, or it did not answer in time. A caller never takes that for "no crash".
+    fn app_crashes(&self, since_ms: u64, now_ms: u64) -> Result<Vec<AppCrash>, AdapterError>;
+}
+
 /// Everything that touches the machine, borrowed for one command.
 #[derive(Clone, Copy)]
 pub struct System<'a> {
@@ -323,6 +343,7 @@ pub struct System<'a> {
     pub wt: &'a dyn WtSettings,
     pub process: &'a dyn Process,
     pub host: &'a dyn Host,
+    pub event_log: &'a dyn EventLog,
 }
 
 /// `%ProgramData%\ai.resincore.cmdstudio-<SID>`: the user's own folder for

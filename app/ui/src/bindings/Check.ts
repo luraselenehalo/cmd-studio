@@ -6,9 +6,10 @@ import type { Status } from "./Status";
  *
  * `details` is English, or text that is not in a language: paths, values, error messages. The
  * CLI prints it in cmd, where nothing CMD Studio writes is Thai. Where the details tell the user
- * what to do, `details_th` holds them in Thai for the app's own UI (R3's way to fix each step);
- * it is `None`, and left out of JSON, for every other check. It is boxed, a pointer wide, so
- * that a `Check`, which many checks' helpers return as their error, stays under clippy's size
- * for an error (`result_large_err`, 128 bytes).
+ * what to do or what to know, `details_th` holds them in Thai for the app's own UI (R3's way to
+ * fix each step, D12's pause of this computer that has not gone through or can't be known to
+ * have); it is `None`, and left out of JSON, for every other check. It is boxed, a pointer
+ * wide, so that a `Check`, which many checks' helpers return as their error, stays under
+ * clippy's size for an error (`result_large_err`, 128 bytes).
  */
 export type Check = { id: string, status: Status, code: string | null, messageTh: string, messageEn: string, details: string, detailsTh?: string | null, };

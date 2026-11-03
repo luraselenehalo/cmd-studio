@@ -1,0 +1,11 @@
+# vm-check.md step 2a on VM-A (cmdstudio-win11, tester), recovery-filters.ps1 -Probe raise
+
+## -Priority 0.5 (the step), report
+--- raise-7864.txt
+filter n=1 priority=0.5 t=0.251 wall=1792338051
+raising
+filter n=2 priority=0.5 t=0.261 wall=1792338051
+filter n=3 priority=0.5 t=0.562 wall=1792338052
+
+## -Priority 1 (the optional second run), report
+no raise-<pid>.txt under C:\Users\tester\AppData\Local\ai.resincore.cmdstudio

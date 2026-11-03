@@ -1,0 +1,8 @@
+[package]
+name = "hang"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Not a member of CMD Studio's workspace: a test-only program for the VMs.
+[workspace]

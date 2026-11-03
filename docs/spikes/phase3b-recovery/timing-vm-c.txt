@@ -1,0 +1,57 @@
+# VM-C (cmdstudio-th, ผู้ทดสอบ ไทย, Thai path), 2026-10-18, spike step 5 (S8); same method as timing-vm-a.txt
+# 5a as written (prompt filter at 100): no marker. 5b and 5c: timing.lua replaced in the VM by the onbeginedit marker; figures are from cmd's start to the first onbeginedit.
+
+## VM-C 5a. as written (marker = prompt filter at 100): setup -NoProbe, timing -Runs 2 2026-10-18T13:11:23.3255436+07:00
+clink set said:
+AutoRun: (if exist "C:\Users\3607~1\AppData\Local\AIRESI~1.CMD\runtime\clink-1.9.34\clink_x64.exe" "C:\Users\3607~1\AppData\Local\AIRESI~1.CMD\runtime\clink-1.9.34\clink_x64.exe" inject --autorun --quiet --profile "C:\Users\ผู้ทดสอบ ไทย\AppData\Local\ai.resincore.cmdstudio-spike3b\clink-profile")
+data: C:\Users\ผู้ทดสอบ ไทย\AppData\Local\ai.resincore.cmdstudio-spike3b
+health: C:\Users\ผู้ทดสอบ ไทย\AppData\Local\ai.resincore.cmdstudio-spike3b\health
+warm-up, not counted: no marker for pid 5748
+no marker for pid 5348
+no marker for pid 2160
+## VM-C 5b. VM-only onbeginedit marker: setup -NoProbe, timing (10 runs), without the counter 2026-10-18T13:12:48.4392684+07:00
+warm-up, not counted: 912
+877
+848
+831
+914
+891
+851
+851
+898
+839
+812
+average of 10: 861 ms
+
+## VM-C 5c. setup -NoProbe -Counter, timing (10 runs), with the counter 2026-10-18T13:13:52.3982689+07:00
+warm-up, not counted: 893
+847
+971
+851
+869
+820
+864
+881
+827
+868
+800
+average of 10: 860 ms
+## VM-C 5d. recovery-report.ps1 2026-10-18T13:14:40.5400730+07:00
+--- clink.log
+p3b counter ms=6.088
+cmdstudio: prompt loaded
+--- probe.txt
+(none)
+--- health\
+start-10264: v1 1792304071
+start-2428: v1 1792304053
+start-6140: v1 1792304074
+start-6236: v1 1792304059
+start-7080: v1 1792304065
+start-7844: v1 1792304047
+start-7904: v1 1792304068
+start-8420: v1 1792304077
+start-8848: v1 1792304056
+start-8976: v1 1792304062
+start-9148: v1 1792304050
+--- cmd.exe processes now

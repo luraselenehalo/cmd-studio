@@ -1,0 +1,118 @@
+# VM-A (cmdstudio-win11, tester), 2026-10-18, spike step 5 (S8)
+# Part 1: as written. zz-timing.lua marks the first prompt with a prompt filter at priority 100. With Oh My Posh loaded no filter after its own runs (S6), so no window wrote a marker.
+# Part 2: the same steps with C:\cmdstudio\spikes\recovery\timing.lua replaced in the VM (not in the repo) by a marker on the first clink.onbeginedit, which runs after every script has loaded, the counter included, and before the prompt filters. The figures are from cmd's process start to that marker.
+# The counter's own time is the "p3b counter ms=" line (os.clock, logged by init.lua; clink.log keeps the last window only).
+
+### p3b-a-5-trial.log
+## 5a. recovery-setup.ps1 -NoProbe 2026-10-18T07:43:17.1563421+07:00
+clink set said:
+        Name: clink.logo
+ Description: Controls what startup logo to show
+     Options: none,full,short
+       Value: none
+     Default: full
+
+The default is 'full' which shows the full copyright logo when Clink is
+injected.  A value of 'short' shows an abbreviated startup logo with version
+information.  A value of 'none' omits the startup logo entirely.
+AutoRun: (if exist "C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\runtime\clink-1.9.34\clink_x64.exe" "C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\runtime\clink-1.9.34\clink_x64.exe" inject --autorun --quiet --profile "C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\clink-profile")
+data: C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b
+health: C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\health
+## 5b. recovery-timing.ps1, without the counter 2026-10-18T07:43:28.7702881+07:00
+warm-up, not counted: no marker for pid 10232
+no marker for pid 10380
+no marker for pid 1224
+no marker for pid 7192
+
+### p3b-a-5-asis-counter.log
+## 5c. recovery-setup.ps1 -NoProbe -Counter 2026-10-18T07:48:57.8367027+07:00
+clink set said:
+AutoRun: (if exist "C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\runtime\clink-1.9.34\clink_x64.exe" "C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\runtime\clink-1.9.34\clink_x64.exe" inject --autorun --quiet --profile "C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\clink-profile")
+data: C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b
+health: C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\health
+## 5d. recovery-timing.ps1 -Runs 3, with the counter, marker as written (filter 100) 2026-10-18T07:49:08.9648446+07:00
+warm-up, not counted: no marker for pid 8236
+no marker for pid 2448
+no marker for pid 9244
+no marker for pid 9140
+## 5e. recovery-report.ps1 2026-10-18T07:50:46.7169028+07:00
+--- clink.log
+p3b counter ms=2.635
+cmdstudio: prompt loaded
+--- probe.txt
+(none)
+--- health\
+start-2448: v1 1792284579
+start-8236: v1 1792284557
+start-9140: v1 1792284623
+start-9244: v1 1792284601
+--- cmd.exe processes now
+
+### p3b-a-5-false-pause.log
+## 5f. a fifth cmd window once the four tags are over 60 s old, 2026-10-18T07:51:10.1525463+07:00
+## health\ and paused.json
+paused.json: {"version":1,"reason":"cmdStarts","at":1792284673000,"count":3,"by":"clink"}
+
+### p3b-a-5-without.log
+## 5g. VM-only marker (second copy; the first had a lost backslash, so its 5i run is void): onbeginedit 2026-10-18T07:57:41.2594866+07:00
+-- filter after Oh My Posh's never runs (spike S6), so this marks the first onbeginedit instead,
+clink.onbeginedit(function()
+local f = io.open(p3b_data .. "\\first-prompt-" .. tostring(os.getpid()) .. ".txt", "w")
+## 5h. recovery-setup.ps1 -NoProbe 2026-10-18T07:57:44.8918902+07:00
+clink set said:
+AutoRun: (if exist "C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\runtime\clink-1.9.34\clink_x64.exe" "C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\runtime\clink-1.9.34\clink_x64.exe" inject --autorun --quiet --profile "C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\clink-profile")
+data: C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b
+health: C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\health
+## 5i. recovery-timing.ps1 (10 runs), without the counter 2026-10-18T07:57:55.9345613+07:00
+warm-up, not counted: 961
+775
+835
+800
+832
+828
+850
+777
+861
+787
+802
+average of 10: 815 ms
+
+### p3b-a-5-with.log
+## 5j. recovery-setup.ps1 -NoProbe -Counter 2026-10-18T07:58:52.2940423+07:00
+clink set said:
+AutoRun: (if exist "C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\runtime\clink-1.9.34\clink_x64.exe" "C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\runtime\clink-1.9.34\clink_x64.exe" inject --autorun --quiet --profile "C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\clink-profile")
+data: C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b
+health: C:\Users\tester\AppData\Local\ai.resincore.cmdstudio-spike3b\health
+## 5k. recovery-timing.ps1 (10 runs), with the counter 2026-10-18T07:59:03.3672146+07:00
+warm-up, not counted: 907
+819
+848
+828
+816
+821
+920
+787
+820
+829
+826
+average of 10: 831 ms
+## 5l. recovery-report.ps1 2026-10-18T07:59:44.9013802+07:00
+--- clink.log
+p3b counter ms=2.666
+cmdstudio: prompt loaded
+--- probe.txt
+(none)
+--- health\
+start-1596: v1 1792285181
+start-2340: v1 1792285172
+start-3844: v1 1792285166
+start-4628: v1 1792285178
+start-5716: v1 1792285158
+start-6744: v1 1792285175
+start-6904: v1 1792285152
+start-7712: v1 1792285160
+start-8948: v1 1792285169
+start-940: v1 1792285163
+start-9772: v1 1792285155
+--- cmd.exe processes now
+

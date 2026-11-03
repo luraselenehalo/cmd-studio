@@ -673,6 +673,8 @@ describe("AfterApplyBar", () => {
         draftProblems,
         version: 0,
         bump: () => {},
+        recoveryActed: false,
+        markRecoveryActed: () => {},
       };
       return (
         <AppStateContext.Provider value={state}>

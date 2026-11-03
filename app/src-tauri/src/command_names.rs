@@ -1,6 +1,7 @@
 // The IPC commands the window may call: spec §5.7's list, plus `preview_render`,
-// `open_external` and `advanced_read` (Phase 2b; spec §5.7 records them). One list, read by
-// `build.rs`, which turns each into the permissions `allow-<command>` and `deny-<command>`
+// `open_external` and `advanced_read` (Phase 2b; spec §5.7 records them), and
+// `recovery_status`, `theme_pause` and `theme_resume` (phase 3b, recovery spec §8). One list,
+// read by `build.rs`, which turns each into the permissions `allow-<command>` and `deny-<command>`
 // (underscores become hyphens), and by `ipc.rs`, whose test checks that every name here is
 // registered with Tauri and allowed by `capabilities/default.json`, and nothing else is.
 // Each name is also a constant of its own, which `ipc.rs` hands to `Backend::logged`: the log
@@ -36,8 +37,11 @@ pub const OPEN_CMD: &str = "open_cmd";
 pub const OPEN_EXTERNAL: &str = "open_external";
 pub const DIAGNOSTICS_COPY: &str = "diagnostics_copy";
 pub const ADVANCED_READ: &str = "advanced_read";
+pub const RECOVERY_STATUS: &str = "recovery_status";
+pub const THEME_PAUSE: &str = "theme_pause";
+pub const THEME_RESUME: &str = "theme_resume";
 
-/// The 27 IPC command names, in the order of spec §5.7.
+/// The 30 IPC command names, in the order of spec §5.7.
 pub const COMMANDS: &[&str] = &[
     SYSTEM_DETECT,
     THEMES_LIST,
@@ -66,4 +70,7 @@ pub const COMMANDS: &[&str] = &[
     OPEN_EXTERNAL,
     DIAGNOSTICS_COPY,
     ADVANCED_READ,
+    RECOVERY_STATUS,
+    THEME_PAUSE,
+    THEME_RESUME,
 ];
