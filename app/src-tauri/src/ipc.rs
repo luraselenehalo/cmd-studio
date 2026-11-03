@@ -441,16 +441,24 @@ pub async fn log_ui_error(
 }
 
 /// Starts CMD Studio again and ends this process (recovery spec §6.3): a transaction that
-/// runs is cut off here and rolled back by the journal at the next command that changes the
-/// machine, as a crash's would be. The answer never reaches the window; the exit comes after
-/// the spawn, so a spawn that fails is an error the window still sees.
+/// runs is cut off here and rolled back by the journal when the child starts
+/// (`GuiStart::Restarted`, `lib.rs`), as the restart dialog promises. The answer never reaches
+/// the window; the exit comes after the spawn, so a spawn that fails is an error the window
+/// still sees. This process's run record goes here, once the spawn went through: Tauri's
+/// `exit` falls back to `process::exit` with no exit event when its loop cannot be reached, and
+/// a record left with `uiReadyAt` set would open the child on a false crash notice. `end_run`
+/// is idempotent, so the exit event's own call changes nothing.
 #[tauri::command]
 pub async fn app_restart(app: AppHandle, state: TauriState<'_, Shared>) -> Result<(), AppError> {
     let b = state.inner().clone();
     let spawned = blocking(move || {
-        b.logged(names::APP_RESTART, |_| {
+        let spawned = b.logged(names::APP_RESTART, |_| {
             crate::restart_process().map_err(AppError::internal)
-        })
+        });
+        if spawned.is_ok() {
+            b.end_run();
+        }
+        spawned
     })
     .await;
     if spawned.is_ok() {
@@ -624,6 +632,27 @@ mod tests {
             );
         }
         assert_eq!(logging, 33);
+    }
+
+    /// The final review's re-graded carry: `app_restart` ends this process's run record itself,
+    /// after the spawn went through and before `app.exit(0)`. Tauri's `exit` falls back to
+    /// `process::exit` when its event loop cannot be reached, and a record left with `uiReadyAt`
+    /// set would open the restarted app on a false crash notice. `end_run` is idempotent, so the
+    /// exit event's own call is harmless.
+    #[test]
+    fn the_restart_ends_the_run_record_before_it_exits() {
+        let start = SOURCE.find("pub async fn app_restart(").unwrap();
+        let body = SOURCE.get(start..).unwrap().split_once("\n}\n").unwrap().0;
+        let logged = body.find(".logged(names::APP_RESTART").unwrap();
+        let ended = body.find("b.end_run()").unwrap();
+        let exit = body.find("app.exit(0)").unwrap();
+        assert!(logged < ended, "the record goes after the spawn's log line");
+        assert!(ended < exit, "the record goes before the exit");
+        assert_eq!(body.matches("end_run()").count(), 1);
+        assert!(
+            body.contains("if spawned.is_ok() {\n            b.end_run();"),
+            "only after a spawn that went through: {body}"
+        );
     }
 
     /// A pure command runs on the window's thread: a panic in it must come back as an error,

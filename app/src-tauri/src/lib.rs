@@ -47,6 +47,11 @@ pub fn run_gui(how: backend::run::GuiStart) {
     // The run's record, before the window (recovery spec §5.1); `--recovery`'s own steps run on
     // a thread once the window is up, so a slow rollback never delays the window.
     let decided = backend.start_run(how);
+    if how == GuiStart::Restarted {
+        // The change `app_restart` cut off is put back now, as its dialog promised (recovery
+        // spec §6.3): under the lock, one log line, bounded by the core's timeouts.
+        backend.restart_rollback();
+    }
     let for_window = backend.clone();
     let for_instance = backend.clone();
     let for_exit = backend.clone();
@@ -139,9 +144,10 @@ pub fn run_gui(how: backend::run::GuiStart) {
 
 /// `--recovery`'s steps 1–2 on a thread of their own (recovery spec §4.4), then `after`. The
 /// entry is `busy` under its own name while it runs, so the UI's start waits for it (§6.3); it
-/// is marked before the thread exists, so a UI that asks in between does not find it idle. A
-/// thread that cannot be started clears the mark and leaves the reason as the entry's outcome
-/// for the Recovery page; nothing waits on the window's thread.
+/// is marked before the thread exists, so a UI that asks in between does not find it idle, and
+/// the thread clears it on every exit, a panic included ([`run_recovery_entry`]). A thread that
+/// cannot be started clears the mark and leaves the reason as the entry's outcome for the
+/// Recovery page; nothing waits on the window's thread.
 #[cfg(windows)]
 fn spawn_recovery_entry(
     backend: &std::sync::Arc<backend::Backend<machine::RealMachine>>,
@@ -154,9 +160,13 @@ fn spawn_recovery_entry(
     let spawned = std::thread::Builder::new()
         .name("recovery-entry".to_string())
         .spawn(move || {
-            let _ = b.recovery_entry();
-            b.busy_clear(backend::run::RECOVERY_ENTRY_BUSY);
-            for_thread();
+            run_recovery_entry(
+                &b,
+                |b| {
+                    let _ = b.recovery_entry();
+                },
+                move || for_thread(),
+            );
         });
     if let Err(e) = spawned {
         backend.busy_clear(backend::run::RECOVERY_ENTRY_BUSY);
@@ -164,6 +174,38 @@ fn spawn_recovery_entry(
         // The page is reloaded all the same, so that it shows the reason.
         after();
     }
+}
+
+/// The entry thread's body: `entry` under a guard that clears the mark made before the thread
+/// and then runs `after` (the page's reload), on every exit of `entry`, a panic included. A
+/// panic there writes its crash note (`crash.rs`) and ends the thread; without the guard
+/// `app_status` would say `recovery_entry` for the rest of the run and the reloaded UI would
+/// wait for it forever. Generic over the machine so that a test runs it with an entry that
+/// panics; nothing in `after` may panic (a panic while unwinding aborts the process).
+#[cfg(windows)]
+fn run_recovery_entry<M: backend::Machine>(
+    backend: &backend::Backend<M>,
+    entry: impl FnOnce(&backend::Backend<M>),
+    after: impl FnOnce(),
+) {
+    struct AtEnd<'a, M: backend::Machine, F: FnOnce()> {
+        mark: Option<backend::run::Busy<'a, M>>,
+        after: Option<F>,
+    }
+    impl<M: backend::Machine, F: FnOnce()> Drop for AtEnd<'_, M, F> {
+        fn drop(&mut self) {
+            // The mark first, so the reloaded page's `app_status` finds the entry ended.
+            drop(self.mark.take());
+            if let Some(after) = self.after.take() {
+                after();
+            }
+        }
+    }
+    let _at_end = AtEnd {
+        mark: Some(backend.busy_until_dropped(backend::run::RECOVERY_ENTRY_BUSY)),
+        after: Some(after),
+    };
+    entry(backend);
 }
 
 /// The start with `--recovery`: the entry once the window is up; the window's first
@@ -657,15 +699,87 @@ mod tests {
             "the mark is cleared after the failed spawn is seen"
         );
         assert!(
-            body.matches(".busy_clear(").count() == 2,
-            "cleared when the thread ends and when it could not start"
+            body.matches(".busy_clear(").count() == 1,
+            "cleared by hand only when the thread could not start; the thread's own exit is the guard's"
         );
-        assert!(body.contains(".recovery_entry()"));
+        let guarded = body.find("run_recovery_entry(").unwrap();
+        let entry = body.find(".recovery_entry()").unwrap();
+        assert!(
+            spawned < guarded && guarded < entry,
+            "the thread's body is the guarded entry"
+        );
         // Fix 1, item 4: the callback (the page's reload) also runs when the thread could not
         // start, so the reloaded page shows the reason.
         let after_failure = body.get(failed..).unwrap_or("");
         assert!(after_failure.contains("after()"), "{after_failure}");
         assert!(body.contains("after: impl Fn() + Send + Sync + 'static"));
+    }
+
+    /// The final review's re-graded carry: the entry's thread clears the mark set before it on
+    /// every exit, a panic included, so `app_status` never says `recovery_entry` for the rest of
+    /// the run with no entry running; the page's reload (`after`) runs all the same.
+    #[test]
+    fn the_entrys_thread_clears_its_mark_when_the_entry_panics() {
+        use crate::backend::run::RECOVERY_ENTRY_BUSY;
+        let b = crate::backend::testing::backend();
+        let after = std::cell::Cell::new(0);
+        b.busy_mark(RECOVERY_ENTRY_BUSY);
+        let ended = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_recovery_entry(
+                &b,
+                |_| panic!("a bug in the entry"),
+                || after.set(after.get() + 1),
+            );
+        }));
+        assert!(ended.is_err(), "the panic goes on to the thread's end");
+        assert_eq!(b.app_status().unwrap().busy, None, "nothing stays busy");
+        assert_eq!(after.get(), 1, "the page is reloaded all the same");
+        // The plain path: the entry runs, the mark goes, then `after`.
+        b.busy_mark(RECOVERY_ENTRY_BUSY);
+        let seen = std::cell::Cell::new(None);
+        run_recovery_entry(
+            &b,
+            |b| seen.set(b.app_status().unwrap().busy),
+            || after.set(after.get() + 1),
+        );
+        assert_eq!(seen.into_inner().as_deref(), Some(RECOVERY_ENTRY_BUSY));
+        assert_eq!(b.app_status().unwrap().busy, None);
+        assert_eq!(after.get(), 2);
+    }
+
+    /// I1 (the final review): the start after `app_restart` rolls the cut-off change back before
+    /// the window, as the restart dialog promises: `main.rs` starts the `--after-pid` child as
+    /// `GuiStart::Restarted`, and `run_gui` runs the rollback after the record and before the
+    /// window, on that start only.
+    #[test]
+    fn the_restarted_start_rolls_back_before_the_window() {
+        let main = include_str!("main.rs");
+        let arm = main
+            .find("[flag, pid] if flag == cmdstudio_app::AFTER_PID_ARG")
+            .unwrap();
+        let restarted = main.find("run_gui(GuiStart::Restarted)").unwrap();
+        assert!(
+            arm < restarted,
+            "the --after-pid arm is the restarted start"
+        );
+        assert_eq!(main.matches("run_gui(GuiStart::Restarted)").count(), 1);
+        let text = production();
+        let record = text.find("backend.start_run(how)").unwrap();
+        let rollback = text.find("backend.restart_rollback()").unwrap();
+        let window = text.find("open_main_window(app, ").unwrap();
+        assert!(
+            record < rollback && rollback < window,
+            "after the record, before the window"
+        );
+        let guard = text.get(..rollback).unwrap_or("");
+        assert!(
+            guard
+                .trim_end()
+                .ends_with("if how == GuiStart::Restarted {")
+                || guard.contains("how == GuiStart::Restarted"),
+            "on the restarted start only"
+        );
+        assert_eq!(text.matches(".restart_rollback()").count(), 1);
     }
 }
 

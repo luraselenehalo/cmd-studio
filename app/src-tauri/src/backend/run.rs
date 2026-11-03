@@ -42,6 +42,9 @@ pub enum GuiStart {
     Normal,
     /// `cmdstudio.exe --recovery` (recovery spec §4.4).
     Recovery,
+    /// `cmdstudio.exe --after-pid <pid>`: `app_restart`'s child (recovery spec §6.3). A normal
+    /// start that first rolls back the change the restart cut off ([`Backend::restart_rollback`]).
+    Restarted,
 }
 
 /// Why the app is in safe mode (recovery spec §5.2).
@@ -206,12 +209,14 @@ impl<M: Machine> Backend<M> {
         }
         let safe_mode = match how {
             GuiStart::Recovery => Some(SafeModeReason::Recovery),
-            GuiStart::Normal if failed_starts >= FAILED_STARTS_FOR_SAFE_MODE => {
+            GuiStart::Normal | GuiStart::Restarted
+                if failed_starts >= FAILED_STARTS_FOR_SAFE_MODE =>
+            {
                 Some(SafeModeReason::FailedStarts {
                     count: failed_starts,
                 })
             }
-            GuiStart::Normal => None,
+            GuiStart::Normal | GuiStart::Restarted => None,
         };
         let mine = RunRecord {
             version: RUN_VERSION,
@@ -236,6 +241,28 @@ impl<M: Machine> Backend<M> {
             safe_mode,
             crash_notice,
         }
+    }
+
+    /// The start after `app_restart` (recovery spec §6.3; the final review's I1): the change the
+    /// restart cut off is rolled back now, before the window, as the restart dialog promises,
+    /// under the lock as every change's start is (`recover_at_start`). One log line says what it
+    /// did: `none`, `rolled-back`, `incomplete` (what could not be put back waits for the next
+    /// change's start, which shows it the §5.5 way), or the code of a refusal (`E_BUSY`: another
+    /// run holds the lock; the next change's start rolls back instead). Bounded: the lock is
+    /// tried once and every step has the core's process timeout.
+    pub fn restart_rollback(&self) {
+        use cmdstudio_core::txn::Outcome;
+        let sys = self.sys();
+        let ctx = self.ctx();
+        let did = match recover_at_start(sys, &ctx) {
+            Ok(report) => match report.recovered {
+                None | Some(Outcome::Committed) => "none".to_string(),
+                Some(Outcome::RolledBack { .. }) => "rolled-back".to_string(),
+                Some(Outcome::RollbackIncomplete { .. }) => "incomplete".to_string(),
+            },
+            Err(e) => e.code().to_string(),
+        };
+        self.note_line(&format!("run start rollback={did}"));
     }
 
     /// Safe mode from now on, for a `--recovery` that reached a running app (recovery spec §4.4).
@@ -505,6 +532,16 @@ impl<M: Machine> Backend<M> {
     /// `app_status` cannot find it idle). [`Backend::busy_clear`] ends it.
     pub(crate) fn busy_mark(&self, name: &'static str) {
         self.run.with(|r| r.busy.push(name));
+    }
+
+    /// A guard over a mark made with [`Backend::busy_mark`], for the thread that does the work:
+    /// it clears that one mark when it drops, a panic included (`lib.rs`'s `--recovery` entry
+    /// thread), so `app_status` never says the name for the rest of the run with nothing running.
+    pub(crate) fn busy_until_dropped(&self, name: &'static str) -> Busy<'_, M> {
+        Busy {
+            backend: self,
+            name,
+        }
     }
 
     /// Ends one mark of `name`; what else runs stays marked, in whichever order they end.
@@ -1175,6 +1212,121 @@ mod tests {
             Some(RECOVERY_ENTRY_BUSY)
         );
         drop(outer);
+        assert_eq!(b.app_status().unwrap().busy, None);
+    }
+
+    /// I1 (the final review): the start after `app_restart` (`--after-pid`, `GuiStart::Restarted`)
+    /// rolls a change the restart cut off back before the window, as the restart dialog
+    /// promises, and the log says so; with nothing to roll back the line says `none`, and a lock
+    /// held by another run is that line with `E_BUSY` and nothing changed. `Restarted` is a
+    /// normal start otherwise: no safe mode of its own.
+    #[test]
+    fn the_restarts_start_rolls_a_cut_off_change_back_and_says_so() {
+        use crate::backend::testing::terracotta_id;
+        use cmdstudio_core::actions::prepare_apply;
+        use cmdstudio_core::exec::SystemExecutor;
+        use cmdstudio_core::model::Target;
+        use cmdstudio_core::plan::Request;
+        use cmdstudio_core::snapshot::SnapshotStore;
+        use cmdstudio_core::txn::{Executor, Journal, JournalStore, Snapshot, Stage};
+        let b = backend();
+        let omp_dir = b.paths().omp_dir();
+        assert!(!b.sys().fs.exists(&omp_dir));
+        // An apply cut off at its third step, as the core's own crash test makes it: the plan's
+        // ops captured and run by hand, the journal saved after each, then the process gone
+        // (the lock dropped with `prepared`) before the step that follows.
+        let theme = b.theme_get(terracotta_id()).unwrap().theme;
+        let request = Request {
+            target: Target::All,
+            set_wt_default_profile: true,
+            replace_foreign_clink: false,
+        };
+        let ctx = b.ctx();
+        let prepared = prepare_apply(b.sys(), &ctx, &theme, &request).unwrap();
+        let (ops, manifest) = (prepared.ops.clone(), prepared.manifest.clone());
+        let root = ctx.paths.snapshots();
+        let store = SnapshotStore::new(b.sys().fs, &root);
+        let mut journal = store.begin(manifest.clone());
+        let mut exec = SystemExecutor::new(b.sys(), &ctx.resources);
+        let snapshots = ops
+            .iter()
+            .enumerate()
+            .map(|(i, op)| Snapshot {
+                op_index: i,
+                prior: exec.capture(op).unwrap(),
+            })
+            .collect();
+        let mut j = Journal {
+            id: manifest.id.clone(),
+            ops: ops.clone(),
+            snapshots,
+            stage: Stage::Snapshotted,
+        };
+        journal.save(&j).unwrap();
+        for (i, op) in ops.iter().take(3).enumerate() {
+            exec.apply(op).unwrap();
+            j.stage = Stage::Applying { done: i + 1 };
+            journal.save(&j).unwrap();
+        }
+        drop(prepared);
+        assert!(
+            b.sys().fs.exists(&omp_dir),
+            "the cut-off apply got that far"
+        );
+        let journal_file = root.join(&manifest.id).join("journal.json");
+
+        let d = b.start_run(GuiStart::Restarted);
+        assert_eq!((d.safe_mode, d.crash_notice), (None, None));
+        b.restart_rollback();
+        let log = b.log_tail(5);
+        assert!(log.contains("run start rollback=rolled-back"), "{log}");
+        let bytes = b.sys().fs.read(&journal_file).unwrap().unwrap();
+        let journal: Journal = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(journal.stage, Stage::RolledBack, "the change is put back");
+        assert!(
+            !b.sys().fs.exists(&omp_dir),
+            "the machine is as it was before the cut-off apply"
+        );
+        // Nothing left to roll back: said as such.
+        b.restart_rollback();
+        assert!(
+            b.log_tail(3).contains("run start rollback=none"),
+            "{}",
+            b.log_tail(3)
+        );
+        // The lock held by another run: refused, and the refusal is the line's code.
+        let held = b.sys().fs.try_lock(&b.paths().lock_file()).unwrap();
+        assert!(held.is_some());
+        b.restart_rollback();
+        assert!(
+            b.log_tail(3).contains("run start rollback=E_BUSY"),
+            "{}",
+            b.log_tail(3)
+        );
+        drop(held);
+        // Two failed starts open safe mode on a restarted start as on a normal one.
+        put(&b, &old(None, 1));
+        let d = b.start_run(GuiStart::Restarted);
+        assert_eq!(d.safe_mode, Some(SafeModeReason::FailedStarts { count: 2 }));
+    }
+
+    /// The final review's re-graded carry: a guard over a mark made on another thread clears
+    /// that one mark when it drops, a panic included, and nothing else.
+    #[test]
+    fn a_guard_over_a_mark_clears_it_when_it_drops_even_on_a_panic() {
+        let b = backend();
+        b.busy_mark(RECOVERY_ENTRY_BUSY);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = b.busy_until_dropped(RECOVERY_ENTRY_BUSY);
+            panic!("a bug in the entry");
+        }));
+        assert_eq!(b.app_status().unwrap().busy, None);
+        // The guard clears only its own name.
+        b.busy_mark("apply");
+        b.busy_mark(RECOVERY_ENTRY_BUSY);
+        drop(b.busy_until_dropped(RECOVERY_ENTRY_BUSY));
+        assert_eq!(b.app_status().unwrap().busy.as_deref(), Some("apply"));
+        b.busy_clear("apply");
         assert_eq!(b.app_status().unwrap().busy, None);
     }
 

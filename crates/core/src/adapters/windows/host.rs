@@ -645,7 +645,8 @@ impl Host for WinHost {
 
 /// When the process `pid` was created, in milliseconds since 1970 (`GetProcessTimes`), or `None`
 /// when there is no such process: `OpenProcess` fails with `ERROR_INVALID_PARAMETER` for a pid
-/// that is not in use. Any other failure is an error.
+/// that is not in use, and a process that has exited but is still held open (its exit time is
+/// set) is none either. Any other failure is an error.
 pub fn process_created_at(pid: u32) -> Result<Option<u64>, AdapterError> {
     use windows_sys::Win32::Foundation::{
         CloseHandle, GetLastError, ERROR_INVALID_PARAMETER, FILETIME,
@@ -676,6 +677,11 @@ pub fn process_created_at(pid: u32) -> Result<Option<u64>, AdapterError> {
     unsafe { CloseHandle(handle) };
     if ok == 0 {
         return Err(last_error("GetProcessTimes"));
+    }
+    // A process that has exited but whose object is still held open (a parent with the handle,
+    // a tool's process object): its pid runs nothing, so it is gone for every caller here.
+    if exited.dwLowDateTime != 0 || exited.dwHighDateTime != 0 {
+        return Ok(None);
     }
     Ok(Some(filetime_unix_ms(created)))
 }
@@ -1578,6 +1584,8 @@ mod tests {
 #[cfg(test)]
 mod process_stamp_tests {
     use super::*;
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 
     /// This process was created within the last minute; a pid that nothing uses is `None`
     /// (spike S3). Pid 4_294_967_294 is `u32::MAX - 1`: Windows pids are multiples of 4 below
@@ -1596,5 +1604,37 @@ mod process_stamp_tests {
             dwHighDateTime: 0x019D_B1DE,
         };
         assert_eq!(filetime_unix_ms(t), 0);
+    }
+
+    /// M2 of the final review: a process that has exited but whose object is still held open
+    /// (a parent with the handle, a tool's process object) is gone, not running: its pid runs
+    /// nothing, and a run record that names it is a run that ended. The child here is cmd
+    /// waiting for a key on a pipe this test holds, with `/d` (no AutoRun) and no window; the
+    /// `Child` keeps the handle after the wait, which is what makes the zombie.
+    #[test]
+    fn a_process_that_exited_but_is_still_held_open_is_gone() {
+        let mut child = std::process::Command::new("cmd")
+            .args(["/d", "/c", "pause"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        assert!(
+            process_created_at(pid).unwrap().is_some(),
+            "alive while it waits for a key"
+        );
+        child.kill().unwrap();
+        child.wait().unwrap();
+        // `child` still holds the process handle: the pid stays taken and OpenProcess opens it,
+        // but GetProcessTimes gives an exit time.
+        assert_eq!(
+            process_created_at(pid).unwrap(),
+            None,
+            "exited, held open: gone"
+        );
+        drop(child);
     }
 }
