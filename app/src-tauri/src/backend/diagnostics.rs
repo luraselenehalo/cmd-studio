@@ -203,29 +203,45 @@ impl<M: Machine> Backend<M> {
     /// folder and no `USERNAME`), or the alias can't be read, this is the error, and nothing is
     /// copied.
     pub(crate) fn user_names(&self) -> Result<Vec<String>, AppError> {
+        let (names, why) = self.user_names_known();
+        match why {
+            Some(e) => Err(e),
+            None => Ok(names),
+        }
+    }
+
+    /// Every name [`Backend::user_names`] could tell, and the reason it would refuse, if it
+    /// would: the crash notes and the log redact with what is known even when the 8.3 alias
+    /// could not be read, while the diagnostics refuse.
+    pub(crate) fn user_names_known(&self) -> (Vec<String>, Option<AppError>) {
+        let mut why = None;
         let mut names: Vec<String> = self
             .windows_user_name()
             .map(str::to_string)
             .into_iter()
             .collect();
         if let Some(profile) = profile_of(&self.paths().data) {
-            let short = self.sys().host.short_path(&profile).map_err(|_| {
-                AppError::coded(
-                    "E_MACHINE_READ",
-                    "the 8.3 name of the profile folder could not be read, so the diagnostics \
-                     are not copied: it could be in them",
-                )
-            })?;
+            let mut folders = vec![profile.clone()];
+            match self.sys().host.short_path(&profile) {
+                Ok(short) => folders.push(short),
+                Err(_) => {
+                    why = Some(AppError::coded(
+                        "E_MACHINE_READ",
+                        "the 8.3 name of the profile folder could not be read, so the \
+                         diagnostics are not copied: it could be in them",
+                    ));
+                }
+            }
             names.extend(
-                [profile.as_path(), short.as_path()]
+                folders
                     .iter()
                     .filter_map(|p| p.file_name())
                     .map(|n| n.to_string_lossy().into_owned())
                     .filter(|n| !n.is_empty()),
             );
         }
-        if names.is_empty() {
-            return Err(AppError::internal(
+        if names.is_empty() && why.is_none() {
+            why = Some(AppError::internal(
                 "the data folder's path holds no AppData folder and USERNAME is not set, so the \
                  user name in the diagnostics could not be told; they are not copied with it in \
                  them",
@@ -233,7 +249,7 @@ impl<M: Machine> Backend<M> {
         }
         names.sort_by_key(|n| std::cmp::Reverse(n.chars().count()));
         names.dedup();
-        Ok(names)
+        (names, why)
     }
 
     /// The user name Windows gives (`USERNAME`), as the backend holds it for the preview's

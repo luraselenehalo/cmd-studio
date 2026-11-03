@@ -650,6 +650,8 @@ pub struct FakeHost {
     pub processes: RefCell<BTreeMap<u32, u64>>,
     /// Pids that are there but cannot be opened (`process_created_at` answers an error).
     pub unreadable_processes: RefCell<BTreeSet<u32>>,
+    /// `short_path` answers an error (the 8.3 alias cannot be read).
+    pub short_path_fails: std::cell::Cell<bool>,
     private: RefCell<BTreeMap<PathBuf, DirState>>,
 }
 
@@ -673,6 +675,7 @@ impl Default for FakeHost {
             created_at_ms: Some(1_791_694_000_000),
             processes: RefCell::new(BTreeMap::new()),
             unreadable_processes: RefCell::new(BTreeSet::new()),
+            short_path_fails: std::cell::Cell::new(false),
             private: RefCell::new(BTreeMap::new()),
         }
     }
@@ -702,6 +705,12 @@ impl Host for FakeHost {
         Ok(self.sid.clone())
     }
     fn short_path(&self, path: &Path) -> Result<PathBuf, AdapterError> {
+        if self.short_path_fails.get() {
+            return Err(AdapterError::new(
+                path.display().to_string(),
+                "no 8.3 alias (injected)",
+            ));
+        }
         Ok(self
             .short
             .get(path)

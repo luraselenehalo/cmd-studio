@@ -129,7 +129,9 @@ struct RunInner {
     safe_mode: Option<SafeModeReason>,
     crash_notice: Option<CrashNotice>,
     recovery_entry: Option<RecoveryEntry>,
-    busy: Option<&'static str>,
+    /// What runs now, oldest first; the status names the newest. A mark or a guard removes only
+    /// its own entry, so the order in which they end does not matter.
+    busy: Vec<&'static str>,
     ui_errors: u32,
 }
 
@@ -288,7 +290,10 @@ impl<M: Machine> Backend<M> {
             .read(&path)
             .map_err(|e| AppError::coded("E_MACHINE_READ", e.to_string()))?
             .unwrap_or_default();
-        let text = crate::crash::redact_all(&String::from_utf8_lossy(&bytes), &self.redaction());
+        let text = cap_report(crate::crash::redact_all(
+            &String::from_utf8_lossy(&bytes),
+            &self.redaction(),
+        ));
         Ok(Some(CrashReport {
             file: path
                 .file_name()
@@ -301,11 +306,12 @@ impl<M: Machine> Backend<M> {
 
     /// The one rule of what is taken out of a text: the names `diagnostics_copy` redacts
     /// (`user_names`: the Windows user name and the profile folder's names, the 8.3 alias
-    /// included) and this user's SID; empty when they cannot be read, so nothing is taken out.
+    /// included, when it can be read) and this user's SID; every name that is known is used even when
+    /// the alias is not (`user_names_known`), where the diagnostics refuse.
     /// The panic hook takes its copy from here (`main.rs`).
     pub fn redaction(&self) -> crate::crash::Redaction {
         crate::crash::Redaction {
-            names: self.user_names().unwrap_or_default(),
+            names: self.user_names_known().0,
             sid: self.sys().host.user_sid().ok(),
         }
     }
@@ -441,7 +447,7 @@ impl<M: Machine> Backend<M> {
 
     pub fn app_status(&self) -> Result<AppStatus, AppError> {
         Ok(self.run.with(|r| AppStatus {
-            busy: r.busy.map(str::to_string),
+            busy: r.busy.last().map(|n| (*n).to_string()),
             safe_mode: r.safe_mode.is_some(),
             safe_mode_reason: r.safe_mode,
             crash_notice: r.crash_notice,
@@ -487,10 +493,10 @@ impl<M: Machine> Backend<M> {
     /// Marks `name` as what runs now, until the guard drops: also when the work panics, so a
     /// panic inside a change never leaves `app_status` saying busy for the rest of the run.
     pub(crate) fn busy(&self, name: &'static str) -> Busy<'_, M> {
-        let replaced = self.run.with(|r| r.busy.replace(name));
+        self.busy_mark(name);
         Busy {
             backend: self,
-            replaced,
+            name,
         }
     }
 
@@ -498,13 +504,40 @@ impl<M: Machine> Backend<M> {
     /// (`lib.rs`'s `--recovery` entry is marked before its thread exists, so the UI's first
     /// `app_status` cannot find it idle). [`Backend::busy_clear`] ends it.
     pub(crate) fn busy_mark(&self, name: &'static str) {
-        self.run.with(|r| r.busy = Some(name));
+        self.run.with(|r| r.busy.push(name));
     }
 
-    /// Ends what [`Backend::busy_mark`] began.
-    pub(crate) fn busy_clear(&self) {
-        self.run.with(|r| r.busy = None);
+    /// Ends one mark of `name`; what else runs stays marked, in whichever order they end.
+    pub(crate) fn busy_clear(&self, name: &'static str) {
+        self.run.with(|r| {
+            if let Some(at) = r.busy.iter().rposition(|n| *n == name) {
+                r.busy.remove(at);
+            }
+        });
     }
+}
+
+/// The most of a crash note `crash_report_read` returns (the Report tab, the diagnostics).
+pub const CRASH_REPORT_MAX_BYTES: usize = 256 * 1024;
+
+/// `text` cut at [`CRASH_REPORT_MAX_BYTES`], on a character boundary, with a "(truncated)" line
+/// when it was cut.
+fn cap_report(text: String) -> String {
+    if text.len() <= CRASH_REPORT_MAX_BYTES {
+        return text;
+    }
+    let cut = text
+        .char_indices()
+        .map(|(i, _)| i)
+        .take_while(|i| *i <= CRASH_REPORT_MAX_BYTES)
+        .last()
+        .unwrap_or(0);
+    let mut kept = text.get(..cut).unwrap_or("").to_string();
+    if !kept.ends_with('\n') {
+        kept.push('\n');
+    }
+    kept.push_str("(truncated)\n");
+    kept
 }
 
 /// `UI_ERRORS_PER_RUN`'s sibling: the name `app_status.busy` carries while the `--recovery`
@@ -512,18 +545,16 @@ impl<M: Machine> Backend<M> {
 /// UI's start shows its own text for it.
 pub const RECOVERY_ENTRY_BUSY: &str = "recovery_entry";
 
-/// The guard of [`Backend::busy`].
-/// On drop it gives back what it replaced, so a command that runs inside the `--recovery` entry
-/// does not end the entry's busy early.
+/// The guard of [`Backend::busy`]. On drop it removes its own name only (the `--recovery`
+/// entry's mark, which may have come before or after it, stays until the entry clears it).
 pub(crate) struct Busy<'a, M: Machine> {
     backend: &'a Backend<M>,
-    replaced: Option<&'static str>,
+    name: &'static str,
 }
 
 impl<M: Machine> Drop for Busy<'_, M> {
     fn drop(&mut self) {
-        let replaced = self.replaced;
-        self.backend.run.with(|r| r.busy = replaced);
+        self.backend.busy_clear(self.name);
     }
 }
 
@@ -1004,7 +1035,7 @@ mod tests {
             b.app_status().unwrap().busy.as_deref(),
             Some(RECOVERY_ENTRY_BUSY)
         );
-        b.busy_clear();
+        b.busy_clear(RECOVERY_ENTRY_BUSY);
         b.recovery_entry_not_run("out of threads");
         let status = b.app_status().unwrap();
         assert_eq!(status.busy, None);
@@ -1053,6 +1084,79 @@ mod tests {
         assert!(b.sys().fs.exists(&file));
         b.end_run();
         assert!(!b.sys().fs.exists(&file));
+    }
+
+    /// Fix 1, item 2: the entry's mark and a command's guard end in either order and leave
+    /// nothing busy; while one of them is still running, the status names it.
+    #[test]
+    fn the_entry_mark_and_a_commands_guard_end_in_either_order_with_nothing_stuck() {
+        let b = backend();
+        let busy = || b.app_status().unwrap().busy;
+        // Outer mark, inner guard, the mark cleared first, then the guard drops.
+        b.busy_mark(RECOVERY_ENTRY_BUSY);
+        let inner = b.busy("apply");
+        b.busy_clear(RECOVERY_ENTRY_BUSY);
+        assert_eq!(busy().as_deref(), Some("apply"));
+        drop(inner);
+        assert_eq!(busy(), None);
+        // Inner guard first, the mark set under it, the guard drops, then the mark is cleared.
+        let inner = b.busy("apply");
+        b.busy_mark(RECOVERY_ENTRY_BUSY);
+        drop(inner);
+        assert_eq!(busy().as_deref(), Some(RECOVERY_ENTRY_BUSY));
+        b.busy_clear(RECOVERY_ENTRY_BUSY);
+        assert_eq!(busy(), None);
+        // Clearing what is not marked changes nothing.
+        b.busy_clear(RECOVERY_ENTRY_BUSY);
+        assert_eq!(busy(), None);
+    }
+
+    /// Fix 1, item 3: when the 8.3 alias cannot be read the diagnostics still refuse, but the
+    /// crash note's and the log's redaction keep every name that is known.
+    #[test]
+    fn the_names_known_are_redacted_when_the_alias_cannot_be_read() {
+        let b = backend();
+        fake_host(&b).short_path_fails.set(true);
+        assert!(
+            b.diagnostics_copy().is_err(),
+            "the diagnostics still refuse"
+        );
+        let names = b.redaction().names;
+        assert!(names.contains(&"tester".to_string()), "{names:?}");
+        b.log_ui_error("Error C:\\Users\\tester\\x.js", "Themes")
+            .unwrap();
+        let log = b.log_tail(3);
+        assert!(log.contains("C:\\Users\\%USERNAME%\\x.js"), "{log}");
+        assert!(!log.contains("tester"), "{log}");
+        let text = crate::crash::report_text(
+            &crate::crash::Report {
+                version: "0.1.0",
+                now_ms: 0,
+                thread: "main",
+                message: "at C:\\Users\\tester\\x",
+                location: None,
+                backtrace: "",
+            },
+            &b.redaction(),
+        );
+        assert!(!text.contains("tester"), "{text}");
+    }
+
+    /// Fix 1, item 5: the report is capped at 256 KiB and says so.
+    #[test]
+    fn a_crash_note_over_256_kib_is_cut_and_marked() {
+        let b = backend();
+        let big = "x".repeat(300 * 1024);
+        crate::crash::write_note(b.sys().fs, &b.paths().logs(), 5, &big).unwrap();
+        let report = b.crash_report_read().unwrap().unwrap();
+        assert!(
+            report.text.len() <= CRASH_REPORT_MAX_BYTES + 32,
+            "{}",
+            report.text.len()
+        );
+        assert!(report.text.ends_with("\n(truncated)\n"));
+        crate::crash::write_note(b.sys().fs, &b.paths().logs(), 6, "small\n").unwrap();
+        assert_eq!(b.crash_report_read().unwrap().unwrap().text, "small\n");
     }
 
     /// Carry 2: a guard gives back what it replaced. An entry that is busy under its own name

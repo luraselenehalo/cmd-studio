@@ -111,8 +111,12 @@ pub fn hook_body(fs: &dyn Fs, logs: &Path, now_ms: u64, redaction: &Redaction, r
 }
 
 /// Installs the hook (recovery spec §5.3). The earlier hook runs after the note is written.
-/// Everything the hook does is inside `catch_unwind`: a panic in the hook itself would abort
-/// the process at once, before the earlier hook could say anything.
+///
+/// The hook's safety does not come from `catch_unwind`: Rust aborts the process at once when a
+/// panic hook itself panics, and the `catch_unwind` inside the hook does not prevent that (it is
+/// kept as harmless). It rests on what the hook calls never panicking: `redact`, `redact_sids`,
+/// `iso_utc`, `WinFs`'s `write_atomic`, `list_dir` and `remove_file`, `now` (`cmdstudio_cli::now_ms`)
+/// and the `downcast_ref` chains here. Any change to them must keep that.
 #[cfg(windows)]
 pub fn install_hook(logs: PathBuf, redaction: Redaction, now: fn() -> u64) {
     use cmdstudio_core::adapters::windows::fs::WinFs;

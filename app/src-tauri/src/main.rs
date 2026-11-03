@@ -9,6 +9,9 @@
 //! cmd does not wait for a Windows-subsystem program, so `cmdstudio doctor` typed in cmd prints
 //! after the prompt came back; `cmdstudio doctor | more`, or `start /wait cmdstudio doctor`,
 //! waits. The uninstaller runs it with `ExecWait`, and tests call the library: both wait.
+//!
+//! The crash-note panic hook is installed first, for every mode, `--cleanup` included: a panic
+//! in the uninstaller's run leaves a note in the default data folder's `logs\` as well.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 #[cfg(windows)]

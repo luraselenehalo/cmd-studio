@@ -136,20 +136,24 @@ pub fn run_gui(how: backend::run::GuiStart) {
 #[cfg(windows)]
 fn spawn_recovery_entry(
     backend: &std::sync::Arc<backend::Backend<machine::RealMachine>>,
-    after: impl FnOnce() + Send + 'static,
+    after: impl Fn() + Send + Sync + 'static,
 ) {
     let b = backend.clone();
+    let after = std::sync::Arc::new(after);
+    let for_thread = after.clone();
     backend.busy_mark(backend::run::RECOVERY_ENTRY_BUSY);
     let spawned = std::thread::Builder::new()
         .name("recovery-entry".to_string())
         .spawn(move || {
             let _ = b.recovery_entry();
-            b.busy_clear();
-            after();
+            b.busy_clear(backend::run::RECOVERY_ENTRY_BUSY);
+            for_thread();
         });
     if let Err(e) = spawned {
-        backend.busy_clear();
+        backend.busy_clear(backend::run::RECOVERY_ENTRY_BUSY);
         backend.recovery_entry_not_run(&e.to_string());
+        // The page is reloaded all the same, so that it shows the reason.
+        after();
     }
 }
 
@@ -628,7 +632,7 @@ mod tests {
         let marked = body.find(".busy_mark(").unwrap();
         let spawned = body.find(".spawn(").unwrap();
         let failed = body.find("if let Err(e) = spawned").unwrap();
-        let cleared = body.rfind(".busy_clear()").unwrap();
+        let cleared = body.rfind(".busy_clear(").unwrap();
         let said = body.find(".recovery_entry_not_run(").unwrap();
         assert!(marked < spawned, "marked first");
         assert!(
@@ -640,10 +644,15 @@ mod tests {
             "the mark is cleared after the failed spawn is seen"
         );
         assert!(
-            body.matches(".busy_clear()").count() == 2,
+            body.matches(".busy_clear(").count() == 2,
             "cleared when the thread ends and when it could not start"
         );
         assert!(body.contains(".recovery_entry()"));
+        // Fix 1, item 4: the callback (the page's reload) also runs when the thread could not
+        // start, so the reloaded page shows the reason.
+        let after_failure = body.get(failed..).unwrap_or("");
+        assert!(after_failure.contains("after()"), "{after_failure}");
+        assert!(body.contains("after: impl Fn() + Send + Sync + 'static"));
     }
 }
 
