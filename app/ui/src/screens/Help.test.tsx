@@ -81,7 +81,7 @@ function Shell({ language, start, applied }: { language: Language; start: Route;
   const saveSettings = useCallback(async () => {}, []);
   const settings = useMemo(() => ({ ...DEFAULT_SETTINGS, language: lang, wizardDone: true }), [lang]);
   const appState = useMemo<AppState>(
-    () => ({ settings, saveSettings, lastApply, setLastApply, draftProblems, version, bump, recoveryActed, markRecoveryActed, appStatus: null }),
+    () => ({ settings, saveSettings, lastApply, setLastApply, draftProblems, version, bump, recoveryActed, markRecoveryActed, appStatus: null, adoptSettings: () => {} }),
     [settings, saveSettings, lastApply, draftProblems, version, bump, recoveryActed, markRecoveryActed],
   );
   const nav = useMemo<Nav>(() => ({ route, go: setRoute }), [route]);

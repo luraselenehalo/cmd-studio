@@ -29,16 +29,24 @@ function describe(error: unknown): string {
   }
 }
 
-/** Listens for the window's errors and promises nobody handled; `onError` gets each, and the
- * first twenty go to the log. Returns the function that stops listening. */
-export function watchWindowErrors(ipc: Ipc, onError: (error: unknown) => void): () => void {
+/** Sends an error of the UI to the log through `log_ui_error`, the first twenty only. One logger
+ * is shared by the window's listeners and the boundary, so the cap is per load, not per source. */
+export function makeUiErrorLogger(ipc: Ipc): (error: unknown, place: string) => void {
   let sent = 0;
+  return (error, place) => {
+    if (sent >= UI_ERRORS_SENT_PER_LOAD) return;
+    sent += 1;
+    ipc.logUiError(describe(error), place).catch(() => {});
+  };
+}
+
+/** Listens for the window's errors and promises nobody handled; `onError` gets each, and the
+ * first twenty go to the log (through `log`, one shared with the boundary when given). Returns
+ * the function that stops listening. */
+export function watchWindowErrors(ipc: Ipc, onError: (error: unknown) => void, log = makeUiErrorLogger(ipc)): () => void {
   const report = (error: unknown, logOnly: boolean) => {
     if (!logOnly) onError(error);
-    if (sent < UI_ERRORS_SENT_PER_LOAD) {
-      sent += 1;
-      ipc.logUiError(describe(error), "window").catch(() => {});
-    }
+    log(error, "window");
   };
   // A window `error` with no Error object (a resource that did not load, the browser's
   // "ResizeObserver loop" notices) is logged but never blanks the app: nothing of ours threw.
@@ -57,9 +65,9 @@ export function watchWindowErrors(ipc: Ipc, onError: (error: unknown) => void): 
 
 /** The catch-all around the app: the first error the window reports replaces the app with the
  * notice (a render that throws is the boundary's, below this). */
-function Catch({ ipc, reload, children }: { ipc: Ipc; reload?: () => void; children: ReactNode }) {
+function Catch({ ipc, log, reload, children }: { ipc: Ipc; log: (error: unknown, place: string) => void; reload?: () => void; children: ReactNode }) {
   const [crashed, setCrashed] = useState<{ error: unknown } | null>(null);
-  useEffect(() => watchWindowErrors(ipc, (error) => setCrashed((c) => c ?? { error })), [ipc]);
+  useEffect(() => watchWindowErrors(ipc, (error) => setCrashed((c) => c ?? { error }), log), [ipc, log]);
   if (crashed) return <CrashNotice error={crashed.error} reload={reload} />;
   return children;
 }
@@ -82,12 +90,13 @@ export async function start(container: HTMLElement, pickIpc: () => Promise<Ipc>,
     return root;
   }
   const { ipc, work } = withWork(picked);
+  const log = makeUiErrorLogger(ipc);
   root.render(
     <StrictMode>
-      <ErrorBoundary reload={reload}>
+      <ErrorBoundary reload={reload} onCatch={(error) => log(error, "render")}>
         <IpcProvider ipc={ipc}>
           <WorkContext.Provider value={work}>
-            <Catch ipc={ipc} reload={reload}>
+            <Catch ipc={ipc} log={log} reload={reload}>
               <App />
             </Catch>
           </WorkContext.Provider>

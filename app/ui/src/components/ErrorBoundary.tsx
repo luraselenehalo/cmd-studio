@@ -57,7 +57,16 @@ export function CrashNotice({ error, reload = reloadPage }: { error: unknown; /*
   );
 }
 
-export class ErrorBoundary extends Component<{ children: ReactNode; /** For tests. */ reload?: () => void }, State> {
+export class ErrorBoundary extends Component<
+  {
+    children: ReactNode;
+    /** Gets the error once it is caught: start.tsx sends it to the log (recovery spec §6.5). */
+    onCatch?: (error: unknown) => void;
+    /** For tests. */
+    reload?: () => void;
+  },
+  State
+> {
   override state: State = { failed: false, error: null };
 
   static getDerivedStateFromError(error: unknown): State {
@@ -67,6 +76,7 @@ export class ErrorBoundary extends Component<{ children: ReactNode; /** For test
   /** On the console as well, with where it happened, for whoever looks into it. */
   override componentDidCatch(error: unknown, info: ErrorInfo): void {
     console.error("CMD Studio: a screen could not be drawn", error, info.componentStack ?? "");
+    this.props.onCatch?.(error);
   }
 
   override render(): ReactNode {

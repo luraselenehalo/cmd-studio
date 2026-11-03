@@ -168,6 +168,35 @@ describe("the catch-all (recovery spec §6.5)", () => {
     container.remove();
   });
 
+  it("logs a render error once, through the boundary (Task 9 carry)", async () => {
+    const ipc = createMockIpc({ settings: { wizardDone: true } });
+    // A reset notice whose file name cannot be written down: the shell throws while it renders.
+    const settingsGet = ipc.settingsGet.bind(ipc);
+    vi.spyOn(ipc, "settingsGet").mockImplementation(async () => ({
+      ...(await settingsGet()),
+      resetFrom: {
+        toString: () => {
+          throw new TypeError("cannot draw this");
+        },
+      } as unknown as string,
+    }));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const container = document.createElement("div");
+    document.body.append(container);
+    await act(async () => {
+      await start(container, async () => ipc, () => {});
+    });
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Code E_INTERNAL");
+    await waitFor(() => expect(ipc.state.calls.filter((c) => c === "logUiError").length).toBeGreaterThan(0));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(ipc.state.calls.filter((c) => c === "logUiError")).toHaveLength(1);
+    expect(ipc.state.uiErrors[0]).toContain("cannot draw this");
+    container.remove();
+  });
+
   it("catches a promise nobody handled the same way, and sends at most twenty per load", async () => {
     const ipc = createMockIpc({ settings: { wizardDone: true } });
     const seen: unknown[] = [];

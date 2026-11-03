@@ -5,6 +5,7 @@
 import { createContext, useCallback, useContext, useMemo, useRef, useState } from "react";
 import type { AppSettings } from "./bindings/AppSettings";
 import type { AppStatus } from "./bindings/AppStatus";
+import type { SettingsLoad } from "./bindings/SettingsLoad";
 import type { ApplyOutcome } from "./bindings/ApplyOutcome";
 import type { Target } from "./bindings/Target";
 import type { Theme } from "./bindings/Theme";
@@ -92,6 +93,8 @@ export interface AppState {
   markRecoveryActed: () => void;
   /** app_status as read when this load started (recovery spec §6.3); the Recovery page and the crash notice read it. */
   appStatus: AppStatus | null;
+  /** What one read of settings.json gives, held as the app's settings at once: the Recovery page's reset (recovery spec §5.2). */
+  adoptSettings: (loaded: SettingsLoad) => void;
 }
 
 export const AppStateContext = createContext<AppState | null>(null);

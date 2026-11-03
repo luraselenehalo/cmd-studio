@@ -678,6 +678,7 @@ describe("AfterApplyBar", () => {
         recoveryActed: false,
         markRecoveryActed: () => {},
         appStatus: null,
+        adoptSettings: () => {},
       };
       return (
         <AppStateContext.Provider value={state}>

@@ -74,6 +74,12 @@ async function applyIn(ipc: MockIpc, name: string, replaceOtherClink = false): P
   if (outcome.status !== "committed") throw new Error(`${name} was not applied`);
 }
 
+/** Terracotta applied, then the given pause (an apply lifts any pause, so the pause comes last). */
+const pausedWith = (paused: PauseInfo) => async (m: MockIpc) => {
+  await applyIn(m, "Terracotta");
+  m.state.paused = structuredClone(paused);
+};
+
 /** Holds every `apply` of the mock until `release()` is called. */
 function holdApply(ipc: MockIpc): () => void {
   let release: () => void = () => {};
@@ -159,6 +165,115 @@ describe("the start (recovery spec §5.1, §6.3)", () => {
   it("the working bar sits above the shell and the wizard, empty", async () => {
     await home();
     expect(screen.getByRole("status", { name: "Still working" }).textContent).toBe("");
+  });
+});
+
+describe("recovery mode (recovery spec §5.2)", () => {
+  const entryPaused = {
+    notes: [],
+    unrestored: [],
+    pause: { pausedNow: true, revert: { ok: true, steps: [], notes: [], status: "committed" as const, error: null, unrestored: [] }, refused: null, notSaved: null },
+    skipped: null,
+  };
+
+  it("opens on the Recovery page after two failed starts, says why, and offers every way out", async () => {
+    const { ipc, user } = await mount({ safeMode: { kind: "failedStarts", count: 2 }, settings: { wizardDone: true } });
+    const heading = await screen.findByRole("heading", { name: "Recovery mode" });
+    expect(heading.getAttribute("tabindex")).toBe("-1");
+    expect(screen.getByText("CMD Studio failed to start 2 times in a row, so it opened in recovery mode. Nothing of your themes was loaded.")).toBeTruthy();
+    expect(screen.queryByRole("navigation")).toBeNull();
+    for (const name of ["Undo everything", "Check now", "Open the log folder", "Copy details", "Reset the app's settings", "Start normally"]) {
+      expect(screen.getAllByRole("button", { name }).length, name).toBeGreaterThan(0);
+    }
+    expect(screen.getByRole("heading", { name: "Restore points" })).toBeTruthy();
+    expect(ipc.state.calls).not.toContain("themesList");
+    await user.click(screen.getByRole("button", { name: "Open the log folder" }));
+    await waitFor(() => expect(ipc.state.calls).toContain("openExternal:logsFolder"));
+    await user.click(screen.getByRole("button", { name: "Start normally" }));
+    await waitFor(() => expect(ipc.state.restarted).toBe(true));
+  });
+
+  it("safe mode shows the Recovery page first and says ready only after it is drawn (Task 9 carry)", async () => {
+    const { ipc } = await mount({ safeMode: { kind: "recovery" }, settings: { wizardDone: true } });
+    await screen.findByRole("heading", { name: "Recovery mode" });
+    await waitFor(() => expect(ipc.state.ready).toBe(true));
+    expect(screen.queryByRole("heading", { name: "Home" })).toBeNull();
+    expect(ipc.state.calls.filter((c) => c === "appReady")).toHaveLength(1);
+  });
+
+  it("from the Recovery shortcut, says what the entry did and lets the theme be turned back on", async () => {
+    const { user } = await mount({
+      safeMode: { kind: "recovery" },
+      recoveryEntry: entryPaused,
+      paused: { by: "app", level: "computer", reason: "recovery", atMs: 1791694709000, count: 0, resume: { themeId: presetId("Terracotta"), target: "all", themeName: "Terracotta" } },
+    });
+    await screen.findByRole("heading", { name: "Recovery mode" });
+    expect(screen.getByText("CMD Studio was opened from the CMD Studio Recovery shortcut.")).toBeTruthy();
+    expect(screen.getByText("When it opened, CMD Studio put back any change that was cut off and paused the theme on this computer:")).toBeTruthy();
+    expect(screen.getByText("The theme is paused: cmd windows open without it.")).toBeTruthy();
+    // The banner comes with the page's own read of the pause.
+    expect(await screen.findByText("The theme was paused from the CMD Studio Recovery shortcut.")).toBeTruthy();
+    // The banner's button is the first; the health check offers the same fix further down.
+    await user.click(screen.getAllByRole("button", { name: "Turn the theme back on" })[0]!);
+    expect(await screen.findByRole("dialog", { name: "Turn the theme back on" })).toBeTruthy();
+  });
+
+  it("says why no pause was made, and resets the settings after asking", async () => {
+    const { ipc, user } = await mount({ safeMode: { kind: "recovery" }, recoveryEntry: { notes: [], unrestored: [], pause: null, skipped: "no theme is applied" }, settings: { language: "th" } });
+    await screen.findByRole("heading", { name: "โหมดกู้คืน" });
+    expect(screen.getByText("ไม่ได้หยุดธีม:", { exact: false }).textContent).toContain("no theme is applied");
+    await user.click(screen.getByRole("button", { name: "รีเซ็ตการตั้งค่าของแอป" }));
+    const dialog = await screen.findByRole("dialog", { name: "รีเซ็ตการตั้งค่าของแอป" });
+    expect(dialog.textContent).toContain("ภาษา ที่ที่ธีมไป และตัวเลือกอื่นของแอปกลับเป็นค่าตั้งต้น ไฟล์เดิมเก็บไว้ให้ดู ธีมของคุณไม่หาย");
+    await user.click(within(dialog).getByRole("button", { name: "รีเซ็ตการตั้งค่าของแอป" }));
+    await waitFor(() => expect(ipc.state.calls).toContain("settingsReset"));
+    // The defaults stand: English from now on.
+    expect(await screen.findByText(/^The settings were reset\. The old file is kept as settings\.json\.reset-\d+\.$/)).toBeTruthy();
+  });
+
+  it("shows the crash notice on the home page and reaches the report with the crash note in two clicks (recovery spec §1.4)", async () => {
+    const { ipc, user } = await home({
+      crashNotice: { atMs: Date.UTC(2026, 9, 11, 4, 58), hasReport: true },
+      crashReport: { file: "crash-1791694709000.txt", atMs: 1791694709000, text: "CMD Studio 0.1.0 crashed at 2026-10-11T04:58:29Z\nmessage: boom\n" },
+    });
+    const notice = screen.getByRole("alert");
+    expect(notice.textContent).toMatch(/CMD Studio closed unexpectedly at .*2026/);
+    const clicks = counting(user);
+    await clicks.click(within(notice).getByRole("button", { name: "Report a problem" }));
+    expect(await screen.findByRole("heading", { name: "Report a problem" })).toBeTruthy();
+    expect(await screen.findByText("Crash note crash-1791694709000.txt")).toBeTruthy();
+    expect(screen.getByText(/message: boom/)).toBeTruthy();
+    expect(clicks.count).toBe(1);
+    await user.click(screen.getByRole("button", { name: "Home" }));
+    await user.click(within(screen.getByRole("alert")).getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(ipc.state.calls).toContain("crashDismiss"));
+    expect(screen.queryByText(/closed unexpectedly/)).toBeNull();
+  });
+
+  it("waits for the --recovery entry, then shows what it did (K12)", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const { ipc } = await mount({ safeMode: { kind: "recovery" }, busy: "recovery_entry", recoveryEntry: entryPaused });
+      expect(await screen.findByText("CMD Studio is putting back a change that was cut off and pausing the theme…")).toBeTruthy();
+      expect(screen.queryByRole("heading", { name: "Recovery mode" })).toBeNull();
+      ipc.state.busy = null;
+      await vi.advanceTimersByTimeAsync(2100);
+      await screen.findByRole("heading", { name: "Recovery mode" });
+      expect(screen.getByText("The theme is paused: cmd windows open without it.")).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a notice without a report names the start it had", async () => {
+    await home({ crashNotice: { atMs: Date.UTC(2026, 9, 11, 4, 58), hasReport: false } });
+    expect(screen.getByRole("alert").textContent).toMatch(/CMD Studio closed unexpectedly after starting at .*2026/);
+  });
+
+  it("turning back on when state.json cannot be read says so (3b-1 m4)", async () => {
+    const { user } = await home({}, pausedWith({ by: "app", level: "computerUnknown", reason: "user", atMs: 1791694709000, count: 0, resume: null }));
+    await user.click(await screen.findByRole("button", { name: "Turn the theme back on" }));
+    expect(await screen.findByText("Whether the theme is on this computer could not be read (state.json). Fix state.json first: the health check says what is wrong with it.")).toBeTruthy();
   });
 });
 
@@ -903,12 +1018,6 @@ describe("the theme's pause", () => {
     m.state.paused = structuredClone(PAUSED_IN_CMD);
   };
 
-  /** Terracotta applied, then the given pause (an apply lifts any pause, so the pause comes last). */
-  const pausedWith = (paused: PauseInfo) => async (m: MockIpc) => {
-    await applyIn(m, "Terracotta");
-    m.state.paused = structuredClone(paused);
-  };
-
   /** The theme a pause of this computer applies again. */
   const resumeTerracotta = () => ({ themeId: presetId("Terracotta"), target: "all" as const, themeName: "Terracotta" });
 
@@ -1358,7 +1467,7 @@ describe("the theme's pause", () => {
     await user.click(within(await banner()).getByRole("button", { name: "Turn the theme back on" }));
     expect(
       await screen.findByText(
-        "Whether the theme is paused on this computer is not known: CMD Studio could not read its state.json. Fix that first (Help → Report a problem).",
+        "Whether the theme is on this computer could not be read (state.json). Fix state.json first: the health check says what is wrong with it.",
       ),
     ).toBeTruthy();
     expect(ipc.state.paused).not.toBeNull();
@@ -1528,6 +1637,21 @@ describe("accessibility", () => {
     },
     60000,
   );
+
+  it("names every button of the Recovery page, in English and in Thai", async () => {
+    for (const language of ["en", "th"] as Language[]) {
+      const d = language === "th" ? th : en;
+      const { view } = await mount({
+        safeMode: { kind: "recovery" },
+        settings: { language, wizardDone: true },
+        paused: { by: "app", level: "computer", reason: "recovery", atMs: 1791694709000, count: 0, resume: { themeId: presetId("Terracotta"), target: "all", themeName: "Terracotta" } },
+      });
+      await screen.findByRole("heading", { name: d["recovery.title"] });
+      await settle();
+      expectNamedButtons(`${language}: the Recovery page`);
+      view.unmount();
+    }
+  });
 
   it("names every button of the pause banner and its dialogs, in English and in Thai", async () => {
     for (const language of ["en", "th"] as Language[]) {

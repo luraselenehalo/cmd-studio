@@ -14,6 +14,7 @@ const SAME_IN_BOTH = new Set<string>([
   "language.en",
   "language.th",
   "home.update.placeholder",
+  "recovery.update.placeholder",
   "home.restore.latest",
   "editor.prompt.layout.powerline",
   "help.credits.signpath",
@@ -36,7 +37,7 @@ describe("the two dictionaries", () => {
 
   it("have no empty text except the reserved update notice", () => {
     for (const [key, text] of Object.entries(en)) {
-      if (key === "home.update.placeholder") continue;
+      if (key === "home.update.placeholder" || key === "recovery.update.placeholder") continue;
       expect(text.trim(), key).not.toBe("");
       expect(th[key as keyof typeof th].trim(), key).not.toBe("");
     }

@@ -11,6 +11,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { ApplyRequest } from "../bindings/ApplyRequest";
 import type { CheckReport } from "../bindings/CheckReport";
+import type { CrashReport } from "../bindings/CrashReport";
 import type { DoctorReport } from "../bindings/DoctorReport";
 import type { FixKind } from "../bindings/FixKind";
 import type { PauseInfo } from "../bindings/PauseInfo";
@@ -67,7 +68,7 @@ export function Help({ tab }: { tab: HelpTab }) {
   );
 }
 
-function Doctor() {
+export function Doctor() {
   const ipc = useIpc();
   const { t, language } = useI18n();
   const { version, bump, setLastApply } = useAppState();
@@ -289,7 +290,7 @@ function pointLabel(p: RestorePoint, t: Translate, language: Language): string {
 /** What a restore did, and the points as they were before it, to name the applies it undid. */
 type RestoreResult = { kind: "restore"; outcome: RestoreOutcome; before: RestorePoint[] } | { kind: "error"; error: unknown };
 
-function RestorePointsTab() {
+export function RestorePointsTab() {
   const ipc = useIpc();
   const { t, language } = useI18n();
   const { version, bump, lastApply, setLastApply } = useAppState();
@@ -471,7 +472,7 @@ function RestoreResultView({ outcome, before }: { outcome: RestoreOutcome; befor
 
 type RevertResult = { kind: "revert"; outcome: RevertOutcome } | { kind: "error"; error: unknown };
 
-function Revert() {
+export function Revert() {
   const ipc = useIpc();
   const { t } = useI18n();
   const { bump, setLastApply } = useAppState();
@@ -589,12 +590,14 @@ function RevertResultView({ outcome }: { outcome: RevertOutcome }) {
   );
 }
 
-function Report() {
+export function Report() {
   const ipc = useIpc();
   const { t } = useI18n();
   const [text, setText] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<unknown>(null);
   const [openError, setOpenError] = useState<unknown>(null);
+  /** The newest crash note, when there is one (recovery spec §5.3). */
+  const [note, setNote] = useState<CrashReport | null>(null);
   // The same copy as the apply's "Copy details", saying the same way whether it copied.
   const { copied, copy } = useCopyDiagnostics();
 
@@ -607,6 +610,19 @@ function Report() {
       (e: unknown) => {
         if (alive) setLoadError(e);
       },
+    );
+    return () => {
+      alive = false;
+    };
+  }, [ipc]);
+
+  useEffect(() => {
+    let alive = true;
+    ipc.crashReportRead().then(
+      (n) => {
+        if (alive) setNote(n);
+      },
+      () => {},
     );
     return () => {
       alive = false;
@@ -652,6 +668,14 @@ function Report() {
         <pre className="log" lang="en">
           {text}
         </pre>
+      )}
+      {note && (
+        <>
+          <h3>{t("help.report.crashNote", { file: note.file })}</h3>
+          <pre className="log" lang="en">
+            {note.text}
+          </pre>
+        </>
       )}
     </div>
   );

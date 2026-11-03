@@ -8,22 +8,24 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import type { AppSettings } from "./bindings/AppSettings";
 import type { AppStatus } from "./bindings/AppStatus";
+import type { CrashNotice } from "./bindings/CrashNotice";
 import type { SettingsLoad } from "./bindings/SettingsLoad";
 import { AfterApplyBar } from "./components/AfterApplyBar";
 import { DraftProblemNotice } from "./components/DraftProblemNotice";
 import { ErrorNotice, Notice } from "./components/Notices";
 import { WorkingBar } from "./components/WorkingBar";
-import { I18nProvider, useI18n, type Key, type Language } from "./i18n";
+import { formatTime, I18nProvider, useI18n, type Key, type Language } from "./i18n";
 import { useIpc } from "./ipc/context";
 import { NavContext, useNav, type Nav, type Route } from "./router";
 import { Advanced } from "./screens/Advanced";
 import { Editor } from "./screens/Editor";
 import { Help } from "./screens/Help";
 import { Home } from "./screens/Home";
+import { Recovery } from "./screens/Recovery";
 import { Settings } from "./screens/Settings";
 import { Themes } from "./screens/Themes";
 import { Wizard } from "./screens/Wizard";
-import { AppStateContext, DEFAULT_SETTINGS, useDraftProblems, type AppState, type LastApply } from "./state";
+import { AppStateContext, DEFAULT_SETTINGS, useAppState, useDraftProblems, type AppState, type LastApply } from "./state";
 import { useRouteFocus } from "./useRouteFocus";
 
 /** `loaded` with what `next` changes put on top. `base` is what the caller built `next` from, so
@@ -82,21 +84,22 @@ export function App() {
   useEffect(() => {
     let alive = true;
     let timer: ReturnType<typeof setTimeout> | null = null;
-    // `_safe`: the app is in safe mode (recovery spec §5.2). Task 10 adds the Recovery route;
-    // until then the start reads as a normal one.
-    const readSettings = (_safe: boolean) =>
+    // `safe`: the app is in safe mode (recovery spec §5.2): the first screen is the Recovery
+    // page, whatever the settings say (the wizard and the library are not shown), and `app_ready`
+    // follows its drawing like any first screen.
+    const readSettings = (safe: boolean) =>
       ipc.settingsGet().then(
         (loaded) => {
           if (!alive) return;
           adopt(loaded);
-          setRoute(loaded.settings.wizardDone ? { name: "home" } : { name: "wizard" });
+          setRoute(safe ? { name: "recovery" } : loaded.settings.wizardDone ? { name: "home" } : { name: "wizard" });
         },
         (e: unknown) => {
           if (!alive) return;
           // Said on the home page; the wizard is not shown over settings that could not be read.
           // The settings held meanwhile are the defaults, not the file's: see `saveSettings`.
           setStartError(e);
-          setRoute({ name: "home" });
+          setRoute(safe ? { name: "recovery" } : { name: "home" });
         },
       );
     // Recovery spec §6.3: on every load, `app_status` first. While this process still runs a
@@ -193,8 +196,8 @@ export function App() {
   const bump = useCallback(() => setVersion((v) => v + 1), []);
   const markRecoveryActed = useCallback(() => setRecoveryActed(true), []);
   const appState = useMemo<AppState>(
-    () => ({ settings, saveSettings, lastApply, setLastApply, draftProblems, version, bump, recoveryActed, markRecoveryActed, appStatus: status }),
-    [settings, saveSettings, lastApply, draftProblems, version, bump, recoveryActed, markRecoveryActed, status],
+    () => ({ settings, saveSettings, lastApply, setLastApply, draftProblems, version, bump, recoveryActed, markRecoveryActed, appStatus: status, adoptSettings: adopt }),
+    [settings, saveSettings, lastApply, draftProblems, version, bump, recoveryActed, markRecoveryActed, status, adopt],
   );
   const nav = useMemo<Nav>(() => ({ route: route ?? { name: "home" }, go: (r: Route) => setRoute(r) }), [route]);
 
@@ -248,6 +251,14 @@ function Screens({ onUnsaved, ...problems }: StartProblems & { onUnsaved: (setti
   const { route } = useNav();
   const main = useRef<HTMLElement>(null);
   useRouteFocus(route, main);
+  if (route.name === "recovery") {
+    return (
+      <main id="content" className="recovery" ref={main}>
+        <StartNotices {...problems} />
+        <Recovery />
+      </main>
+    );
+  }
   if (route.name === "wizard") {
     return (
       <main id="content" className="wizard" ref={main}>
@@ -272,8 +283,10 @@ function StartNotices({ startError, onRetry, resetFrom, unsaved }: StartProblems
       setReading(false);
     }
   };
+  const { appStatus } = useAppState();
   return (
     <>
+      {appStatus?.crashNotice && <CrashClosed notice={appStatus.crashNotice} />}
       {startError !== null && (
         <>
           <ErrorNotice error={startError} title={t("settings.startFailed")} />
@@ -287,6 +300,36 @@ function StartNotices({ startError, onRetry, resetFrom, unsaved }: StartProblems
       {resetFrom && <Notice kind="warn">{t("settings.reset", { file: resetFrom })}</Notice>}
       {unsaved !== null && <ErrorNotice error={unsaved} title={t("wizard.notSaved")} />}
     </>
+  );
+}
+
+/** The earlier run ended abnormally (recovery spec §5.3): when, and one click to the report with
+ * the crash note. Closing it tells the backend, which forgets the notice. */
+function CrashClosed({ notice }: { notice: CrashNotice }) {
+  const { t, language } = useI18n();
+  const ipc = useIpc();
+  const { go } = useNav();
+  const [closed, setClosed] = useState(false);
+  if (closed) return null;
+  const time = formatTime(notice.atMs, language);
+  return (
+    <Notice kind="warn">
+      <p>{notice.hasReport ? t("start.crashed", { time }) : t("start.crashedNoReport", { time })}</p>
+      <div className="row-actions">
+        <button type="button" className="primary" onClick={() => go({ name: "help", tab: "report" })}>
+          {t("home.paused.report")}
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setClosed(true);
+            ipc.crashDismiss().catch(() => {});
+          }}
+        >
+          {t("common.close")}
+        </button>
+      </div>
+    </Notice>
   );
 }
 

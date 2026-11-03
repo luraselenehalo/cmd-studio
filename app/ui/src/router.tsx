@@ -13,7 +13,8 @@ export type Route =
   | { name: "editor"; id: string }
   | { name: "settings" }
   | { name: "help"; tab: HelpTab }
-  | { name: "advanced" };
+  | { name: "advanced" }
+  | { name: "recovery" };
 
 export interface Nav {
   route: Route;
