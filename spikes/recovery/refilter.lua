@@ -11,6 +11,14 @@
 -- S2), each "<what> n=<call> t=<os.clock> wall=<os.time>". recovery-filters.ps1 -Install puts
 -- `local p3b_data = [==[<data>]==]` and `local p3b_priority = <n>` in front. Nothing here raises
 -- past pcall, and the probe's own filter returns nothing: the prompt stays Oh My Posh's.
+-- Plan 3b-2 Task 12 (carry F3 of 3b-1: the VM check saw "own n=3", a second refilter): who asks
+-- for each refilter. clink.refilterprompt is wrapped once at load, and each call on the first
+-- line logs "refilterprompt from <caller>" (the caller's frame of debug.traceback: a line of
+-- `[string "..."]` is Oh My Posh's init script, which init.lua runs through load(script) with no
+-- chunk name; a line naming init.lua is CMD Studio's own; a generated file's name is that file).
+-- An "own n=<k>" line with no "refilterprompt from" line before it is Clink's own refilter, the
+-- one it runs after the prompt coroutine ends (recovery spec §13): no script asked for it.
+-- clink.promptcoroutine exposes nothing of its completion; the traceback is the evidence.
 local unpack = table.unpack or unpack
 local lines, own_calls = 0, 0
 local function mark(text)
@@ -67,6 +75,23 @@ clink.onbeginedit(function()
   end
   mark(string.format("wrapped %d methods of %d filters", done, #later))
 end)
+-- Who asks for a refilter (3b-2, carry F3): the wrapper's caller, the traceback's first frame
+-- above the wrapper (level 2: level 1 is the wrapper itself; a C function would count as a
+-- level too, so no pcall sits between). A Clink without debug.traceback, or one whose
+-- refilterprompt is not a function, loses the line and nothing else; mark itself is under pcall.
+if type(clink.refilterprompt) == "function" then
+  local real_refilter = clink.refilterprompt
+  clink.refilterprompt = function(...)
+    if lines <= 1 then
+      local who = "?"
+      if type(debug) == "table" and type(debug.traceback) == "function" then
+        who = tostring(debug.traceback("", 2)):match("stack traceback:\n%s*([^\n]+)") or "?"
+      end
+      mark("refilterprompt from " .. who .. string.format(" t=%.3f", os.clock()))
+    end
+    return real_refilter(...)
+  end
+end
 local own = real_promptfilter(p3b_priority)
 function own:filter()
   if lines > 1 then return end
