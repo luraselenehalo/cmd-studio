@@ -648,6 +648,8 @@ pub struct FakeHost {
     pub created_at_ms: Option<u64>,
     /// The processes alive now, pid → creation time; this process is in it by its own fields.
     pub processes: RefCell<BTreeMap<u32, u64>>,
+    /// Pids that are there but cannot be opened (`process_created_at` answers an error).
+    pub unreadable_processes: RefCell<BTreeSet<u32>>,
     private: RefCell<BTreeMap<PathBuf, DirState>>,
 }
 
@@ -670,6 +672,7 @@ impl Default for FakeHost {
             pid: 4242,
             created_at_ms: Some(1_791_694_000_000),
             processes: RefCell::new(BTreeMap::new()),
+            unreadable_processes: RefCell::new(BTreeSet::new()),
             private: RefCell::new(BTreeMap::new()),
         }
     }
@@ -728,6 +731,12 @@ impl Host for FakeHost {
     fn process_created_at(&self, pid: u32) -> Result<Option<u64>, AdapterError> {
         if pid == self.pid {
             return Ok(self.created_at_ms);
+        }
+        if self.unreadable_processes.borrow().contains(&pid) {
+            return Err(AdapterError::new(
+                format!("process {pid}"),
+                "cannot be opened (injected)",
+            ));
         }
         Ok(self.processes.borrow().get(&pid).copied())
     }

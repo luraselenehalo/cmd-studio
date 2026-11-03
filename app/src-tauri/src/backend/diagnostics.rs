@@ -171,6 +171,25 @@ impl<M: Machine> Backend<M> {
             }
             Err(e) => out.push_str(&format!("could not be read: {e}\n")),
         }
+        // The newest crash note, when it belongs to this run or to the one that ended
+        // abnormally (recovery spec §5.3): the user sees it here before copying. The redaction
+        // below runs over it once more, which changes nothing.
+        if let Ok(Some(report)) = self.crash_report_read() {
+            let attach = self
+                .run_started_at()
+                .is_some_and(|started| report.at_ms >= started)
+                || self
+                    .app_status()
+                    .ok()
+                    .and_then(|s| s.crash_notice)
+                    .is_some_and(|n| n.has_report);
+            if attach {
+                out.push_str(&format!(
+                    "\n== crash report {} ==\n{}",
+                    report.file, report.text
+                ));
+            }
+        }
         let out = redact_sids(&out, sys.host.user_sid().ok().as_deref());
         Ok(names.iter().fold(out, |text, name| redact(&text, name)))
     }
@@ -183,7 +202,7 @@ impl<M: Machine> Backend<M> {
     /// `AppData` folder, still holds. None is empty. When no name is known at all (no `AppData`
     /// folder and no `USERNAME`), or the alias can't be read, this is the error, and nothing is
     /// copied.
-    fn user_names(&self) -> Result<Vec<String>, AppError> {
+    pub(crate) fn user_names(&self) -> Result<Vec<String>, AppError> {
         let mut names: Vec<String> = self
             .windows_user_name()
             .map(str::to_string)

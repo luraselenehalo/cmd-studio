@@ -99,6 +99,17 @@ pub struct AppStatus {
     pub recovery_entry: Option<RecoveryEntry>,
 }
 
+/// The newest crash note, for the Report tab (recovery spec §5.3).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct CrashReport {
+    pub file: String,
+    #[ts(type = "number")]
+    pub at_ms: u64,
+    pub text: String,
+}
+
 /// What `start_run` decided, for `lib.rs`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StartDecision {
@@ -167,7 +178,12 @@ impl<M: Machine> Backend<M> {
                         Ok(Some(created)) => same_run(&old, Some(created)),
                         // Gone, or a process this user may not open (not this app's own earlier
                         // run, which runs as this user).
-                        Ok(None) | Err(_) => false,
+                        Ok(None) => false,
+                        Err(_) => {
+                            // Counted as gone, as before; the line says it could not be told.
+                            self.note_line("run record=process-unreadable");
+                            false
+                        }
                     };
                     if alive && old.pid != me.pid {
                         // Spec §5.1: single-instance ends this process in a moment (its plugin
@@ -248,11 +264,65 @@ impl<M: Machine> Backend<M> {
         }
     }
 
-    /// The time of the newest crash note written at or after `since_ms`. Task 5 fills it in
-    /// over `crash::latest_note`; until then there is none.
+    /// The time of the newest crash note written at or after `since_ms` (`crash::latest_note`).
     fn latest_crash_note_since(&self, since_ms: u64) -> Option<u64> {
-        let _ = since_ms;
-        None
+        crate::crash::latest_note(self.sys().fs, &self.paths().logs())
+            .map(|(ms, _)| ms)
+            .filter(|ms| *ms >= since_ms)
+    }
+
+    /// When this run started, as its record says; `None` before `start_run`.
+    pub(crate) fn run_started_at(&self) -> Option<u64> {
+        self.run.with(|r| r.mine.as_ref().map(|m| m.started_at))
+    }
+
+    /// The newest crash note, for the Report tab (recovery spec §5.3): its file name, its time,
+    /// and its text (written redacted; redacted once more here, in case the hook had no name to
+    /// take out).
+    pub fn crash_report_read(&self) -> Result<Option<CrashReport>, AppError> {
+        let fs = self.sys().fs;
+        let Some((at_ms, path)) = crate::crash::latest_note(fs, &self.paths().logs()) else {
+            return Ok(None);
+        };
+        let bytes = fs
+            .read(&path)
+            .map_err(|e| AppError::coded("E_MACHINE_READ", e.to_string()))?
+            .unwrap_or_default();
+        let text = crate::crash::redact_all(&String::from_utf8_lossy(&bytes), &self.redaction());
+        Ok(Some(CrashReport {
+            file: path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            at_ms,
+            text,
+        }))
+    }
+
+    /// The one rule of what is taken out of a text: the names `diagnostics_copy` redacts
+    /// (`user_names`: the Windows user name and the profile folder's names, the 8.3 alias
+    /// included) and this user's SID; empty when they cannot be read, so nothing is taken out.
+    /// The panic hook takes its copy from here (`main.rs`).
+    pub fn redaction(&self) -> crate::crash::Redaction {
+        crate::crash::Redaction {
+            names: self.user_names().unwrap_or_default(),
+            sid: self.sys().host.user_sid().ok(),
+        }
+    }
+
+    /// The `--recovery` entry's thread could not be started (carry 3): the reason is the
+    /// entry's outcome, for the Recovery page, and one line in the log.
+    pub(crate) fn recovery_entry_not_run(&self, why: &str) {
+        self.note_line("recovery_entry not_run");
+        let entry = RecoveryEntry {
+            notes: Vec::new(),
+            unrestored: Vec::new(),
+            pause: None,
+            skipped: Some(format!(
+                "CMD Studio could not start its recovery step: {why}"
+            )),
+        };
+        self.run.with(|r| r.recovery_entry = Some(entry));
     }
 
     fn write_record(&self, record: &RunRecord) {
@@ -350,14 +420,20 @@ impl<M: Machine> Backend<M> {
         let Some(mine) = self.run.with(|r| r.mine.clone()) else {
             return;
         };
-        let theirs = match fs.read(&file) {
-            Ok(Some(bytes)) => serde_json::from_slice::<RunRecord>(&bytes).ok(),
-            _ => None,
+        // Deleted when there is no file, when the file is nobody's record (it does not parse), or
+        // when it is this process's own. A read that fails says nothing about whose it is
+        // (another process may be renaming its record into place): it stays.
+        let delete = match fs.read(&file) {
+            Err(_) => {
+                self.note_line("run record=unreadable-at-end");
+                false
+            }
+            Ok(None) => false,
+            Ok(Some(bytes)) => serde_json::from_slice::<RunRecord>(&bytes).map_or(true, |t| {
+                t.pid == mine.pid && t.created_at == mine.created_at
+            }),
         };
-        let is_mine = theirs
-            .as_ref()
-            .is_none_or(|t| t.pid == mine.pid && t.created_at == mine.created_at);
-        if is_mine {
+        if delete {
             let _ = fs.remove_file(&file);
         }
         self.note_line("run end");
@@ -380,7 +456,7 @@ impl<M: Machine> Backend<M> {
 
     /// The UI's own error (recovery spec §6.5): one log line, at most [`UI_ERRORS_PER_RUN`] per
     /// run; `place` is letters and digits only, 40 at most. The text goes through the
-    /// diagnostics' redaction (Task 5); until then as given, with line breaks folded.
+    /// diagnostics' redaction (`redact_for_log`), with line breaks folded.
     pub fn log_ui_error(&self, message: &str, place: &str) -> Result<(), AppError> {
         let allowed = self.run.with(|r| {
             if r.ui_errors >= UI_ERRORS_PER_RUN {
@@ -402,17 +478,32 @@ impl<M: Machine> Backend<M> {
         Ok(())
     }
 
-    /// Task 5 replaces this with `diagnostics::redact` and `redact_sids` over the user's name
-    /// and SID; until then the text as it is.
+    /// The text as the diagnostics would show it: the user's names and SID taken out, line
+    /// breaks folded.
     fn redact_for_log(&self, text: &str) -> String {
-        text.replace(['\r', '\n'], " ")
+        crate::crash::redact_all(&text.replace(['\r', '\n'], " "), &self.redaction())
     }
 
     /// Marks `name` as what runs now, until the guard drops: also when the work panics, so a
     /// panic inside a change never leaves `app_status` saying busy for the rest of the run.
     pub(crate) fn busy(&self, name: &'static str) -> Busy<'_, M> {
+        let replaced = self.run.with(|r| r.busy.replace(name));
+        Busy {
+            backend: self,
+            replaced,
+        }
+    }
+
+    /// Marks `name` as what runs now, with no guard: for work that is started on another thread
+    /// (`lib.rs`'s `--recovery` entry is marked before its thread exists, so the UI's first
+    /// `app_status` cannot find it idle). [`Backend::busy_clear`] ends it.
+    pub(crate) fn busy_mark(&self, name: &'static str) {
         self.run.with(|r| r.busy = Some(name));
-        Busy(self)
+    }
+
+    /// Ends what [`Backend::busy_mark`] began.
+    pub(crate) fn busy_clear(&self) {
+        self.run.with(|r| r.busy = None);
     }
 }
 
@@ -422,11 +513,17 @@ impl<M: Machine> Backend<M> {
 pub const RECOVERY_ENTRY_BUSY: &str = "recovery_entry";
 
 /// The guard of [`Backend::busy`].
-pub(crate) struct Busy<'a, M: Machine>(&'a Backend<M>);
+/// On drop it gives back what it replaced, so a command that runs inside the `--recovery` entry
+/// does not end the entry's busy early.
+pub(crate) struct Busy<'a, M: Machine> {
+    backend: &'a Backend<M>,
+    replaced: Option<&'static str>,
+}
 
 impl<M: Machine> Drop for Busy<'_, M> {
     fn drop(&mut self) {
-        self.0.run.with(|r| r.busy = None);
+        let replaced = self.replaced;
+        self.backend.run.with(|r| r.busy = replaced);
     }
 }
 
@@ -819,5 +916,182 @@ mod tests {
         let log = b.log_tail(40);
         assert_eq!(log.matches("ui_error place=Home ").count(), 20, "{log}");
         assert!(!log.contains("(24)"), "{log}");
+    }
+
+    /// Spec §5.3: a run that ended abnormally with a crash note newer than its start has a
+    /// report, which `crash_report_read` gives redacted, and the diagnostics attach.
+    #[test]
+    fn a_crash_note_newer_than_the_run_makes_the_notice_a_report() {
+        let b = backend();
+        let logs = b.paths().logs();
+        crate::crash::write_note(b.sys().fs, &logs, 1_791_693_000_000, "older\n").unwrap();
+        put(&b, &old(Some(1_791_694_100_000), 0));
+        let d = b.start_run(GuiStart::Normal);
+        assert!(
+            !d.crash_notice.unwrap().has_report,
+            "an older note is not this run's"
+        );
+        crate::crash::write_note(
+            b.sys().fs,
+            &logs,
+            1_791_694_200_000,
+            "message: at C:\\Users\\tester\\x\n",
+        )
+        .unwrap();
+        put(&b, &old(Some(1_791_694_100_000), 0));
+        let d = b.start_run(GuiStart::Normal);
+        assert_eq!(
+            d.crash_notice,
+            Some(CrashNotice {
+                at_ms: 1_791_694_200_000,
+                has_report: true
+            })
+        );
+        let report = b.crash_report_read().unwrap().unwrap();
+        assert_eq!(report.file, "crash-1791694200000.txt");
+        assert_eq!(report.at_ms, 1_791_694_200_000);
+        assert!(
+            report.text.contains("%USERNAME%") && !report.text.contains("tester"),
+            "{}",
+            report.text
+        );
+        let diagnostics = b.diagnostics_copy().unwrap();
+        assert!(
+            diagnostics.contains("== crash report crash-1791694200000.txt =="),
+            "{diagnostics}"
+        );
+        assert!(diagnostics.contains("%USERNAME%\\x"), "{diagnostics}");
+        // A note older than this run, and no notice: the diagnostics leave it out.
+        let b2 = backend();
+        crate::crash::write_note(b2.sys().fs, &b2.paths().logs(), 1_791_694_000_000, "old\n")
+            .unwrap();
+        let d2 = b2.start_run(GuiStart::Normal);
+        assert_eq!(d2.crash_notice, None);
+        assert!(b2.run_started_at().unwrap() > 1_791_694_000_000);
+        assert!(!b2.diagnostics_copy().unwrap().contains("== crash report"));
+        // A note written during this run (a caught panic, say): attached.
+        crate::crash::write_note(b2.sys().fs, &b2.paths().logs(), b2.now_ms() + 1, "now\n")
+            .unwrap();
+        assert!(b2.diagnostics_copy().unwrap().contains("== crash report"));
+        // No note at all: none to read.
+        let b = backend();
+        assert_eq!(b.crash_report_read().unwrap(), None);
+    }
+
+    /// Spec §6.5: the UI's error text is redacted like the diagnostics.
+    #[test]
+    fn a_ui_error_is_logged_redacted() {
+        let b = backend();
+        b.log_ui_error(
+            "Error: file:///C:/Users/tester/x.js S-1-5-21-1-2-3-1001",
+            "Themes",
+        )
+        .unwrap();
+        let log = b.log_tail(3);
+        assert!(
+            log.contains("ui_error place=Themes Error: file:///C:/Users/%USERNAME%/x.js <SID>"),
+            "{log}"
+        );
+    }
+
+    /// Carry 3: an entry whose thread could not be started leaves a reason the Recovery page
+    /// can show, and nothing stays busy.
+    #[test]
+    fn an_entry_that_could_not_start_leaves_its_reason_and_nothing_busy() {
+        let b = backend();
+        b.busy_mark(RECOVERY_ENTRY_BUSY);
+        assert_eq!(
+            b.app_status().unwrap().busy.as_deref(),
+            Some(RECOVERY_ENTRY_BUSY)
+        );
+        b.busy_clear();
+        b.recovery_entry_not_run("out of threads");
+        let status = b.app_status().unwrap();
+        assert_eq!(status.busy, None);
+        let entry = status.recovery_entry.unwrap();
+        assert_eq!(
+            entry.skipped.as_deref(),
+            Some("CMD Studio could not start its recovery step: out of threads")
+        );
+        assert_eq!((entry.pause, entry.notes.len()), (None, 0));
+        assert!(
+            b.log_tail(3).contains("recovery_entry not_run"),
+            "{}",
+            b.log_tail(3)
+        );
+    }
+
+    /// Carry 1 (Task 4's review): a record that cannot be read at the end is left alone, since
+    /// another process may be renaming its own into place under a sharing violation; one line
+    /// says so. No file, a file that is nobody's record, and our own record are deleted.
+    #[test]
+    fn the_end_deletes_only_what_is_known_to_be_ours() {
+        let b = backend();
+        let file = b.paths().run_file();
+        b.start_run(GuiStart::Normal);
+        fake_fs(&b).fail_reads_of(&file);
+        b.end_run();
+        fake_fs(&b).stop_failing(&file);
+        assert!(
+            b.sys().fs.exists(&file),
+            "a record that could not be read stays"
+        );
+        assert!(
+            b.log_tail(5).contains("run record=unreadable-at-end"),
+            "{}",
+            b.log_tail(5)
+        );
+        // Not a record at all: nobody's, deleted.
+        fake_fs(&b).put(&file, b"{ not json");
+        b.end_run();
+        assert!(!b.sys().fs.exists(&file));
+        // No file: nothing to delete, and no failure.
+        b.end_run();
+        assert!(!b.sys().fs.exists(&file));
+        // Ours: deleted.
+        b.start_run(GuiStart::Normal);
+        assert!(b.sys().fs.exists(&file));
+        b.end_run();
+        assert!(!b.sys().fs.exists(&file));
+    }
+
+    /// Carry 2: a guard gives back what it replaced. An entry that is busy under its own name
+    /// stays busy when a command that ran inside it ends.
+    #[test]
+    fn a_busy_guard_restores_what_it_replaced() {
+        let b = backend();
+        let outer = b.busy(RECOVERY_ENTRY_BUSY);
+        {
+            let inner = b.busy("apply");
+            assert_eq!(b.app_status().unwrap().busy.as_deref(), Some("apply"));
+            drop(inner);
+        }
+        assert_eq!(
+            b.app_status().unwrap().busy.as_deref(),
+            Some(RECOVERY_ENTRY_BUSY)
+        );
+        drop(outer);
+        assert_eq!(b.app_status().unwrap().busy, None);
+    }
+
+    /// Carry 4: a pid that is there but cannot be opened is a run that is gone for the count,
+    /// and the log says that it could not be told.
+    #[test]
+    fn a_process_that_cannot_be_opened_is_counted_as_gone_and_said() {
+        let b = backend();
+        fake_host(&b).unreadable_processes.borrow_mut().insert(9999);
+        put(&b, &old(None, 0));
+        let d = b.start_run(GuiStart::Normal);
+        assert_eq!(d.safe_mode, None);
+        assert_eq!(
+            record(&b).unwrap().failed_starts,
+            1,
+            "the count is as it was"
+        );
+        assert!(
+            b.log_tail(5).contains("run record=process-unreadable"),
+            "{}",
+            b.log_tail(5)
+        );
     }
 }

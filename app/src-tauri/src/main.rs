@@ -14,6 +14,16 @@
 #[cfg(windows)]
 fn main() {
     use cmdstudio_app::backend::run::GuiStart;
+    // The crash notes, for the app and the CLI alike (recovery spec §5.3): the default data
+    // folder's logs\ (a `--data-dir` run's note goes there too), redacted as the diagnostics
+    // redact. A backend that cannot be made (no local app data) installs no hook.
+    if let Ok(backend) = cmdstudio_app::machine::real_backend() {
+        cmdstudio_app::crash::install_hook(
+            backend.paths().logs(),
+            backend.redaction(),
+            cmdstudio_cli::now_ms,
+        );
+    }
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     // `--recovery` alone opens the window in recovery mode (recovery spec §4.4, §8): the
     // Start-menu shortcut "CMD Studio Recovery". Every other argument is the CLI's.

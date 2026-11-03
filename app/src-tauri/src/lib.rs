@@ -7,6 +7,7 @@
 pub mod backend;
 pub mod command_names;
 pub mod console;
+pub mod crash;
 pub mod error;
 #[cfg(windows)]
 pub mod ipc;
@@ -93,22 +94,27 @@ pub fn run_gui(how: backend::run::GuiStart) {
 }
 
 /// `--recovery`'s steps 1–2 on a thread of their own (recovery spec §4.4), then `after`. The
-/// entry is `busy` under its own name while it runs, so the UI's start waits for it (§6.3). A
-/// thread that cannot be started is logged; nothing waits on the window's thread.
+/// entry is `busy` under its own name while it runs, so the UI's start waits for it (§6.3); it
+/// is marked before the thread exists, so a UI that asks in between does not find it idle. A
+/// thread that cannot be started clears the mark and leaves the reason as the entry's outcome
+/// for the Recovery page; nothing waits on the window's thread.
 #[cfg(windows)]
 fn spawn_recovery_entry(
     backend: &std::sync::Arc<backend::Backend<machine::RealMachine>>,
     after: impl FnOnce() + Send + 'static,
 ) {
     let b = backend.clone();
+    backend.busy_mark(backend::run::RECOVERY_ENTRY_BUSY);
     let spawned = std::thread::Builder::new()
         .name("recovery-entry".to_string())
         .spawn(move || {
             let _ = b.recovery_entry();
+            b.busy_clear();
             after();
         });
-    if spawned.is_err() {
-        backend.note_line("recovery_entry not_run");
+    if let Err(e) = spawned {
+        backend.busy_clear();
+        backend.recovery_entry_not_run(&e.to_string());
     }
 }
 
@@ -338,6 +344,37 @@ mod tests {
         let gui = main.find("run_gui(GuiStart::Normal)").unwrap();
         let cli = main.find("cmdstudio_cli::run(").unwrap();
         assert!(gui < cli, "the window's cases come before the CLI");
+        assert!(
+            main.find("crash::install_hook").unwrap() < main.find("let args").unwrap(),
+            "the hook comes first"
+        );
+    }
+
+    /// Carry 3: the entry is marked busy before its thread exists (a UI that asks in between
+    /// does not find it idle), and a thread that cannot be started clears the mark and leaves
+    /// the reason for the Recovery page.
+    #[test]
+    fn the_entry_is_marked_before_its_thread_and_a_failed_spawn_clears_it() {
+        let body = body_of("fn spawn_recovery_entry(");
+        let marked = body.find(".busy_mark(").unwrap();
+        let spawned = body.find(".spawn(").unwrap();
+        let failed = body.find("if let Err(e) = spawned").unwrap();
+        let cleared = body.rfind(".busy_clear()").unwrap();
+        let said = body.find(".recovery_entry_not_run(").unwrap();
+        assert!(marked < spawned, "marked first");
+        assert!(
+            spawned < failed && failed < said,
+            "said only after a failed spawn"
+        );
+        assert!(
+            cleared > failed,
+            "the mark is cleared after the failed spawn is seen"
+        );
+        assert!(
+            body.matches(".busy_clear()").count() == 2,
+            "cleared when the thread ends and when it could not start"
+        );
+        assert!(body.contains(".recovery_entry()"));
     }
 }
 
