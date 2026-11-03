@@ -6,7 +6,7 @@
 
 **Architecture:** The core's `Host` adapter learns this process's id and creation time and those of any pid (`GetProcessTimes`), and `Paths` the new files. The app gets `backend/run.rs` (`run.json`, the safe-mode state, `app_ready`, `app_status`, the `--recovery` entry) and `crash.rs` (the panic hook that writes `logs\crash-<ms>.txt` through `redact`/`redact_sids`, keeps ten, never panics); `main.rs` sends `--recovery` to the window, not the CLI; `lib.rs` writes the run record before the window, ends it on a normal exit, turns `window_failed` into a Yes/No box over `Backend::revert_all`, and, if Task 1 passes, reloads the page when WebView2's renderer dies. Seven IPC commands join the thirty. The UI wraps its `Ipc` in `withWork` (a "still working" bar after 10 s, a 60-second deadline with `E_TIMEOUT` for read-only commands, late answers dropped, "Restart CMD Studio" after 3 minutes of a change), asks `app_status` first on every load, catches `window.onerror`/`unhandledrejection` into the existing `CrashNotice`, shows the crash notice in `StartNotices`, and has one Recovery page built from Help's existing parts.
 
-**Tech Stack:** Rust 1.99.0, windows-sys 0.61.2 (`Win32_System_Threading`, `Win32_Foundation`, already on), Tauri 2.12.4 (`WebviewWindow::with_webview`, `tauri-plugin-single-instance` 2.5.4), webview2-com 0.39.1 and windows-core 0.62.2 (already in `Cargo.lock` through wry 0.57.0; the app names them as direct dependencies only if Task 1 passes), ts-rs 12.0.1, React 19.3.1, TypeScript 5.9.3, Vitest 5.0.5 (fake timers), mlua 0.10 `lua52` in the core's tests.
+**Tech Stack:** Rust 1.99.0, windows-sys 0.61.2 (`Win32_System_Threading`, `Win32_Foundation`, already on), Tauri 2.12.4 (`WebviewWindow::with_webview`, `tauri-plugin-single-instance` 2.5.4), webview2-com 0.39.1 (already in `Cargo.lock` through wry 0.57.0; the app names it as a direct dependency only if Task 1 passes), ts-rs 12.0.1, React 19.3.1, TypeScript 5.9.3, Vitest 5.0.5 (fake timers), mlua 0.10 `lua52` in the core's tests.
 
 **Spec:** `docs/superpowers/specs/2026-10-17-recovery-mode-design.md` (the recovery spec: §0's WebView2 item, §1 criteria 3–6, §4.4, §5, §6, §7, §8, §9, §10, §12, §13) and the main spec `docs/superpowers/specs/2026-10-10-cmd-studio-design.md` (§5.3, §5.7, §5.9, §6.1, appendix B). The carries from 3b-1 are in `docs/superpowers/plans/2026-10-17-phase3b-1-recovery-cmd-rulings.md` ("Carries", "Deferred minors", the founder's decision of 2026-10-19). Where the recovery spec and the shipped code (main `60061c0`) disagree, this plan follows the code and says so ("Where this plan departs from the recovery spec").
 
@@ -22,7 +22,7 @@ Every task's requirements include these. Values are copied from the recovery spe
 - **The numbers, each in one place:** `FAILED_STARTS_FOR_SAFE_MODE = 2` and `CRASH_NOTES_KEPT = 10` in the app (`backend/run.rs`, `crash.rs`); `UI_ERRORS_PER_RUN = 20` (`backend/run.rs`); in the UI (`app/ui/src/ipc/work.ts`) `STILL_WORKING_MS = 10_000`, `READ_DEADLINE_MS = 60_000`, `RESTART_AFTER_MS = 180_000`; the renderer gives up after `RENDERER_FAILURES = 3` within `RENDERER_WINDOW_MS = 60_000` (`webview_watch.rs`, Task 6, if Task 1 passes). `STALE_AFTER_SECS = 60`, `FORGET_AFTER_SECS = 600`, `PAUSE_AFTER = 3` stay (the founder's 10-minute rule stays as it is).
 - **The files (recovery spec §5.1, §5.3, §5.2, §7):** `<data>\run.json` is `{"version":1,"pid":<n>,"createdAt":<ms>|null,"startedAt":<ms>,"uiReadyAt":null|<ms>,"failedStarts":<n>,"safeMode":<bool>}`, written with `write_atomic`; `<data>\logs\crash-<unix ms>.txt` (UTF-8, redacted, ten kept); `<data>\settings.json.reset-<ms>`. `--cleanup` knows every one of them (Task 3). `revert_all` (core) touches none of them.
 - **IPC (main spec §5.7, §5.9, §5.10).** From Task 7 the commands are the 30 of 3b-1 plus `app_ready`, `app_status`, `crash_dismiss`, `crash_report_read`, `settings_reset`, `log_ui_error` and `app_restart`: 37 names in `app/src-tauri/src/command_names.rs`, thin wrappers over `Backend`, each `async`, each through `blocking`, each logging once through `Backend::logged` (`ipc.rs`'s tests pin it; `logging` becomes 33). `capabilities/default.json` allows exactly these and `core:event:allow-listen`/`allow-unlisten`; no new event (`apply-progress` stays the only one); the CSP is unchanged; `config_guard.rs:3` says 37. Every failure crosses the IPC as `{code, messageTh, messageEn, details}` with the codes of main spec §5.9 and no other: `error.rs`'s `MEANINGS` equals the §5.9 rows (a test reads the spec), so `E_TIMEOUT` goes into both in one commit (Task 3).
-- **The mock stays logic-free (main spec §5.6).** `app/ui/src/ipc/mock.ts` answers the new commands with fixed data per status shape, chosen by `MockOptions` (`safeMode`, `crashNotice`, `busy`, `failedStarts`); it works nothing out.
+- **The mock stays logic-free (main spec §5.6).** `app/ui/src/ipc/mock.ts` answers the new commands with fixed data per status shape, chosen by `MockOptions` (`safeMode`, `crashNotice`, `crashReport`, `busy`, `recoveryEntry`); it works nothing out.
 - **Bindings.** Regenerate them by the manual steps only: delete the generated `.ts` files that change, then `cargo test -p cmdstudio-app --lib export_bindings` with `TS_RS_EXPORT_DIR` set to `<repo>\app\ui\src\bindings`. Never run `scripts/export-bindings.ps1`; never pass `-ExecutionPolicy`.
 - **The checks.** Each Rust task ends with `cargo fmt --all`, then `cargo clippy --workspace --all-targets -- -D warnings`, `cargo clippy -p cmdstudio-core --all-targets -- -D warnings`, `cargo clippy -p cmdstudio-core --all-targets --features fake -- -D warnings`, `cargo clippy -p cmdstudio-core --all-targets --features ts -- -D warnings`. Each UI task ends with `npm run typecheck` and `npm test`, then `TZ=UTC npm test` (in Git Bash: `TZ=UTC npm test`; in PowerShell: `$env:TZ='UTC'; npm test`), and, when it touches the bundle (Tasks 8, 9, 10), `npm run build` and `bash scripts/check-dist.sh`, all in `<repo>\app`.
 - **PC safety (`.superpowers/sdd/.../pc-safety.md`, binding).** The dev PC is the founder's own: never run the built app, `cmdstudio.exe`, `npx tauri dev`/`build`, Oh My Posh or Clink yourself; never read this PC's event log, registry or windows; never set `CMDSTUDIO_SYSTEM_TESTS`, `CMDSTUDIO_OMP_TESTS` or `CMDSTUDIO_ALLOW_PARITY_SKIP`; run `cmd.exe` only with `/d`. Scripts written for a VM (`spikes/vm/guest/*.ps1`, `.vbs`) are parse-checked only (`[System.Management.Automation.Language.Parser]::ParseFile`), never run, not even as a dry run; `guard.test.ps1` included. Windows Application Control blocks (`os error 4551`) are rerun once and never worked around: mark the step "not run locally (WDAC); CI is the gate" and go on.
@@ -36,7 +36,7 @@ Every task's requirements include these. Values are copied from the recovery spe
 The five inputs the recovery spec implies but its own test list (§10) does not exercise, most likely to bite a person first. Each has its test in the task that owns the code.
 
 1. **A pid Windows gave again.** The previous `run.json` names a pid that is alive now, but as another program (Windows reuses pids within seconds). Without the creation time the app would take it for "still running" and skip the failed-start count, and a user whose app crashes at start would never reach safe mode. Task 4: `a_live_pid_with_another_creation_time_is_a_run_that_ended`.
-2. **`app_restart` and the run record.** The new process starts while the old one still runs, reads the old one's `run.json` (alive, same creation time: skipped) and writes its own; the old one then exits and must not delete the new one's record, or the next start would read nothing and a crash of the new process would go unnoticed. Task 4: `a_normal_exit_deletes_only_this_processs_own_record`.
+2. **A second launch and the run record.** A second `cmdstudio.exe` (a double click, a shortcut) reads the running one's `run.json` (alive, same creation time), and single-instance ends it a moment later: it must write nothing and delete nothing, or the running process's record would be lost or replaced by a dead one, and the next start would count a failed start for nothing (two of them open safe mode). The same guard covers the restart's child, which waits for the old process but reads whatever it left. Task 4: `a_live_pid_with_another_creation_time_is_a_run_that_ended` (the untouched record) and `a_normal_exit_deletes_only_this_processs_own_record`.
 3. **A read-only command that answers after its deadline.** The UI rejected with `E_TIMEOUT`, the user pressed Try again, and now two answers come: the late one must be dropped and the retry's shown, never the other way round. Task 8: `a late answer after the deadline is dropped and the retry's answer is shown`.
 4. **A crash note that cannot be written, or holds the user's name.** The panic hook runs with the app already broken: a `logs\` that cannot be written must not panic again (which would abort the process without the earlier hook's output), and the panic message, which often holds a path, must come out redacted. Task 5: `a_note_that_cannot_be_written_is_dropped_without_a_second_panic` and `the_note_is_redacted_before_it_is_written`.
 5. **`--recovery` on a computer already paused, or whose state.json cannot be read.** A second Revert everything on a computer that is already out would make a second `revertAll` restore point and a second record for nothing; and with state.json unreadable the entry must not revert blind, but say so on the Recovery page. Task 4: `recovery_entry_pauses_nothing_twice_and_says_when_it_cannot_tell`.
@@ -46,13 +46,13 @@ The five inputs the recovery spec implies but its own test list (§10) does not 
 These follow from the shipped code at `60061c0` (file:line) or from a decision this plan makes where the spec is silent; the report to the founder lists them.
 
 - **`--recovery` while the app is running (recovery spec §4.4) reloads the page instead of sending an event.** The single-instance callback (`app/src-tauri/src/lib.rs:47-52`) runs steps 1–2 on a thread of its own, then `window.eval("window.location.reload()")`; the reloaded UI asks `app_status` first (recovery spec §6.3's rule for every reload) and sees `safeMode: true`. Main spec §5.7 keeps `apply-progress` as the only event (§13 of the recovery spec made that choice for `recovery_status`); the capability file does not change.
-- **"Start normally" (recovery spec §5.2) is `app_restart`.** In safe mode `app_ready` has already set `failedStarts` to 0, so a restart without arguments is a normal start; the spec's "reload the app page" would need one more IPC to leave safe mode in the backend. One command less; the restart takes under a second.
+- **"Start normally" (recovery spec §5.2) is `app_restart`.** In safe mode `app_ready` has already set `failedStarts` to 0, so a restart is a normal start; the spec's "reload the app page" would need one more IPC to leave safe mode in the backend. One command less. The child is started with the hidden `--after-pid <old pid>` and waits, up to 10 s, for the old process to be gone before anything else, the single-instance plugin included (K13: otherwise the new process could hand its start to the dying one and exit); no cmd.exe helper, since cmd loads AutoRun. Task 1's S4 proves the restart on VM-A.
 - **`app_status` (recovery spec §8) carries two fields more:** `safeModeReason` is a tagged enum (`failedStarts {count}` or `recovery`), and `recoveryEntry` says what the `--recovery` entry did (the start's notes, the pause's `PauseOutcome`), so the Recovery page can say it the §5.5 way (3b-1 Task 10's rulings for a pause that did not go through).
 - **The crash notice's time (recovery spec §5.3).** The app cannot know when it died; the notice says the newest crash note's time when one is newer than the run that ended, else the time that run started ("CMD Studio closed unexpectedly after starting at …"). `hasReport` says which.
 - **"Close" on the crash notice (recovery spec §5.3) is remembered for this run only** (`crash_dismiss`): the notice comes from the previous run's `run.json`, which this run has replaced, so the next start cannot show it again anyway. No file.
 - **The panic hook in CLI mode writes to the default data folder** (`%LOCALAPPDATA%\ai.resincore.cmdstudio\logs`), installed in `main.rs` before the arguments are parsed: a `--data-dir` run's crash note goes there. `crates/cli/src/lib.rs:70-117` parses inside `run_with`; moving the hook behind it would need `redact`/`redact_sids` (`app/src-tauri/src/backend/diagnostics.rs:372, 483`) in the CLI crate.
 - **The 60-second deadline (recovery spec §6.2) exempts the two commands that wait for the user** (`theme_import_preview`, `theme_export`: `app/src-tauri/src/ipc.rs:85-110`, a native dialog the user may leave open) and `app_restart` (it never answers). They are a third and fourth kind in the one list of Task 8, which a test checks for completeness.
-- **The "still working" bar's task names are fourteen groups, not one per command** (recovery spec §6.1: "from the dictionary"): `ipc/work.ts` maps every method to one `work.*` key; the test of the list covers the map.
+- **The "still working" bar's task names are fifteen groups, not one per command** (recovery spec §6.1: "from the dictionary"): `ipc/work.ts` maps every method to one `work.*` key; the test of the list covers the map.
 - **Commands that change the machine, for `busy` (recovery spec §6.3, §8):** `apply`, `undo_last`, `snapshot_restore`, `revert_all` and `theme_pause` (they run the core's journaled transactions: `app/src-tauri/src/backend/apply.rs:535, 666, 779, 821`, `recovery.rs:412`). `plan_apply` takes the lock and changes nothing; `theme_resume` at the cmd level writes only `health\`; `doctor_fix` only proposes.
 - **No test-only "crash at start" variable in the build** (recovery spec §10): CI's artifact is a release build with no test feature. Task 12's VM check makes the two failed starts with `run.json` fixtures (a dead pid, `uiReadyAt: null`, `failedStarts: 1`) and the crash notice with `Stop-Process` while the window is up; the panic hook is proven by Task 5's tests, one of them on the real disk. Whether the founder wants a cargo feature `test-hooks` instead is an open question in the report.
 - **WebView2 `ProcessFailed` (recovery spec §6.4) is in Task 6 only if Task 1 passes**; its fallback F1 drops §6.4 from this phase and records why.
@@ -69,14 +69,16 @@ Task 1 records each result in `docs/spikes/phase3b-recovery/results-3b2.md`. The
 
 | # | What the spike shows | Tasks 2–12 assume | Used by | If not |
 |---|---|---|---|---|
-| S1 | `tauri::WebviewWindow::with_webview` gives `PlatformWebview::controller()` (an `ICoreWebView2Controller`), its `CoreWebView2()` an `ICoreWebView2`, and `add_ProcessFailed` with a `webview2_com::ProcessFailedEventHandler` compiles with the app's pins (webview2-com 0.39.1, windows-core 0.62.2 as direct dependencies) | it compiles; the handler's closure may hold a clone of the `ICoreWebView2` and call `Reload()` from it | Task 6 | F1 |
+| S1 | `tauri::WebviewWindow::with_webview` gives `PlatformWebview::controller()` (an `ICoreWebView2Controller`), its `CoreWebView2()` an `ICoreWebView2`, and `add_ProcessFailed` with a `webview2_com::ProcessFailedEventHandler` compiles with the app's pins (webview2-com 0.39.1 as a direct dependency) | it compiles; the handler's closure may hold a clone of the `ICoreWebView2` and call `Reload()` from it | Task 6 | F1 |
 | S2 | on VM-A, with the handler registered, `Stop-Process` of the window's renderer (`msedgewebview2.exe --type=renderer` whose parent chain ends at `cmdstudio.exe`) fires the handler with `ProcessFailedKind` `RENDER_PROCESS_EXITED`, and `Reload()` brings the page back | yes: the UI comes back on its own within 5 s, `app_status` is asked, Home is drawn | Task 6, Task 12 | F2 |
 | S3 | `GetProcessTimes` of this process and of a pid that does not exist, through `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` | this process: a creation time within 60 s of now; a pid that is not there: `OpenProcess` fails with `ERROR_INVALID_PARAMETER` (87) and the function answers `Ok(None)` | Task 3 | F3 |
+| S4 | on VM-A, with Task 6 in: "Start normally" (`app_restart`: the child started with `--after-pid <old pid>` waits for the old process, then starts) | one `cmdstudio` process afterwards, Home drawn within 15 s, the log has the old process's `run end` before the new one's `run start`; the wait is under 10 s | Task 6, Task 12 step 2b | F4 |
 
 ### The fallbacks
 
 - **F1 (S1 does not compile, or needs a dependency the lock file does not hold).** Recovery spec §6.4 is dropped from this phase, as §0 and §6.4 say: Task 6 skips its Step 7 (`webview_watch.rs` is not created, `Cargo.toml` gains no dependency, `lib.rs` registers nothing), Task 12's step 6 is marked "not run: §6.4 dropped (F1)", and Task 11's appendix B row says: "§6.4 (WebView2 ProcessFailed) ไม่ได้ทำใน phase นี้: Tauri 2.12.4 … <the compiler's reason, one line>". The report to the founder names it.
 - **F2 (the handler fires but `Reload()` from inside it does nothing, or fires for every kind).** The handler only counts and hands the reload to the window's thread: replace `unsafe { reloader.Reload() }` in `webview_watch.rs` with `let _ = window.eval("window.location.reload()"); Ok(())` where `window` is a clone of the `tauri::WebviewWindow` captured before `with_webview` (it is `Send`), and keep the kind filter. If neither reloads the page, F1.
+- **F4 (S4: no window comes, or two processes, or the new one exits at once).** The pid is gone but the single-instance mutex or window outlives it for a moment: the child also waits for the plugin's window to be gone. In `lib.rs`'s `wait_for_old_process`, after `wait_until_gone`, add a second wait on `FindWindowW(class, name)` being null, where `class` is `ai.resincore.cmdstudio-sic` and `name` `ai.resincore.cmdstudio-siw` (the plugin's names at `tauri-plugin-single-instance-2.5.4/src/platform_impl/windows.rs:67-69`, from the identifier), polled every 100 ms within the same 10 s, through `windows_sys::Win32::UI::WindowsAndMessaging::FindWindowW` (feature `Win32_UI_WindowsAndMessaging`, already on). If that does not bring the window either, the restart is dropped: "Start normally" tells the user to close and open CMD Studio (`recovery.normal.closeAndOpen`, en "Close CMD Studio and open it again from the Start menu.", th "ปิด CMD Studio แล้วเปิดใหม่จากเมนู Start"), and the bar's restart button goes; recorded in the rulings.
 - **F3 (`OpenProcess` of a pid that is gone fails with another code, e.g. `ERROR_ACCESS_DENIED`, or `GetProcessTimes` is refused for this process).** `process_created_at` answers `Ok(None)` for *every* `OpenProcess` failure (the record's pid is then "not alive"; a process the user may not open is not this app's own earlier instance, which runs as this user), and the test `a_pid_that_is_not_there_is_none` loses its error-code assertion. `this_process` keeps `created_at_ms: None` when `GetProcessTimes` fails, and a run record with `createdAt: null` is compared on the pid alone (Task 4's `same_run`).
 
 ## File map
@@ -121,7 +123,7 @@ Recovery spec §0 asks whether `ProcessFailed` is reachable under the pinned Tau
 
 **Interfaces:**
 - Consumes: `tauri::WebviewWindow::with_webview` (tauri 2.12.4 `src/webview/webview_window.rs:2498`), `PlatformWebview::controller()` (`src/webview/mod.rs:184`, returns a cloned `ICoreWebView2Controller`), `webview2_com::ProcessFailedEventHandler::create(Box<dyn FnMut(Option<ICoreWebView2>, Option<ICoreWebView2ProcessFailedEventArgs>) -> windows_core::Result<()>>)`, `ICoreWebView2::add_ProcessFailed(&self, handler, token: *mut i64)`, `ICoreWebView2::Reload()`, `ICoreWebView2ProcessFailedEventArgs::ProcessFailedKind(*mut COREWEBVIEW2_PROCESS_FAILED_KIND)` (webview2-com-sys 0.39.1 `src/bindings.rs:1299, 1396, 30853`).
-- Produces: `results-3b2.md` with S1–S3 and the fallback taken; the exact `webview_watch.rs` text Task 6 Step 6 copies. **Verified while this plan was written** (a scratch worktree at `60061c0`, its own target dir, the app never started): with `webview2-com = "=0.39.1"` and `windows-core = "=0.62.2"` added, Step 2's file compiles, its test passes, and `cargo clippy -p cmdstudio-app --all-targets -- -D warnings` and `cargo fmt --check` are clean; Step 3's `process_stamp_tests` passes (this process's creation time within 60 s; pid 4294967294 is `None`), clippy clean for the core too. S2 is the only open question, for VM-A.
+- Produces: `results-3b2.md` with S1–S4 and the fallback taken; the exact `webview_watch.rs` text Task 6 Step 6 copies. **Verified while this plan was written** (a scratch worktree at `60061c0`, its own target dir, the app never started): with `webview2-com = "=0.39.1"` added, Step 2's file compiles, its test passes, and `cargo clippy -p cmdstudio-app --all-targets -- -D warnings` and `cargo fmt --check` are clean; Step 3's `process_stamp_tests` passes (this process's creation time within 60 s; pid 4294967294 is `None`), clippy clean for the core too. S2 is the only open question, for VM-A.
 
 - [ ] **Step 1: The scratch worktree**
 
@@ -135,10 +137,9 @@ git worktree add --detach <scratchpad>/wt HEAD
 In `<scratchpad>\wt\app\src-tauri\Cargo.toml`, under `[target.'cfg(windows)'.dependencies]`, add:
 
 ```toml
-# WebView2's ProcessFailed (recovery spec §6.4): the renderer's death reloads the page. Both
-# versions are the ones wry 0.57.0 already pins in Cargo.lock; nothing new is downloaded.
+# WebView2's ProcessFailed (recovery spec §6.4): the renderer's death reloads the page. The
+# version is the one wry 0.57.0 already pins in Cargo.lock; nothing new is downloaded.
 webview2-com = "=0.39.1"
-windows-core = "=0.62.2"
 ```
 
 In `<scratchpad>\wt\app\src-tauri\src\lib.rs`, after `pub mod settings;`, add `#[cfg(windows)]\npub mod webview_watch;`. Create `<scratchpad>\wt\app\src-tauri\src\webview_watch.rs`:
@@ -414,16 +415,22 @@ Expected: `recovery-renderer.ps1 errors=0 guarded=True`, `guard.test.ps1 errors=
 # Phase 3b-2 spike — WebView2 ProcessFailed through Tauri 2.12.4, and the process stamp (recovery spec §0, §6.4)
 
 - **Date / commit:** <date> / <sha>.
-- **S1 and S3 ran on the dev PC in a scratch worktree** (`cargo check` and two unit tests; the app was never started). **S2 runs on VM-A** against CI's artifact of this branch once Task 6 is in (the controller; `spikes/vm/guest/recovery-renderer.ps1`).
+- **S1 and S3 ran on the dev PC in a scratch worktree** (`cargo check` and two unit tests; the app was never started). **S2 and S4 run on VM-A** against CI's artifact of this branch once Task 6 is in (the controller; `spikes/vm/guest/recovery-renderer.ps1`, Task 12 step 2b).
 
 | # | What | Plan 3b-2 assumes | Result | Holds? | Fallback taken |
 |---|---|---|---|---|---|
-| S1 | `with_webview` → `controller().CoreWebView2()` → `add_ProcessFailed(ProcessFailedEventHandler)`, `Reload()` from the handler, with webview2-com 0.39.1 and windows-core 0.62.2 as direct dependencies | compiles | <`cargo check` output's last line; the test's result> | <✅/❌> | <— / F1> |
+| S1 | `with_webview` → `controller().CoreWebView2()` → `add_ProcessFailed(ProcessFailedEventHandler)`, `Reload()` from the handler, with webview2-com 0.39.1 as a direct dependency | compiles | <`cargo check` output's last line; the test's result> | <✅/❌> | <— / F1> |
 | S2 | `Stop-Process` of the renderer fires the handler and `Reload()` brings the page back | the page is back within 5 s; `app_status` asked; Home drawn | <recovery-renderer.ps1's lines; the app's log lines> | <✅/❌> | <— / F2 / F1> |
 | S3 | `GetProcessTimes` of this process; `OpenProcess` of a pid that is not there | a time within 60 s; `ERROR_INVALID_PARAMETER` → `Ok(None)` | <the test's result> | <✅/❌> | <— / F3> |
 ```
 
-Fill S1 and S3 from Steps 2–3; leave S2's cells as `pending (VM-A, after Task 6)` for the controller.
+and a fourth row:
+
+```markdown
+| S4 | "Start normally" restarts the app: the child (`--after-pid <old pid>`) waits for the old process, then one new process with Home | one process, Home within 15 s, `run end` before `run start` | <recovery-run.ps1 -Show and the process count> | <✅/❌> | <— / F4> |
+```
+
+Fill S1 and S3 from Steps 2–3; leave S2's and S4's cells as `pending (VM-A, after Task 6)` for the controller (Task 12 steps 6 and 2b).
 
 - [ ] **Step 6: Clean the scratch, commit**
 
@@ -482,7 +489,23 @@ fn a_stale_tag_of_a_live_window_counts_and_nothing_runs_tasklist() -> mlua::Resu
 }
 ```
 
-Keep the harness's `__tasklist` stub, `usual_tasklist` and the `tasklists` field: they now prove that nothing runs tasklist. Delete `tasklist_raises` handling if it is referenced only by the deleted tests (`__tasklist_raises` in the STUBS Lua at `:142`: leave the stub line; it is harmless).
+Keep the harness's `__tasklist` stub, `usual_tasklist` and the `tasklists` field: they now prove that nothing runs tasklist. Delete `tasklist_raises` handling if it is referenced only by the deleted tests (`__tasklist_raises` in the STUBS Lua at `:142`: leave the stub line; it is harmless). The stub's comment at `:57-58` ("`io.popen` answers a command that runs tasklist …") becomes: `/// \`io.popen\` answers a command that runs tasklist, by any path, with \`__tasklist\` (nothing of init.lua's runs one since 3b-2: the field proves it) and every other command, Oh My Posh's, with \`__popen_result\`.`
+
+A fifth test, `tasklist_is_not_run_when_only_forgotten_tags_are_over_the_threshold` (`:1235-1255`), asserts in its second half that tasklist ran once (`assert_eq!(w.tasklists.len(), 1, …)` at `:1251`). Keep the test and change that half: the three stale tags beside two forgotten still pause and count three, and nothing runs tasklist:
+
+```rust
+    // Three stale ones beside two forgotten: the pause counts the three, and the forgotten are
+    // gone without being counted. Nothing runs tasklist (3b-2).
+    let mut disk = tags_of_age(&[1, 2], 3 * 60 * 60);
+    disk.extend(tags_of_age(&[5, 6, 8], 120));
+    let w = open(&mut disk, window(9, T))?;
+    assert!(w.paused);
+    assert!(w.tasklists.is_empty(), "{:?}", w.tasklists);
+    assert_eq!(w.lines(), [PAUSED_NOW.replace("%d", "3")]);
+    assert_eq!(disk, Disk::from([(paused_file(), pause_record(T, 3))]));
+```
+
+and its first comment's "and tasklist (a program started through cmd /c) never runs" stays true. Rename it `forgotten_tags_are_never_counted_and_nothing_runs_tasklist`.
 
 - [ ] **Step 2: Run it to see it fail**
 
@@ -539,7 +562,7 @@ with
 ```
 
 3. In `HEALTH_BODY`'s opening comment (`-- The start counter (recovery spec §3): …`), delete any sentence that mentions tasklist or a window "still running" (read the comment; there is one about the pause decision).
-4. In the module doc (`lua.rs:56-67`), replace the bullet that starts `/// - Before it pauses the theme, and only then, the counter lists the running programs once` (through `/// before PATH, so a bare \`tasklist\` would run a \`tasklist.bat\` that sits there.`) with:
+4. In the module doc (`lua.rs:49-51`), the FORGET_AFTER bullet's words "before the pause is decided and so before tasklist could run for it" become "before the pause is decided"; then (`lua.rs:56-67`) replace the bullet that starts `/// - Before it pauses the theme, and only then, the counter lists the running programs once` (through `/// before PATH, so a bare \`tasklist\` would run a \`tasklist.bat\` that sits there.`) with:
 
 ```rust
 /// - A hung window counts, open or closed (the founder, 2026-10-19): three stale tags pause the
@@ -788,6 +811,26 @@ Update the module doc's first line: `//! The theme's pause, the start counter's 
 
 The two must be byte-equal: `crates/core/tests/error_codes.rs` and `error.rs`'s test compare them.
 
+`error_codes.rs`'s `the_codes_of_spec_5_9_and_the_codes_the_code_says_are_the_same` also asks that every row be *used* by Rust outside `MEANINGS`; `E_TIMEOUT` is the UI's own (`work.ts`, Task 8), so the test names the UI-only codes explicitly. Add above that test:
+
+```rust
+/// The rows of §5.9 that only the UI says (recovery spec §6.2): the TypeScript raises them, the
+/// Rust side only knows their meaning. A test of its own (`every_ui_only_code_is_said_by_the_typescript`,
+/// plan 3b-2 Task 8) checks that the TypeScript does say each.
+const UI_ONLY: &[&str] = &["E_TIMEOUT"];
+```
+
+and in the test change `let never_said: Vec<_> = spec.difference(&used).collect();` to
+
+```rust
+    let never_said: Vec<_> = spec
+        .difference(&used)
+        .filter(|code| !UI_ONLY.contains(&code.as_str()))
+        .collect();
+```
+
+Its module doc gains one sentence: `A row that only the UI says (\`UI_ONLY\`) is checked against the TypeScript instead.`
+
 - [ ] **Step 7: Run everything**
 
 Run: `cargo test -p cmdstudio-core --lib` → `ok. 777 passed` (774 + the fake's, the paths', the stamp's). `cargo test -p cmdstudio-core --test error_codes` → `ok. 3 passed`. `cargo test -p cmdstudio-cli --lib` → `ok. 55 passed`. `cargo test -p cmdstudio-app --lib` → `ok. 228 passed`.
@@ -839,8 +882,10 @@ The app's own record of its run (recovery spec §5.1), the safe mode it opens in
       pub fn app_status(&self) -> Result<AppStatus, AppError>;
       pub fn crash_dismiss(&self);
       pub fn log_ui_error(&self, message: &str, place: &str) -> Result<(), AppError>;
-      pub(crate) fn busy_begin(&self, name: &'static str); pub(crate) fn busy_end(&self);
+      pub(crate) fn busy(&self, name: &'static str) -> Busy<'_, M>;   // a guard: busy until dropped
+      pub(crate) fn recovery_entry_with(&self, during: impl FnOnce(&Self)) -> RecoveryEntry;   // a test seam
   }
+  pub const RECOVERY_ENTRY_BUSY: &str = "recovery_entry";
   // command_names.rs
   pub const CHANGES_MACHINE: &[&str] = &[APPLY, UNDO_LAST, SNAPSHOT_RESTORE, REVERT_ALL, THEME_PAUSE];
   // lib.rs
@@ -858,7 +903,6 @@ mod tests {
     use super::*;
     use crate::backend::testing::{apply_terracotta, backend, fake_fs, fake_host};
     use cmdstudio_core::adapters::fake::FakeMachine;
-    use cmdstudio_core::adapters::Fs;
     use cmdstudio_core::recovery::{read_pause, PauseLevel, PauseReason, PausedBy};
     use cmdstudio_core::state::State;
 
@@ -957,12 +1001,17 @@ mod tests {
             failed_starts: 1,
             ..old(None, 1)
         };
-        // Alive with the same creation time: skipped (no count), this run's record replaces it.
+        // Alive with the same creation time: skipped (no count), and its record is left as it
+        // is: single-instance ends this process, and nothing of this process's touches the file
+        // (K11: `app_ready` and `end_run` are no-ops for it).
         fake_host(&b).processes.borrow_mut().insert(777, 50);
         put(&b, &alive);
         let d = b.start_run(GuiStart::Normal);
         assert_eq!((d.safe_mode, d.crash_notice), (None, None));
-        assert_eq!(record(&b).unwrap().failed_starts, 0);
+        assert_eq!(record(&b), Some(alive.clone()));
+        b.app_ready().unwrap();
+        b.end_run();
+        assert_eq!(record(&b), Some(alive.clone()), "the running process's record is untouched");
         assert!(b.log_tail(5).contains("run record=still-running"), "{}", b.log_tail(5));
         // The same pid, another creation time: that process is another program; the run ended.
         fake_host(&b).processes.borrow_mut().insert(777, 51);
@@ -977,7 +1026,7 @@ mod tests {
         put(&b, &no_time);
         let d = b.start_run(GuiStart::Normal);
         assert_eq!(d.safe_mode, None, "pid 777 is alive: skipped");
-        assert_eq!(record(&b).unwrap().failed_starts, 0);
+        assert_eq!(record(&b), Some(no_time));
     }
 
     /// Review Focus 2: after `app_restart` the old process exits while the new one's record is
@@ -1131,6 +1180,27 @@ mod tests {
         });
         assert!(!CHANGES_MACHINE.contains(&PLAN_APPLY), "planning changes nothing");
         assert_eq!(CHANGES_MACHINE.len(), 5);
+        // A change that panics leaves nothing busy (the guard, K20 f).
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _: Result<(), AppError> = b.logged(APPLY, |_| panic!("a bug"));
+        }));
+        assert_eq!(b.app_status().unwrap().busy, None);
+    }
+
+    /// K12: the `--recovery` entry is busy under its own name for its whole duration, so the
+    /// UI's start waits for it (recovery spec §6.3) and reads the page once it has ended.
+    #[test]
+    fn the_recovery_entry_is_busy_under_its_own_name_while_it_runs() {
+        let b = backend();
+        apply_terracotta(&b);
+        b.start_run(GuiStart::Recovery);
+        let seen = std::cell::Cell::new(None);
+        let entry = b.recovery_entry_with(|b| seen.set(b.app_status().unwrap().busy));
+        assert_eq!(seen.into_inner().as_deref(), Some(RECOVERY_ENTRY_BUSY));
+        assert_eq!(RECOVERY_ENTRY_BUSY, "recovery_entry");
+        assert!(!crate::command_names::CHANGES_MACHINE.contains(&RECOVERY_ENTRY_BUSY));
+        assert!(entry.pause.unwrap().paused_now);
+        assert_eq!(b.app_status().unwrap().busy, None);
     }
 
     /// Spec §6.5: the UI's errors are logged, at most twenty per run (Task 5 pins the
@@ -1338,7 +1408,14 @@ impl<M: Machine> Backend<M> {
                         Ok(None) | Err(_) => false,
                     };
                     if alive && old.pid != me.pid {
+                        // Spec §5.1: single-instance ends this process in a moment (its plugin
+                        // runs after this). Nothing is written, so the running process's record
+                        // stays its own, and `app_ready`/`end_run` here are no-ops (`mine` None).
                         self.note_line("run record=still-running");
+                        return StartDecision {
+                            safe_mode: None,
+                            crash_notice: None,
+                        };
                     } else if old.ui_ready_at.is_none() {
                         failed_starts = old.failed_starts.saturating_add(1);
                     } else {
@@ -1439,6 +1516,15 @@ impl<M: Machine> Backend<M> {
     /// this computer (`reason: recovery`) when one is applied and no pause of this computer is
     /// in place. Run off the window's thread (`lib.rs`); the outcome goes to `app_status`.
     pub fn recovery_entry(&self) -> RecoveryEntry {
+        self.recovery_entry_with(|_| {})
+    }
+
+    /// [`recovery_entry`] with `during` run once the entry is marked busy, for a test that looks
+    /// at `app_status` meanwhile. The entry is `busy` under [`RECOVERY_ENTRY_BUSY`] for its whole
+    /// duration (K12): the UI's start waits for it and asks again when it ends.
+    pub(crate) fn recovery_entry_with(&self, during: impl FnOnce(&Self)) -> RecoveryEntry {
+        let _busy = self.busy(RECOVERY_ENTRY_BUSY);
+        during(self);
         let sys = self.sys();
         let ctx = self.ctx();
         let (mut notes, unrestored) = match recover_at_start(sys, &ctx) {
@@ -1558,12 +1644,25 @@ impl<M: Machine> Backend<M> {
         text.replace(['\r', '\n'], " ")
     }
 
-    pub(crate) fn busy_begin(&self, name: &'static str) {
+    /// Marks `name` as what runs now, until the guard drops: also when the work panics, so a
+    /// panic inside a change never leaves `app_status` saying busy for the rest of the run.
+    pub(crate) fn busy(&self, name: &'static str) -> Busy<'_, M> {
         self.run.with(|r| r.busy = Some(name));
+        Busy(self)
     }
+}
 
-    pub(crate) fn busy_end(&self) {
-        self.run.with(|r| r.busy = None);
+/// `UI_ERRORS_PER_RUN`'s sibling: the name `app_status.busy` carries while the `--recovery`
+/// entry runs (recovery spec §4.4, §6.3). Not in `CHANGES_MACHINE` (it is no IPC command); the
+/// UI's start shows its own text for it.
+pub const RECOVERY_ENTRY_BUSY: &str = "recovery_entry";
+
+/// The guard of [`Backend::busy`].
+pub(crate) struct Busy<'a, M: Machine>(&'a Backend<M>);
+
+impl<M: Machine> Drop for Busy<'_, M> {
+    fn drop(&mut self) {
+        self.0.run.with(|r| r.busy = None);
     }
 }
 ```
@@ -1573,14 +1672,12 @@ impl<M: Machine> Backend<M> {
 In `backend/mod.rs`: `pub mod run;`; the field `/// This run: the record, safe mode, the crash notice, what runs now (recovery spec §5).\n    run: run::RunState,` with `run: run::RunState::new(),` in `new`; and in `logged`, around `let result = f(self);`:
 
 ```rust
-        let changes = crate::command_names::CHANGES_MACHINE.contains(&name);
-        if changes {
-            self.busy_begin(name);
-        }
+        // Named as what runs now while it runs (recovery spec §6.3); the guard clears it also
+        // when `f` panics (the worker then answers E_INTERNAL).
+        let _busy = crate::command_names::CHANGES_MACHINE
+            .contains(&name)
+            .then(|| self.busy(name));
         let result = f(self);
-        if changes {
-            self.busy_end();
-        }
 ```
 
 In `command_names.rs`, after `COMMANDS`:
@@ -1598,7 +1695,7 @@ pub const CHANGES_MACHINE: &[&str] = &[APPLY, UNDO_LAST, SNAPSHOT_RESTORE, REVER
 - [ ] **Step 4: Run the backend tests**
 
 Run: `cargo test -p cmdstudio-app --lib backend::run::`
-Expected: `ok. 11 passed`. `cargo test -p cmdstudio-app --lib` → `ok. 239 passed` (228 + 11).
+Expected: `ok. 12 passed`. `cargo test -p cmdstudio-app --lib` → `ok. 240 passed` (228 + 12).
 
 - [ ] **Step 5: `main.rs` and `lib.rs`**
 
@@ -1703,40 +1800,44 @@ pub fn run_gui(how: backend::run::GuiStart) {
     }
 }
 
-/// `--recovery`'s steps 1–2 on a thread of their own, once the window is up (recovery spec
-/// §4.4): the window shows the Recovery page meanwhile, and `app_status` carries the outcome.
+/// `--recovery`'s steps 1–2 on a thread of their own (recovery spec §4.4), then `after`. The
+/// entry is `busy` under its own name while it runs, so the UI's start waits for it (§6.3). A
+/// thread that cannot be started is logged; nothing waits on the window's thread.
 #[cfg(windows)]
-fn start_recovery_entry(backend: &std::sync::Arc<backend::Backend<machine::RealMachine>>) {
+fn spawn_recovery_entry(
+    backend: &std::sync::Arc<backend::Backend<machine::RealMachine>>,
+    after: impl FnOnce() + Send + 'static,
+) {
     let b = backend.clone();
     let spawned = std::thread::Builder::new()
         .name("recovery-entry".to_string())
         .spawn(move || {
             let _ = b.recovery_entry();
+            after();
         });
     if spawned.is_err() {
         backend.note_line("recovery_entry not_run");
     }
 }
 
-/// A second start with `--recovery` while this one runs (recovery spec §4.4): steps 1–2 on a
-/// thread, then the page is loaded again; the reloaded UI asks `app_status` first and finds
-/// safe mode on (§6.3). Nothing waits on the window's thread.
+/// The start with `--recovery`: the entry once the window is up; the window's first
+/// `app_status` finds it busy and asks again until it has ended.
+#[cfg(windows)]
+fn start_recovery_entry(backend: &std::sync::Arc<backend::Backend<machine::RealMachine>>) {
+    spawn_recovery_entry(backend, || {});
+}
+
+/// A second start with `--recovery` while this one runs (recovery spec §4.4): the entry, then
+/// the page is loaded again; the reloaded UI asks `app_status` first and finds safe mode on.
 #[cfg(windows)]
 fn recover_in_place(
     backend: &std::sync::Arc<backend::Backend<machine::RealMachine>>,
     window: tauri::WebviewWindow,
 ) {
     backend.enter_safe_mode(backend::run::SafeModeReason::Recovery);
-    let b = backend.clone();
-    let spawned = std::thread::Builder::new()
-        .name("recovery-entry".to_string())
-        .spawn(move || {
-            let _ = b.recovery_entry();
-            let _ = window.eval("window.location.reload()");
-        });
-    if spawned.is_err() {
-        backend.note_line("recovery_entry not_run");
-    }
+    spawn_recovery_entry(backend, move || {
+        let _ = window.eval("window.location.reload()");
+    });
 }
 ```
 
@@ -1770,7 +1871,7 @@ and this test for `main.rs`'s rule by text (the binary is never run here):
 
 - [ ] **Step 6: Build and test**
 
-Run: `cargo test -p cmdstudio-app --lib` → `ok. 240 passed` (239 + 1). `cargo build -p cmdstudio-app` must finish (the exe is built, never started; a WDAC block on the build is rerun once and then marked in the message).
+Run: `cargo test -p cmdstudio-app --lib` → `ok. 241 passed` (240 + 1). `cargo build -p cmdstudio-app` must finish (the exe is built, never started; a WDAC block on the build is rerun once and then marked in the message).
 
 - [ ] **Step 7: Checks and commit**
 
@@ -1792,9 +1893,8 @@ Recovery spec §5.3: a panic in the app or the CLI leaves `<data>\logs\crash-<un
 - Create: `app/src-tauri/src/crash.rs`
 - Modify: `app/src-tauri/src/lib.rs` (`pub mod crash;`)
 - Modify: `app/src-tauri/src/main.rs` (the hook, both modes)
-- Modify: `app/src-tauri/src/machine.rs` (`default_data_dir`, `redaction`)
-- Modify: `app/src-tauri/src/backend/run.rs` (`latest_crash_note_since`, `redact_for_log`, `crash_report_read`)
-- Modify: `app/src-tauri/src/backend/diagnostics.rs` (the crash note at the end of `diagnostics_copy`)
+- Modify: `app/src-tauri/src/backend/run.rs` (`latest_crash_note_since`, `redact_for_log`, `redaction`, `crash_report_read`)
+- Modify: `app/src-tauri/src/backend/diagnostics.rs` (`user_names` made `pub(crate)`; the crash note before `diagnostics_copy`'s redaction fold)
 
 **Interfaces:**
 - Consumes: `diagnostics::{redact, redact_sids, user_name_of}` (`diagnostics.rs:358-500`), `Backend::user_names() -> Result<Vec<String>, AppError>` (`diagnostics.rs:186`, the names `diagnostics_copy` redacts), `Logger`'s `Fs` use (`logs.rs`), `WinFs`, `WinHost::{local_app_data, user_sid}`, `cmdstudio_cli::{DATA_DIR_NAME, now_ms}`, `versions()` (`backend/mod.rs:365`).
@@ -1813,10 +1913,8 @@ Recovery spec §5.3: a panic in the app or the CLI leaves `<data>\logs\crash-<un
   pub fn install_hook(logs: PathBuf, redaction: Redaction, now: fn() -> u64);
   // backend/run.rs
   pub struct CrashReport { pub file: String, pub at_ms: u64, pub text: String }   // TS
-  impl Backend { pub fn crash_report_read(&self) -> Result<Option<CrashReport>, AppError>; }
-  // machine.rs
-  pub fn default_data_dir() -> Option<PathBuf>;
-  pub fn redaction() -> crash::Redaction;
+  impl Backend { pub fn crash_report_read(&self) -> Result<Option<CrashReport>, AppError>;
+                 pub fn redaction(&self) -> crash::Redaction; }   // the one rule: `diagnostics::user_names` (made pub(crate)) and the host's SID
   ```
 
 - [ ] **Step 1: The failing tests**
@@ -1912,11 +2010,20 @@ mod tests {
     fn a_note_that_cannot_be_written_is_dropped_without_a_second_panic() {
         let fs = FakeFs::new();
         fs.fail_writes_to(logs().join("crash-1791694709000.txt"));
-        let outcome = std::panic::catch_unwind(|| {
+        // UNWIND SAFETY (test): `FakeFs` holds a `RefCell`, so the closure is wrapped; nothing is
+        // read from it after a panic but through the assertions below.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             hook_body(&fs, &logs(), 1_791_694_709_000, &redaction(), &report("boom", ""))
-        });
+        }));
         assert!(outcome.is_ok(), "the hook's body panicked");
         assert_eq!(latest_note(&fs, &logs()), None);
+        // The disk is whole: once the folder can be written again, the next note lands.
+        fs.stop_failing(logs().join("crash-1791694709000.txt"));
+        hook_body(&fs, &logs(), 1_791_694_709_000, &redaction(), &report("boom", ""));
+        assert_eq!(
+            latest_note(&fs, &logs()),
+            Some((1_791_694_709_000, logs().join("crash-1791694709000.txt")))
+        );
     }
 
     /// On the real disk, as the hook writes it: a temp folder of its own, removed afterwards
@@ -1956,7 +2063,7 @@ In `app/src-tauri/src/backend/run.rs`'s tests, add:
         crate::crash::write_note(b.sys().fs, &logs, 1_791_693_000_000, "older\n").unwrap();
         put(&b, &old(Some(1_791_694_100_000), 0));
         let d = b.start_run(GuiStart::Normal);
-        assert_eq!(d.crash_notice.unwrap().has_report, false, "an older note is not this run's");
+        assert!(!d.crash_notice.unwrap().has_report, "an older note is not this run's");
         crate::crash::write_note(b.sys().fs, &logs, 1_791_694_200_000, "message: at C:\\Users\\tester\\x\n").unwrap();
         put(&b, &old(Some(1_791_694_100_000), 0));
         let d = b.start_run(GuiStart::Normal);
@@ -2154,53 +2261,22 @@ In `lib.rs`: `pub mod crash;`.
 
 - [ ] **Step 4: `machine.rs`, `main.rs`**
 
-`app/src-tauri/src/machine.rs`, after `real_backend`:
-
-```rust
-/// `%LOCALAPPDATA%\ai.resincore.cmdstudio`, as `real_backend` works it out; `None` when
-/// Windows cannot say where the local app data is.
-pub fn default_data_dir() -> Option<PathBuf> {
-    WinHost
-        .local_app_data()
-        .ok()
-        .map(|local| local.join(cmdstudio_cli::DATA_DIR_NAME))
-}
-
-/// What the crash notes take out (recovery spec §5.3): this user's name, from the local app
-/// data path and from `USERNAME`, and the SID. Nothing when neither can be read: the notes then
-/// redact nothing, and a name in a path stays (the user reads the note before sending it).
-pub fn redaction() -> crate::crash::Redaction {
-    let host = WinHost;
-    let mut names: Vec<String> = host
-        .local_app_data()
-        .map(|p| vec![crate::backend::diagnostics::user_name_of(&p)])
-        .unwrap_or_default();
-    if let Ok(user) = std::env::var("USERNAME") {
-        names.push(user);
-    }
-    names.retain(|n| !n.is_empty());
-    crate::crash::Redaction {
-        names,
-        sid: host.user_sid().ok(),
-    }
-}
-```
-
-`app/src-tauri/src/main.rs`, as the first lines of the Windows `main`, before `let args`:
+One rule for what is redacted, the diagnostics' (`user_names`, `diagnostics.rs:186`): make it `pub(crate) fn user_names` there, and the hook takes its `Redaction` from a real backend. `app/src-tauri/src/main.rs`, as the first lines of the Windows `main`, before `let args`:
 
 ```rust
     // The crash notes, for the app and the CLI alike (recovery spec §5.3): the default data
-    // folder's logs\ (a `--data-dir` run's note goes there too).
-    if let Some(data) = cmdstudio_app::machine::default_data_dir() {
+    // folder's logs\ (a `--data-dir` run's note goes there too), redacted as the diagnostics
+    // redact. A backend that cannot be made (no local app data) installs no hook.
+    if let Ok(backend) = cmdstudio_app::machine::real_backend() {
         cmdstudio_app::crash::install_hook(
-            data.join("logs"),
-            cmdstudio_app::machine::redaction(),
+            backend.paths().logs(),
+            backend.redaction(),
             cmdstudio_cli::now_ms,
         );
     }
 ```
 
-`machine` is `#[cfg(windows)] pub mod machine;`: fine, `main` is `#[cfg(windows)]` too. Add to `lib.rs`'s text test `only_the_recovery_argument_opens_the_window`: `assert!(main.find("crash::install_hook").unwrap() < main.find("let args").unwrap(), "the hook comes first");`.
+(`real_backend` builds the adapters and reads the environment once; it starts nothing and writes nothing. `run_gui` builds its own backend afterwards, as before: the hook keeps only its `Redaction`.) `machine` is `#[cfg(windows)] pub mod machine;`: fine, `main` is `#[cfg(windows)]` too; `machine.rs` needs no change. Add to `lib.rs`'s text test `only_the_recovery_argument_opens_the_window`: `assert!(main.find("crash::install_hook").unwrap() < main.find("let args").unwrap(), "the hook comes first");`.
 
 - [ ] **Step 5: The backend's use of the notes**
 
@@ -2219,10 +2295,11 @@ In `backend/run.rs`, replace the two stand-ins:
         crate::crash::redact_all(&text.replace(['\r', '\n'], " "), &self.redaction())
     }
 
-    /// The names `diagnostics_copy` redacts (`user_names`, `diagnostics.rs:186`: the Windows
-    /// user name and the profile folder's names) and this user's SID; empty when they cannot
-    /// be read, so nothing is taken out.
-    pub(crate) fn redaction(&self) -> crate::crash::Redaction {
+    /// The one rule of what is taken out of a text: the names `diagnostics_copy` redacts
+    /// (`user_names`, `diagnostics.rs:186`: the Windows user name and the profile folder's
+    /// names, the 8.3 alias included) and this user's SID; empty when they cannot be read, so
+    /// nothing is taken out. The panic hook takes its copy from here (`main.rs`).
+    pub fn redaction(&self) -> crate::crash::Redaction {
         crate::crash::Redaction {
             names: self.user_names().unwrap_or_default(),
             sid: self.sys().host.user_sid().ok(),
@@ -2268,7 +2345,7 @@ impl<M: Machine> Backend<M> {
 }
 ```
 
-In `backend/diagnostics.rs`, at the end of `diagnostics_copy` (before `Ok(out)`; read the function's tail), append the newest note when the start found an abnormal exit with a report, or a note was written during this run (newer than this run's start):
+In `backend/diagnostics.rs`, `diagnostics_copy` ends with the redaction fold (`:174-175`: `let out = redact_sids(&out, …); Ok(names.iter().fold(out, …))`); right before that `let out = redact_sids(` line, append the newest note when the start found an abnormal exit with a report, or a note was written during this run (newer than this run's start). The fold then redacts the note once more, which changes nothing:
 
 ```rust
         // The newest crash note, when it belongs to this run or the one that ended abnormally
@@ -2282,18 +2359,33 @@ In `backend/diagnostics.rs`, at the end of `diagnostics_copy` (before `Ok(out)`;
         }
 ```
 
-with, in `run.rs`'s `impl`: `pub(crate) fn run_started_at(&self) -> Option<u64> { self.run.with(|r| r.mine.as_ref().map(|m| m.started_at)) }`. In the test above, the notice has a report, so the note is attached; add to the same test, after the diagnostics assertion, a backend with a note older than its run and no notice: `assert!(!b2.diagnostics_copy().unwrap().contains("== crash report"))`.
+with, in `run.rs`'s `impl`: `pub(crate) fn run_started_at(&self) -> Option<u64> { self.run.with(|r| r.mine.as_ref().map(|m| m.started_at)) }`. In the test above, the notice has a report, so the note is attached; add to the same test, after the diagnostics assertion, the other case:
+
+```rust
+        // A note older than this run, and no notice: the diagnostics leave it out.
+        let b2 = backend();
+        crate::crash::write_note(b2.sys().fs, &b2.paths().logs(), 1_791_694_000_000, "old\n").unwrap();
+        let d2 = b2.start_run(GuiStart::Normal);
+        assert_eq!(d2.crash_notice, None);
+        assert!(b2.run_started_at().unwrap() > 1_791_694_000_000);
+        assert!(!b2.diagnostics_copy().unwrap().contains("== crash report"));
+        // A note written during this run (a caught panic, say): attached.
+        crate::crash::write_note(b2.sys().fs, &b2.paths().logs(), b2.now_ms() + 1, "now\n").unwrap();
+        assert!(b2.diagnostics_copy().unwrap().contains("== crash report"));
+```
+
+(The hook writes a note for every panic, a caught one of a pure command included (`ipc.rs`'s `caught`): that is a bug worth a note, and the Report tab then shows it; the crash notice itself comes only from `run.json`, so a caught panic never says the app closed.)
 
 - [ ] **Step 6: Run everything**
 
-Run: `cargo test -p cmdstudio-app --lib` → `ok. 246 passed` (240 + 4 crash + 2 run). The on-disk test writes under the temp folder only.
+Run: `cargo test -p cmdstudio-app --lib` → `ok. 247 passed` (241 + 4 crash + 2 run). The on-disk test writes under the temp folder only.
 
 - [ ] **Step 7: Checks and commit**
 
 `cargo fmt --all`; the four clippy commands; `cargo build -p cmdstudio-app` (never started).
 
 ```bash
-git add -- app/src-tauri/src/crash.rs app/src-tauri/src/lib.rs app/src-tauri/src/main.rs app/src-tauri/src/machine.rs app/src-tauri/src/backend/run.rs app/src-tauri/src/backend/diagnostics.rs
+git add -- app/src-tauri/src/crash.rs app/src-tauri/src/lib.rs app/src-tauri/src/main.rs app/src-tauri/src/backend/run.rs app/src-tauri/src/backend/diagnostics.rs
 ```
 
 Message: `app: a panic writes a redacted crash note, the next start says the run ended abnormally, and the UI's errors are logged redacted (recovery spec §5.3, §6.5)`.
@@ -2305,8 +2397,9 @@ Message: `app: a panic writes a redacted crash note, the next start says the run
 Recovery spec §5.4 (a window that cannot open offers Undo everything), §6.3 (`app_restart`), §5.2 ("Reset the app's settings"), 3b-1's m4, and §6.4 if Task 1's S1 passed. Backend methods and `lib.rs`; the IPC wrappers are Task 7's.
 
 **Files:**
-- Modify: `app/src-tauri/src/console.rs` (`ask_yes_no`)
-- Modify: `app/src-tauri/src/lib.rs` (the Yes/No path, `restart_process`, the renderer watch)
+- Modify: `app/src-tauri/src/console.rs` (`message_box`, `fatal` over it, `ask_yes_no`)
+- Modify: `app/src-tauri/src/lib.rs` (the Yes/No path, `restart_process` and the `--after-pid` wait, the renderer watch)
+- Modify: `app/src-tauri/src/main.rs` (the `--after-pid` arm)
 - Modify: `app/src-tauri/src/backend/mod.rs` (`settings_reset`)
 - Modify: `app/src-tauri/src/backend/recovery.rs` (`ResumeOutcome::NotKnown`)
 - Create (only if S1 passed): `app/src-tauri/src/webview_watch.rs`; Modify: `app/src-tauri/Cargo.toml`
@@ -2320,7 +2413,11 @@ Recovery spec §5.4 (a window that cannot open offers Undo everything), §6.3 (`
   // lib.rs
   pub fn window_question(why: &str, logs: &Path) -> String;
   pub fn revert_said(result: &Result<RevertOutcome, AppError>, logs: &Path) -> String;
-  pub fn restart_process() -> Result<(), String>;      // spawns cmdstudio.exe with no arguments
+  pub const AFTER_PID_ARG: &str = "--after-pid"; pub const RESTART_WAIT_MS: u64 = 10_000;
+  pub fn restart_process() -> Result<(), String>;      // spawns cmdstudio.exe --after-pid <this pid>
+  pub fn after_pid(arg: &OsStr) -> Option<u32>;
+  pub fn wait_until_gone(pid: u32, limit: Duration, is_alive: impl FnMut(u32) -> bool, sleep: impl FnMut(Duration)) -> Duration;
+  pub fn wait_for_old_process(arg: &OsStr);           // main.rs, before run_gui
   // backend/mod.rs
   impl Backend { pub fn settings_reset(&self) -> Result<SettingsLoad, AppError>; }
   // backend/recovery.rs
@@ -2384,21 +2481,28 @@ In `app/src-tauri/src/lib.rs`'s tests:
         assert_eq!(text.matches("console::fatal(&start_failed(").count(), 2, "start_failed stays a plain box");
     }
 
-    /// Recovery spec §6.3: the restart starts this exe again with no argument; the process is
-    /// never started here (the text is checked: the exe is never run on this PC).
+    /// Recovery spec §6.3: the restart starts this exe again with `--after-pid <this pid>` and
+    /// nothing else; the process is never started here (the text is checked: the exe is never
+    /// run on this PC). `main.rs` takes that flag before the window and before the CLI.
     #[test]
-    fn the_restart_starts_this_exe_with_no_argument() {
+    fn the_restart_starts_this_exe_after_this_pid() {
         let body = body_of("pub fn restart_process(");
         assert!(body.contains("std::env::current_exe()"));
         assert!(body.contains("std::process::Command::new(exe)"));
-        assert!(!body.contains(".arg("), "no argument: a normal start");
+        assert!(body.contains(".arg(AFTER_PID_ARG)"));
+        assert!(body.contains(".arg(std::process::id().to_string())"));
+        assert_eq!(body.matches(".arg(").count(), 2, "the flag and the pid, nothing else");
         assert!(body.contains(".spawn()"));
+        assert_eq!(AFTER_PID_ARG, "--after-pid");
+        let main = include_str!("main.rs");
+        assert!(main.contains("[flag, pid] if flag == cmdstudio_app::AFTER_PID_ARG"), "{main}");
+        assert!(main.contains("wait_for_old_process(pid)"));
     }
 ```
 
 (`RevertOutcome`'s fields: read `apply.rs:295` and fit the struct literal; `status` may be `Option<TxnStatus>` or `TxnStatus`.)
 
-In `app/src-tauri/src/console.rs`'s tests nothing: `ask_yes_no` shows a box (never in a test); its flags are pinned by text in `lib.rs`'s test above through `console::ask_yes_no(`; add there `assert!(include_str!("console.rs").contains("MB_YESNO | MB_ICONQUESTION"));` and `assert!(include_str!("console.rs").contains("== IDYES"));`.
+In `app/src-tauri/src/console.rs`'s tests nothing: `ask_yes_no` shows a box (never in a test); its flags are pinned by text in `lib.rs`'s test above through `console::ask_yes_no(`; add there `assert!(include_str!("console.rs").contains("message_box(message, MB_YESNO | MB_ICONQUESTION) == IDYES"));` and `assert!(include_str!("console.rs").contains("message_box(message, MB_OK | MB_ICONERROR)"));`.
 
 In `app/src-tauri/src/backend/mod.rs`'s tests:
 
@@ -2426,6 +2530,16 @@ In `app/src-tauri/src/backend/mod.rs`'s tests:
         let b = backend();
         let reset = b.settings_reset().unwrap();
         assert_eq!((reset.settings, reset.reset_from), (AppSettings::default(), None));
+        // A file that cannot be read is the case a reset is for: it is set aside all the same.
+        let b = backend();
+        let file = b.paths().settings_file();
+        b.sys().fs.write_atomic(&file, b"{ not json").unwrap();
+        crate::backend::testing::fake_fs(&b).fail_reads_of(&file);
+        assert_eq!(b.settings_get().unwrap_err().code, "E_MACHINE_READ");
+        let reset = b.settings_reset().unwrap();
+        assert!(reset.reset_from.unwrap().starts_with("settings.json.reset-"));
+        assert!(!b.sys().fs.exists(&file));
+        assert_eq!(b.settings_get().unwrap().settings, AppSettings::default());
     }
 ```
 
@@ -2436,6 +2550,7 @@ In `app/src-tauri/src/backend/recovery.rs`'s tests (m4):
     /// cannot be read says so, instead of ending in the planner's error; nothing is changed.
     #[test]
     fn turning_back_on_when_state_json_cannot_be_read_says_so() {
+        let level = |b: &Backend<FakeMachine>| b.recovery_status().unwrap().paused.unwrap().level;
         let b = backend();
         apply_terracotta(&b);
         b.theme_pause(PauseReason::User).unwrap();
@@ -2446,7 +2561,7 @@ In `app/src-tauri/src/backend/recovery.rs`'s tests (m4):
     }
 ```
 
-(`level(&b)` is the helper the test at `:849` uses.)
+(`recovery_status` needs no crash check to have started: it answers at once with `crashes: None`, as `no_pause_and_no_check_yet_is_said_as_such_at_once` shows.)
 
 - [ ] **Step 2: Run them to see them fail**
 
@@ -2456,27 +2571,35 @@ Run: `cargo test -p cmdstudio-app --lib a_window_that_cannot_open` → compile e
 
 After `fatal`:
 
+One box helper for both (K18): replace `fatal`'s body with a call, and add the two:
+
 ```rust
-/// Shows `message` with Yes and No, titled "CMD Studio", and answers whether Yes was pressed. For
-/// a window that cannot be opened (recovery spec §5.4); English, like `fatal`.
+/// Shows `message` in a message box titled "CMD Studio" with `flags` (`MB_*`), and answers what
+/// was pressed (`IDOK`, `IDYES`, `IDNO`). English, like every text outside the UI.
 #[cfg(windows)]
-pub fn ask_yes_no(message: &str) -> bool {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        MessageBoxW, IDYES, MB_ICONQUESTION, MB_YESNO,
-    };
+fn message_box(message: &str, flags: u32) -> i32 {
+    use windows_sys::Win32::UI::WindowsAndMessaging::MessageBoxW;
     let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
     let (text, title) = (wide(message), wide("CMD Studio"));
     // SAFETY: both strings are NUL-terminated UTF-16 buffers that outlive the call, the owner
-    // window is null (no parent), and the flags are documented constants.
-    let pressed = unsafe {
-        MessageBoxW(
-            std::ptr::null_mut(),
-            text.as_ptr(),
-            title.as_ptr(),
-            MB_YESNO | MB_ICONQUESTION,
-        )
-    };
-    pressed == IDYES
+    // window is null (no parent), and the flags are the caller's documented constants.
+    unsafe { MessageBoxW(std::ptr::null_mut(), text.as_ptr(), title.as_ptr(), flags) }
+}
+
+/// Shows `message` and returns when it is closed. For a start that fails before the window
+/// exists.
+#[cfg(windows)]
+pub fn fatal(message: &str) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK};
+    message_box(message, MB_OK | MB_ICONERROR);
+}
+
+/// Shows `message` with Yes and No, and answers whether Yes was pressed. For a window that
+/// cannot be opened (recovery spec §5.4).
+#[cfg(windows)]
+pub fn ask_yes_no(message: &str) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{IDYES, MB_ICONQUESTION, MB_YESNO};
+    message_box(message, MB_YESNO | MB_ICONQUESTION) == IDYES
 }
 
 #[cfg(not(windows))]
@@ -2485,6 +2608,8 @@ pub fn ask_yes_no(message: &str) -> bool {
     false
 }
 ```
+
+(`fatal`'s doc comment and its non-Windows twin stay as they are.)
 
 - [ ] **Step 4: `lib.rs`**
 
@@ -2502,7 +2627,9 @@ with
 ```rust
             if let Err(why) = open_main_window(app, for_window.paths().webview()) {
                 // Recovery spec §5.4: Yes undoes everything through the backend, under the lock
-                // as every change is; No ends as before. Either way exit code 1.
+                // as every change is; No ends as before. Either way exit code 1, and the run
+                // record is left on purpose: a window that could not open is a start that
+                // failed, and the second one in a row opens the next start in recovery mode.
                 let logs = for_window.paths().logs();
                 if console::ask_yes_no(&window_question(&why, &logs)) {
                     console::fatal(&revert_said(&for_window.revert_all(), &logs));
@@ -2548,17 +2675,105 @@ pub fn revert_said(
     }
 }
 
-/// Starts this exe again with no argument, a normal start (recovery spec §6.3): the caller
-/// exits once it has spawned. The new process reads this one's run record as still running and
-/// writes its own, which this one's exit leaves alone (`Backend::end_run`).
+/// The hidden argument `app_restart`'s child is started with (recovery spec §6.3): the pid of
+/// the process that is ending. The child waits for it before anything else (`main.rs`), so the
+/// single-instance plugin never finds the old window and hands the start to a dying process.
+pub const AFTER_PID_ARG: &str = "--after-pid";
+/// How long the child waits for the old process at most.
+pub const RESTART_WAIT_MS: u64 = 10_000;
+
+/// Starts this exe again as a normal start that waits for this process to be gone (recovery
+/// spec §6.3): the caller exits once it has spawned. No cmd.exe helper: cmd would load AutoRun.
 #[cfg(windows)]
 pub fn restart_process() -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     std::process::Command::new(exe)
+        .arg(AFTER_PID_ARG)
+        .arg(std::process::id().to_string())
         .spawn()
         .map(|_| ())
         .map_err(|e| e.to_string())
 }
+
+/// The pid `--after-pid` names; `None` for anything that is not a number.
+pub fn after_pid(arg: &std::ffi::OsStr) -> Option<u32> {
+    arg.to_str()?.parse().ok()
+}
+
+/// Waits, polling every 100 ms, until `is_alive(pid)` says no or `limit` has passed: how long
+/// it waited. Pure, for the test: `main.rs` hands it the real process check and `sleep`.
+pub fn wait_until_gone(
+    pid: u32,
+    limit: std::time::Duration,
+    mut is_alive: impl FnMut(u32) -> bool,
+    mut sleep: impl FnMut(std::time::Duration),
+) -> std::time::Duration {
+    let step = std::time::Duration::from_millis(100);
+    let mut waited = std::time::Duration::ZERO;
+    while waited < limit && is_alive(pid) {
+        sleep(step);
+        waited += step;
+    }
+    waited
+}
+
+/// `main.rs`'s wait for the process `arg` names, up to [`RESTART_WAIT_MS`]: a process that is
+/// there (`process_created_at` answers a time) is alive; one that is gone, or cannot be opened,
+/// is not waited for.
+#[cfg(windows)]
+pub fn wait_for_old_process(arg: &std::ffi::OsStr) {
+    let Some(pid) = after_pid(arg) else {
+        return;
+    };
+    wait_until_gone(
+        pid,
+        std::time::Duration::from_millis(RESTART_WAIT_MS),
+        |p| {
+            cmdstudio_core::adapters::windows::host::process_created_at(p).is_ok_and(|c| c.is_some())
+        },
+        std::thread::sleep,
+    );
+}
+```
+
+and in `main.rs`'s `match args.as_slice()`, before the `_ => {}` arm:
+
+```rust
+        [flag, pid] if flag == cmdstudio_app::AFTER_PID_ARG => {
+            // app_restart's child (recovery spec §6.3): the old process must be gone before the
+            // single-instance plugin looks for its window.
+            cmdstudio_app::wait_for_old_process(pid);
+            return cmdstudio_app::run_gui(GuiStart::Normal);
+        }
+```
+
+with the tests, in `lib.rs`'s tests:
+
+```rust
+    /// Recovery spec §6.3: the child of a restart waits for the old pid, up to ten seconds, and
+    /// goes on at once when it is gone; a flag that is not a number waits for nothing.
+    #[test]
+    fn the_restarts_child_waits_for_the_old_process_up_to_ten_seconds() {
+        use std::time::Duration;
+        assert_eq!(after_pid(std::ffi::OsStr::new("4242")), Some(4242));
+        assert_eq!(after_pid(std::ffi::OsStr::new("x")), None);
+        let mut polls = 0;
+        let mut slept = Duration::ZERO;
+        let waited = wait_until_gone(
+            7,
+            Duration::from_millis(RESTART_WAIT_MS),
+            |pid| {
+                assert_eq!(pid, 7);
+                polls += 1;
+                polls <= 3
+            },
+            |d| slept += d,
+        );
+        assert_eq!((polls, slept, waited), (4, Duration::from_millis(300), Duration::from_millis(300)));
+        let waited = wait_until_gone(7, Duration::from_millis(RESTART_WAIT_MS), |_| true, |_| {});
+        assert_eq!(waited, Duration::from_millis(RESTART_WAIT_MS));
+        assert_eq!(wait_until_gone(7, Duration::from_millis(RESTART_WAIT_MS), |_| false, |_| panic!("no sleep")), Duration::ZERO);
+    }
 ```
 
 - [ ] **Step 5: `settings_reset` and m4**
@@ -2571,38 +2786,44 @@ pub fn restart_process() -> Result<(), String> {
     /// name of the file set aside is told, once, like a damaged file's. Nothing to set aside
     /// when there is no file.
     pub fn settings_reset(&self) -> Result<SettingsLoad, AppError> {
-        self.with_settings(|cache| {
-            let fs = self.sys().fs;
-            let file = self.paths.settings_file();
-            let reset_from = if fs.exists(&file) {
-                let mut ms = self.now_ms();
-                let aside = loop {
-                    let candidate = self.paths.settings_reset_file(ms);
-                    if !fs.exists(&candidate) {
-                        break candidate;
-                    }
-                    ms = ms.saturating_add(1);
-                };
-                fs.rename(&file, &aside).map_err(|e| {
-                    AppError::coded(
-                        "E_DATA_WRITE",
-                        format!(
-                            "{} could not be set aside as {}: {e}",
-                            file.display(),
-                            aside.display()
-                        ),
-                    )
-                })?;
-                aside.file_name().map(|n| n.to_string_lossy().into_owned())
-            } else {
-                None
+        // Not through `with_settings`: that reads the file first, and a file that cannot be
+        // read is the very case a reset is for (K20 g). The lock is held for the whole of it.
+        let mut held = self.settings.lock().unwrap_or_else(PoisonError::into_inner);
+        let fs = self.sys().fs;
+        let file = self.paths.settings_file();
+        // A damaged file an earlier read set aside and has not yet told the page about is
+        // told now, unless this reset sets a file aside itself.
+        let pending = held.as_mut().and_then(|cache| cache.reset_from.take());
+        let reset_from = if fs.exists(&file) {
+            let mut ms = self.now_ms();
+            let aside = loop {
+                let candidate = self.paths.settings_reset_file(ms);
+                if !fs.exists(&candidate) {
+                    break candidate;
+                }
+                ms = ms.saturating_add(1);
             };
-            cache.settings = AppSettings::default();
-            cache.reset_from = None;
-            Ok(SettingsLoad {
-                settings: AppSettings::default(),
-                reset_from,
-            })
+            fs.rename(&file, &aside).map_err(|e| {
+                AppError::coded(
+                    "E_DATA_WRITE",
+                    format!(
+                        "{} could not be set aside as {}: {e}",
+                        file.display(),
+                        aside.display()
+                    ),
+                )
+            })?;
+            aside.file_name().map(|n| n.to_string_lossy().into_owned())
+        } else {
+            pending
+        };
+        *held = Some(SettingsCache {
+            settings: AppSettings::default(),
+            reset_from: None,
+        });
+        Ok(SettingsLoad {
+            settings: AppSettings::default(),
+            reset_from,
         })
     }
 ```
@@ -2623,7 +2844,7 @@ and in `theme_resume`, before the `(_, Some(r)) if …` arm:
 
 - [ ] **Step 6: The renderer watch (only if Task 1's S1 passed; else skip to Step 8 and record F1)**
 
-Create `app/src-tauri/src/webview_watch.rs` with Task 1 Step 2's text as it compiled (its `Failures` test included). `Cargo.toml`: Task 1's two lines under `[target.'cfg(windows)'.dependencies]`. `lib.rs`: `#[cfg(windows)] pub mod webview_watch;`, and in `setup`, right after the `open_main_window` block:
+Create `app/src-tauri/src/webview_watch.rs` with Task 1 Step 2's text as it compiled (its `Failures` test included). `Cargo.toml`: Task 1's `webview2-com` line and its comment under `[target.'cfg(windows)'.dependencies]`. `lib.rs`: `#[cfg(windows)] pub mod webview_watch;`, and in `setup`, right after the `open_main_window` block:
 
 ```rust
             // Recovery spec §6.4: the renderer's death reloads the page; the third in a minute
@@ -2641,6 +2862,10 @@ Create `app/src-tauri/src/webview_watch.rs` with Task 1 Step 2's text as it comp
                             if console::ask_yes_no(&window_question(why, &logs)) {
                                 console::fatal(&revert_said(&b.revert_all(), &logs));
                             }
+                            // The run had reached its UI: this end is the app's own choice,
+                            // not a crash. `exit` raises no Tauri event, so the record goes
+                            // here (K14); the next start shows no notice.
+                            b.end_run();
                             std::process::exit(1);
                         });
                 });
@@ -2654,19 +2879,19 @@ Create `app/src-tauri/src/webview_watch.rs` with Task 1 Step 2's text as it comp
 
 - [ ] **Step 7: Run everything**
 
-Run: `cargo test -p cmdstudio-app --lib` → `ok. 250 passed` (246 + 2 lib + 1 settings + 1 m4), `251` with `webview_watch`'s test. `cargo build -p cmdstudio-app` (never started).
+Run: `cargo test -p cmdstudio-app --lib` → `ok. 252 passed` (247 + 3 lib + 1 settings + 1 m4), `253` with `webview_watch`'s test. `cargo build -p cmdstudio-app` (never started).
 
 - [ ] **Step 8: Checks and commit**
 
 `cargo fmt --all`; the four clippy commands.
 
 ```bash
-git add -- app/src-tauri/src/console.rs app/src-tauri/src/lib.rs app/src-tauri/src/backend/mod.rs app/src-tauri/src/backend/recovery.rs
+git add -- app/src-tauri/src/console.rs app/src-tauri/src/lib.rs app/src-tauri/src/main.rs app/src-tauri/src/backend/mod.rs app/src-tauri/src/backend/recovery.rs
 # and, if Step 6 ran:
 git add -- app/src-tauri/src/webview_watch.rs app/src-tauri/Cargo.toml Cargo.lock
 ```
 
-(`Cargo.lock` changes only by the two new direct edges; `git diff Cargo.lock` must show no new package.) Message: `app: a window that cannot open offers to undo everything, app_restart, settings_reset, turning back on says when state.json cannot be read, and the renderer's death reloads the page (recovery spec §5.2, §5.4, §6.3, §6.4)` (without the last clause under F1).
+(`Cargo.lock` changes only by the one new direct edge; `git diff Cargo.lock` must show no new package.) Message: `app: a window that cannot open offers to undo everything, app_restart, settings_reset, turning back on says when state.json cannot be read, and the renderer's death reloads the page (recovery spec §5.2, §5.4, §6.3, §6.4)` (without the last clause under F1).
 
 ---
 
@@ -2694,7 +2919,8 @@ Recovery spec §8's new commands as thin wrappers (`app_ready`, `app_status`, `c
     appRestart(): Promise<void>;
   }
   // ipc/mock.ts: MockOptions gains safeMode?: SafeModeReason; crashNotice?: CrashNotice; crashReport?: CrashReport;
-  //   busy?: string; recoveryEntry?: RecoveryEntry. MockState gains safeMode, crashNotice, uiErrors: string[], restarted: boolean.
+  //   busy?: string; recoveryEntry?: RecoveryEntry. MockState gains safeMode, crashNotice, ready: boolean,
+  //   uiErrors: string[], restarted: boolean (and busy: string | null in Task 9).
   ```
 
 - [ ] **Step 1: The failing tests (Rust)**
@@ -2974,7 +3200,7 @@ Run: `npm run typecheck` → errors (the methods are missing); that is the failu
     },
 ```
 
-In `themeResume`, before the `paused.resume` line: `if (paused.level === "computerUnknown") return { kind: "notKnown" };` (the backend's m4). Read how `settingsGet` builds its answer and keep `settingsReset`'s defaults equal to `DEFAULT_SETTINGS` of `state.tsx` (import it rather than repeating the literal if the mock already imports from `../state`; the mock may not import React modules: then the literal, as above).
+In `themeResume`, before the `paused.resume` line: `if (paused.level === "computerUnknown") return { kind: "notKnown" };` (the backend's m4). The existing `mock.test.ts:444` expects `pickTheme` for `computerUnknown` with a theme that is gone; it now expects `notKnown`: change that line to `expect((await (await shape({ ...crash, level: "computerUnknown", resume: gone })).ipc.themeResume()).kind).toBe("notKnown");` and its comment above (`Without one, or with one that is no longer in the library: the Themes page.`) gains `; a state that cannot be told: notKnown (3b-1 m4)`. Read how `settingsGet` builds its answer and keep `settingsReset`'s defaults equal to `DEFAULT_SETTINGS` of `state.tsx` (import it rather than repeating the literal if the mock already imports from `../state`; the mock may not import React modules: then the literal, as above).
 
 - [ ] **Step 6: Run the UI checks**
 
@@ -2982,7 +3208,7 @@ In `themeResume`, before the `paused.resume` line: `if (paused.level === "comput
 
 - [ ] **Step 7: Checks and commit**
 
-`cargo fmt --all`; the four clippy commands; `cargo test -p cmdstudio-app --lib` → `ok. 251 passed` (or 250 under F1).
+`cargo fmt --all`; the four clippy commands; `cargo test -p cmdstudio-app --lib` → `ok. 253 passed` (or 252 under F1).
 
 ```bash
 git add -- app/src-tauri/src/command_names.rs app/src-tauri/src/ipc.rs app/src-tauri/capabilities/default.json app/src-tauri/src/config_guard.rs app/ui/src/bindings app/ui/src/ipc/types.ts app/ui/src/ipc/tauri.ts app/ui/src/ipc/tauri.test.ts app/ui/src/ipc/mock.ts app/ui/src/ipc/mock.test.ts
@@ -2999,6 +3225,8 @@ Recovery spec §6.1, §6.2, §6.3. One wrapper over any `Ipc`, one list of what 
 **Files:**
 - Create: `app/ui/src/ipc/work.ts`, `app/ui/src/ipc/work.test.ts`
 - Create: `app/ui/src/components/WorkingBar.tsx`
+- Modify: `app/ui/src/components/components.test.tsx` (the bar's tests)
+- Modify: `crates/core/tests/error_codes.rs` (the test that the TypeScript says each UI-only code; K3)
 - Modify: `app/ui/src/i18n/en.ts`, `th.ts` (the `work.*` keys, `error.timeout` none: the texts come from the §5.9 row)
 - Modify: `app/ui/src/styles.css` (`.working-bar`)
 
@@ -3296,7 +3524,7 @@ export const KINDS: Record<keyof Ipc, Kind> = {
   appRestart: "exit",
 };
 
-/** The bar's words for each command (recovery spec §6.1): fourteen tasks. */
+/** The bar's words for each command (recovery spec §6.1): fifteen tasks. */
 export const TASK: Record<keyof Ipc, Key> = {
   systemDetect: "work.reading",
   themesList: "work.readingThemes",
@@ -3598,14 +3826,37 @@ export function WorkingBar() {
 
 (Read `styles.css` for the variable names the `.notice.warn` rule uses and use those.)
 
-- [ ] **Step 5: Run the UI checks**
+- [ ] **Step 5: The TypeScript says each UI-only code (K3)**
+
+In `crates/core/tests/error_codes.rs`, after the test that uses `UI_ONLY` (Task 3), add:
+
+```rust
+/// Each code only the UI says is raised by the UI's IPC wrapper, as a string literal in
+/// `app/ui/src/ipc/work.ts` (the one place that makes an `E_TIMEOUT`).
+#[test]
+fn every_ui_only_code_is_said_by_the_typescript() {
+    let work = root().join("app").join("ui").join("src").join("ipc").join("work.ts");
+    let source = std::fs::read_to_string(&work).unwrap();
+    for code in UI_ONLY {
+        assert!(
+            source.contains(&format!("\"{code}\"")),
+            "{} does not say {code}",
+            work.display()
+        );
+    }
+}
+```
+
+Run: `cargo test -p cmdstudio-core --test error_codes` → `ok. 4 passed`.
+
+- [ ] **Step 6: Run the UI checks**
 
 `npm run typecheck`; `npm test` → `Tests 274 passed` (265 + 7 work + 2 bar); `TZ=UTC npm test`.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add -- app/ui/src/ipc/work.ts app/ui/src/ipc/work.test.ts app/ui/src/components/WorkingBar.tsx app/ui/src/components/components.test.tsx app/ui/src/i18n/en.ts app/ui/src/i18n/th.ts app/ui/src/styles.css
+git add -- app/ui/src/ipc/work.ts app/ui/src/ipc/work.test.ts app/ui/src/components/WorkingBar.tsx app/ui/src/components/components.test.tsx crates/core/tests/error_codes.rs app/ui/src/i18n/en.ts app/ui/src/i18n/th.ts app/ui/src/styles.css
 ```
 
 Message: `ui: the Ipc wrapper says what still works after ten seconds, gives a read up after a minute with E_TIMEOUT, drops late answers, and offers a restart after three minutes of a change (recovery spec §6.1–§6.3)`.
@@ -3618,7 +3869,8 @@ Recovery spec §6.3's rule for every load (ask `app_status` first; while a chang
 
 **Files:**
 - Modify: `app/ui/src/start.tsx`, `app/ui/src/start.test.tsx`
-- Modify: `app/ui/src/App.tsx`, `app/ui/src/App.test.tsx`
+- Modify: `app/ui/src/App.tsx`, `app/ui/src/App.test.tsx` (the new describe; the Settings status region at :685)
+- Modify: `app/ui/src/state.tsx` (`appStatus` in `AppState`)
 - Modify: `app/ui/src/ipc/mock.ts` (`state.busy`)
 - Modify: `app/ui/src/i18n/en.ts`, `th.ts` (`start.busy`)
 
@@ -3675,6 +3927,18 @@ describe("the catch-all (recovery spec §6.5)", () => {
     window.dispatchEvent(new ErrorEvent("error", { error: new Error("after") }));
     expect(seen).toHaveLength(25);
   });
+
+  it("logs a window error that carries no Error object without blanking the app", async () => {
+    const ipc = createMockIpc({ settings: { wizardDone: true } });
+    const seen: unknown[] = [];
+    const stop = watchWindowErrors(ipc, (e) => seen.push(e));
+    window.dispatchEvent(new ErrorEvent("error", { message: "ResizeObserver loop completed with undelivered notifications." }));
+    window.dispatchEvent(new ErrorEvent("error", { message: "Script error." }));
+    await waitFor(() => expect(ipc.state.uiErrors).toHaveLength(2));
+    expect(seen).toEqual([]);
+    expect(ipc.state.uiErrors[1]).toBe("window: Script error.");
+    stop();
+  });
 });
 ```
 
@@ -3697,7 +3961,7 @@ describe("the start (recovery spec §5.1, §6.3)", () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       const { ipc } = await mount({ busy: "apply", settings: { wizardDone: true } });
-      expect(await screen.findByRole("status")).toHaveTextContent("A theme is still being applied. CMD Studio waits for it to finish…");
+      expect(await screen.findByText("A theme is still being applied. CMD Studio waits for it to finish…")).toBeTruthy();
       expect(ipc.state.calls).not.toContain("settingsGet");
       ipc.state.busy = null;
       await vi.advanceTimersByTimeAsync(2100);
@@ -3714,6 +3978,8 @@ describe("the start (recovery spec §5.1, §6.3)", () => {
   });
 });
 ```
+
+The bar is one more always-present `role="status"` region: `App.test.tsx:685` (`screen.getAllByRole("status").find((el) => el.textContent === "")`, the Settings "Saved." region) would pick the bar. Change that line to `within(screen.getByRole("main")).getAllByRole("status").find((el) => el.textContent === "")` (the bar sits above `main`).
 
 - [ ] **Step 2: Run them to see them fail**
 
@@ -3735,7 +4001,7 @@ import { StrictMode, useEffect, useState, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { App } from "./App";
 import { CrashNotice, ErrorBoundary } from "./components/ErrorBoundary";
-import { WorkContext, WorkingBar } from "./components/WorkingBar";
+import { WorkContext } from "./components/WorkingBar";
 import { IpcProvider } from "./ipc/context";
 import type { Ipc } from "./ipc/types";
 import { withWork } from "./ipc/work";
@@ -3759,15 +4025,20 @@ function describe(error: unknown): string {
  * first twenty go to the log. Returns the function that stops listening. */
 export function watchWindowErrors(ipc: Ipc, onError: (error: unknown) => void): () => void {
   let sent = 0;
-  const report = (error: unknown) => {
-    onError(error);
+  const report = (error: unknown, logOnly: boolean) => {
+    if (!logOnly) onError(error);
     if (sent < UI_ERRORS_SENT_PER_LOAD) {
       sent += 1;
       ipc.logUiError(describe(error), "window").catch(() => {});
     }
   };
-  const onErrorEvent = (event: ErrorEvent) => report(event.error ?? event.message);
-  const onRejection = (event: Event) => report((event as Event & { reason?: unknown }).reason);
+  // A window `error` with no Error object (a resource that did not load, the browser's
+  // "ResizeObserver loop" notices) is logged but never blanks the app: nothing of ours threw.
+  const onErrorEvent = (event: ErrorEvent) => {
+    const benign = event.target !== window || event.error == null || /ResizeObserver loop/.test(event.message);
+    report(event.error ?? event.message, benign);
+  };
+  const onRejection = (event: Event) => report((event as Event & { reason?: unknown }).reason, false);
   window.addEventListener("error", onErrorEvent);
   window.addEventListener("unhandledrejection", onRejection);
   return () => {
@@ -3835,17 +4106,19 @@ Replace the first `useEffect` (the one that calls `ipc.settingsGet()`) with:
   useEffect(() => {
     let alive = true;
     let timer: ReturnType<typeof setTimeout> | null = null;
-    const readSettings = () =>
+    // `safe`: the app is in safe mode (recovery spec §5.2): the Recovery page whatever
+    // `wizardDone` says, and whether or not the settings could be read (Task 10 adds the route).
+    const readSettings = (safe: boolean) =>
       ipc.settingsGet().then(
         (loaded) => {
           if (!alive) return;
           adopt(loaded);
-          setRoute(loaded.settings.wizardDone ? { name: "home" } : { name: "wizard" });
+          setRoute(safe ? { name: "recovery" } : loaded.settings.wizardDone ? { name: "home" } : { name: "wizard" });
         },
         (e: unknown) => {
           if (!alive) return;
           setStartError(e);
-          setRoute({ name: "home" });
+          setRoute(safe ? { name: "recovery" } : { name: "home" });
         },
       );
     // Recovery spec §6.3: on every load, `app_status` first. While this process still runs a
@@ -3862,12 +4135,12 @@ Replace the first `useEffect` (the one that calls `ipc.settingsGet()`) with:
           }
           setBusyWith(null);
           setStatus(s);
-          void readSettings();
+          void readSettings(s.safeMode);
         },
         () => {
           if (!alive) return;
           setBusyWith(null);
-          void readSettings();
+          void readSettings(false);
         },
       );
     void readStatus();
@@ -3914,13 +4187,13 @@ function StartWait() {
 
 so the JSX reads `<WorkingBar />{busyWith !== null ? <StartWait /> : route === null ? (…the existing "…" status…) : (<Screens … />)}`. Import `WorkingBar` from `./components/WorkingBar`.
 
-`en.ts`: `"start.busy": "A theme is still being applied. CMD Studio waits for it to finish…"`; `th.ts`: `"start.busy": "กำลังใช้ธีมอยู่ CMD Studio รอให้เสร็จก่อน…"`.
+`en.ts`: `"start.busy": "A theme is still being applied. CMD Studio waits for it to finish…"` and `"start.recovering": "CMD Studio is putting back a change that was cut off and pausing the theme…"`; `th.ts`: `"start.busy": "กำลังใช้ธีมอยู่ CMD Studio รอให้เสร็จก่อน…"` and `"start.recovering": "CMD Studio กำลังย้อนการเปลี่ยนแปลงที่ค้างอยู่และหยุดธีม…"`. `StartWait` takes `busy: string` and shows `t(busy === "recovery_entry" ? "start.recovering" : "start.busy")` (`"recovery_entry"` is `RECOVERY_ENTRY_BUSY` of `backend/run.rs`, K12: the `--recovery` entry's own name; `busyWith` is passed as that prop).
 
 `mock.ts`: `MockState` gains `busy: string | null` (from `options.busy ?? null`), and `appStatus` answers `busy: state.busy`.
 
 - [ ] **Step 5: Run the UI checks**
 
-`npm run typecheck`; `npm test` → `Tests 279 passed` (274 + 2 start + 3 App); `TZ=UTC npm test`; `npm run build`; `bash scripts/check-dist.sh`.
+`npm run typecheck`; `npm test` → `Tests 280 passed` (274 + 3 start + 3 App); `TZ=UTC npm test`; `npm run build`; `bash scripts/check-dist.sh`.
 
 - [ ] **Step 6: Commit**
 
@@ -3941,6 +4214,8 @@ Recovery spec §5.2 (the one page of safe mode), §5.3 (the notice in `StartNoti
 - Modify: `app/ui/src/router.tsx` (`{ name: "recovery" }`), `app/ui/src/useRouteFocus.ts` (if `screenOf` lists names)
 - Modify: `app/ui/src/App.tsx` (the route from `appStatus.safeMode`; `StartNotices`' crash notice; `Screens` for `recovery`)
 - Modify: `app/ui/src/screens/Help.tsx` (`Doctor`, `RestorePointsTab`, `Revert`, `Report` exported; the crash note on `Report`)
+- Create: `app/ui/src/useRead.ts` (moved out of `Home.tsx`); Modify: `app/ui/src/screens/Home.tsx` (imports it)
+- Modify: `app/ui/src/state.tsx` (`adoptSettings` in `AppState`)
 - Modify: `app/ui/src/components/Pause.tsx` (`notKnown`)
 - Modify: `app/ui/src/i18n/en.ts`, `th.ts`, `i18n.test.ts` (the placeholder exemption)
 - Modify: `app/ui/src/App.test.tsx`, `app/ui/src/screens/Help.test.tsx`
@@ -4024,6 +4299,21 @@ describe("recovery mode (recovery spec §5.2)", () => {
     expect(screen.queryByText(/closed unexpectedly/)).toBeNull();
   });
 
+  it("waits for the --recovery entry, then shows what it did (K12)", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const { ipc } = await mount({ safeMode: { kind: "recovery" }, busy: "recovery_entry", recoveryEntry: entryPaused });
+      expect(await screen.findByText("CMD Studio is putting back a change that was cut off and pausing the theme…")).toBeTruthy();
+      expect(screen.queryByRole("heading", { name: "Recovery mode" })).toBeNull();
+      ipc.state.busy = null;
+      await vi.advanceTimersByTimeAsync(2100);
+      await screen.findByRole("heading", { name: "Recovery mode" });
+      expect(screen.getByText("The theme is paused: cmd windows open without it.")).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("a notice without a report names the start it had", async () => {
     await home({ crashNotice: { atMs: Date.UTC(2026, 9, 11, 4, 58), hasReport: false } });
     expect(screen.getByRole("alert")).toHaveTextContent(/CMD Studio closed unexpectedly after starting at .*2026/);
@@ -4051,7 +4341,7 @@ describe("recovery mode (recovery spec §5.2)", () => {
 
 Move `useRead` out of `Home.tsx` into `app/ui/src/useRead.ts` (the function as it is, exported; `Home` imports it; `readRecovery` stays module-level in each screen that uses it).
 
-`App.tsx`: when `status?.safeMode` is true, the route is `{ name: "recovery" }` whatever `wizardDone` says (`readSettings`' success branch: `setRoute(s.safeMode ? { name: "recovery" } : loaded.settings.wizardDone ? … )`; the failure branch the same with `safeMode`). In `Screens`, before the wizard case:
+`App.tsx`: Task 9's `readSettings(safe)` already routes to `{ name: "recovery" }` in safe mode; in Task 9 the `Route` type has no such name, so Task 9 writes `{ name: "home" }` there with the comment `// Task 10: { name: "recovery" }`, and this task changes it. `AppState` gains `adoptSettings: (loaded: SettingsLoad) => void` (`state.tsx`, with the doc `/** What one read of settings.json gives, held as the app's settings at once: the Recovery page's reset (recovery spec §5.2). */`), set to `App`'s `adopt` in the `useMemo`. In `Screens`, before the wizard case:
 
 ```tsx
   if (route.name === "recovery") {
@@ -4123,7 +4413,7 @@ const readRecovery = (ipc: Ipc) => ipc.recoveryStatus();
 export function Recovery() {
   const { t } = useI18n();
   const ipc = useIpc();
-  const { appStatus, version, bump } = useAppState();
+  const { appStatus, version, adoptSettings } = useAppState();
   const heading = useRef<HTMLHeadingElement>(null);
   const recovery = useRead(readRecovery, version);
   const paused = recovery.value?.paused ?? null;
@@ -4146,9 +4436,10 @@ export function Recovery() {
     act(async () => {
       const done = await ipc.settingsReset();
       setAsking(null);
+      // The defaults stand at once, the language too (no reload: the notice below is read in
+      // the language the defaults give).
+      adoptSettings(done);
       setResetTo(done.resetFrom);
-      // The defaults stand: the language too.
-      window.location.reload();
     });
 
   return (
@@ -4222,7 +4513,7 @@ export function Recovery() {
 }
 ```
 
-(`window.location.reload()` after the reset: in jsdom it is a no-op that logs "not implemented"; the test asserts the `recovery.reset.done` text before the reload would land. `ExternalTarget`'s value for the log folder: read `app/ui/src/bindings/ExternalTarget.ts` and use the exact string, `"logsFolder"`.) `Help.tsx`: `export function Doctor()`, `export function RestorePointsTab()`, `export function Revert()`, `export function Report()`.
+(`adoptSettings` is `App`'s `adopt`: it sets the settings, the language and clears the start problem, so the Thai page of the test turns English at once and the notice "The settings were reset…" is read in English. `ExternalTarget`'s value for the log folder is `"logsFolder"`, `app/ui/src/bindings/ExternalTarget.ts`.) `Help.tsx`: `export function Doctor()`, `export function RestorePointsTab()`, `export function Revert()`, `export function Report()`.
 
 `Report` (in `Help.tsx`) gains the crash note under the diagnostics text:
 
@@ -4313,7 +4604,7 @@ and `help.guide.cmdWontOpen`: `'ถ้า cmd เปิดไม่ขึ้น:
 
 - [ ] **Step 5: Run the UI checks**
 
-`npm run typecheck`; `npm test` → `Tests 285 passed` (279 + 6); `TZ=UTC npm test`; `npm run build`; `bash scripts/check-dist.sh`.
+`npm run typecheck`; `npm test` → `Tests 287 passed` (280 + 7); `TZ=UTC npm test`; `npm run build`; `bash scripts/check-dist.sh`.
 
 - [ ] **Step 6: Commit**
 
@@ -4378,7 +4669,7 @@ Read §6.1 and add one bullet at its end:
 Add a row after phase 3b-1's:
 
 ```markdown
-| 2026-11-03 | Phase 3b-2 โหมดกู้คืนฝั่งแอป (architect เลือก founder เปลี่ยนได้ แผนอยู่ใน `docs/superpowers/plans/2026-11-03-phase3b-2-recovery-app.md`):<br>• `run.json` เขียนก่อนสร้างหน้าต่าง เทียบ pid กับเวลาสร้างโปรเซสเสมอ (pid ซ้ำได้) เปิดไม่สำเร็จ 2 ครั้งติดเข้าโหมดกู้คืน ปิดปกติลบเฉพาะบันทึกของโปรเซสตัวเอง (หลัง `app_restart` โปรเซสใหม่เขียนบันทึกของตัวเองก่อนโปรเซสเก่าจบ)<br>• `--recovery` ขณะแอปเปิดอยู่: callback ของ single-instance ทำขั้น 1–2 บน thread แล้ว `window.location.reload()` ไม่มี event ใหม่ (§5.7 ยังมีแค่ `apply-progress`) UI ที่โหลดใหม่ถาม `app_status` ก่อนตามกฎของ recovery spec §6.3<br>• "เริ่มแบบปกติ" คือ `app_restart` เพราะ `app_ready` ในโหมดกู้คืนตั้ง `failedStarts` เป็น 0 แล้ว การเริ่มใหม่โดยไม่มี argument จึงเป็นการเริ่มปกติ ไม่ต้องมี IPC ออกจากโหมดกู้คืน<br>• ประกาศแครช: เวลาคือเวลาของบันทึกแครชถ้ามีไฟล์ใหม่กว่าการเปิดครั้งที่ตาย ไม่มีก็เวลาที่ครั้งนั้นเริ่ม "ปิด" จำไว้แค่การเปิดครั้งนี้<br>• panic hook ตั้งใน `main.rs` ก่อน parse argument ทั้งสองโหมด ที่โฟลเดอร์ข้อมูลตั้งต้น (`--data-dir` ไม่มีผลกับบันทึกแครช)<br>• เส้นตาย 60 วินาทีของ UI ยกเว้น `theme_import_preview`, `theme_export` (รอผู้ใช้ในกล่องเลือกไฟล์) และ `app_restart` (ไม่ตอบ) รายการชนิดของคำสั่งอยู่ที่เดียวใน `app/ui/src/ipc/work.ts` มีเทสต์ตรวจว่าครบทุกเมธอดของ `Ipc` · แถบ "ยังทำงานอยู่" ใช้ชื่องาน 14 กลุ่มจากพจนานุกรม<br>• คำสั่งที่นับว่าเปลี่ยนเครื่องสำหรับ `busy` และปุ่ม "เริ่ม CMD Studio ใหม่": `apply`, `undo_last`, `snapshot_restore`, `revert_all`, `theme_pause` (`command_names::CHANGES_MACHINE`)<br>• กล่อง Yes/No ของ §5.4: Yes เรียก `Backend::revert_all` ใต้ล็อก แล้วกล่องที่สองบอกผล (สำเร็จ / ไม่ครบ ดู log / `E_BUSY` / รหัสอื่น) `start_failed` ยังเป็นกล่องเดิม<br>• WebView2 `ProcessFailed` (§6.4): <ทำแล้วผ่าน `with_webview` → `ICoreWebView2::add_ProcessFailed` นับเฉพาะ renderer ตายหรือไม่ตอบ โหลดหน้าใหม่ด้วย `Reload()` ครั้งที่ 3 ใน 1 นาทีใช้กล่อง Yes/No แทน | หรือ: ไม่ได้ทำใน phase นี้ (F1): <เหตุผลจาก spike S1/S2>> ผล spike อยู่ใน `docs/spikes/phase3b-recovery/results-3b2.md`<br>• ตัวนับใน init.lua เลิกตรวจ tasklist (founder 2026-10-19) หน้าต่างที่ 4 หยุดธีมแม้สามหน้าต่างที่ค้างยังเปิดอยู่<br>• m4 ของ 3b-1: `theme_resume` ที่ `computerUnknown` คืน `notKnown` แทน error ของ planner<br>• ไม่มีตัวแปรทดสอบ "แครชตอนเปิด" ใน build: VM check ใช้ไฟล์ `run.json` จำลอง (pid ที่ตายแล้ว, `uiReadyAt: null`) และ `Stop-Process` ขณะหน้าต่างเปิดอยู่ ส่วน panic hook พิสูจน์ด้วยเทสต์ (หนึ่งเทสต์เขียนดิสก์จริงในโฟลเดอร์ชั่วคราว) |
+| 2026-11-03 | Phase 3b-2 โหมดกู้คืนฝั่งแอป (architect เลือก founder เปลี่ยนได้ แผนอยู่ใน `docs/superpowers/plans/2026-11-03-phase3b-2-recovery-app.md`):<br>• `run.json` เขียนก่อนสร้างหน้าต่าง เทียบ pid กับเวลาสร้างโปรเซสเสมอ (pid ซ้ำได้) เปิดไม่สำเร็จ 2 ครั้งติดเข้าโหมดกู้คืน ปิดปกติลบเฉพาะบันทึกของโปรเซสตัวเอง และโปรเซสที่สองซึ่ง single-instance จะปิดในครู่เดียว (พบบันทึกของโปรเซสที่ยังมีชีวิตและเวลาสร้างตรงกัน) ไม่เขียนและไม่ลบอะไร<br>• `app_restart` เริ่ม `cmdstudio.exe --after-pid <pid เดิม>` โปรเซสใหม่รอให้ตัวเดิมจบก่อน (ไม่เกิน 10 วินาที) แล้วจึงเริ่มตามปกติ ไม่ใช้ cmd.exe เป็นตัวกลางเพราะ cmd โหลด AutoRun (spike S4 บน VM-A, fallback F4 รอหน้าต่างของ single-instance หายด้วย)<br>• `--recovery` ขณะแอปเปิดอยู่: callback ของ single-instance ทำขั้น 1–2 บน thread แล้ว `window.location.reload()` ไม่มี event ใหม่ (§5.7 ยังมีแค่ `apply-progress`) UI ที่โหลดใหม่ถาม `app_status` ก่อนตามกฎของ recovery spec §6.3<br>• "เริ่มแบบปกติ" คือ `app_restart` เพราะ `app_ready` ในโหมดกู้คืนตั้ง `failedStarts` เป็น 0 แล้ว การเริ่มใหม่โดยไม่มี argument จึงเป็นการเริ่มปกติ ไม่ต้องมี IPC ออกจากโหมดกู้คืน<br>• ประกาศแครช: เวลาคือเวลาของบันทึกแครชถ้ามีไฟล์ใหม่กว่าการเปิดครั้งที่ตาย ไม่มีก็เวลาที่ครั้งนั้นเริ่ม "ปิด" จำไว้แค่การเปิดครั้งนี้<br>• panic hook ตั้งใน `main.rs` ก่อน parse argument ทั้งสองโหมด ที่โฟลเดอร์ข้อมูลตั้งต้น (`--data-dir` ไม่มีผลกับบันทึกแครช)<br>• เส้นตาย 60 วินาทีของ UI ยกเว้น `theme_import_preview`, `theme_export` (รอผู้ใช้ในกล่องเลือกไฟล์) และ `app_restart` (ไม่ตอบ) รายการชนิดของคำสั่งอยู่ที่เดียวใน `app/ui/src/ipc/work.ts` มีเทสต์ตรวจว่าครบทุกเมธอดของ `Ipc` · แถบ "ยังทำงานอยู่" ใช้ชื่องาน 15 กลุ่มจากพจนานุกรม<br>• คำสั่งที่นับว่าเปลี่ยนเครื่องสำหรับ `busy` และปุ่ม "เริ่ม CMD Studio ใหม่": `apply`, `undo_last`, `snapshot_restore`, `revert_all`, `theme_pause` (`command_names::CHANGES_MACHINE`)<br>• กล่อง Yes/No ของ §5.4: Yes เรียก `Backend::revert_all` ใต้ล็อก แล้วกล่องที่สองบอกผล (สำเร็จ / ไม่ครบ ดู log / `E_BUSY` / รหัสอื่น) `start_failed` ยังเป็นกล่องเดิม<br>• WebView2 `ProcessFailed` (§6.4): <ทำแล้วผ่าน `with_webview` → `ICoreWebView2::add_ProcessFailed` นับเฉพาะ renderer ตายหรือไม่ตอบ โหลดหน้าใหม่ด้วย `Reload()` ครั้งที่ 3 ใน 1 นาทีใช้กล่อง Yes/No แทน | หรือ: ไม่ได้ทำใน phase นี้ (F1): <เหตุผลจาก spike S1/S2>> ผล spike อยู่ใน `docs/spikes/phase3b-recovery/results-3b2.md`<br>• ตัวนับใน init.lua เลิกตรวจ tasklist (founder 2026-10-19) หน้าต่างที่ 4 หยุดธีมแม้สามหน้าต่างที่ค้างยังเปิดอยู่<br>• m4 ของ 3b-1: `theme_resume` ที่ `computerUnknown` คืน `notKnown` แทน error ของ planner<br>• ไม่มีตัวแปรทดสอบ "แครชตอนเปิด" ใน build: VM check ใช้ไฟล์ `run.json` จำลอง (pid ที่ตายแล้ว, `uiReadyAt: null`) และ `Stop-Process` ขณะหน้าต่างเปิดอยู่ ส่วน panic hook พิสูจน์ด้วยเทสต์ (หนึ่งเทสต์เขียนดิสก์จริงในโฟลเดอร์ชั่วคราว) |
 ```
 
 Fill the `<…>` of the `ProcessFailed` bullet from Task 6's outcome (one of the two texts), and nothing else is left in angle brackets.
@@ -4531,7 +4822,7 @@ Expected: `errors=0` for all five; `guarded=True` for the four guest scripts, `F
 |---|---|---|---|
 | 1 | `& $startApp`, the wizard to Terracotta applied, Home (3b-1 step 1). `& $closeApp`. `& $run`. | The log has `run start safe=false failed_starts=0` and, after the close, `run end`; `& $run` prints `(no run.json)` and `crash notes: 0`. | |
 | 2 | **Two failed starts.** App closed. `Invoke-GuestDesktop $vm "$g\recovery-run.ps1" "-FailedStarts 1 $dataArg" $u`. `& $startApp`, wait 15 s, `Save-Shot $vm 'p3b2-recovery-failed'`; `& $run`; `& $appLog`. | The page is "Recovery mode" with "CMD Studio failed to start 2 times in a row, so it opened in recovery mode. Nothing of your themes was loaded.", the buttons "Undo everything", "Check now", "Open the log folder", "Copy details", "Reset the app's settings", "Start normally", and no sidebar. The log has `run record=…` nothing (the pid is gone: no `still-running`), `run start safe=true failed_starts=2`, and no `crash_check` line (recovery mode starts none). `run.json` holds `"failedStarts": 0` once the page is up (`app_ready`). `themes_list` is not in the log since the start. | |
-| 2b | `Invoke-GuestButton $vm 'Start normally' $u`, wait 10 s, `Save-Shot $vm 'p3b2-after-normal'`; `& $run`; `& $appLog`. | Home, with Terracotta in use. The log has `cmd=app_restart ms=<n> ok`, then the old process's `run end`, then the new one's `run start safe=false failed_starts=0`; `run.json` names the new pid (the old one's exit left it alone). | |
+| 2b | **The restart (spike S4).** `& $started` (the old pid); `Invoke-GuestButton $vm 'Start normally' $u`, wait 15 s, `Save-Shot $vm 'p3b2-after-normal'`; `& $started` (the new pid); `Invoke-GuestPs $vm 'Get-Process cmdstudio | Measure-Object | ForEach-Object Count' $u`; `& $run`; `& $appLog`. | One `cmdstudio` process, with a new pid, and Home with Terracotta in use within 15 s. The log has `cmd=app_restart ms=<n> ok`, then the old process's `run end`, then the new one's `run start safe=false failed_starts=0` (that order: the child waited for the old pid, `--after-pid`); `run.json` names the new pid. A second process, no window, or `run start` before `run end` is S4 failing: F4. Record S4 in `results-3b2.md`. | |
 | 3 | **The Recovery shortcut, app closed.** `& $closeApp; & $closeCmd`. `Send-Run $vm 'C:\cmdstudio\phase3\check\cmdstudio.exe --recovery'` (the artifact's exe, as `start-app.vbs` names it; read that file for the path), wait 15 s, `Save-Shot $vm 'p3b2-shortcut-closed'`; `& $appLog`; `& $health`; `Get-GuestAutoRun $vm 'after-recovery' $u`. `Send-Run $vm 'cmd'`, wait 10 s, `Get-GuestCmdWindows $vm $u`, `& $closeCmd`. | "Recovery mode", "CMD Studio was opened from the CMD Studio Recovery shortcut.", "When it opened, CMD Studio put back any change that was cut off and paused the theme on this computer:", "The theme is paused: cmd windows open without it.", the banner "The theme was paused from the CMD Studio Recovery shortcut." with "Turn the theme back on". The log has `run start safe=true failed_starts=0` and `pause reason=recovery count=0 revert=ok saved=true`. `paused.json` has `"reason": "recovery"`, `"by": "app"`. AutoRun `(absent)`. The new cmd window is plain, `Clink loaded: no`. | |
 | 3b | `Invoke-GuestButton $vm 'Turn the theme back on' $u` → Apply → Close (3b-1 step 4b). `Invoke-GuestButton $vm 'Start normally' $u`, wait 10 s. | The plan applies Terracotta; after the restart Home shows Terracotta, no banner. | |
 | 4 | **The shortcut, app open.** `& $startApp` (Home). `Send-Run $vm 'C:\cmdstudio\phase3\check\cmdstudio.exe --recovery'`, wait 15 s, `Save-Shot $vm 'p3b2-shortcut-open'`; `& $appLog`; `Invoke-GuestPs $vm 'Get-Process cmdstudio | Measure-Object | ForEach-Object Count' $u`. | One `cmdstudio` process. The window reloaded into "Recovery mode" with the shortcut's reason and the paused banner; the log has `pause reason=recovery …` and then `cmd=app_status ms=<n> ok` from the reload. Then "Turn the theme back on" → Apply → Close, "Start normally". | |
