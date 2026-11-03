@@ -677,6 +677,7 @@ describe("AfterApplyBar", () => {
         bump: () => {},
         recoveryActed: false,
         markRecoveryActed: () => {},
+        appStatus: null,
       };
       return (
         <AppStateContext.Provider value={state}>

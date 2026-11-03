@@ -185,6 +185,8 @@ export const en = {
   "resume.done": "The theme is back on. Open a new cmd window to see it.",
   "resume.notKnown": "Whether the theme is paused on this computer is not known: CMD Studio could not read its state.json. Fix that first (Help → Report a problem).",
   "resume.noteRemoved": "The note was removed: cmd windows open without a pause again.",
+  "start.busy": "A theme is still being applied. CMD Studio waits for it to finish…",
+  "start.recovering": "CMD Studio is putting back a change that was cut off and pausing the theme…",
   "work.label": "Still working",
   "work.still": "CMD Studio is still working: {task}…",
   "work.reading": "reading this computer",

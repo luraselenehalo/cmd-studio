@@ -131,6 +131,37 @@ async function open(user: User, name: string) {
   await user.click(within(screen.getByRole("navigation")).getByRole("button", { name }));
 }
 
+describe("the start (recovery spec §5.1, §6.3)", () => {
+  it("asks app_status before anything, and says it is ready once the first screen is drawn", async () => {
+    const { ipc } = await home();
+    expect(ipc.state.calls[0]).toBe("appStatus");
+    expect(ipc.state.calls.indexOf("settingsGet")).toBeGreaterThan(0);
+    await waitFor(() => expect(ipc.state.ready).toBe(true));
+    expect(ipc.state.calls.filter((c) => c === "appReady")).toHaveLength(1);
+    expect(ipc.state.calls.indexOf("appReady")).toBeGreaterThan(ipc.state.calls.indexOf("settingsGet"));
+  });
+
+  it("waits while a change still runs in this process, then reads as a start would", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const { ipc } = await mount({ busy: "apply", settings: { wizardDone: true } });
+      expect(await screen.findByText("A theme is still being applied. CMD Studio waits for it to finish…")).toBeTruthy();
+      expect(ipc.state.calls).not.toContain("settingsGet");
+      ipc.state.busy = null;
+      await vi.advanceTimersByTimeAsync(2100);
+      await screen.findByRole("heading", { name: "Home" });
+      expect(ipc.state.calls.filter((c) => c === "appStatus").length).toBeGreaterThanOrEqual(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("the working bar sits above the shell and the wizard, empty", async () => {
+    await home();
+    expect(screen.getByRole("status", { name: "Still working" }).textContent).toBe("");
+  });
+});
+
 describe("the first run", () => {
   it("opens in English and applies Terracotta in five clicks with nothing typed (criterion 1)", async () => {
     const { ipc, user, view } = await mount();
@@ -682,7 +713,7 @@ describe("Settings", () => {
     expect((screen.getByLabelText("Automatic (recommended)") as HTMLInputElement).checked).toBe(true);
     expect(screen.getByText(/checked each time it starts/)).toBeTruthy();
     // "Saved." comes in a status region that was there before (2c item 10).
-    const status = screen.getAllByRole("status").find((el) => el.textContent === "");
+    const status = within(screen.getByRole("main")).getAllByRole("status").find((el) => el.textContent === "");
     expect(status).toBeTruthy();
     await user.click(screen.getByLabelText("Tell me first"));
     await waitFor(() => expect(ipc.state.settings.updates).toBe("notify"));

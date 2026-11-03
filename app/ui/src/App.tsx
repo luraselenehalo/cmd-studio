@@ -7,10 +7,12 @@
 // language, so a screen reader reads Thai as Thai and the `:lang(th)` styles apply.
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import type { AppSettings } from "./bindings/AppSettings";
+import type { AppStatus } from "./bindings/AppStatus";
 import type { SettingsLoad } from "./bindings/SettingsLoad";
 import { AfterApplyBar } from "./components/AfterApplyBar";
 import { DraftProblemNotice } from "./components/DraftProblemNotice";
 import { ErrorNotice, Notice } from "./components/Notices";
+import { WorkingBar } from "./components/WorkingBar";
 import { I18nProvider, useI18n, type Key, type Language } from "./i18n";
 import { useIpc } from "./ipc/context";
 import { NavContext, useNav, type Nav, type Route } from "./router";
@@ -34,12 +36,29 @@ function withChanges(loaded: AppSettings, base: AppSettings, next: AppSettings):
   return merged;
 }
 
+/** How often the start asks `app_status` again while a change still runs (recovery spec §6.3). */
+export const APP_STATUS_POLL_MS = 2000;
+
+/** Recovery spec §6.3: a change of this process still runs; the start waits for it.
+ * `recovery_entry` is RECOVERY_ENTRY_BUSY of backend/run.rs: the `--recovery` entry's own name. */
+function StartWait({ busy }: { busy: string }) {
+  const { t } = useI18n();
+  return (
+    <p role="status" style={{ padding: "2rem" }}>
+      {t(busy === "recovery_entry" ? "start.recovering" : "start.busy")}
+    </p>
+  );
+}
+
 export function App() {
   const ipc = useIpc();
   // English until the saved settings say otherwise (founder 2026-10-16).
   const [language, setLanguage] = useState<Language>("en");
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [route, setRoute] = useState<Route | null>(null);
+  /** `app_status` as read first on this load (recovery spec §6.3); `null` until then. */
+  const [status, setStatus] = useState<AppStatus | null>(null);
+  const [busyWith, setBusyWith] = useState<string | null>(null);
   /** The last committed apply, with the target of the request that made it (item 12). */
   const [lastApply, setLastApply] = useState<LastApply | null>(null);
   const draftProblems = useDraftProblems();
@@ -62,24 +81,61 @@ export function App() {
 
   useEffect(() => {
     let alive = true;
-    ipc.settingsGet().then(
-      (loaded) => {
-        if (!alive) return;
-        adopt(loaded);
-        setRoute(loaded.settings.wizardDone ? { name: "home" } : { name: "wizard" });
-      },
-      (e: unknown) => {
-        if (!alive) return;
-        // Said on the home page; the wizard is not shown over settings that could not be read.
-        // The settings held meanwhile are the defaults, not the file's: see `saveSettings`.
-        setStartError(e);
-        setRoute({ name: "home" });
-      },
-    );
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    // `_safe`: the app is in safe mode (recovery spec §5.2). Task 10 adds the Recovery route;
+    // until then the start reads as a normal one.
+    const readSettings = (_safe: boolean) =>
+      ipc.settingsGet().then(
+        (loaded) => {
+          if (!alive) return;
+          adopt(loaded);
+          setRoute(loaded.settings.wizardDone ? { name: "home" } : { name: "wizard" });
+        },
+        (e: unknown) => {
+          if (!alive) return;
+          // Said on the home page; the wizard is not shown over settings that could not be read.
+          // The settings held meanwhile are the defaults, not the file's: see `saveSettings`.
+          setStartError(e);
+          setRoute({ name: "home" });
+        },
+      );
+    // Recovery spec §6.3: on every load, `app_status` first. While this process still runs a
+    // change, say so and ask again every two seconds (K12: this includes the `--recovery` entry's
+    // own busy, after which the answer is read again); a status that cannot be read is no reason
+    // to hold the start.
+    const readStatus = (): Promise<void> =>
+      ipc.appStatus().then(
+        (s) => {
+          if (!alive) return;
+          if (s.busy !== null) {
+            setBusyWith(s.busy);
+            timer = setTimeout(() => void readStatus(), APP_STATUS_POLL_MS);
+            return;
+          }
+          setBusyWith(null);
+          setStatus(s);
+          return readSettings(s.safeMode);
+        },
+        () => {
+          if (!alive) return;
+          setBusyWith(null);
+          return readSettings(false);
+        },
+      );
+    void readStatus();
     return () => {
       alive = false;
+      if (timer !== null) clearTimeout(timer);
     };
   }, [ipc, adopt]);
+
+  // The first screen is drawn: the run is a good start from then on (recovery spec §5.1).
+  const ready = useRef(false);
+  useEffect(() => {
+    if (route === null || ready.current) return;
+    ready.current = true;
+    ipc.appReady().catch(() => {});
+  }, [ipc, route]);
 
   /** Reads settings.json again after the start read failed. A read that works replaces the
    * defaults held in memory with what the file holds and ends the problem; one that fails keeps
@@ -137,8 +193,8 @@ export function App() {
   const bump = useCallback(() => setVersion((v) => v + 1), []);
   const markRecoveryActed = useCallback(() => setRecoveryActed(true), []);
   const appState = useMemo<AppState>(
-    () => ({ settings, saveSettings, lastApply, setLastApply, draftProblems, version, bump, recoveryActed, markRecoveryActed }),
-    [settings, saveSettings, lastApply, draftProblems, version, bump, recoveryActed, markRecoveryActed],
+    () => ({ settings, saveSettings, lastApply, setLastApply, draftProblems, version, bump, recoveryActed, markRecoveryActed, appStatus: status }),
+    [settings, saveSettings, lastApply, draftProblems, version, bump, recoveryActed, markRecoveryActed, status],
   );
   const nav = useMemo<Nav>(() => ({ route: route ?? { name: "home" }, go: (r: Route) => setRoute(r) }), [route]);
 
@@ -147,7 +203,10 @@ export function App() {
       <AppStateContext.Provider value={appState}>
         <NavContext.Provider value={nav}>
           <div lang={language}>
-            {route === null ? (
+            <WorkingBar />
+            {busyWith !== null ? (
+              <StartWait busy={busyWith} />
+            ) : route === null ? (
               <p role="status" style={{ padding: "2rem" }}>
                 …
               </p>

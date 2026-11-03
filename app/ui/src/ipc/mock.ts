@@ -364,6 +364,8 @@ export interface MockState {
   paused: PauseInfo | null;
   safeMode: SafeModeReason | null;
   crashNotice: CrashNotice | null;
+  /** `app_status.busy` as given now; a test may clear it (recovery spec §6.3). */
+  busy: string | null;
   /** `app_ready` was called. */
   ready: boolean;
   /** The UI's own errors given to `logUiError`, as "place: message". */
@@ -418,6 +420,7 @@ export function createMockIpc(options: MockOptions = {}): Ipc & { state: MockSta
     paused: options.paused ? structuredClone(options.paused) : null,
     safeMode: options.safeMode ? structuredClone(options.safeMode) : null,
     crashNotice: options.crashNotice ? structuredClone(options.crashNotice) : null,
+    busy: options.busy ?? null,
     ready: false,
     uiErrors: [],
     restarted: false,
@@ -1006,6 +1009,7 @@ export function createMockIpc(options: MockOptions = {}): Ipc & { state: MockSta
       return { kind, request: null, plan: null };
     },
     async settingsGet(): Promise<SettingsLoad> {
+      state.calls.push("settingsGet");
       return { settings: { ...state.settings }, resetFrom: null };
     },
     async settingsSet(settings): Promise<AppSettings> {
@@ -1080,7 +1084,7 @@ export function createMockIpc(options: MockOptions = {}): Ipc & { state: MockSta
     async appStatus(): Promise<AppStatus> {
       state.calls.push("appStatus");
       return {
-        busy: options.busy ?? null,
+        busy: state.busy,
         safeMode: state.safeMode !== null,
         safeModeReason: state.safeMode,
         crashNotice: state.crashNotice,

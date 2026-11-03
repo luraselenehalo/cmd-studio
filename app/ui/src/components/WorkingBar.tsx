@@ -11,7 +11,8 @@ import { ErrorNotice } from "./Notices";
 
 export const WorkContext = createContext<WorkStore | null>(null);
 
-const NONE: WorkStore = { get: () => ({ task: null, offerRestart: false }), subscribe: () => () => {} };
+const IDLE = { task: null, offerRestart: false };
+const NONE: WorkStore = { get: () => IDLE, subscribe: () => () => {} };
 
 export function WorkingBar() {
   const store = useContext(WorkContext) ?? NONE;

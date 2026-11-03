@@ -189,6 +189,8 @@ export const th: Dictionary = {
   "resume.done": "เปิดธีมกลับแล้ว เปิดหน้าต่าง cmd ใหม่เพื่อดูธีม",
   "resume.notKnown": "บอกไม่ได้ว่าธีมของเครื่องนี้ถูกหยุดอยู่หรือไม่ เพราะ CMD Studio อ่าน state.json ไม่ได้ ให้แก้ก่อน (ช่วยเหลือ → แจ้งปัญหา)",
   "resume.noteRemoved": "ลบบันทึกแล้ว หน้าต่าง cmd จะเปิดได้ตามปกติอีกครั้ง",
+  "start.busy": "กำลังใช้ธีมอยู่ CMD Studio รอให้เสร็จก่อน…",
+  "start.recovering": "CMD Studio กำลังย้อนการเปลี่ยนแปลงที่ค้างอยู่และหยุดธีม…",
   "work.label": "ยังทำงานอยู่",
   "work.still": "CMD Studio ยังทำงานอยู่: {task}…",
   "work.reading": "กำลังอ่านข้อมูลของเครื่องนี้",
