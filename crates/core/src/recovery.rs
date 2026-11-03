@@ -1,4 +1,5 @@
-//! The theme's pause, the start counter's files, and the app's own records (recovery spec §3.1, §4.1, §5.1, §5.2, §7). The folder
+//! The theme's pause, the start counter's files, and the app's own records (recovery spec
+//! §3.1, §4.1, §5.1, §5.2, §7). The folder
 //! `<data>\health\` is CMD Studio's alone:
 //! - `start-<pid>`: init.lua's tag for one cmd window, the text `v1 <unix seconds>`, from the
 //!   window's start to its first prompt;

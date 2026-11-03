@@ -3,7 +3,8 @@
 //! somewhere. The app's own table of those meanings (`const MEANINGS` in `error.rs`) counts for
 //! the first half only: it lists every row by construction, so it cannot show that a row is used.
 //! The table also holds each code's Thai meaning, for the app's own UI; the CLI prints the code
-//! and English text only. A row that only the UI says (`UI_ONLY`) is checked against the TypeScript instead.
+//! and English text only. A row that only the UI says (`UI_ONLY`) is checked against the
+//! TypeScript instead.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -104,7 +105,8 @@ fn without_meanings_table(source: &str) -> (String, bool) {
 }
 
 /// The rows of §5.9 that only the UI says (recovery spec §6.2): the TypeScript raises them, the
-/// Rust side only knows their meaning. A test of its own (`every_ui_only_code_is_said_by_the_typescript`,
+/// Rust side only knows their meaning. A test of its own
+/// (`every_ui_only_code_is_said_by_the_typescript`,
 /// plan 3b-2 Task 8) checks that the TypeScript does say each.
 const UI_ONLY: &[&str] = &["E_TIMEOUT"];
 

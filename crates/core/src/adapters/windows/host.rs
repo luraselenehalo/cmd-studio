@@ -1589,7 +1589,7 @@ mod process_stamp_tests {
             .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
             .unwrap_or(0);
         let mine = process_created_at(current_pid()).unwrap().unwrap();
-        assert!(now.saturating_sub(mine) < 60_000, "{mine} vs {now}");
+        assert!(mine <= now && now - mine < 60_000, "{mine} vs {now}");
         assert_eq!(process_created_at(4_294_967_294).unwrap(), None);
         let t = windows_sys::Win32::Foundation::FILETIME {
             dwLowDateTime: 0xD53E_8000,
