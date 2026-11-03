@@ -209,3 +209,18 @@ describe("pages that fit and scroll at Windows' Text size 150 % (F2)", () => {
     }
   });
 });
+
+describe("the working bar's live region", () => {
+  it("stays in the accessibility tree when empty: hidden by size, never by display:none", () => {
+    const css = readFileSync(join(import.meta.dirname, "styles.css"), "utf8");
+    expect(css).not.toMatch(/.working-bar.emptys*{[^}]*display:s*none/);
+    const el = document.createElement("div");
+    el.className = "working-bar empty";
+    document.body.append(el);
+    const style = window.getComputedStyle(el);
+    expect(style.display).not.toBe("none");
+    expect(style.width).toBe("1px");
+    expect(style.overflow).toBe("hidden");
+    el.remove();
+  });
+});

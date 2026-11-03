@@ -521,6 +521,16 @@ progress {
   border-bottom: 1px solid var(--border);
   border-left: 0.25rem solid var(--warn);
 }
+/* Empty: hidden by size, not by display:none, which would take the live region out of the
+   accessibility tree and a screen reader would not hear it fill. */
 .working-bar.empty {
-  display: none;
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  border: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }

@@ -18,7 +18,7 @@ import { I18nProvider, type Language } from "../i18n";
 import { IpcProvider } from "../ipc/context";
 import { createMockIpc } from "../ipc/mock";
 import { PRESETS } from "../ipc/presets";
-import type { Ipc } from "../ipc/types";
+import { IpcError, type Ipc } from "../ipc/types";
 import { AppStateContext, DEFAULT_SETTINGS, useDraftProblems, type AppState, type LastApply } from "../state";
 import { AfterApplyBar } from "./AfterApplyBar";
 import { ApplyFlow, ProgressView } from "./ApplyFlow";
@@ -749,5 +749,51 @@ describe("the working bar", () => {
     expect(dialog.textContent).toContain("A change that has not finished is put back when CMD Studio starts again.");
     await user.click(within(dialog).getByRole("button", { name: "Restart CMD Studio" }));
     expect(ipc.state.restarted).toBe(true);
+  });
+
+  it("shows 'restarting' and disables the button while the restart is pending, once", async () => {
+    const s = store({ task: "work.applying", offerRestart: true });
+    const ipc = createMockIpc();
+    const spy = vi.spyOn(ipc, "appRestart").mockReturnValue(new Promise(() => {}));
+    const user = userEvent.setup();
+    mountBar(s, ipc);
+    await user.click(screen.getByRole("button", { name: "Restart CMD Studio" }));
+    const dialog = screen.getByRole("dialog", { name: "Restart CMD Studio" });
+    await user.click(within(dialog).getByRole("button", { name: "Restart CMD Studio" }));
+    expect(dialog.textContent).toContain("restarting");
+    const again = within(dialog).getByRole("button", { name: "Restart CMD Studio" });
+    expect((again as HTMLButtonElement).disabled).toBe(true);
+    await user.click(again);
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps 'restarting' shown on an Ok answer", async () => {
+    const s = store({ task: "work.applying", offerRestart: true });
+    const user = userEvent.setup();
+    mountBar(s);
+    await user.click(screen.getByRole("button", { name: "Restart CMD Studio" }));
+    const dialog = screen.getByRole("dialog", { name: "Restart CMD Studio" });
+    await user.click(within(dialog).getByRole("button", { name: "Restart CMD Studio" }));
+    await waitFor(() => expect(dialog.textContent).toContain("restarting"));
+    expect(screen.getByRole("dialog", { name: "Restart CMD Studio" })).toBeTruthy();
+  });
+
+  it("a rejection shows the error and lets the restart be tried again", async () => {
+    const s = store({ task: "work.applying", offerRestart: true });
+    const ipc = createMockIpc();
+    const spy = vi
+      .spyOn(ipc, "appRestart")
+      .mockRejectedValueOnce(new IpcError({ code: "E_INTERNAL", messageTh: "ไม่ได้", messageEn: "spawn failed", details: "d" }))
+      .mockReturnValue(new Promise(() => {}));
+    const user = userEvent.setup();
+    mountBar(s, ipc);
+    await user.click(screen.getByRole("button", { name: "Restart CMD Studio" }));
+    await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Restart CMD Studio" }));
+    expect(await screen.findByText(/spawn failed/)).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Restart CMD Studio" }));
+    const dialog = screen.getByRole("dialog", { name: "Restart CMD Studio" });
+    expect((within(dialog).getByRole("button", { name: "Restart CMD Studio" }) as HTMLButtonElement).disabled).toBe(false);
+    await user.click(within(dialog).getByRole("button", { name: "Restart CMD Studio" }));
+    expect(spy).toHaveBeenCalledTimes(2);
   });
 });

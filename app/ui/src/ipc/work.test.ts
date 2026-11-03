@@ -51,6 +51,22 @@ describe("the one list of commands", () => {
 });
 
 describe("the wrapper", () => {
+  it("leaves nothing pending and no timer when the inner method throws at once", () => {
+    vi.useFakeTimers();
+    try {
+      const inner = createMockIpc();
+      vi.spyOn(inner, "themesList").mockImplementation(() => {
+        throw new Error("sync");
+      });
+      const { ipc, work } = withWork(inner, () => Date.now());
+      expect(() => ipc.themesList()).toThrow("sync");
+      expect(vi.getTimerCount()).toBe(0);
+      expect(work.get().task).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   beforeEach(() => {
     vi.useFakeTimers();
   });
@@ -114,8 +130,14 @@ describe("the wrapper", () => {
     await one;
     expect(shown).toEqual(["E_TIMEOUT"]);
     const two = show(ipc.diagnosticsCopy());
+    // The retry has waited ten seconds and is shown; the first call's late answer must not
+    // take it off the list (the dropped call is already off it).
+    await vi.advanceTimersByTimeAsync(STILL_WORKING_MS);
+    expect(work.get().task).toBe("work.reading");
     first.resolve("late");
     await vi.advanceTimersByTimeAsync(0);
+    expect(work.get().task).toBe("work.reading");
+    expect(shown).toEqual(["E_TIMEOUT"]);
     second.resolve("fresh");
     await two;
     expect(shown).toEqual(["E_TIMEOUT", "fresh"]);

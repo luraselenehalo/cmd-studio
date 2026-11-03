@@ -3,7 +3,7 @@
 // nothing is given up after a minute with E_TIMEOUT and its late answer dropped; one that
 // changes the machine is never given up (its transaction must end), but after three minutes
 // the bar offers "Restart CMD Studio". The two commands that wait for the user's file dialog
-// and the restart itself are neither timed nor shown. One list says what each command is.
+// are shown but never timed; the restart itself is neither timed nor shown. One list says what each command is.
 import type { Key } from "../i18n/types";
 import { IpcError, type Ipc } from "./types";
 
@@ -166,7 +166,15 @@ export function withWork(ipc: Ipc, now: () => number = Date.now): { ipc: Ipc; wo
   const track = <T>(method: keyof Ipc, run: () => Promise<T>): Promise<T> => {
     if (KINDS[method] === "exit") return run();
     const p = begin(method);
-    const settled = run().finally(() => end(p));
+    let started: Promise<T>;
+    try {
+      started = run();
+    } catch (e) {
+      // A throw before any promise exists: nothing is left waiting.
+      end(p);
+      throw e;
+    }
+    const settled = started.finally(() => end(p));
     if (KINDS[method] !== "read") return settled;
     return new Promise<T>((resolve, reject) => {
       let done = false;

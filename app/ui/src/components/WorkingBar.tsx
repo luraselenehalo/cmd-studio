@@ -21,12 +21,18 @@ export function WorkingBar() {
   const state = useSyncExternalStore(store.subscribe, store.get, store.get);
   const [asking, setAsking] = useState(false);
   const [error, setError] = useState<unknown>(null);
+  // Set before the call and kept on an Ok answer or none (the app is restarting either way);
+  // only a rejection clears it.
+  const [restarting, setRestarting] = useState(false);
   const restart = async () => {
+    if (restarting) return;
     setError(null);
+    setRestarting(true);
     try {
       await ipc.appRestart();
     } catch (e) {
       setError(e);
+      setRestarting(false);
       setAsking(false);
     }
   };
@@ -43,13 +49,14 @@ export function WorkingBar() {
       </div>
       {error !== null && <ErrorNotice error={error} />}
       {asking && (
-        <Dialog title={t("work.restart")} onClose={() => setAsking(false)}>
+        <Dialog title={t("work.restart")} onClose={restarting ? undefined : () => setAsking(false)}>
           <p>{t("work.restartConfirm")}</p>
+          {restarting && <p role="status">{t("work.restarting")}…</p>}
           <div className="row-actions">
-            <button type="button" className="primary" onClick={() => void restart()}>
+            <button type="button" className="primary" disabled={restarting} onClick={() => void restart()}>
               {t("work.restart")}
             </button>
-            <button type="button" onClick={() => setAsking(false)}>
+            <button type="button" disabled={restarting} onClick={() => setAsking(false)}>
               {t("common.cancel")}
             </button>
           </div>
