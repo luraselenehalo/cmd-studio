@@ -6,7 +6,7 @@
 // commands it turns off; Try again asks about that add-on again; a plan that changed is shown
 // again, never applied; what a rollback left is listed under its header; focus follows the
 // stages; "busy" brackets the apply; "Copy details" says whether it copied.
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState, type ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
@@ -27,6 +27,8 @@ import { ErrorBoundary } from "./ErrorBoundary";
 import { ErrorNotice, NotesList, UnrestoredList } from "./Notices";
 import { TerminalPreview } from "./TerminalPreview";
 import { ThemeCard } from "./ThemeCard";
+import { WorkContext, WorkingBar } from "./WorkingBar";
+import type { WorkState, WorkStore } from "../ipc/work";
 
 function mount(children: ReactNode, { ipc = createMockIpc(), language = "en" }: { ipc?: Ipc; language?: Language } = {}) {
   const wrap = (inner: ReactNode) => (
@@ -697,5 +699,54 @@ describe("AfterApplyBar", () => {
     });
     expect(within(bar).getByText(/open a new cmd tab in Windows Terminal/)).toBeTruthy();
     expect(screen.queryByText(/open a new cmd window/)).toBeNull();
+  });
+});
+
+describe("the working bar", () => {
+  const store = (state: WorkState) => {
+    const listeners = new Set<() => void>();
+    return {
+      get: () => state,
+      subscribe: (l: () => void) => {
+        listeners.add(l);
+        return () => listeners.delete(l);
+      },
+      set: (next: WorkState) => {
+        state = next;
+        listeners.forEach((l) => l());
+      },
+    };
+  };
+  const mountBar = (work: WorkStore, ipc = createMockIpc()) =>
+    render(
+      <IpcProvider ipc={ipc}>
+        <I18nProvider language="en" setLanguage={() => {}}>
+          <WorkContext.Provider value={work}>
+            <WorkingBar />
+          </WorkContext.Provider>
+        </I18nProvider>
+      </IpcProvider>,
+    );
+
+  it("is an empty status region until something works, then names the task", () => {
+    const s = store({ task: null, offerRestart: false });
+    mountBar(s);
+    const region = screen.getByRole("status", { name: "Still working" });
+    expect(region.textContent).toBe("");
+    act(() => s.set({ task: "work.applying", offerRestart: false }));
+    expect(region.textContent).toContain("CMD Studio is still working: applying the theme…");
+    expect(screen.queryByRole("button", { name: "Restart CMD Studio" })).toBeNull();
+  });
+
+  it("offers the restart after three minutes, asks first, and restarts on yes", async () => {
+    const s = store({ task: "work.applying", offerRestart: true });
+    const ipc = createMockIpc();
+    const user = userEvent.setup();
+    mountBar(s, ipc);
+    await user.click(screen.getByRole("button", { name: "Restart CMD Studio" }));
+    const dialog = screen.getByRole("dialog", { name: "Restart CMD Studio" });
+    expect(dialog.textContent).toContain("A change that has not finished is put back when CMD Studio starts again.");
+    await user.click(within(dialog).getByRole("button", { name: "Restart CMD Studio" }));
+    expect(ipc.state.restarted).toBe(true);
   });
 });

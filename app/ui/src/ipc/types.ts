@@ -94,7 +94,9 @@ export interface Ipc {
   settingsReset(): Promise<SettingsLoad>;
   /** One of the UI's own errors (recovery spec §6.5); the backend logs twenty per run. */
   logUiError(message: string, place: string): Promise<void>;
-  /** Starts CMD Studio again and ends this one (recovery spec §6.3); never answers. */
+  /** Starts CMD Studio again and ends this one (recovery spec §6.3). It usually never answers;
+   * an Ok answer also means it is restarting (the process may stay alive a moment after the
+   * exit is asked for); only a rejection (the spawn failed) is an error. */
   appRestart(): Promise<void>;
 }
 

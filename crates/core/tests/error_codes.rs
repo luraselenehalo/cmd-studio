@@ -153,6 +153,26 @@ fn the_codes_of_spec_5_9_and_the_codes_the_code_says_are_the_same() {
     );
 }
 
+/// Each code only the UI says is raised by the UI's IPC wrapper, as a string literal in
+/// `app/ui/src/ipc/work.ts` (the one place that makes an `E_TIMEOUT`).
+#[test]
+fn every_ui_only_code_is_said_by_the_typescript() {
+    let work = root()
+        .join("app")
+        .join("ui")
+        .join("src")
+        .join("ipc")
+        .join("work.ts");
+    let source = std::fs::read_to_string(&work).unwrap();
+    for code in UI_ONLY {
+        assert!(
+            source.contains(&format!("\"{code}\"")),
+            "{} does not say {code}",
+            work.display()
+        );
+    }
+}
+
 #[test]
 fn the_reader_finds_codes_in_literals_and_not_in_comments_or_tests() {
     let source = r#"

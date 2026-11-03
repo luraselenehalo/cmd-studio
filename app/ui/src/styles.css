@@ -507,3 +507,20 @@ legend {
 progress {
   width: 100%;
 }
+
+/* The "still working" bar (recovery spec §6.1): at the top, over the page; empty until needed. */
+.working-bar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  padding: 0.5rem 1rem;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  border-left: 0.25rem solid var(--warn);
+}
+.working-bar.empty {
+  display: none;
+}
