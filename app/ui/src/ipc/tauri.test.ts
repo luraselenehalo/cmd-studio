@@ -113,4 +113,26 @@ describe("Tauri's IPC", () => {
     ]);
     invoke.mockReset();
   });
+
+  it("calls the seven commands of phase 3b-2 by their names and argument names", async () => {
+    invoke.mockReset();
+    invoke.mockResolvedValue(undefined);
+    await tauriIpc.appReady();
+    await tauriIpc.appStatus();
+    await tauriIpc.crashDismiss();
+    await tauriIpc.crashReportRead();
+    await tauriIpc.settingsReset();
+    await tauriIpc.logUiError("TypeError: x", "Home");
+    await tauriIpc.appRestart();
+    expect(invoke.mock.calls).toEqual([
+      ["app_ready", undefined],
+      ["app_status", undefined],
+      ["crash_dismiss", undefined],
+      ["crash_report_read", undefined],
+      ["settings_reset", undefined],
+      ["log_ui_error", { message: "TypeError: x", place: "Home" }],
+      ["app_restart", undefined],
+    ]);
+    invoke.mockReset();
+  });
 });

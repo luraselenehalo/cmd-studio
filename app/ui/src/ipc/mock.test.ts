@@ -437,11 +437,11 @@ describe("the mock IPC", () => {
     expect(row.check.messageEn).toContain("a theme was applied after this pause");
     expect(await row.ipc.themeResume()).toEqual({ kind: "resumed" });
     // Not yet or in effect, with a theme to apply: through the plan. Without one, or with one that
-    // is no longer in the library: the Themes page.
+    // is no longer in the library: the Themes page; a state that cannot be told: notKnown (3b-1 m4).
     expect((await (await shape({ ...crash, level: "computerNotYet" })).ipc.themeResume()).kind).toBe("apply");
     expect((await (await shape({ ...crash, level: "computer", resume: null })).ipc.themeResume()).kind).toBe("pickTheme");
     const gone = { ...resume, themeId: "00000000-0000-4000-8000-000000000000", themeName: null };
-    expect((await (await shape({ ...crash, level: "computerUnknown", resume: gone })).ipc.themeResume()).kind).toBe("pickTheme");
+    expect((await (await shape({ ...crash, level: "computerUnknown", resume: gone })).ipc.themeResume()).kind).toBe("notKnown");
     // Every Thai text of the pause rows is free of the words the app never says.
     for (const level of ["computer", "computerNotYet", "computerUnknown", "cmd"] as const) {
       for (const reason of ["cmdStarts", "clinkCrash", "recovery", "user", null] as const) {
@@ -620,5 +620,48 @@ describe("the mock IPC", () => {
     expect(crashing.state.applied).not.toBeNull();
     // A crashCheck that is not given keeps the check that runs once.
     expect((await createMockIpc().recoveryStatus()).crashes).toEqual({ kind: "noTheme" });
+  });
+
+  it("answers the app's status as fixed data from its options, notes ready and dismiss, and counts the UI's errors", async () => {
+    const plain = createMockIpc();
+    expect(await plain.appStatus()).toEqual({ busy: null, safeMode: false, safeModeReason: null, crashNotice: null, recoveryEntry: null });
+    await plain.appReady();
+    expect(plain.state.ready).toBe(true);
+    const ipc = createMockIpc({
+      safeMode: { kind: "failedStarts", count: 2 },
+      crashNotice: { atMs: 1791694709000, hasReport: true },
+      crashReport: { file: "crash-1791694709000.txt", atMs: 1791694709000, text: "CMD Studio 0.1.0 crashed at 2026-10-11T04:58:29Z\nmessage: boom\n" },
+      busy: "apply",
+    });
+    const status = await ipc.appStatus();
+    expect(status.safeMode).toBe(true);
+    expect(status.safeModeReason).toEqual({ kind: "failedStarts", count: 2 });
+    expect(status.crashNotice).toEqual({ atMs: 1791694709000, hasReport: true });
+    expect(status.busy).toBe("apply");
+    expect((await ipc.crashReportRead())?.file).toBe("crash-1791694709000.txt");
+    await ipc.crashDismiss();
+    expect((await ipc.appStatus()).crashNotice).toBeNull();
+    await ipc.logUiError("TypeError: x", "Home");
+    expect(ipc.state.uiErrors).toEqual(["Home: TypeError: x"]);
+    await ipc.appRestart();
+    expect(ipc.state.restarted).toBe(true);
+    expect(await createMockIpc().crashReportRead()).toBeNull();
+    expect(ipc.state.calls).toEqual(expect.arrayContaining(["appStatus", "crashReportRead", "crashDismiss", "logUiError", "appRestart"]));
+  });
+
+  it("resets the settings to the defaults and names the file set aside, as the backend does", async () => {
+    const ipc = createMockIpc({ settings: { language: "th", wizardDone: true } });
+    const reset = await ipc.settingsReset();
+    expect(reset.settings).toEqual({ language: "en", target: "all", setWtDefaultProfile: true, updates: "auto", wizardDone: false });
+    expect(reset.resetFrom).toMatch(/^settings\.json\.reset-\d+$/);
+    expect((await ipc.settingsGet()).settings.language).toBe("en");
+  });
+
+  it("gives what --recovery did as fixed data, and turning back on says notKnown when told", async () => {
+    const entry = { notes: [], unrestored: [], pause: null, skipped: "no theme is applied" };
+    const ipc = createMockIpc({ safeMode: { kind: "recovery" }, recoveryEntry: entry });
+    expect((await ipc.appStatus()).recoveryEntry).toEqual(entry);
+    const unknown = createMockIpc({ paused: { by: "app", level: "computerUnknown", reason: "user", atMs: 1, count: 0, resume: null } });
+    expect(await unknown.themeResume()).toEqual({ kind: "notKnown" });
   });
 });

@@ -76,4 +76,11 @@ export const tauriIpc: Ipc = {
   recoveryStatus: () => call("recovery_status"),
   themePause: (reason) => call("theme_pause", { reason }),
   themeResume: () => call("theme_resume"),
+  appReady: () => call("app_ready"),
+  appStatus: () => call("app_status"),
+  crashDismiss: () => call("crash_dismiss"),
+  crashReportRead: () => call("crash_report_read"),
+  settingsReset: () => call("settings_reset"),
+  logUiError: (message, place) => call("log_ui_error", { message, place }),
+  appRestart: () => call("app_restart"),
 };

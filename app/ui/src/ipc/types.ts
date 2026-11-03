@@ -6,6 +6,8 @@
 import type { AdvancedInfo } from "../bindings/AdvancedInfo";
 import type { AppError } from "../bindings/AppError";
 import type { AppSettings } from "../bindings/AppSettings";
+import type { AppStatus } from "../bindings/AppStatus";
+import type { CrashReport } from "../bindings/CrashReport";
 import type { ApplyOutcome } from "../bindings/ApplyOutcome";
 import type { ApplyProgress } from "../bindings/ApplyProgress";
 import type { ApplyRequest } from "../bindings/ApplyRequest";
@@ -80,6 +82,20 @@ export interface Ipc {
   /** Turns the theme back on: a pause in cmd at once, one of this computer as a request to
    * apply through the plan. */
   themeResume(): Promise<ResumeOutcome>;
+  /** The UI drew its first page (recovery spec §5.1): the run is a good start from then on. */
+  appReady(): Promise<void>;
+  /** What runs now, safe mode and why, the crash notice, what `--recovery` did (recovery spec
+   * §6.3, §8). The first call on every load; may be asked again every 2 s only while `busy`. */
+  appStatus(): Promise<AppStatus>;
+  crashDismiss(): Promise<void>;
+  /** The newest crash note, redacted; `null` when there is none. */
+  crashReportRead(): Promise<CrashReport | null>;
+  /** settings.json set aside as `settings.json.reset-<ms>`; the defaults from then on. */
+  settingsReset(): Promise<SettingsLoad>;
+  /** One of the UI's own errors (recovery spec §6.5); the backend logs twenty per run. */
+  logUiError(message: string, place: string): Promise<void>;
+  /** Starts CMD Studio again and ends this one (recovery spec §6.3); never answers. */
+  appRestart(): Promise<void>;
 }
 
 /** A command failed: the Rust side's `AppError` (spec §5.9), as a JavaScript error. */

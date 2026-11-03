@@ -1321,6 +1321,20 @@ describe("the theme's pause", () => {
     expect(screen.queryByText(tried)).toBeNull();
   });
 
+  it("says, and keeps the pause, when turning the theme back on finds that state.json cannot be read (notKnown)", async () => {
+    const unknown: PauseInfo = { by: "app", level: "computerUnknown", reason: "user", atMs: PAUSED_AT, count: 0, resume: resumeTerracotta() };
+    const { ipc, user } = await home({}, pausedWith(unknown));
+    await user.click(within(await banner()).getByRole("button", { name: "Turn the theme back on" }));
+    expect(
+      await screen.findByText(
+        "Whether the theme is paused on this computer is not known: CMD Studio could not read its state.json. Fix that first (Help → Report a problem).",
+      ),
+    ).toBeTruthy();
+    expect(ipc.state.paused).not.toBeNull();
+    expect(screen.queryByText("The theme is back on. Open a new cmd window to see it.")).toBeNull();
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
   it("puts focus on Home's heading when the lift at once takes the banner and its button away", async () => {
     const { user } = await home({}, pausedInCmd);
     await user.click(within(await banner()).getByRole("button", { name: "Turn the theme back on" }));

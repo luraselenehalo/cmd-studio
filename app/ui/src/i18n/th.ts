@@ -187,6 +187,7 @@ export const th: Dictionary = {
   "resume.title": "เปิดธีมกลับ",
   "resume.button": "เปิดธีมกลับ",
   "resume.done": "เปิดธีมกลับแล้ว เปิดหน้าต่าง cmd ใหม่เพื่อดูธีม",
+  "resume.notKnown": "บอกไม่ได้ว่าธีมของเครื่องนี้ถูกหยุดอยู่หรือไม่ เพราะ CMD Studio อ่าน state.json ไม่ได้ ให้แก้ก่อน (ช่วยเหลือ → แจ้งปัญหา)",
   "resume.noteRemoved": "ลบบันทึกแล้ว หน้าต่าง cmd จะเปิดได้ตามปกติอีกครั้ง",
 
   "themes.title": "ธีม",

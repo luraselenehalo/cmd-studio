@@ -249,7 +249,7 @@ export function useResume(
   const [applyBusy, setApplyBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   /** What a lift at once did, for the status line: the theme is back on, or only the note went. */
-  const [resumed, setResumed] = useState<"themeOn" | "noteRemoved" | null>(null);
+  const [resumed, setResumed] = useState<"themeOn" | "noteRemoved" | "notKnown" | null>(null);
   const keys = useRef(0);
   const running = useRef(false);
   /** The element that had focus when the pause was lifted at once, until it has left the page. */
@@ -286,6 +286,9 @@ export function useResume(
         keys.current += 1;
         setApplyBusy(false);
         setApplying({ key: keys.current, request: outcome.request });
+      } else if (outcome.kind === "notKnown") {
+        // Nothing was lifted: the pause stays, and the words say why (recovery spec §5.4).
+        setResumed("notKnown");
       } else if (outcome.kind === "pickTheme") {
         go({ name: "themes" });
       } else {
@@ -305,7 +308,7 @@ export function useResume(
   const view = (
     <>
       {/* Always there, its text toggled (2c item 10). */}
-      <div role="status">{resumed && <p>{t(resumed === "noteRemoved" ? "resume.noteRemoved" : "resume.done")}</p>}</div>
+      <div role="status">{resumed && <p>{t(resumed === "noteRemoved" ? "resume.noteRemoved" : resumed === "notKnown" ? "resume.notKnown" : "resume.done")}</p>}</div>
       {error !== null && <ErrorNotice error={error} />}
       {applying && (
         // No Close while the apply runs (ruling R7), and the outcome is read in the dialog.
