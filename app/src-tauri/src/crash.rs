@@ -15,7 +15,9 @@ pub const CRASH_NOTES_KEPT: usize = 10;
 pub const NOTE_PREFIX: &str = "crash-";
 
 /// What the diagnostics take out of a text (`diagnostics.rs`): the names `user_names` redacts
-/// (the Windows user name, the profile folder's names) and the user's SID.
+/// (the Windows user name, the profile folder's names) and the user's SID. A name of three
+/// characters or more goes wherever it stands as a whole word (a panic message's free text
+/// included); a shorter one only where it is a folder name (`redact`'s rule).
 #[derive(Clone, Debug, Default)]
 pub struct Redaction {
     pub names: Vec<String>,

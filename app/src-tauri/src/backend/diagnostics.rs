@@ -396,33 +396,53 @@ pub fn user_name_of(local_app_data: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// Replaces the user name `user` by `%USERNAME%` wherever it is a whole folder name: right
-/// after `\` or `/`, and up to a character that is neither a letter or digit nor a combining
-/// mark (a mark belongs to the letter before it), or the end of the text. So with user
-/// `tester`, `\testers\` and `\tester2\` stay: they are other folders (a profile folder named
-/// `testers` is its own name, and is redacted as that); and with user `สม`, `\สม่ำเสมอ` stays.
-/// The name is matched letter by letter on the text as it is, without regard to case, so a
-/// letter that is longer or shorter in another case (İ, the Kelvin sign) never moves or hides a
-/// match.
+/// A user name of this many characters or more is taken out wherever it stands as a whole word;
+/// a shorter one only where it is a folder name (see [`redact`]).
+pub const WHOLE_WORD_FROM: usize = 3;
+
+/// Replaces the user name `user` by `%USERNAME%` wherever it stands whole: right after `\` or
+/// `/` (a folder name), and, for a name of [`WHOLE_WORD_FROM`] characters or more, after any
+/// other character that is not a letter, a digit or a combining mark, or at the start of the
+/// text (a panic message's `user <name>`, a prompt's `name@host`, an environment line's
+/// `USERNAME=<name>`); in both cases up to a character that is neither a letter or digit nor a
+/// combining mark (a mark belongs to the letter before it), or the end of the text. So with
+/// user `tester`, `\testers\`, `\tester2\` and `attester` stay: other words (a profile folder
+/// named `testers` is its own name, and is redacted as that); and with user `สม`, `\สม่ำเสมอ`
+/// stays. A name shorter than three characters gets the path rule only, so it never eats the
+/// pairs of letters of every message; a name that is also a common word (`core`, `user`)
+/// takes that word out of a message or a backtrace symbol too, which is the cost of taking it
+/// out everywhere. The name is matched letter by letter on the text as it is, without regard to
+/// case, so a letter that is longer or shorter in another case (İ, the Kelvin sign) never moves
+/// or hides a match.
 pub fn redact(text: &str, user: &str) -> String {
     if user.is_empty() {
         return text.to_string();
     }
+    let anywhere = user.chars().count() >= WHOLE_WORD_FROM;
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
-    while let Some(at) = rest.find(['\\', '/']) {
-        // A slash is one byte, so the text after it starts at a character.
-        let (Some(through_slash), Some(after)) = (rest.get(..=at), rest.get(at + 1..)) else {
+    let mut before: Option<char> = None;
+    while !rest.is_empty() {
+        let at_start = match before {
+            None => anywhere,
+            Some('\\' | '/') => true,
+            Some(c) => anywhere && !continues_word(c),
+        };
+        if at_start {
+            if let Some(len) = name_at(rest, user) {
+                out.push_str(USER_PLACEHOLDER);
+                before = user.chars().last();
+                rest = rest.get(len..).unwrap_or("");
+                continue;
+            }
+        }
+        let Some(c) = rest.chars().next() else {
             break;
         };
-        out.push_str(through_slash);
-        rest = after;
-        if let Some(len) = name_at(rest, user) {
-            out.push_str(USER_PLACEHOLDER);
-            rest = rest.get(len..).unwrap_or("");
-        }
+        out.push(c);
+        before = Some(c);
+        rest = rest.get(c.len_utf8()..).unwrap_or("");
     }
-    out.push_str(rest);
     out
 }
 
@@ -621,6 +641,40 @@ mod tests {
         ] {
             assert_eq!(redact(other, "tester"), other);
         }
+    }
+
+    /// M4 of the final review: a name of three characters or more is taken out wherever it
+    /// stands as a whole word, not only after a slash (a panic message's `user <name>`, a
+    /// prompt sample's `name@host`, an environment line's `USERNAME=<name>`); a name shorter
+    /// than that gets the path rule only, so a two-letter name never eats the pairs of letters
+    /// of every message.
+    #[test]
+    fn a_name_of_three_letters_or_more_is_redacted_wherever_it_stands_whole() {
+        for (text, expected) in [
+            ("user tester", "user %USERNAME%"),
+            ("tester@host", "%USERNAME%@host"),
+            ("USERNAME=tester", "USERNAME=%USERNAME%"),
+            ("tester", "%USERNAME%"),
+            ("at (tester)", "at (%USERNAME%)"),
+            (
+                "Tester: C:\\Users\\tester",
+                "%USERNAME%: C:\\Users\\%USERNAME%",
+            ),
+        ] {
+            assert_eq!(redact(text, "tester"), expected, "{text}");
+        }
+        // Still only as a whole word: other words that hold the name stay.
+        for other in ["testers", "attester", "tester2", "testerä", "contester's"] {
+            assert_eq!(redact(other, "tester"), other);
+        }
+        // A short name: after a slash only.
+        assert_eq!(redact("user ab", "ab"), "user ab");
+        assert_eq!(redact("ab@host", "ab"), "ab@host");
+        assert_eq!(redact(r"C:\Users\ab\x", "ab"), r"C:\Users\%USERNAME%\x");
+        assert_eq!(redact("user สมใจ", "สมใจ"), "user %USERNAME%");
+        assert_eq!(redact("user สม", "สม"), "user สม");
+        // Three characters is the least that counts.
+        assert_eq!(redact("user bob", "bob"), "user %USERNAME%");
     }
 
     /// Letters whose lower case is longer (İ) or shorter (the Kelvin sign) than they are never
