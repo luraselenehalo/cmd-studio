@@ -225,6 +225,52 @@ impl<M: Machine> Backend<M> {
         })
     }
 
+    /// "Reset the app's settings" (recovery spec §5.2): settings.json is set aside as
+    /// `settings.json.reset-<ms>` and the defaults stand, in memory and on the next read; the
+    /// name of the file set aside is told, once, like a damaged file's. Nothing to set aside
+    /// when there is no file.
+    pub fn settings_reset(&self) -> Result<SettingsLoad, AppError> {
+        // Not through `with_settings`: that reads the file first, and a file that cannot be
+        // read is the very case a reset is for (K20 g). The lock is held for the whole of it.
+        let mut held = self.settings.lock().unwrap_or_else(PoisonError::into_inner);
+        let fs = self.sys().fs;
+        let file = self.paths.settings_file();
+        // A damaged file an earlier read set aside and has not yet told the page about is
+        // told now, unless this reset sets a file aside itself.
+        let pending = held.as_mut().and_then(|cache| cache.reset_from.take());
+        let reset_from = if fs.exists(&file) {
+            let mut ms = self.now_ms();
+            let aside = loop {
+                let candidate = self.paths.settings_reset_file(ms);
+                if !fs.exists(&candidate) {
+                    break candidate;
+                }
+                ms = ms.saturating_add(1);
+            };
+            fs.rename(&file, &aside).map_err(|e| {
+                AppError::coded(
+                    "E_DATA_WRITE",
+                    format!(
+                        "{} could not be set aside as {}: {e}",
+                        file.display(),
+                        aside.display()
+                    ),
+                )
+            })?;
+            aside.file_name().map(|n| n.to_string_lossy().into_owned())
+        } else {
+            pending
+        };
+        *held = Some(SettingsCache {
+            settings: AppSettings::default(),
+            reset_from: None,
+        });
+        Ok(SettingsLoad {
+            settings: AppSettings::default(),
+            reset_from,
+        })
+    }
+
     /// The settings a command works from when it is not told otherwise; the defaults when the
     /// file cannot be used (the Settings page shows that problem itself). Never uses up the
     /// notice of a reset that `settings_get` has yet to hand to the UI.
@@ -588,6 +634,50 @@ mod tests {
         // What `settings_get` returns is held in memory; the file is what was saved.
         let on_disk = crate::settings::load(b.sys().fs, &b.paths().settings_file(), 0).unwrap();
         assert_eq!(on_disk.settings, mine);
+    }
+
+    /// Recovery spec §5.2: "Reset the app's settings" sets settings.json aside as
+    /// `settings.json.reset-<ms>`, the defaults stand from then on, and the page is told which
+    /// file was set aside. With no file, nothing is set aside.
+    #[test]
+    fn resetting_the_settings_sets_the_file_aside_and_the_defaults_stand() {
+        let b = backend();
+        let mine = AppSettings {
+            language: crate::settings::Language::Th,
+            wizard_done: true,
+            ..AppSettings::default()
+        };
+        b.settings_set(mine).unwrap();
+        let reset = b.settings_reset().unwrap();
+        assert_eq!(reset.settings, AppSettings::default());
+        let aside = reset.reset_from.unwrap();
+        assert!(aside.starts_with("settings.json.reset-"), "{aside}");
+        assert!(!b.sys().fs.exists(&b.paths().settings_file()));
+        assert!(b
+            .sys()
+            .fs
+            .exists(&b.paths().settings_file().with_file_name(&aside)));
+        assert_eq!(b.settings_get().unwrap().settings, AppSettings::default());
+        assert_eq!(b.settings_or_default(), AppSettings::default());
+        let b = backend();
+        let reset = b.settings_reset().unwrap();
+        assert_eq!(
+            (reset.settings, reset.reset_from),
+            (AppSettings::default(), None)
+        );
+        // A file that cannot be read is the case a reset is for: it is set aside all the same.
+        let b = backend();
+        let file = b.paths().settings_file();
+        b.sys().fs.write_atomic(&file, b"{ not json").unwrap();
+        crate::backend::testing::fake_fs(&b).fail_reads_of(&file);
+        assert_eq!(b.settings_get().unwrap_err().code, "E_MACHINE_READ");
+        let reset = b.settings_reset().unwrap();
+        assert!(reset
+            .reset_from
+            .unwrap()
+            .starts_with("settings.json.reset-"));
+        assert!(!b.sys().fs.exists(&file));
+        assert_eq!(b.settings_get().unwrap().settings, AppSettings::default());
     }
 
     #[test]

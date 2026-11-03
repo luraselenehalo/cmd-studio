@@ -32,6 +32,12 @@ fn main() {
         [one] if one == cmdstudio_app::RECOVERY_ARG => {
             return cmdstudio_app::run_gui(GuiStart::Recovery)
         }
+        [flag, pid] if flag == cmdstudio_app::AFTER_PID_ARG => {
+            // app_restart's child (recovery spec §6.3): the old process must be gone before the
+            // single-instance plugin looks for its window.
+            cmdstudio_app::wait_for_old_process(pid);
+            return cmdstudio_app::run_gui(GuiStart::Normal);
+        }
         _ => {}
     }
     cmdstudio_app::console::attach_parent();

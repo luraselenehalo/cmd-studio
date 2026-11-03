@@ -78,28 +78,43 @@ pub fn attach_parent() {
 #[cfg(not(windows))]
 pub fn attach_parent() {}
 
-/// Shows `message` in a message box titled "CMD Studio" and returns when it is closed. For a
-/// start that fails before the window exists; English, like every text outside the UI.
+/// Shows `message` in a message box titled "CMD Studio" with `flags` (`MB_*`), and answers what
+/// was pressed (`IDOK`, `IDYES`, `IDNO`). English, like every text outside the UI.
 #[cfg(windows)]
-pub fn fatal(message: &str) {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+fn message_box(message: &str, flags: u32) -> i32 {
+    use windows_sys::Win32::UI::WindowsAndMessaging::MessageBoxW;
     let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
     let (text, title) = (wide(message), wide("CMD Studio"));
     // SAFETY: both strings are NUL-terminated UTF-16 buffers that outlive the call, the owner
-    // window is null (no parent), and the flags are documented constants.
-    unsafe {
-        MessageBoxW(
-            std::ptr::null_mut(),
-            text.as_ptr(),
-            title.as_ptr(),
-            MB_OK | MB_ICONERROR,
-        );
-    }
+    // window is null (no parent), and the flags are the caller's documented constants.
+    unsafe { MessageBoxW(std::ptr::null_mut(), text.as_ptr(), title.as_ptr(), flags) }
+}
+
+/// Shows `message` and returns when it is closed. For a start that fails before the window
+/// exists; English, like every text outside the UI.
+#[cfg(windows)]
+pub fn fatal(message: &str) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK};
+    message_box(message, MB_OK | MB_ICONERROR);
 }
 
 #[cfg(not(windows))]
 pub fn fatal(message: &str) {
     eprintln!("CMD Studio: {message}");
+}
+
+/// Shows `message` with Yes and No, and answers whether Yes was pressed. For a window that
+/// cannot be opened (recovery spec §5.4).
+#[cfg(windows)]
+pub fn ask_yes_no(message: &str) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{IDYES, MB_ICONQUESTION, MB_YESNO};
+    message_box(message, MB_YESNO | MB_ICONQUESTION) == IDYES
+}
+
+#[cfg(not(windows))]
+pub fn ask_yes_no(message: &str) -> bool {
+    eprintln!("CMD Studio: {message}");
+    false
 }
 
 #[cfg(all(test, windows))]

@@ -17,6 +17,8 @@ pub mod logs;
 pub mod machine;
 pub mod open;
 pub mod settings;
+#[cfg(windows)]
+pub mod webview_watch;
 
 /// The one argument that opens the window instead of the CLI (recovery spec §4.4, §8).
 pub const RECOVERY_ARG: &str = "--recovery";
@@ -68,8 +70,41 @@ pub fn run_gui(how: backend::run::GuiStart) {
         .setup(move |app| {
             // Said and ended here, not returned: Tauri would turn the error into a panic.
             if let Err(why) = open_main_window(app, for_window.paths().webview()) {
-                console::fatal(&window_failed(&why));
+                // Recovery spec §5.4: Yes undoes everything through the backend, under the lock
+                // as every change is; No ends as before. Either way exit code 1, and the run
+                // record is left on purpose: a window that could not open is a start that
+                // failed, and the second one in a row opens the next start in recovery mode.
+                let logs = for_window.paths().logs();
+                if console::ask_yes_no(&window_question(&why, &logs)) {
+                    console::fatal(&revert_said(&for_window.revert_all(), &logs));
+                }
                 std::process::exit(1);
+            }
+            // Recovery spec §6.4: the renderer's death reloads the page; the third in a minute
+            // asks the Yes/No question instead, on a thread of its own (WebView2's thread must
+            // not block), then ends the app.
+            if let Some(window) = app.get_webview_window("main") {
+                let b = for_window.clone();
+                let watched = webview_watch::watch_renderer(&window, move || {
+                    let b = b.clone();
+                    let _ = std::thread::Builder::new()
+                        .name("renderer-gave-up".to_string())
+                        .spawn(move || {
+                            let logs = b.paths().logs();
+                            let why = "its page stopped three times in a minute";
+                            if console::ask_yes_no(&window_question(why, &logs)) {
+                                console::fatal(&revert_said(&b.revert_all(), &logs));
+                            }
+                            // The run had reached its UI: this end is the app's own choice,
+                            // not a crash. `exit` raises no Tauri event, so the record goes
+                            // here (K14); the next start shows no notice.
+                            b.end_run();
+                            std::process::exit(1);
+                        });
+                });
+                if let Err(e) = watched {
+                    for_window.note_line(&format!("renderer watch=not_registered {e}"));
+                }
             }
             if how == GuiStart::Recovery {
                 start_recovery_entry(&for_window);
@@ -212,6 +247,101 @@ fn window_failed(why: &str) -> String {
     format!("CMD Studio could not open its window: {why}")
 }
 
+/// The Yes/No question of a window that could not be built (recovery spec §5.4).
+#[cfg(windows)]
+pub fn window_question(why: &str, logs: &std::path::Path) -> String {
+    format!(
+        "{}. Your themes are safe. Undo everything CMD Studio changed on this computer (cmd, \
+         Windows Terminal, fonts)? The log is in {}.",
+        window_failed(why),
+        logs.display()
+    )
+}
+
+/// What the undo did, for the second box (recovery spec §5.4): done, not everything (the log
+/// says what to finish by hand), refused because busy, or refused for another reason.
+#[cfg(windows)]
+pub fn revert_said(
+    result: &Result<backend::apply::RevertOutcome, error::AppError>,
+    logs: &std::path::Path,
+) -> String {
+    match result {
+        Ok(out) if out.ok => {
+            "Everything CMD Studio changed on this computer is back as it was.".to_string()
+        }
+        Ok(_) => format!(
+            "Not everything could be undone. The log in {} says what to finish by hand.",
+            logs.display()
+        ),
+        Err(e) if e.code == "E_BUSY" => "Nothing was undone: another CMD Studio, or another \
+                                         program, is changing this computer right now (E_BUSY). \
+                                         Try again when it is done."
+            .to_string(),
+        Err(e) => format!("Nothing was undone ({}): {}", e.code, e.details),
+    }
+}
+
+/// The hidden argument `app_restart`'s child is started with (recovery spec §6.3): the pid of
+/// the process that is ending. The child waits for it before anything else (`main.rs`), so the
+/// single-instance plugin never finds the old window and hands the start to a dying process.
+pub const AFTER_PID_ARG: &str = "--after-pid";
+/// How long the child waits for the old process at most.
+pub const RESTART_WAIT_MS: u64 = 10_000;
+
+/// Starts this exe again as a normal start that waits for this process to be gone (recovery
+/// spec §6.3): the caller exits once it has spawned. No cmd.exe helper: cmd would load AutoRun.
+#[cfg(windows)]
+pub fn restart_process() -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    std::process::Command::new(exe)
+        .arg(AFTER_PID_ARG)
+        .arg(std::process::id().to_string())
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// The pid `--after-pid` names; `None` for anything that is not a number.
+pub fn after_pid(arg: &std::ffi::OsStr) -> Option<u32> {
+    arg.to_str()?.parse().ok()
+}
+
+/// Waits, polling every 100 ms, until `is_alive(pid)` says no or `limit` has passed: how long
+/// it waited. Pure, for the test: `main.rs` hands it the real process check and `sleep`.
+pub fn wait_until_gone(
+    pid: u32,
+    limit: std::time::Duration,
+    mut is_alive: impl FnMut(u32) -> bool,
+    mut sleep: impl FnMut(std::time::Duration),
+) -> std::time::Duration {
+    let step = std::time::Duration::from_millis(100);
+    let mut waited = std::time::Duration::ZERO;
+    while waited < limit && is_alive(pid) {
+        sleep(step);
+        waited += step;
+    }
+    waited
+}
+
+/// `main.rs`'s wait for the process `arg` names, up to [`RESTART_WAIT_MS`]: a process that is
+/// there (`process_created_at` answers a time) is alive; one that is gone, or cannot be opened,
+/// is not waited for.
+#[cfg(windows)]
+pub fn wait_for_old_process(arg: &std::ffi::OsStr) {
+    let Some(pid) = after_pid(arg) else {
+        return;
+    };
+    wait_until_gone(
+        pid,
+        std::time::Duration::from_millis(RESTART_WAIT_MS),
+        |p| {
+            cmdstudio_core::adapters::windows::host::process_created_at(p)
+                .is_ok_and(|c| c.is_some())
+        },
+        std::thread::sleep,
+    );
+}
+
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
@@ -328,6 +458,145 @@ mod tests {
             "a normal exit ends the run"
         );
         assert!(production().contains("for_exit.end_run()"));
+    }
+
+    /// Recovery spec §5.4: the window that cannot open asks, in English, whether to undo
+    /// everything, and says what the undo did.
+    #[test]
+    fn a_window_that_cannot_open_asks_to_undo_and_says_what_the_undo_did() {
+        use crate::backend::apply::RevertOutcome;
+        let logs = std::path::Path::new(r"C:\Users\x\AppData\Local\ai.resincore.cmdstudio\logs");
+        let q = window_question("no WebView2", logs);
+        assert_eq!(
+            q,
+            "CMD Studio could not open its window: no WebView2. Your themes are safe. Undo \
+             everything CMD Studio changed on this computer (cmd, Windows Terminal, fonts)? The \
+             log is in C:\\Users\\x\\AppData\\Local\\ai.resincore.cmdstudio\\logs."
+        );
+        let ok = RevertOutcome {
+            ok: true,
+            steps: vec![],
+            notes: vec![],
+            status: Some(crate::backend::apply::TxnStatus::Committed),
+            error: None,
+            unrestored: vec![],
+        };
+        assert_eq!(
+            revert_said(&Ok(ok.clone()), logs),
+            "Everything CMD Studio changed on this computer is back as it was."
+        );
+        let not_ok = RevertOutcome { ok: false, ..ok };
+        assert_eq!(
+            revert_said(&Ok(not_ok), logs),
+            "Not everything could be undone. The log in C:\\Users\\x\\AppData\\Local\\ai.resincore.cmdstudio\\logs says what to finish by hand."
+        );
+        let busy = Err(crate::error::AppError::coded(
+            "E_BUSY",
+            "cmdstudio.lock is held",
+        ));
+        assert_eq!(
+            revert_said(&busy, logs),
+            "Nothing was undone: another CMD Studio, or another program, is changing this computer right now (E_BUSY). Try again when it is done."
+        );
+        let other = Err(crate::error::AppError::coded(
+            "E_SNAPSHOT_READ",
+            "manifest.json is not JSON",
+        ));
+        assert_eq!(
+            revert_said(&other, logs),
+            "Nothing was undone (E_SNAPSHOT_READ): manifest.json is not JSON"
+        );
+        for text in [q, revert_said(&busy, logs)] {
+            assert!(text.is_ascii(), "{text}");
+        }
+        // The wiring, by text: Yes runs the backend's Undo everything, No ends as before, and
+        // `start_failed` keeps its plain box (no data folder to undo from).
+        let text = production();
+        assert!(
+            text.contains("console::ask_yes_no(&window_question("),
+            "the window's failure asks"
+        );
+        assert!(
+            text.contains("for_window.revert_all()"),
+            "Yes undoes everything"
+        );
+        assert!(
+            text.contains("console::fatal(&revert_said("),
+            "the outcome is said"
+        );
+        assert_eq!(
+            text.matches("console::fatal(&start_failed(").count(),
+            2,
+            "start_failed stays a plain box"
+        );
+        let console = include_str!("console.rs");
+        assert!(console.contains("message_box(message, MB_YESNO | MB_ICONQUESTION) == IDYES"));
+        assert!(console.contains("message_box(message, MB_OK | MB_ICONERROR)"));
+        assert!(
+            text.contains("webview_watch::watch_renderer(&window,"),
+            "the renderer is watched"
+        );
+    }
+
+    /// Recovery spec §6.3: the restart starts this exe again with `--after-pid <this pid>` and
+    /// nothing else; the process is never started here (the text is checked: the exe is never
+    /// run on this PC). `main.rs` takes that flag before the window and before the CLI.
+    #[test]
+    fn the_restart_starts_this_exe_after_this_pid() {
+        let body = body_of("pub fn restart_process(");
+        assert!(body.contains("std::env::current_exe()"));
+        assert!(body.contains("std::process::Command::new(exe)"));
+        assert!(body.contains(".arg(AFTER_PID_ARG)"));
+        assert!(body.contains(".arg(std::process::id().to_string())"));
+        assert_eq!(
+            body.matches(".arg(").count(),
+            2,
+            "the flag and the pid, nothing else"
+        );
+        assert!(body.contains(".spawn()"));
+        assert_eq!(AFTER_PID_ARG, "--after-pid");
+        let main = include_str!("main.rs");
+        assert!(
+            main.contains("[flag, pid] if flag == cmdstudio_app::AFTER_PID_ARG"),
+            "{main}"
+        );
+        assert!(main.contains("wait_for_old_process(pid)"));
+    }
+
+    /// Recovery spec §6.3: the child of a restart waits for the old pid, up to ten seconds, and
+    /// goes on at once when it is gone; a flag that is not a number waits for nothing.
+    #[test]
+    fn the_restarts_child_waits_for_the_old_process_up_to_ten_seconds() {
+        use std::time::Duration;
+        assert_eq!(after_pid(std::ffi::OsStr::new("4242")), Some(4242));
+        assert_eq!(after_pid(std::ffi::OsStr::new("x")), None);
+        let mut polls = 0;
+        let mut slept = Duration::ZERO;
+        let waited = wait_until_gone(
+            7,
+            Duration::from_millis(RESTART_WAIT_MS),
+            |pid| {
+                assert_eq!(pid, 7);
+                polls += 1;
+                polls <= 3
+            },
+            |d| slept += d,
+        );
+        assert_eq!(
+            (polls, slept, waited),
+            (4, Duration::from_millis(300), Duration::from_millis(300))
+        );
+        let waited = wait_until_gone(7, Duration::from_millis(RESTART_WAIT_MS), |_| true, |_| {});
+        assert_eq!(waited, Duration::from_millis(RESTART_WAIT_MS));
+        assert_eq!(
+            wait_until_gone(
+                7,
+                Duration::from_millis(RESTART_WAIT_MS),
+                |_| false,
+                |_| panic!("no sleep")
+            ),
+            Duration::ZERO
+        );
     }
 
     /// `--recovery` alone opens the window in recovery mode; every other argument is the CLI's

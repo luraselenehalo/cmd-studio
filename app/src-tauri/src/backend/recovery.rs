@@ -160,6 +160,9 @@ pub enum ResumeOutcome {
     PickTheme,
     /// The theme is not paused.
     NotPaused,
+    /// A pause of this computer whose state can't be told (state.json could not be read): fix
+    /// state.json first (doctor says what is wrong with it); nothing is changed.
+    NotKnown,
 }
 
 /// Where the start's crash check leaves its answer for `recovery_status`. A lock that a
@@ -489,6 +492,7 @@ impl<M: Machine> Backend<M> {
                 self.note_line(&format!("resume by={by} level=cmd"));
                 Ok(ResumeOutcome::Resumed)
             }
+            (PauseLevel::ComputerUnknown, _) => Ok(ResumeOutcome::NotKnown),
             (_, Some(r)) if self.find_theme(r.theme_id).is_ok() => {
                 let request = ApplyRequest {
                     theme_id: r.theme_id,
@@ -852,6 +856,23 @@ mod tests {
         assert!(b.theme_pause(PauseReason::User).unwrap().paused_now);
         assert_eq!(level(&b), PauseLevel::Computer);
         assert_eq!(b.sys().autorun.read_user().unwrap(), None);
+    }
+
+    /// 3b-1's m4: "Turn the theme back on" with a pause of this computer whose state.json
+    /// cannot be read says so, instead of ending in the planner's error; nothing is changed.
+    #[test]
+    fn turning_back_on_when_state_json_cannot_be_read_says_so() {
+        let level = |b: &Backend<FakeMachine>| b.recovery_status().unwrap().paused.unwrap().level;
+        let b = backend();
+        apply_terracotta(&b);
+        b.theme_pause(PauseReason::User).unwrap();
+        fake_fs(&b).fail_reads_of(b.paths().state_file());
+        assert_eq!(level(&b), PauseLevel::ComputerUnknown);
+        assert_eq!(b.theme_resume().unwrap(), ResumeOutcome::NotKnown);
+        assert!(
+            read_pause(b.sys().fs, b.paths()).unwrap().is_some(),
+            "the record stays"
+        );
     }
 
     #[test]
