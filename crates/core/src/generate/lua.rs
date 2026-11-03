@@ -50,14 +50,13 @@ pub const PAUSED_STILL: &str = "CMD Studio's theme is paused. Open CMD Studio to
 ///   the pause is decided: deleted, and never counted.
 ///   A failure that old is not one of `PAUSE_AFTER` in a row, and a window that sat that long
 ///   without a prompt is no start that failed just now. A tag still being written (no time in it
-///   yet) is left alone, as everywhere. A `cmd /k <a long command>` window writes no tag at all:
-///   Clink loads its scripts only when cmd first reads a line, which such a window never does
-///   while its command runs (the VM check of 2026-10-18, finding F2).
+///   yet) is left alone, as everywhere.
 /// - A hung window counts, open or closed (the founder, 2026-10-19): three stale tags pause the
 ///   next window while the three hung ones are still there. Nothing lists the running
 ///   programs; the tasklist liveness check of 3b-1 is gone, and so is its 0.6 s at the pause
 ///   decision. A `cmd /k <a long command>` window writes no tag at all: Clink loads its scripts
-///   only when cmd first reads a line (the VM check of 2026-10-18, finding F2).
+///   only when cmd first reads a line, which such a window never does while its command runs
+///   (the VM check of 2026-10-18, finding F2).
 /// - Oh My Posh registers its filter at `_ZL_CLINK_PROMPT_PRIORITY + 1`, 1 when that is unset,
 ///   and Clink calls the lower number first: CMD Studio's is at 0, or lower when the variable
 ///   puts Oh My Posh's at 0 or below.

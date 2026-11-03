@@ -38,8 +38,11 @@ if ($InstallMarker) {
 # happens. The counter's cost per start is the difference of the two averages.
 $initLua = Join-Path $Data 'generated\init.lua'
 $backup = "$initLua.with-counter"
+if ($WithoutCounter -and (Test-Path -LiteralPath $backup)) { throw "$backup is still there: an earlier run did not put init.lua back; move it back by hand first" }
+# The backup copy and the cut write sit inside the try, so a write that fails half-way still
+# ends with the finally putting the original back.
+try {
 if ($WithoutCounter) {
-  if (Test-Path -LiteralPath $backup) { throw "$backup is still there: an earlier run did not put init.lua back; move it back by hand first" }
   $lines = [IO.File]::ReadAllLines($initLua)
   $from = [Array]::FindIndex($lines, [Predicate[string]]{ param($l) $l.StartsWith('-- The start counter (recovery spec') })
   $to = [Array]::FindIndex($lines, [Predicate[string]]{ param($l) $l.StartsWith('-- cmd /c drops the outermost quotes') })
@@ -49,7 +52,6 @@ if ($WithoutCounter) {
   [IO.File]::WriteAllLines($initLua, $cut, (New-Object Text.UTF8Encoding $false))
   "init.lua without the counter: $($lines.Length - $cut.Length) lines cut (from line $($from + 1) to $to)"
 }
-try {
 $tagsFound = 0
 $times = foreach ($i in 1..($Warmup + $Runs)) {
   $p = Start-Process -FilePath "$env:SystemRoot\System32\cmd.exe" -PassThru
