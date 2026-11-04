@@ -22,7 +22,7 @@ Every change is listed before it is made, and a restore point is taken first. CM
 
 - *Undo*, the button that appears after an apply, returns to the restore point of that apply.
 - *Undo everything* in Help puts back everything CMD Studio ever changed.
-- Uninstalling (Settings > Apps, or the Start menu) does the same and removes the program; your themes stay unless you tick the box to delete the app's data. If the uninstaller says it could not put everything back (a font file still open in Windows Terminal is the usual cause), it keeps the data folder on purpose: install CMD Studio again, press *Undo everything* in Help once every cmd and Terminal window is closed, then uninstall.
+- Uninstalling (Settings > Apps, or `uninstall.exe` in the install folder) puts everything back like *Undo everything*, then removes the program, takes the install folder off your Path and deletes the app's data. Your themes stay unless you tick the box to delete them too. If the uninstaller says it could not put everything back (a font file still open in Windows Terminal is the usual cause), it keeps the data folder on purpose: install CMD Studio again, press *Undo everything* in Help once every cmd and Terminal window is closed, then uninstall.
 - Installing a newer version by hand over an older one runs the older version's uninstaller first, with its full cleanup: your applied theme is undone and the app's data is cleared (your themes are kept), and the first-run wizard starts again. It is safe, just not smooth; keeping your setup across versions is for the updater, which comes later.
 - If cmd will not open: Start menu > *CMD Studio Recovery* puts back any cut-off change, pauses the theme, and opens CMD Studio in recovery mode.
 
