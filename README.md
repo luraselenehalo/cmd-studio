@@ -12,7 +12,7 @@ Status: pre-release (unsigned builds for testers). The design is in `docs/superp
 
 ## Install
 
-1. Download `CMD Studio_<version>_x64-setup.exe` from [Releases](https://github.com/luraselenehalo/cmd-studio/releases).
+1. Download `CMD-Studio_<version>_x64-setup.exe` from [Releases](https://github.com/luraselenehalo/cmd-studio/releases).
 2. Run it. **Windows SmartScreen will warn** ("Windows protected your PC"): choose *More info*, then *Run anyway*. The build is not code-signed yet; signing through SignPath Foundation is planned once the project qualifies, and even a signed program earns SmartScreen's trust only over time (since 2024 an EV certificate no longer skips the warning either). Check the SHA-256 in `SHA256SUMS.txt` on the release page if you want to be sure of the file.
 3. The installer puts CMD Studio in `%LOCALAPPDATA%\CMD Studio` for your user only, adds that folder to your Path (cmd windows that were already open do not see it; open a new one), makes two Start-menu entries, "CMD Studio" and "CMD Studio Recovery", and starts the app. The first run is a short wizard: pick a theme, choose where it goes, apply.
 
