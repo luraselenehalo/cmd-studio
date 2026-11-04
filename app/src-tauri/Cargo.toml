@@ -6,6 +6,7 @@ license.workspace = true
 # The app and the CLI in one exe (spec §5.7): `cmdstudio.exe` opens the window when started
 # without arguments and runs `cmdstudio_cli::run` when started with any.
 publish = false
+default-run = "cmdstudio"
 
 [lints]
 workspace = true

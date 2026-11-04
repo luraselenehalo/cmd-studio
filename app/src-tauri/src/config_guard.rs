@@ -487,3 +487,16 @@ fn the_version_has_one_source() {
         );
     }
 }
+
+/// The app crate has two binaries (`cmdstudio` and `cmdstudio-cli`), so the Tauri CLI finds the
+/// main one only through `default-run`; it is `mainBinaryName` of `tauri.conf.json`.
+#[test]
+fn the_main_binary_is_the_default_run_of_the_app_crate() {
+    let toml = include_str!("../Cargo.toml");
+    assert!(
+        toml.contains("\ndefault-run = \"cmdstudio\"\n"),
+        "default-run names the main binary"
+    );
+    let config: Value = serde_json::from_str(CONFIG).unwrap();
+    assert_eq!(config["mainBinaryName"], "cmdstudio");
+}
