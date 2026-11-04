@@ -96,12 +96,11 @@ describe("the two dictionaries", () => {
     expect(th["wizard.where.allHint"]).toMatch(/^หน้าต่าง cmd ที่เปิดจากเมนู Start, Win\+R หรือ Windows Terminal /);
   });
 
-  it("hold the Start-menu shortcut sentence of the guide until phase 4 makes the shortcut (M7)", () => {
+  it("the guide says the Start-menu shortcut first, now that the installer makes it (M7, phase 4a)", () => {
     expect(en["help.guide.cmdWontOpen"]).toBe(
-      "If cmd won't open: open CMD Studio. When cmd keeps failing to start because of the theme, CMD Studio pauses the theme by itself, and you can also press Pause the theme on the home page.",
+      "If cmd won't open: open the Start menu and choose CMD Studio Recovery, or open CMD Studio. When cmd keeps failing to start because of the theme, CMD Studio pauses the theme by itself, and you can also press Pause the theme on the home page.",
     );
-    expect(th["help.guide.cmdWontOpen"]).not.toMatch(/เมนู Start|CMD Studio Recovery/);
-    expect(th["help.guide.cmdWontOpen"]).toMatch(/^ถ้า cmd เปิดไม่ขึ้น: เปิด CMD Studio เมื่อ cmd/);
+    expect(th["help.guide.cmdWontOpen"]).toMatch(/^ถ้า cmd เปิดไม่ขึ้น: เปิดเมนู Start แล้วเลือก CMD Studio Recovery หรือเปิด CMD Studio /);
   });
 
   it("say which change the start still waits for, and say the entry's pause only when it paused (M1, M3)", () => {

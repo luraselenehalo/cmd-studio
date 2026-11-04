@@ -725,6 +725,7 @@ function Credits() {
     <div>
       <h2>{t("help.credits.title")}</h2>
       <p>{t("help.credits.intro")}</p>
+      <p>{t("help.credits.files")}</p>
       <h3>{t("help.credits.bundled")}</h3>
       <CreditList items={BUNDLED} />
       <h3>{t("help.credits.schemes")}</h3>

@@ -864,6 +864,9 @@ describe("the guide and the credits", () => {
       if (c.version) expect(item.textContent).toContain(c.version);
     }
     expect(screen.queryByText(/SignPath/)).toBeNull();
+    expect(screen.getByText(en["help.credits.files"])).toBeTruthy();
+    expect(en["help.credits.files"]).toContain("resources\\LICENSES");
+    expect(en["help.credits.files"]).toContain("LICENSE.txt");
   });
 
   it("names the versions the app bundles, Clink's source of that exact release, and docs/credits.md's lines", () => {
