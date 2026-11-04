@@ -187,21 +187,51 @@ jobs:
       # as tauri.conf.json has no `devUrl`, pinned by config_guard.rs, but it is not the app) and
       # is neither built here nor uploaded. So this one step is also the release compile check;
       # a separate `cargo build --release` would compile the same crates twice and write a
-      # second, different cmdstudio.exe to the same path. No bundle: Phase 4 turns it on.
+      # second, different cmdstudio.exe to the same path. The bundle is on (phase 4a) through
+      # `--config src-tauri/tauri.bundle.conf.json`, the one place that file is passed: Tauri merges
+      # it into the config the cargo build sees too (G-CFG), so `resources/` must be fetched first
+      # (it is, above), and the NSIS installer lands in target/release/bundle/nsis/ with
+      # `cmdstudio-cli.exe` inside under its cargo name (G-BIN).
       # The exe lands in the workspace's target/, not in app/.
       # `npm run tauri --` runs the Tauri CLI that package-lock.json locks (node_modules/.bin) and
       # nothing else: npm run never downloads a package, while `npx` fetches a missing one (a try
       # with npm 11: `npx --no-install <unknown package>` still asked the registry). bash, so
       # that the `--` reaches npm as written.
-      - name: Tauri build (no bundle)
+      - name: Tauri build (with the NSIS bundle)
         shell: bash
         working-directory: app
-        run: npm run tauri -- build --no-bundle
+        run: npm run tauri -- build --config src-tauri/tauri.bundle.conf.json
       # The same search again, now that `tauri build` has built the UI once more: the exe embeds
       # the dist as this build left it, so this is the gate on what ships.
       - name: The UI the exe embeds holds no mock data and no preset file
         shell: bash
         run: bash ./scripts/check-dist.sh
+      # The installer (spec §6.1): one file, named with the one version (Task 5 pins the sources;
+      # the name proves the Tauri CLI read Cargo.toml's). 7-Zip lists NSIS installers, so the
+      # files inside are checked here without running it: both binaries (the console one under
+      # its cargo name; the installer's hook renames it to cmdstudio.com, G-BIN), the runtimes'
+      # manifest, the three licenses and Clink's source notice, the app's LICENSE. Its size is
+      # printed for the spec's §6.1 (20–30 MB estimated). SHA256SUMS.txt goes with it.
+      - name: The installer holds both exes, the resources and the licenses
+        shell: bash
+        run: |
+          version="$(grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')"
+          installer="target/release/bundle/nsis/CMD Studio_${version}_x64-setup.exe"
+          test -f "$installer"
+          ls -l "$installer"
+          7z l "$installer" > installer-files.txt
+          for f in cmdstudio.exe cmdstudio-cli.exe 'resources\manifest.json' 'resources\omp\oh-my-posh.exe' 'resources\clink\clink_x64.exe' 'resources\clink\clink_dll_x64.dll' 'resources\fonts\CaskaydiaCoveNerdFont-Regular.ttf' 'resources\LICENSES\oh-my-posh-MIT.txt' 'resources\LICENSES\clink-GPL-3.0.txt' 'resources\LICENSES\clink-SOURCE.txt' 'resources\LICENSES\CaskaydiaCove-NF-OFL-1.1.txt' LICENSE.txt; do
+            grep -q -F -- "$f" installer-files.txt || { echo "::error::$f is not in the installer"; exit 1; }
+          done
+          mkdir -p stage/installer
+          cp "$installer" stage/installer/
+          (cd stage/installer && sha256sum -- *.exe > SHA256SUMS.txt && cat SHA256SUMS.txt)
+      # For the VM check of phase 4a (install, uninstall; docs/spikes/phase4-install/protocol.md).
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cmdstudio-installer
+          path: stage/installer
+          if-no-files-found: error
       # The two binaries of the app crate (spec §5.7, phase 4a): cmdstudio.exe is a windows
       # program (PE subsystem 2) and cmdstudio-cli.exe, bundled as cmdstudio.com, a console one
       # (subsystem 3), which answers --help with its usage and exit 0, and an unknown command with

@@ -8,6 +8,307 @@ use serde_json::Value;
 
 const CONFIG: &str = include_str!("../tauri.conf.json");
 
+/// The bundle's configuration, passed with `--config` only when bundling (G-CFG): never part of
+/// the committed tauri.conf.json, so that a cargo build needs no resources/.
+const BUNDLE: &str = include_str!("../tauri.bundle.conf.json");
+const HOOKS: &str = include_str!("../windows/hooks.nsh");
+
+/// The hooks file without its comments: everything from `;` to the end of a line is NSIS
+/// comment, and the pins below count code only (no text of this file holds a `;` in a string).
+/// Each line is trimmed: the pins hold no indentation, which differs with the nesting.
+fn hooks_code() -> String {
+    HOOKS
+        .lines()
+        .map(|line| line.split(';').next().unwrap_or("").trim())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The text of the one `!macro NAME` … `!macroend` block of the code.
+fn hook(code: &str, name: &str) -> String {
+    let start = code
+        .find(&format!("!macro {name}"))
+        .unwrap_or_else(|| panic!("no macro {name}"));
+    let end = code
+        .get(start..)
+        .and_then(|rest| rest.find("!macroend"))
+        .unwrap_or_else(|| panic!("{name} has no end"));
+    code.get(start..start + end).unwrap().to_string()
+}
+
+/// `a` comes before `b` in `text`, and both are there.
+fn before(text: &str, a: &str, b: &str) {
+    let ia = text.find(a).unwrap_or_else(|| panic!("missing: {a}"));
+    let ib = text.find(b).unwrap_or_else(|| panic!("missing: {b}"));
+    assert!(ia < ib, "{a:?} must come before {b:?}");
+}
+
+/// A JSON deep merge, as Tauri merges a `--config` file over tauri.conf.json: objects by key,
+/// anything else replaced.
+fn merge(base: &mut Value, over: Value) {
+    match (base, over) {
+        (Value::Object(b), Value::Object(o)) => {
+            for (k, v) in o {
+                merge(b.entry(k).or_insert(Value::Null), v);
+            }
+        }
+        (b, o) => *b = o,
+    }
+}
+
+/// The three-line result check that follows every nsExec call (P8): nsExec answers the text
+/// `error` when the program could not start and `timeout` when it did not end, so the exit
+/// code is compared as text, never as a number.
+const RESULT_CHECK: &str = "${If} $0 == \"error\"\n${OrIf} $0 == \"timeout\"\n${OrIf} $0 S!= \"0\"";
+
+/// Spec §6.1, §6.3, G10, G-CFG: the bundle file is a per-user NSIS installer with the hooks
+/// file, the resources with their licenses and the app's LICENSE (two entries, no more: the
+/// console exe is bundled by Tauri under its cargo name), one Start-menu folder, Tauri's default
+/// WebView2 bootstrapper, no updater artifacts until 4b; the committed config keeps the bundle
+/// off and names no resource; the two merged are a config Tauri accepts.
+#[test]
+fn the_bundle_file_is_a_per_user_nsis_installer_and_the_committed_config_stays_buildable() {
+    let bundle_file: Value = serde_json::from_str(BUNDLE).unwrap();
+    let bundle = bundle_file.get("bundle").filter(|b| b.is_object()).unwrap();
+    assert_eq!(
+        bundle_file.as_object().unwrap().keys().collect::<Vec<_>>(),
+        ["bundle"],
+        "the bundle block only"
+    );
+    assert_eq!(bundle.get("active"), Some(&Value::Bool(true)));
+    assert_eq!(bundle.get("targets"), Some(&serde_json::json!(["nsis"])));
+    assert!(
+        bundle.get("createUpdaterArtifacts").is_none(),
+        "4b turns the updater artifacts on"
+    );
+    let resources = bundle.get("resources").and_then(Value::as_object).unwrap();
+    assert_eq!(resources.len(), 2);
+    assert_eq!(
+        resources.get("../../resources").and_then(Value::as_str),
+        Some("resources")
+    );
+    assert_eq!(
+        resources.get("../../LICENSE").and_then(Value::as_str),
+        Some("LICENSE.txt")
+    );
+    let nsis = bundle
+        .pointer("/windows/nsis")
+        .and_then(Value::as_object)
+        .unwrap();
+    assert_eq!(
+        nsis.get("installMode").and_then(Value::as_str),
+        Some("currentUser")
+    );
+    assert_eq!(
+        nsis.get("installerHooks").and_then(Value::as_str),
+        Some("windows/hooks.nsh")
+    );
+    assert_eq!(
+        nsis.get("startMenuFolder").and_then(Value::as_str),
+        Some("CMD Studio")
+    );
+    assert!(
+        bundle.pointer("/windows/webviewInstallMode").is_none(),
+        "Tauri's default: downloadBootstrapper (G10)"
+    );
+
+    let mut config: Value = serde_json::from_str(CONFIG).unwrap();
+    assert_eq!(
+        config.pointer("/bundle/active"),
+        Some(&Value::Bool(false)),
+        "the committed config bundles nothing"
+    );
+    assert!(
+        config.pointer("/bundle/resources").is_none(),
+        "a resource here would be copied at every cargo build (G-CFG)"
+    );
+    assert!(config.pointer("/build/beforeBundleCommand").is_none());
+    assert_eq!(
+        config.get("mainBinaryName").and_then(Value::as_str),
+        Some("cmdstudio")
+    );
+    merge(&mut config, bundle_file);
+    let merged: tauri::utils::config::Config = serde_json::from_value(config).unwrap();
+    assert!(merged.bundle.active);
+}
+
+/// Review Focus 5 (the install half): the console exe renamed and the Recovery shortcut made
+/// after the files, on every install, an update's included (POSTINSTALL carries no update
+/// guard); ARM64 refused before any file.
+#[test]
+fn the_recovery_shortcut_is_made_after_every_install() {
+    let code = hooks_code();
+    for name in [
+        "NSIS_HOOK_PREINSTALL",
+        "NSIS_HOOK_POSTINSTALL",
+        "NSIS_HOOK_PREUNINSTALL",
+        "NSIS_HOOK_POSTUNINSTALL",
+    ] {
+        assert_eq!(code.matches(&format!("!macro {name}")).count(), 1, "{name}");
+    }
+    let pre = hook(&code, "NSIS_HOOK_PREINSTALL");
+    before(&pre, "${If} ${IsNativeARM64}", "Abort");
+    let post = hook(&code, "NSIS_HOOK_POSTINSTALL");
+    let recovery = "CreateShortcut \"$SMPROGRAMS\\$AppStartMenuFolder\\CMD Studio Recovery.lnk\" \"$INSTDIR\\cmdstudio.exe\" \"--recovery\"";
+    before(
+        &post,
+        "Delete \"$INSTDIR\\cmdstudio.com\"",
+        "Rename \"$INSTDIR\\cmdstudio-cli.exe\" \"$INSTDIR\\cmdstudio.com\"",
+    );
+    before(
+        &post,
+        "Rename \"$INSTDIR\\cmdstudio-cli.exe\"",
+        "CreateDirectory \"$SMPROGRAMS\\$AppStartMenuFolder\"",
+    );
+    before(
+        &post,
+        "CreateDirectory \"$SMPROGRAMS\\$AppStartMenuFolder\"",
+        recovery,
+    );
+    before(
+        &post,
+        recovery,
+        "nsExec::ExecToStack '\"$INSTDIR\\cmdstudio.com\" --add-to-path'",
+    );
+    assert!(
+        !post.contains("$UpdateMode"),
+        "an update gets the .com and the shortcut again"
+    );
+    assert!(
+        !HOOKS
+            .chars()
+            .any(|c| ('\u{0E00}'..='\u{0E7F}').contains(&c)),
+        "no Thai"
+    );
+    assert!(
+        !HOOKS.contains("cmdstudio.exe\" --"),
+        "every call goes through the console exe"
+    );
+}
+
+/// Review Focus 5 (the uninstall half), spec §6.3: the cleanup, the Path removal and the two
+/// deletes run only outside update mode, before any file is deleted; the update's uninstaller
+/// leaves the Path entry, the shortcut and the .com for the new installer's POSTINSTALL.
+#[test]
+fn the_path_and_the_cleanup_run_only_outside_update_mode() {
+    let code = hooks_code();
+    assert_eq!(
+        code.matches("$UpdateMode").count(),
+        1,
+        "one guard, in PREUNINSTALL"
+    );
+    let pre = hook(&code, "NSIS_HOOK_PREUNINSTALL");
+    let guard = pre.find("${If} $UpdateMode <> 1").expect("the guard");
+    let guarded = pre.get(guard..).unwrap();
+    let closes = guarded.rfind("${EndIf}").expect("the guard's end");
+    let inside = guarded.get(..closes).unwrap();
+    for line in [
+        "nsExec::ExecToStack '\"$INSTDIR\\cmdstudio.com\" --cleanup --remove-themes'",
+        "nsExec::ExecToStack '\"$INSTDIR\\cmdstudio.com\" --cleanup'",
+        "nsExec::ExecToStack '\"$INSTDIR\\cmdstudio.com\" --remove-from-path'",
+        "Delete \"$SMPROGRAMS\\$AppStartMenuFolder\\CMD Studio Recovery.lnk\"",
+        "Delete \"$INSTDIR\\cmdstudio.com\"",
+    ] {
+        assert!(inside.contains(line), "inside the update guard: {line}");
+    }
+    before(inside, "--cleanup'", "--remove-from-path'");
+    before(
+        inside,
+        "--remove-from-path'",
+        "Delete \"$SMPROGRAMS\\$AppStartMenuFolder\\CMD Studio Recovery.lnk\"",
+    );
+    assert!(
+        hook(&code, "NSIS_HOOK_POSTUNINSTALL")
+            .trim()
+            .ends_with("NSIS_HOOK_POSTUNINSTALL"),
+        "POSTUNINSTALL does nothing"
+    );
+}
+
+/// Review Focus 3, spec §6.3: `--remove-themes` only when the box is ticked; a cleanup that
+/// does not answer 0 (a failed step, a refusal, or nsExec's `error`/`timeout`) un-ticks the box
+/// inside its own failure branch, so NSIS keeps the data folder; the box's text sends the user
+/// to a new install and Undo everything, never to a program this uninstall removes.
+#[test]
+fn a_failed_cleanup_keeps_the_data_folder() {
+    let code = hooks_code();
+    let pre = hook(&code, "NSIS_HOOK_PREUNINSTALL");
+    before(
+        &pre,
+        "${If} $DeleteAppDataCheckboxState = 1",
+        "--cleanup --remove-themes'",
+    );
+    before(&pre, "--cleanup --remove-themes'", "${Else}");
+    before(&pre, "${Else}", "--cleanup'");
+    let after_cleanup = pre.get(pre.find("--cleanup'").unwrap()..).unwrap();
+    before(after_cleanup, "Pop $0", "Pop $1");
+    before(after_cleanup, "Pop $1", RESULT_CHECK);
+    let branch = after_cleanup
+        .get(after_cleanup.find(RESULT_CHECK).unwrap()..)
+        .unwrap();
+    let branch = branch.get(..branch.find("${EndIf}").unwrap()).unwrap();
+    assert!(
+        branch.contains("StrCpy $DeleteAppDataCheckboxState 0"),
+        "inside the failure branch"
+    );
+    // Four calls in three places: the two cleanups are the arms of one ${If}, with one check.
+    assert_eq!(code.matches("nsExec::ExecToStack").count(), 4);
+    assert_eq!(
+        code.matches(RESULT_CHECK).count(),
+        3,
+        "every call's result is compared as text"
+    );
+    let text = HOOKS;
+    let cleanup_box = text
+        .get(text.find("could not put everything back").unwrap()..)
+        .unwrap();
+    let cleanup_box = cleanup_box
+        .get(..cleanup_box.find("/SD IDOK").unwrap())
+        .unwrap();
+    assert!(cleanup_box.contains("install CMD Studio again"));
+    assert!(cleanup_box.contains("Undo everything"));
+    assert!(
+        !cleanup_box.contains("cmdstudio --cleanup") && !cleanup_box.contains("cmdstudio.com"),
+        "names no program the uninstall removes"
+    );
+}
+
+/// The Start-menu folder: the bundle file's default and the hooks' use of Tauri's own variable
+/// (the user may change the folder on the installer's page) agree, and the shortcut's name is
+/// written once for the making and once for the deleting.
+#[test]
+fn the_start_menu_folder_is_one_name() {
+    let bundle_file: Value = serde_json::from_str(BUNDLE).unwrap();
+    assert_eq!(
+        bundle_file
+            .pointer("/bundle/windows/nsis/startMenuFolder")
+            .and_then(Value::as_str),
+        Some("CMD Studio")
+    );
+    let code = hooks_code();
+    assert_eq!(
+        code.matches("$SMPROGRAMS\\$AppStartMenuFolder\\CMD Studio Recovery.lnk")
+            .count(),
+        2
+    );
+    assert!(
+        !code.contains("$SMPROGRAMS\\CMD Studio\\"),
+        "never the literal folder: the user may have renamed it"
+    );
+    // The uninstaller is a new process: Tauri's template reads $AppStartMenuFolder back with
+    // MUI_STARTMENU_GETFOLDER only after PREUNINSTALL, so the hook reads it itself first, or its
+    // Delete would look in $SMPROGRAMS\ and the shortcut would stay behind.
+    let pre = hook(&code, "NSIS_HOOK_PREUNINSTALL");
+    let guarded = pre
+        .get(pre.find("${If} $UpdateMode <> 1").expect("the guard")..)
+        .unwrap();
+    before(
+        guarded,
+        "!insertmacro MUI_STARTMENU_GETFOLDER Application $AppStartMenuFolder",
+        "Delete \"$SMPROGRAMS\\$AppStartMenuFolder\\CMD Studio Recovery.lnk\"",
+    );
+}
+
 /// The CSP of the Global Constraints (spec §5.10): no remote origin.
 const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; \
                    font-src 'self'; connect-src ipc: http://ipc.localhost; object-src 'none'; \
