@@ -441,3 +441,49 @@ fn the_window_is_made_to_fit_the_work_area_and_keeps_its_sizes() {
         (Some(900.0), Some(620.0))
     );
 }
+
+/// Spec §6.4, phase 4a: the version is `[workspace.package] version` in the root Cargo.toml and
+/// nowhere else. tauri.conf.json carries none (Tauri reads Cargo's: the installer's file name
+/// and the updater's own version come from it); the UI's package.json and its lockfile say the
+/// same string; every crate inherits it.
+#[test]
+fn the_version_has_one_source() {
+    let version = env!("CARGO_PKG_VERSION");
+    let config: Value = serde_json::from_str(CONFIG).unwrap();
+    assert!(
+        config.get("version").is_none(),
+        "tauri.conf.json must not carry a version"
+    );
+    let package: Value = serde_json::from_str(include_str!("../../package.json")).unwrap();
+    assert_eq!(
+        package.get("version").and_then(Value::as_str),
+        Some(version),
+        "app/package.json"
+    );
+    let lock: Value = serde_json::from_str(include_str!("../../package-lock.json")).unwrap();
+    assert_eq!(
+        lock.get("version").and_then(Value::as_str),
+        Some(version),
+        "app/package-lock.json"
+    );
+    assert_eq!(
+        lock.pointer("/packages//version").and_then(Value::as_str),
+        Some(version),
+        "the lockfile's root package"
+    );
+    let root = include_str!("../../../Cargo.toml");
+    assert!(
+        root.contains(&format!("\nversion = \"{version}\"\n")),
+        "the workspace's version"
+    );
+    for (name, toml) in [
+        ("app", include_str!("../Cargo.toml")),
+        ("core", include_str!("../../../crates/core/Cargo.toml")),
+        ("cli", include_str!("../../../crates/cli/Cargo.toml")),
+    ] {
+        assert!(
+            toml.contains("version.workspace = true"),
+            "{name} inherits the version"
+        );
+    }
+}
