@@ -36,6 +36,30 @@ fn hook(code: &str, name: &str) -> String {
     code.get(start..start + end).unwrap().to_string()
 }
 
+/// The lines inside the `${If}` whose first line is `opener` (matched whole, on the trimmed
+/// code), up to its own `${EndIf}`: nested `${If}` … `${EndIf}` pairs are counted, so an inner
+/// `${EndIf}` does not end it (`${IfThen}` is one line and opens nothing).
+fn inside_if(code: &str, opener: &str) -> String {
+    let mut lines = code.lines().skip_while(|line| *line != opener);
+    assert_eq!(lines.next(), Some(opener), "missing: {opener}");
+    let mut depth = 1;
+    let mut inside = Vec::new();
+    // Blank lines (a comment's, once stripped) are left out.
+    for line in lines.filter(|line| !line.is_empty()) {
+        if line.starts_with("${If} ") {
+            depth += 1;
+        }
+        if line == "${EndIf}" {
+            depth -= 1;
+            if depth == 0 {
+                return inside.join("\n");
+            }
+        }
+        inside.push(line);
+    }
+    panic!("{opener} has no ${{EndIf}}");
+}
+
 /// `a` comes before `b` in `text`, and both are there.
 fn before(text: &str, a: &str, b: &str) {
     let ia = text.find(a).unwrap_or_else(|| panic!("missing: {a}"));
@@ -132,9 +156,10 @@ fn the_bundle_file_is_a_per_user_nsis_installer_and_the_committed_config_stays_b
     assert!(merged.bundle.active);
 }
 
-/// Review Focus 5 (the install half): the console exe renamed and the Recovery shortcut made
-/// after the files, on every install, an update's included (POSTINSTALL carries no update
-/// guard); ARM64 refused before any file.
+/// Review Focus 5 (the install half): the console exe renamed, the rename checked, and the
+/// Recovery shortcut made after the files, on every install, an update's included (POSTINSTALL
+/// carries no update guard), but not under `/NS`, where Tauri makes no shortcut either; ARM64
+/// refused before any file.
 #[test]
 fn the_recovery_shortcut_is_made_after_every_install() {
     let code = hooks_code();
@@ -150,20 +175,47 @@ fn the_recovery_shortcut_is_made_after_every_install() {
     before(&pre, "${If} ${IsNativeARM64}", "Abort");
     let post = hook(&code, "NSIS_HOOK_POSTINSTALL");
     let recovery = "CreateShortcut \"$SMPROGRAMS\\$AppStartMenuFolder\\CMD Studio Recovery.lnk\" \"$INSTDIR\\cmdstudio.exe\" \"--recovery\"";
-    before(
-        &post,
-        "Delete \"$INSTDIR\\cmdstudio.com\"",
-        "Rename \"$INSTDIR\\cmdstudio-cli.exe\" \"$INSTDIR\\cmdstudio.com\"",
+    let rename = "Rename \"$INSTDIR\\cmdstudio-cli.exe\" \"$INSTDIR\\cmdstudio.com\"";
+    // The Delete and the Rename are checked together: a .com that cannot be deleted makes the
+    // Rename fail too (Rename does not replace a file), and Delete sets no error for a file that
+    // is not there.
+    before(&post, "ClearErrors", "Delete \"$INSTDIR\\cmdstudio.com\"");
+    before(&post, "Delete \"$INSTDIR\\cmdstudio.com\"", rename);
+    before(&post, rename, "${If} ${Errors}");
+    let failed = inside_if(&post, "${If} ${Errors}");
+    assert!(
+        failed.contains("MessageBox"),
+        "the failed rename has its box"
+    );
+    assert!(failed.contains("console program could not be put in place"));
+    assert!(
+        failed.contains("cmdstudio.exe"),
+        "the box says the app still runs"
+    );
+    assert!(
+        !failed.contains("Abort"),
+        "the install goes on to the Path step"
     );
     before(
         &post,
-        "Rename \"$INSTDIR\\cmdstudio-cli.exe\"",
+        "${If} ${Errors}",
         "CreateDirectory \"$SMPROGRAMS\\$AppStartMenuFolder\"",
     );
+    // /NS: Tauri's CreateOrUpdateStartMenuShortcut returns when $NoShortcutMode = 1 unless it
+    // migrates from WiX (template ~:27639-27643); the Recovery shortcut follows the same rule.
+    let shortcut = inside_if(&post, "${If} $WixMode = 1");
+    assert_eq!(
+        shortcut.lines().next(),
+        Some("${OrIf} $NoShortcutMode <> 1")
+    );
     before(
-        &post,
+        &shortcut,
         "CreateDirectory \"$SMPROGRAMS\\$AppStartMenuFolder\"",
         recovery,
+    );
+    assert!(
+        !shortcut.contains("nsExec"),
+        "the Path step runs under /NS too"
     );
     before(
         &post,
@@ -186,43 +238,60 @@ fn the_recovery_shortcut_is_made_after_every_install() {
     );
 }
 
-/// Review Focus 5 (the uninstall half), spec §6.3: the cleanup, the Path removal and the two
-/// deletes run only outside update mode, before any file is deleted; the update's uninstaller
-/// leaves the Path entry, the shortcut and the .com for the new installer's POSTINSTALL.
+/// Review Focus 5 (the uninstall half), spec §6.3: the app-running check, the cleanup and the
+/// Path removal run only outside update mode, before any file is deleted, the check first (Tauri
+/// runs its own CheckIfAppIsRunning only after PREUNINSTALL, and a cleanup under a running app
+/// would be undone by it); the two deletes run in POSTUNINSTALL under the same guard, after
+/// Tauri's own deletes, and the folders they empty are removed. An update's uninstaller leaves
+/// the Path entry, the shortcut and the .com for the new installer's POSTINSTALL.
 #[test]
 fn the_path_and_the_cleanup_run_only_outside_update_mode() {
     let code = hooks_code();
     assert_eq!(
         code.matches("$UpdateMode").count(),
-        1,
-        "one guard, in PREUNINSTALL"
+        2,
+        "one guard in PREUNINSTALL, one in POSTUNINSTALL"
     );
     let pre = hook(&code, "NSIS_HOOK_PREUNINSTALL");
-    let guard = pre.find("${If} $UpdateMode <> 1").expect("the guard");
-    let guarded = pre.get(guard..).unwrap();
-    let closes = guarded.rfind("${EndIf}").expect("the guard's end");
-    let inside = guarded.get(..closes).unwrap();
+    let inside = inside_if(&pre, "${If} $UpdateMode <> 1");
+    assert_eq!(
+        inside.lines().next(),
+        Some("!insertmacro CheckIfAppIsRunning \"$INSTDIR\\${MAINBINARYNAME}.exe\" \"${PRODUCTNAME}\""),
+        "the app-running check comes first"
+    );
+    before(
+        &inside,
+        "!insertmacro CheckIfAppIsRunning",
+        "nsExec::ExecToStack",
+    );
     for line in [
         "nsExec::ExecToStack '\"$INSTDIR\\cmdstudio.com\" --cleanup --remove-themes'",
         "nsExec::ExecToStack '\"$INSTDIR\\cmdstudio.com\" --cleanup'",
         "nsExec::ExecToStack '\"$INSTDIR\\cmdstudio.com\" --remove-from-path'",
-        "Delete \"$SMPROGRAMS\\$AppStartMenuFolder\\CMD Studio Recovery.lnk\"",
-        "Delete \"$INSTDIR\\cmdstudio.com\"",
     ] {
         assert!(inside.contains(line), "inside the update guard: {line}");
     }
-    before(inside, "--cleanup'", "--remove-from-path'");
-    before(
-        inside,
-        "--remove-from-path'",
-        "Delete \"$SMPROGRAMS\\$AppStartMenuFolder\\CMD Studio Recovery.lnk\"",
+    assert_eq!(
+        pre.matches("nsExec::ExecToStack").count(),
+        inside.matches("nsExec::ExecToStack").count(),
+        "no call outside the guard"
     );
+    assert!(!pre.contains("Delete "), "PREUNINSTALL deletes nothing");
+    before(&inside, "--cleanup'", "--remove-from-path'");
+
+    let post = hook(&code, "NSIS_HOOK_POSTUNINSTALL");
+    let deletes = inside_if(&post, "${If} $UpdateMode <> 1");
+    let lnk = "Delete \"$SMPROGRAMS\\$AppStartMenuFolder\\CMD Studio Recovery.lnk\"";
+    let com = "Delete \"$INSTDIR\\cmdstudio.com\"";
+    assert_eq!(post.matches("Delete ").count(), 2, "the two deletes only");
     assert!(
-        hook(&code, "NSIS_HOOK_POSTUNINSTALL")
-            .trim()
-            .ends_with("NSIS_HOOK_POSTUNINSTALL"),
-        "POSTUNINSTALL does nothing"
+        deletes.contains(lnk) && deletes.contains(com),
+        "inside the guard"
     );
+    // Tauri's RMDir of the Start-menu folder and of $INSTDIR ran before this hook, while these
+    // two files were still there; each RMDir removes only an empty folder.
+    before(&deletes, lnk, "RMDir \"$SMPROGRAMS\\$AppStartMenuFolder\"");
+    before(&deletes, com, "RMDir \"$INSTDIR\"");
 }
 
 /// Review Focus 3, spec §6.3: `--remove-themes` only when the box is ticked; a cleanup that
@@ -243,10 +312,7 @@ fn a_failed_cleanup_keeps_the_data_folder() {
     let after_cleanup = pre.get(pre.find("--cleanup'").unwrap()..).unwrap();
     before(after_cleanup, "Pop $0", "Pop $1");
     before(after_cleanup, "Pop $1", RESULT_CHECK);
-    let branch = after_cleanup
-        .get(after_cleanup.find(RESULT_CHECK).unwrap()..)
-        .unwrap();
-    let branch = branch.get(..branch.find("${EndIf}").unwrap()).unwrap();
+    let branch = inside_if(after_cleanup, "${If} $0 == \"error\"");
     assert!(
         branch.contains("StrCpy $DeleteAppDataCheckboxState 0"),
         "inside the failure branch"
@@ -295,17 +361,19 @@ fn the_start_menu_folder_is_one_name() {
         !code.contains("$SMPROGRAMS\\CMD Studio\\"),
         "never the literal folder: the user may have renamed it"
     );
-    // The uninstaller is a new process: Tauri's template reads $AppStartMenuFolder back with
-    // MUI_STARTMENU_GETFOLDER only after PREUNINSTALL, so the hook reads it itself first, or its
-    // Delete would look in $SMPROGRAMS\ and the shortcut would stay behind.
-    let pre = hook(&code, "NSIS_HOOK_PREUNINSTALL");
-    let guarded = pre
-        .get(pre.find("${If} $UpdateMode <> 1").expect("the guard")..)
-        .unwrap();
-    before(
-        guarded,
-        "!insertmacro MUI_STARTMENU_GETFOLDER Application $AppStartMenuFolder",
-        "Delete \"$SMPROGRAMS\\$AppStartMenuFolder\\CMD Studio Recovery.lnk\"",
+    // The uninstaller is a new process: $AppStartMenuFolder holds the folder only after Tauri's
+    // MUI_STARTMENU_GETFOLDER (template ~:27527), which runs inside Tauri's own
+    // `$UpdateMode <> 1` block, after PREUNINSTALL and before POSTUNINSTALL. The shortcut is
+    // deleted in POSTUNINSTALL under the same guard, so the folder is set there.
+    let post = hook(&code, "NSIS_HOOK_POSTUNINSTALL");
+    assert!(
+        inside_if(&post, "${If} $UpdateMode <> 1")
+            .contains("Delete \"$SMPROGRAMS\\$AppStartMenuFolder\\CMD Studio Recovery.lnk\""),
+        "the shortcut's Delete runs where Tauri has read the folder back"
+    );
+    assert!(
+        !hook(&code, "NSIS_HOOK_PREUNINSTALL").contains("$AppStartMenuFolder"),
+        "PREUNINSTALL, where the folder is not read yet, never uses it"
     );
 }
 
