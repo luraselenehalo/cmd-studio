@@ -165,6 +165,23 @@ pub trait AutoRun {
     fn read_machine(&self) -> Result<Option<RegValue>, AdapterError>;
 }
 
+/// The user's `Path` value under `HKCU\Environment` (spec §5.7, phase 4a), read and written raw
+/// like AutoRun so that its kind and every byte survive. Only `user_path::{add, remove}` call it.
+pub trait UserPath {
+    /// The value as stored; `None` when absent.
+    fn read(&self) -> Result<Option<RegValue>, AdapterError>;
+    /// Writes the value exactly as given, kind included; opens the existing `Environment` key
+    /// and creates it only when missing, never recreates it (spec §2.2 lesson 9).
+    fn write(&self, value: &RegValue) -> Result<(), AdapterError>;
+    /// Deletes the value; `Ok` when it is absent.
+    fn delete(&self) -> Result<(), AdapterError>;
+    /// Tells every top-level window that the environment changed (`WM_SETTINGCHANGE` with
+    /// `"Environment"`, `SendMessageTimeoutW`, abort if hung, 5 s), so that a cmd window opened
+    /// from Explorer or the Start menu afterwards sees the new Path. Best effort: a window that
+    /// does not answer is not an error.
+    fn broadcast_change(&self);
+}
+
 /// Per-user fonts (spec §5.4 `Fonts`, G12).
 pub trait Fonts {
     /// Family names GDI lists in this session (`EnumFontFamiliesExW`), sorted, without duplicates.
@@ -358,6 +375,7 @@ pub struct System<'a> {
     pub process: &'a dyn Process,
     pub host: &'a dyn Host,
     pub event_log: &'a dyn EventLog,
+    pub user_path: &'a dyn UserPath,
 }
 
 /// `%ProgramData%\ai.resincore.cmdstudio-<SID>`: the user's own folder for

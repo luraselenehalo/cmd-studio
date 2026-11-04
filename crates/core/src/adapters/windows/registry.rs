@@ -2,7 +2,7 @@
 //! so the type (`REG_SZ` or `REG_EXPAND_SZ`) and every byte survive a
 //! restore. Keys are opened, never recreated (spec §2.2 lesson 9).
 use super::english_io_error;
-use crate::adapters::{AdapterError, AutoRun, RegValue};
+use crate::adapters::{AdapterError, AutoRun, RegValue, UserPath};
 use std::borrow::Cow;
 use std::io::ErrorKind;
 use winreg::enums::{
@@ -224,6 +224,61 @@ impl AutoRun for WinAutoRun {
 
     fn read_machine(&self) -> Result<Option<RegValue>, AdapterError> {
         self.machine.read_raw(AUTORUN)
+    }
+}
+
+/// `HKCU\Environment`, where the user's `Path` lives.
+pub const ENVIRONMENT: &str = "Environment";
+pub const PATH_VALUE: &str = "Path";
+
+/// The user's Path (spec §5.7, phase 4a): `HKCU\Environment` `Path`, read and written raw.
+#[derive(Clone, Debug)]
+pub struct WinUserPath {
+    key: RegLocation,
+}
+
+impl WinUserPath {
+    pub fn real() -> Self {
+        Self::at(RegLocation::user(ENVIRONMENT))
+    }
+    /// At another key, for a test's throwaway key.
+    pub fn at(key: RegLocation) -> Self {
+        WinUserPath { key }
+    }
+}
+
+impl UserPath for WinUserPath {
+    fn read(&self) -> Result<Option<RegValue>, AdapterError> {
+        self.key.read_raw(PATH_VALUE)
+    }
+    fn write(&self, value: &RegValue) -> Result<(), AdapterError> {
+        self.key.write_raw(PATH_VALUE, value)
+    }
+    fn delete(&self) -> Result<(), AdapterError> {
+        self.key.delete_value(PATH_VALUE)
+    }
+    fn broadcast_change(&self) {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            SendMessageTimeoutW, HWND_BROADCAST, SMTO_ABORTIFHUNG, WM_SETTINGCHANGE,
+        };
+        let section = super::wide(std::ffi::OsStr::new(ENVIRONMENT));
+        let mut result = 0usize;
+        // SAFETY: `section` is a NUL-terminated UTF-16 buffer that outlives the call, and the
+        // message goes to every top-level window with a 5 s limit per window and
+        // SMTO_ABORTIFHUNG, so a hung window cannot block us; `result` is a local valid for the
+        // one write the call may make through its address; the return value (0 on timeout) is
+        // deliberately ignored: the broadcast is best effort.
+        unsafe {
+            SendMessageTimeoutW(
+                HWND_BROADCAST,
+                WM_SETTINGCHANGE,
+                0,
+                section.as_ptr() as isize,
+                SMTO_ABORTIFHUNG,
+                5000,
+                &mut result,
+            );
+        }
     }
 }
 

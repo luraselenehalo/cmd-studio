@@ -63,6 +63,9 @@ pub struct Io<'a> {
 pub struct Defaults {
     pub data_dir: PathBuf,
     pub resources: PathBuf,
+    /// The folder of the program that runs: the install folder, which `--add-to-path` puts on
+    /// the Path; empty when `current_exe` could not be read, which the two Path commands refuse.
+    pub exe_dir: PathBuf,
     pub now_ms: u64,
 }
 
@@ -111,6 +114,8 @@ pub fn run_with(args: &[OsString], io: &mut Io<'_>, sys: System<'_>, defaults: &
         }
         Command::Undo => say.undo(sys, &ctx),
         Command::Cleanup { remove_themes } => say.cleanup(sys, &ctx, remove_themes, data_dir_given),
+        Command::AddToPath => say.path_change(sys, &defaults.exe_dir, true),
+        Command::RemoveFromPath => say.path_change(sys, &defaults.exe_dir, false),
         Command::SetAside { id } => say.set_aside(sys, &ctx, &id),
     }
 }
@@ -821,6 +826,64 @@ impl<'s, 'a> Say<'s, 'a> {
             }
         }
     }
+    /// `--add-to-path` and `--remove-from-path` (spec §5.7): the install folder on or off the
+    /// user's Path. Nothing to do is still done (exit 0): the installer runs it on every
+    /// install, an update's included.
+    fn path_change(&mut self, sys: System<'_>, dir: &Path, add: bool) -> i32 {
+        use cmdstudio_core::user_path::{self, PathChange, PathError};
+        let shown = dir.display();
+        // `run` leaves `exe_dir` empty when this program's own path cannot be read; an empty or
+        // relative entry would go into the Path as it is (a stray `;`, or a folder that moves).
+        if dir.as_os_str().is_empty() || !dir.is_absolute() {
+            let text = self.coded(
+                "E_PATH_WRITE",
+                &format!(
+                    "the folder of this program could not be read (\"{shown}\"), so your Path \
+                     was not changed"
+                ),
+            );
+            self.err(text);
+            return EXIT_FAILED;
+        }
+        let result = if add {
+            user_path::add(sys.user_path, dir)
+        } else {
+            user_path::remove(sys.user_path, dir)
+        };
+        match result {
+            Ok(PathChange::Added) => {
+                self.out(format!(
+                    "Added {shown} to your Path. New cmd windows will find cmdstudio; windows \
+                     that are open now will not."
+                ));
+                EXIT_OK
+            }
+            Ok(PathChange::AlreadyThere) => {
+                self.out(format!("Your Path already has {shown}."));
+                EXIT_OK
+            }
+            Ok(PathChange::Removed) => {
+                self.out(format!("Removed {shown} from your Path."));
+                EXIT_OK
+            }
+            Ok(PathChange::NotThere) => {
+                self.out(format!("Your Path does not have {shown}."));
+                EXIT_OK
+            }
+            Err(e) => {
+                let text = self.coded(e.code(), &e.to_string());
+                self.err(text);
+                if !matches!(e, PathError::Read(_)) {
+                    let verb = if add { "add" } else { "remove" };
+                    self.err(format!(
+                        "    fix: {verb} {shown} by hand in Settings > System > About > Advanced \
+                         system settings > Environment Variables, under User variables > Path."
+                    ));
+                }
+                EXIT_FAILED
+            }
+        }
+    }
 
     /// `cmdstudio set-aside <id>`: the way out when a restore point's journal can never be read
     /// again, so every change is refused (doctor's R1). Under the lock it sets aside only a
@@ -1094,8 +1157,13 @@ pub fn now_ms() -> u64 {
 #[cfg(windows)]
 pub fn run(args: &[OsString], io: &mut Io<'_>) -> i32 {
     use cmdstudio_core::adapters::windows::{
-        eventlog::WinEventLog, fonts::WinFonts, fs::WinFs, host::WinHost, process::WinProcess,
-        registry::WinAutoRun, wt::WinWt,
+        eventlog::WinEventLog,
+        fonts::WinFonts,
+        fs::WinFs,
+        host::WinHost,
+        process::WinProcess,
+        registry::{WinAutoRun, WinUserPath},
+        wt::WinWt,
     };
     use cmdstudio_core::adapters::{program_data_dir, Host};
     let host = WinHost;
@@ -1119,6 +1187,7 @@ pub fn run(args: &[OsString], io: &mut Io<'_>) -> i32 {
         data_dir: local.join(DATA_DIR_NAME),
         resources: exe_dir.join("resources"),
         now_ms: now_ms(),
+        exe_dir: exe_dir.clone(),
     };
     // Only programs from the runtime folders may run (spec §5.10), each for 60 seconds at most.
     let data = parse(args)
@@ -1137,6 +1206,7 @@ pub fn run(args: &[OsString], io: &mut Io<'_>) -> i32 {
     );
     let process = WinProcess::new(allowed, std::time::Duration::from_secs(60));
     let event_log = WinEventLog::real();
+    let user_path = WinUserPath::real();
     let sys = System {
         fs: &fs,
         autorun: &autorun,
@@ -1145,6 +1215,7 @@ pub fn run(args: &[OsString], io: &mut Io<'_>) -> i32 {
         process: &process,
         host: &host,
         event_log: &event_log,
+        user_path: &user_path,
     };
     run_with(args, io, sys, &defaults)
 }
@@ -1184,6 +1255,7 @@ mod tests {
             data_dir: PathBuf::from(r"C:\Users\tester\AppData\Local\ai.resincore.cmdstudio"),
             resources: res,
             now_ms: 1_791_694_709_000,
+            exe_dir: PathBuf::from(r"C:\Program Files\CMD Studio"),
         };
         (m, d)
     }
@@ -1211,6 +1283,59 @@ mod tests {
         Defaults {
             now_ms: d.now_ms + ms,
             ..d.clone()
+        }
+    }
+
+    /// The installer's two commands: the install folder on and off the Path, each said once,
+    /// nothing to do still exit 0, and a value that is not text named with the hand fix.
+    #[test]
+    fn add_to_path_and_remove_from_path_say_what_they_did() {
+        let (m, d) = machine();
+        let dir = d.exe_dir.display().to_string();
+        let (code, out, err) = cli(&m, &d, &["--add-to-path"]);
+        assert_eq!((code, err.as_str()), (EXIT_OK, ""), "{out}");
+        assert!(
+            out.starts_with(&format!("Added {dir} to your Path.")),
+            "{out}"
+        );
+        assert_eq!(m.user_path.value().unwrap().text().unwrap(), dir);
+        let (code, out, _) = cli(&m, &d, &["--add-to-path"]);
+        assert_eq!(code, EXIT_OK);
+        assert_eq!(out.trim(), format!("Your Path already has {dir}."));
+        let (code, out, _) = cli(&m, &d, &["--remove-from-path"]);
+        assert_eq!(code, EXIT_OK);
+        assert_eq!(out.trim(), format!("Removed {dir} from your Path."));
+        assert_eq!(m.user_path.value(), None);
+        let (code, out, _) = cli(&m, &d, &["--remove-from-path"]);
+        assert_eq!(code, EXIT_OK);
+        assert_eq!(out.trim(), format!("Your Path does not have {dir}."));
+        assert_eq!(m.user_path.broadcasts(), 2);
+
+        m.user_path.set(Some(RegValue {
+            kind: 3,
+            bytes: vec![0],
+        }));
+        let (code, out, err) = cli(&m, &d, &["--add-to-path"]);
+        assert_eq!((code, out.as_str()), (EXIT_FAILED, ""));
+        assert!(err.starts_with("E_PATH_WRITE: the Path value of HKEY_CURRENT_USER\\Environment is not plain text (registry type 3)"), "{err}");
+        assert!(err.contains("fix: add "), "{err}");
+        assert_eq!(thai(&err), "");
+        assert_eq!(cli(&m, &d, &["--add-to-path", "doctor"]).0, EXIT_INVALID);
+
+        // An exe folder that could not be read (empty) or is relative is refused before anything.
+        m.user_path.set(None);
+        for bad_dir in ["", r"relative\folder"] {
+            let d = Defaults {
+                exe_dir: PathBuf::from(bad_dir),
+                ..d.clone()
+            };
+            let (code, _, err) = cli(&m, &d, &["--add-to-path"]);
+            assert_eq!(code, EXIT_FAILED, "{bad_dir:?}");
+            assert!(
+                err.starts_with("E_PATH_WRITE: the folder of this program could not be read"),
+                "{err}"
+            );
+            assert_eq!(m.user_path.value(), None);
         }
     }
 

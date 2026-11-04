@@ -148,6 +148,11 @@ const MEANINGS: &[(&str, &str, &str)] = &[
         r#"Could not read this computer's settings (the registry, a file, the font list), so your settings were not changed, or doctor could not check that item"#,
     ),
     (
+        "E_PATH_WRITE",
+        r#"แก้ค่า `Path` ของผู้ใช้ (`HKCU\Environment`) ไม่ได้: ค่าไม่ใช่ข้อความธรรมดา หรือเขียนไม่ได้ (`--add-to-path`, `--remove-from-path` §5.7) ให้ใส่หรือเอาโฟลเดอร์ติดตั้งออกด้วยมือใน Environment Variables"#,
+        r#"The user's Path (HKCU\Environment) could not be changed: it is not plain text, or could not be written (`--add-to-path`, `--remove-from-path` §5.7); add or remove the install folder by hand in Environment Variables"#,
+    ),
+    (
         "E_SNAPSHOT_READ",
         r#"อ่านจุดย้อนกลับไม่ได้ (ไฟล์หาย เสีย หรือเปิดไม่ได้ในตอนนี้) · ถ้าเป็นจุดของการเปลี่ยนแปลงที่ถูกตัดกลางทาง แปลว่ายังตรวจการเปลี่ยนแปลงครั้งก่อนไม่ได้ จึงยังไม่ได้เปลี่ยนการตั้งค่าของคุณ ให้ลองใหม่ (§5.5)"#,
         r#"A restore point can't be read (missing, damaged, or not readable right now). When it is the one of a change that was cut off, an earlier change could not be checked yet: your settings were not changed; try again (§5.5)"#,

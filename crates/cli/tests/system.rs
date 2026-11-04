@@ -16,8 +16,13 @@
 
 use cmdstudio_cli::{now_ms, run_with, Defaults, Io, EXIT_OK};
 use cmdstudio_core::adapters::windows::{
-    eventlog::WinEventLog, fonts::WinFonts, fs::WinFs, host::WinHost, process::WinProcess,
-    registry::WinAutoRun, wt::WinWt,
+    eventlog::WinEventLog,
+    fonts::WinFonts,
+    fs::WinFs,
+    host::WinHost,
+    process::WinProcess,
+    registry::{WinAutoRun, WinUserPath},
+    wt::WinWt,
 };
 use cmdstudio_core::adapters::{program_data_dir, AdapterError, Fonts, Host, RegValue, System};
 use cmdstudio_core::exec::font_target;
@@ -31,11 +36,11 @@ use std::time::Duration;
 const TEST: &str = "system_apply_doctor_undo_is_byte_identical";
 
 /// The gate: only the exact value `1` runs the test (`0`, `true` or an empty value skip it).
-fn enabled() -> bool {
+fn enabled(test: &str) -> bool {
     if std::env::var("CMDSTUDIO_SYSTEM_TESTS").as_deref() == Ok("1") {
         return true;
     }
-    println!("SKIPPED {TEST}: set CMDSTUDIO_SYSTEM_TESTS=1");
+    println!("SKIPPED {test}: set CMDSTUDIO_SYSTEM_TESTS=1");
     false
 }
 
@@ -397,7 +402,7 @@ impl Drop for Restore<'_> {
 
 #[test]
 fn system_apply_doctor_undo_is_byte_identical() {
-    if !enabled() {
+    if !enabled(TEST) {
         return;
     }
     let resources = repo("resources");
@@ -454,6 +459,7 @@ fn system_apply_doctor_undo_is_byte_identical() {
         Duration::from_secs(60),
     );
     let event_log = WinEventLog::real();
+    let user_path = WinUserPath::real();
     let sys = System {
         fs: &fs,
         autorun: &autorun,
@@ -462,6 +468,7 @@ fn system_apply_doctor_undo_is_byte_identical() {
         process: &process,
         host: &host,
         event_log: &event_log,
+        user_path: &user_path,
     };
     let (_, font_file, font_value) = font_target(
         sys,
@@ -484,6 +491,7 @@ fn system_apply_doctor_undo_is_byte_identical() {
         data_dir: data,
         resources,
         now_ms: now_ms(),
+        exe_dir: std::env::temp_dir().join("cmdstudio-system-test-exe"),
     };
     apply_doctor_undo(sys, &at, &d, &theme, &mut || {
         std::thread::sleep(RETRY_EVERY)
@@ -604,4 +612,53 @@ fn apply_doctor_undo(
             dir.display()
         );
     }
+}
+
+/// `--add-to-path` and `--remove-from-path` against this runner's real HKCU, at a throwaway
+/// subkey (never the real `Environment`): the value, its kind and its bytes come back as they
+/// were, including a trailing `;` and a REG_SZ kind. Runs only where the first test runs.
+#[test]
+fn system_user_path_add_and_remove_round_trip() {
+    if !enabled("system_user_path_add_and_remove_round_trip") {
+        return;
+    }
+    use cmdstudio_core::adapters::windows::registry::{RegLocation, WinUserPath};
+    use cmdstudio_core::adapters::{RegValue, UserPath, REG_EXPAND_SZ, REG_SZ};
+    use cmdstudio_core::user_path::{add, remove, PathChange};
+    let subkey = format!(r"Software\CMD Studio tests\{}\Environment", now_ms());
+    let key = RegLocation::user(&subkey);
+    let path = WinUserPath::at(key.clone());
+    let dir = Path::new(r"C:\Users\tester\AppData\Local\CMD Studio");
+    for before in [
+        None,
+        Some(RegValue::from_text(
+            REG_EXPAND_SZ,
+            r"%USERPROFILE%\AppData\Local\Microsoft\WindowsApps;",
+        )),
+        Some(RegValue::from_text(REG_SZ, r"C:\a;C:\b")),
+    ] {
+        match &before {
+            Some(v) => path.write(v).unwrap(),
+            None => path.delete().unwrap(),
+        }
+        assert_eq!(add(&path, dir).unwrap(), PathChange::Added);
+        assert!(path
+            .read()
+            .unwrap()
+            .unwrap()
+            .text()
+            .unwrap()
+            .contains(r"\CMD Studio"));
+        assert_eq!(remove(&path, dir).unwrap(), PathChange::Removed);
+        assert_eq!(
+            path.read().unwrap(),
+            before,
+            "byte-equal after the round trip"
+        );
+    }
+    // The throwaway key goes, with the whole `CMD Studio tests` subtree this test made.
+    path.delete().unwrap();
+    winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
+        .delete_subkey_all(r"Software\CMD Studio tests")
+        .unwrap();
 }
