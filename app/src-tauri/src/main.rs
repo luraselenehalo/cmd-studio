@@ -6,9 +6,12 @@
 //! A release build is a Windows-subsystem exe (no console window flashes when the app starts),
 //! so in CLI mode it first attaches to the console it was started from, unless its output was
 //! redirected (`console::attach_parent`: `> out.txt` and `| more` keep their redirection).
-//! cmd does not wait for a Windows-subsystem program, so `cmdstudio doctor` typed in cmd prints
-//! after the prompt came back; `cmdstudio doctor | more`, or `start /wait cmdstudio doctor`,
-//! waits. The uninstaller runs it with `ExecWait`, and tests call the library: both wait.
+//! cmd does not wait for a Windows-subsystem program, so `cmdstudio.exe doctor` typed by name
+//! prints after the prompt came back and leaves `%errorlevel%` at 0; `cmdstudio doctor` without
+//! the extension runs `cmdstudio.com` beside this exe (`src/bin/cli.rs`, console subsystem,
+//! phase 4a), which cmd waits for. This CLI mode stays for `cmdstudio.exe` typed by name,
+//! `start /wait`, and a PATHEXT that puts `.EXE` first. The uninstaller runs the `.com`, and
+//! tests call the library: both wait.
 //!
 //! The crash-note panic hook is installed first, for every mode, `--cleanup` included: a panic
 //! in the uninstaller's run leaves a note in the default data folder's `logs\` as well.

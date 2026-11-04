@@ -202,13 +202,35 @@ jobs:
       - name: The UI the exe embeds holds no mock data and no preset file
         shell: bash
         run: bash ./scripts/check-dist.sh
+      # The two binaries of the app crate (spec §5.7, phase 4a): cmdstudio.exe is a windows
+      # program (PE subsystem 2) and cmdstudio-cli.exe, bundled as cmdstudio.com, a console one
+      # (subsystem 3), which answers --help with its usage and exit 0, and an unknown command with
+      # exit 2. The subsystem is the 16-bit field at offset 0x5C of the optional header, found
+      # through e_lfanew (the 32-bit field at 0x3C). Nothing here touches the runner beyond
+      # reading its %LOCALAPPDATA% for the crash-note hook, which writes only on a panic.
+      - name: The console exe answers in a console; the app exe is a windows program
+        shell: bash
+        run: |
+          subsystem() {
+            python3 -c "import struct,sys; d=open(sys.argv[1],'rb').read(); off=struct.unpack_from('<I',d,0x3C)[0]; print(struct.unpack_from('<H',d,off+0x5C)[0])" "$1"
+          }
+          test "$(subsystem target/release/cmdstudio.exe)" = 2
+          test "$(subsystem target/release/cmdstudio-cli.exe)" = 3
+          # The output is captured first: a pipe into `head` can end `--help` with SIGPIPE
+          # under pipefail and fail the step for nothing.
+          usage="$(./target/release/cmdstudio-cli.exe --help)"
+          printf '%s\n' "$usage" | head -1 | grep -q '^Usage:'
+          code=0; ./target/release/cmdstudio-cli.exe frobnicate 2>/dev/null || code=$?
+          test "$code" -eq 2
       # The app reads its runtimes from `resources\` next to its exe (machine.rs), so the artifact
-      # is one folder with both. `cp` fails when the exe is missing (bash runs with -e).
+      # is one folder with both, and the console exe under its bundled name. `cp` fails when the
+      # exe is missing (bash runs with -e).
       - name: Stage the exe with its resources, as the app finds them
         shell: bash
         run: |
           mkdir -p stage/cmdstudio
           cp target/release/cmdstudio.exe stage/cmdstudio/
+          cp target/release/cmdstudio-cli.exe stage/cmdstudio/cmdstudio.com
           cp -r resources stage/cmdstudio/resources
       # For the VM check of spec §1 criterion 1 (phase 3 plan, Task 4).
       - uses: actions/upload-artifact@v4

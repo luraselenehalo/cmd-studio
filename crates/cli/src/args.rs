@@ -22,6 +22,14 @@ Options for every command:
   --resources <dir>   use these bundled files instead of <exe folder>\\resources
   Both take a full path, such as C:\\folder.
 
+Two programs:
+  cmdstudio.com   this console program: type `cmdstudio`, cmd waits and gets the exit code
+  cmdstudio.exe   the app's window; `cmdstudio.exe doctor` prints after the prompt returns
+
+For the installer (it calls these; they take no other argument):
+  cmdstudio --add-to-path         put this program's folder on your Path (HKCU\\Environment)
+  cmdstudio --remove-from-path    take it off again; other entries are never touched
+
 Exit codes:
   0  done
   1  failed and rolled back, or refused before your settings were changed
@@ -399,6 +407,10 @@ mod tests {
             "cmdstudio undo",
             "cmdstudio --cleanup [--remove-themes]",
             "cmdstudio set-aside <",
+            "cmdstudio.com",
+            "cmdstudio.exe",
+            "--add-to-path",
+            "--remove-from-path",
             "--data-dir <dir>",
             "--resources <dir>",
         ] {

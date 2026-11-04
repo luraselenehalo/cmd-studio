@@ -17,6 +17,15 @@ name = "cmdstudio_app"
 name = "cmdstudio"
 path = "src/main.rs"
 
+# The console exe (spec §5.7, phase 4a): the same CLI, built as a console-subsystem program.
+# `tauri build` builds every [[bin]] and the installer writes this one into the install folder
+# under its name; the installer's hook renames it to cmdstudio.com (windows/hooks.nsh), so
+# `cmdstudio doctor` typed in cmd prints before the prompt returns and hands cmd its exit code:
+# cmd's PATHEXT tries .COM before .EXE for a bare `cmdstudio`.
+[[bin]]
+name = "cmdstudio-cli"
+path = "src/bin/cli.rs"
+
 [build-dependencies]
 # Tauri's build step: the ACL permissions of the app's commands (`allow-<command>`), the icon
 # resource, the config check. Pinned like every version here (spec §6.4).
