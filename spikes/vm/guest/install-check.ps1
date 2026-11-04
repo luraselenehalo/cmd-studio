@@ -9,7 +9,8 @@
 # the install folder's file list, the data folder's top-level entries and its themes\ files.
 # -Compare says SAME or DIFFERENT per item against the two snapshots, requires the install folder,
 # both kinds of shortcut and the uninstall key to be gone, and, with -ThemesKept, the data folder
-# to hold themes\ and nothing of CMD Studio's own files (state.json, snapshots\ ...), with
+# to hold exactly themes\ (any other entry is named as DIFFERENT) with the same theme files, byte
+# for byte, as the -KeptFrom snapshot (default "applied", taken while the theme was in use), with
 # -ThemesGone the data folder and Tauri's own key to be gone (both go only with the box ticked).
 # -Cli runs `cmdstudio doctor` in cmd (through a batch file, so that no quote has to pass through
 # PowerShell) and in PowerShell and prints, for each, the lines in the order they came and the
@@ -18,12 +19,13 @@
 # -CleanupAll runs the installed cmdstudio.com --cleanup --remove-themes, as the uninstaller's
 # failure box tells a person to do after a new install. -Install / -InstallSilent -Setup <file or
 # folder> start the installer on this desktop (silent: /S, waited for); -Uninstall /
-# -UninstallSilent the same for the installed uninstall.exe. Run on the user's desktop
+# -UninstallSilent the same for the installed uninstall.exe. -StartApp opens the Start-menu
+# shortcut "CMD Studio.lnk" as a click does (a silent install starts no app). Run on the user's desktop
 # (Invoke-GuestDesktop): HKCU and the environment are the signed-in user's only there.
 param(
   [ValidatePattern('^[a-z0-9]*$')] [string] $Snapshot = '',
-  [switch] $Compare, [switch] $ThemesKept, [switch] $ThemesGone, [switch] $Cli,
-  [switch] $HoldFont, [int] $HoldSeconds = 600, [switch] $ReleaseFont, [switch] $CleanupAll,
+  [switch] $Compare, [switch] $ThemesKept, [switch] $ThemesGone, [ValidatePattern('^[a-z0-9]+$')] [string] $KeptFrom = 'applied', [switch] $Cli,
+  [switch] $HoldFont, [int] $HoldSeconds = 600, [switch] $ReleaseFont, [switch] $CleanupAll, [switch] $StartApp,
   [switch] $Install, [switch] $InstallSilent, [string] $Setup = '',
   [switch] $Uninstall, [switch] $UninstallSilent,
   [string] $Out = 'C:\cmdstudio\out\phase4'
@@ -133,8 +135,19 @@ if ($Compare) {
   foreach ($k in 'shortcuts', 'desktop', 'uninstall', 'install') { if ($after[$k] -eq 'ABSENT') { "GONE $k" } else { "STILL THERE $k`n  $($after[$k])"; $fail++ } }
   $appBefore = & $read 'before' 'appKey'
   if ($ThemesKept) {
-    $top = $after.dataTop -split "`n"
-    if ($top -contains 'themes' -and -not ($top -contains 'state.json') -and -not ($top -contains 'snapshots')) { "THEMES KEPT, the rest gone (data folder: $(Line $after.dataTop); themes: $(Line $after.themes))" } else { "DATA FOLDER WRONG: $(Line $after.dataTop)"; $fail++ }
+    # --cleanup without --remove-themes keeps themes\ and nothing else (cleanup.rs remove_data,
+    # then the lock file goes): the top level must be exactly "themes".
+    $top = @($after.dataTop -split "`n" | Where-Object { $_ })
+    $other = @($top | Where-Object { $_ -ne 'themes' })
+    if ($after.dataTop -eq 'ABSENT' -or $top -notcontains 'themes') { "DIFFERENT dataTop: no themes folder (data folder: $(Line $after.dataTop))"; $fail++ }
+    elseif ($other.Count) { foreach ($o in $other) { "DIFFERENT dataTop: $o is still in the data folder" }; $fail++ }
+    else { 'THEMES KEPT, the rest gone (data folder: themes)' }
+    # The themes themselves, byte for byte (names and SHA-256), against the -KeptFrom snapshot
+    # taken while they were in use (protocol step 5's "applied").
+    $kept = & $read $KeptFrom 'themes'
+    if ($kept -eq 'ABSENT' -or $kept -eq '') { "DIFFERENT themes: the $KeptFrom snapshot holds no theme file"; $fail++ }
+    elseif ($kept -eq $after.themes) { "SAME themes (as in $KeptFrom): $(Line $after.themes)" }
+    else { "DIFFERENT themes`n  ${KeptFrom}: $(Line $kept)`n  now:  $(Line $after.themes)"; $fail++ }
     # Not counted: Tauri keeps its own key unless the box is ticked (its template, not CMD Studio).
     "INFO appKey before: $(Line $appBefore); after: $(Line $after.appKey)"
   }
@@ -185,6 +198,13 @@ if ($Uninstall -or $UninstallSilent) {
     while ((Test-Path -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\CMD Studio') -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 2 }
     "silent uninstall ended, exit code $($p.ExitCode), uninstall key gone: $(-not (Test-Path -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\CMD Studio'))"
   } else { Start-Process -FilePath $un | Out-Null; 'uninstaller started on the desktop' }
+}
+if ($StartApp) {
+  $lnk = Join-Path $sm 'CMD Studio.lnk'
+  if (-not (Test-Path -LiteralPath $lnk)) { throw "no Start-menu shortcut at $lnk" }
+  Start-Process -FilePath $lnk
+  Start-Sleep -Seconds 10
+  "started from $lnk; cmdstudio processes: $(@(Get-Process cmdstudio -ErrorAction SilentlyContinue).Count)"
 }
 if ($CleanupAll) {
   if (-not (Test-Path -LiteralPath $com)) { throw "no console program at $com" }

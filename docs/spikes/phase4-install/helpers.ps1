@@ -68,6 +68,8 @@ function Stop-Phase4FontHold($Vm, [string] $User = 'tester') { Invoke-GuestDeskt
 function Get-Phase4FontHold($Vm, [string] $User = 'tester') {
   Invoke-GuestPs $Vm ("`$f = '$($P4.Out)\holdfont.pid'; " + 'if (Test-Path -LiteralPath $f) { $id = [int](Get-Content -LiteralPath $f); ''holder pid '' + $id + '' running: '' + [bool](Get-Process -Id $id -ErrorAction SilentlyContinue) } else { ''no holdfont.pid'' }') $User 60
 }
+# The app started from its Start-menu shortcut on the desktop, as a click starts it (-StartApp).
+function Start-Phase4App($Vm, [string] $User = 'tester') { Invoke-GuestDesktop $Vm "$($P4.Guest)\install-check.ps1" '-StartApp' $User 120 }
 function Invoke-Phase4CleanupAll($Vm, [string] $User = 'tester') { Invoke-GuestDesktop $Vm "$($P4.Guest)\install-check.ps1" '-CleanupAll' $User 300 }
 
 # The install folder's entries and the running app, read through guestcontrol (console-free).
