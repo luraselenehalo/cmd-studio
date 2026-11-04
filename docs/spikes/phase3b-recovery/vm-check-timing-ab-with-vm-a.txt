@@ -1,0 +1,13 @@
+warm-up, not counted: 2457
+1347
+1287
+1306
+1300
+1334
+1269
+1326
+1321
+1345
+1282
+average of 10: 1312 ms; median 1314 ms; min 1269 ms; max 1347 ms
+start tags of the timed windows taken away: 11 of 11

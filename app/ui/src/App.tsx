@@ -7,21 +7,26 @@
 // language, so a screen reader reads Thai as Thai and the `:lang(th)` styles apply.
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import type { AppSettings } from "./bindings/AppSettings";
+import type { AppStatus } from "./bindings/AppStatus";
+import type { CrashNotice } from "./bindings/CrashNotice";
 import type { SettingsLoad } from "./bindings/SettingsLoad";
 import { AfterApplyBar } from "./components/AfterApplyBar";
 import { DraftProblemNotice } from "./components/DraftProblemNotice";
 import { ErrorNotice, Notice } from "./components/Notices";
-import { I18nProvider, useI18n, type Key, type Language } from "./i18n";
+import { WorkingBar } from "./components/WorkingBar";
+import { formatTime, I18nProvider, useI18n, type Key, type Language } from "./i18n";
 import { useIpc } from "./ipc/context";
+import { taskOf } from "./ipc/work";
 import { NavContext, useNav, type Nav, type Route } from "./router";
 import { Advanced } from "./screens/Advanced";
 import { Editor } from "./screens/Editor";
 import { Help } from "./screens/Help";
 import { Home } from "./screens/Home";
+import { Recovery } from "./screens/Recovery";
 import { Settings } from "./screens/Settings";
 import { Themes } from "./screens/Themes";
 import { Wizard } from "./screens/Wizard";
-import { AppStateContext, DEFAULT_SETTINGS, useDraftProblems, type AppState, type LastApply } from "./state";
+import { AppStateContext, DEFAULT_SETTINGS, useAppState, useDraftProblems, type AppState, type LastApply } from "./state";
 import { useRouteFocus } from "./useRouteFocus";
 
 /** `loaded` with what `next` changes put on top. `base` is what the caller built `next` from, so
@@ -34,12 +39,30 @@ function withChanges(loaded: AppSettings, base: AppSettings, next: AppSettings):
   return merged;
 }
 
+/** How often the start asks `app_status` again while a change still runs (recovery spec §6.3). */
+export const APP_STATUS_POLL_MS = 2000;
+
+/** Recovery spec §6.3: a change of this process still runs; the start waits for it and names it
+ * by the bar's task of that change (`taskOf`: the backend's snake_case name mapped once).
+ * `recovery_entry` is RECOVERY_ENTRY_BUSY of backend/run.rs: the `--recovery` entry's own name. */
+function StartWait({ busy }: { busy: string }) {
+  const { t } = useI18n();
+  return (
+    <p role="status" style={{ padding: "2rem" }}>
+      {busy === "recovery_entry" ? t("start.recovering") : t("start.busyWith", { task: t(taskOf(busy)) })}
+    </p>
+  );
+}
+
 export function App() {
   const ipc = useIpc();
   // English until the saved settings say otherwise (founder 2026-10-16).
   const [language, setLanguage] = useState<Language>("en");
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [route, setRoute] = useState<Route | null>(null);
+  /** `app_status` as read first on this load (recovery spec §6.3); `null` until then. */
+  const [status, setStatus] = useState<AppStatus | null>(null);
+  const [busyWith, setBusyWith] = useState<string | null>(null);
   /** The last committed apply, with the target of the request that made it (item 12). */
   const [lastApply, setLastApply] = useState<LastApply | null>(null);
   const draftProblems = useDraftProblems();
@@ -47,6 +70,8 @@ export function App() {
   const [recoveryActed, setRecoveryActed] = useState(false);
   const [startError, setStartError] = useState<unknown>(null);
   const [resetFrom, setResetFrom] = useState<string | null>(null);
+  /** The crash notice was closed: it stays closed whatever screen draws the notices next. */
+  const [crashClosed, setCrashClosed] = useState(false);
   /** Why the wizard's settings could not be saved as it went home: they are kept in memory, the
    * next save that goes through writes them, and the shell says so until then (fix I1). */
   const [unsaved, setUnsaved] = useState<unknown>(null);
@@ -62,24 +87,62 @@ export function App() {
 
   useEffect(() => {
     let alive = true;
-    ipc.settingsGet().then(
-      (loaded) => {
-        if (!alive) return;
-        adopt(loaded);
-        setRoute(loaded.settings.wizardDone ? { name: "home" } : { name: "wizard" });
-      },
-      (e: unknown) => {
-        if (!alive) return;
-        // Said on the home page; the wizard is not shown over settings that could not be read.
-        // The settings held meanwhile are the defaults, not the file's: see `saveSettings`.
-        setStartError(e);
-        setRoute({ name: "home" });
-      },
-    );
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    // `safe`: the app is in safe mode (recovery spec §5.2): the first screen is the Recovery
+    // page, whatever the settings say (the wizard and the library are not shown), and `app_ready`
+    // follows its drawing like any first screen.
+    const readSettings = (safe: boolean) =>
+      ipc.settingsGet().then(
+        (loaded) => {
+          if (!alive) return;
+          adopt(loaded);
+          setRoute(safe ? { name: "recovery" } : loaded.settings.wizardDone ? { name: "home" } : { name: "wizard" });
+        },
+        (e: unknown) => {
+          if (!alive) return;
+          // Said on the home page; the wizard is not shown over settings that could not be read.
+          // The settings held meanwhile are the defaults, not the file's: see `saveSettings`.
+          setStartError(e);
+          setRoute(safe ? { name: "recovery" } : { name: "home" });
+        },
+      );
+    // Recovery spec §6.3: on every load, `app_status` first. While this process still runs a
+    // change, say so and ask again every two seconds (K12: this includes the `--recovery` entry's
+    // own busy, after which the answer is read again); a status that cannot be read is no reason
+    // to hold the start.
+    const readStatus = (): Promise<void> =>
+      ipc.appStatus().then(
+        (s) => {
+          if (!alive) return;
+          if (s.busy !== null) {
+            setBusyWith(s.busy);
+            timer = setTimeout(() => void readStatus(), APP_STATUS_POLL_MS);
+            return;
+          }
+          setBusyWith(null);
+          setStatus(s);
+          return readSettings(s.safeMode);
+        },
+        () => {
+          if (!alive) return;
+          setBusyWith(null);
+          return readSettings(false);
+        },
+      );
+    void readStatus();
     return () => {
       alive = false;
+      if (timer !== null) clearTimeout(timer);
     };
   }, [ipc, adopt]);
+
+  // The first screen is drawn: the run is a good start from then on (recovery spec §5.1).
+  const ready = useRef(false);
+  useEffect(() => {
+    if (route === null || ready.current) return;
+    ready.current = true;
+    ipc.appReady().catch(() => {});
+  }, [ipc, route]);
 
   /** Reads settings.json again after the start read failed. A read that works replaces the
    * defaults held in memory with what the file holds and ends the problem; one that fails keeps
@@ -128,6 +191,15 @@ export function App() {
     [ipc, settings, startError, readAgain],
   );
 
+  /** The user's own reset of the settings (the Recovery page): the defaults stand at once, and
+   * the "could not be read" notice does not apply, so none is shown (the page says what it did). */
+  const adoptReset = useCallback((loaded: SettingsLoad) => {
+    setSettings(loaded.settings);
+    setLanguage(loaded.settings.language);
+    setResetFrom(null);
+    setStartError(null);
+  }, []);
+
   const keepUnsaved = useCallback((next: AppSettings, error: unknown) => {
     setSettings(next);
     setLanguage(next.language);
@@ -137,8 +209,8 @@ export function App() {
   const bump = useCallback(() => setVersion((v) => v + 1), []);
   const markRecoveryActed = useCallback(() => setRecoveryActed(true), []);
   const appState = useMemo<AppState>(
-    () => ({ settings, saveSettings, lastApply, setLastApply, draftProblems, version, bump, recoveryActed, markRecoveryActed }),
-    [settings, saveSettings, lastApply, draftProblems, version, bump, recoveryActed, markRecoveryActed],
+    () => ({ settings, saveSettings, lastApply, setLastApply, draftProblems, version, bump, recoveryActed, markRecoveryActed, appStatus: crashClosed && status ? { ...status, crashNotice: null } : status, adoptSettings: adoptReset }),
+    [settings, saveSettings, lastApply, draftProblems, version, bump, recoveryActed, markRecoveryActed, status, crashClosed, adoptReset],
   );
   const nav = useMemo<Nav>(() => ({ route: route ?? { name: "home" }, go: (r: Route) => setRoute(r) }), [route]);
 
@@ -147,7 +219,10 @@ export function App() {
       <AppStateContext.Provider value={appState}>
         <NavContext.Provider value={nav}>
           <div lang={language}>
-            {route === null ? (
+            <WorkingBar />
+            {busyWith !== null ? (
+              <StartWait busy={busyWith} />
+            ) : route === null ? (
               <p role="status" style={{ padding: "2rem" }}>
                 …
               </p>
@@ -157,6 +232,7 @@ export function App() {
                 onRetry={tryAgain}
                 resetFrom={resetFrom}
                 unsaved={unsaved}
+                onCrashClosed={() => setCrashClosed(true)}
                 onUnsaved={keepUnsaved}
               />
             )}
@@ -178,6 +254,8 @@ interface StartProblems {
   resetFrom: string | null;
   /** The wizard's settings could not be saved (fix I1). */
   unsaved: unknown;
+  /** The crash notice was closed. */
+  onCrashClosed: () => void;
 }
 
 /**
@@ -189,6 +267,14 @@ function Screens({ onUnsaved, ...problems }: StartProblems & { onUnsaved: (setti
   const { route } = useNav();
   const main = useRef<HTMLElement>(null);
   useRouteFocus(route, main);
+  if (route.name === "recovery") {
+    return (
+      <main id="content" className="recovery" ref={main}>
+        <StartNotices {...problems} />
+        <Recovery />
+      </main>
+    );
+  }
   if (route.name === "wizard") {
     return (
       <main id="content" className="wizard" ref={main}>
@@ -202,7 +288,7 @@ function Screens({ onUnsaved, ...problems }: StartProblems & { onUnsaved: (setti
 
 /** The settings could not be read as the app started, were reset, or could not be saved by the
  * wizard: then the wizard shows again at the next start, as the notice says. */
-function StartNotices({ startError, onRetry, resetFrom, unsaved }: StartProblems) {
+function StartNotices({ startError, onRetry, resetFrom, unsaved, onCrashClosed }: StartProblems) {
   const { t } = useI18n();
   const [reading, setReading] = useState(false);
   const retry = async () => {
@@ -213,8 +299,10 @@ function StartNotices({ startError, onRetry, resetFrom, unsaved }: StartProblems
       setReading(false);
     }
   };
+  const { appStatus } = useAppState();
   return (
     <>
+      {appStatus?.crashNotice && <CrashClosed notice={appStatus.crashNotice} onClosed={onCrashClosed} />}
       {startError !== null && (
         <>
           <ErrorNotice error={startError} title={t("settings.startFailed")} />
@@ -228,6 +316,41 @@ function StartNotices({ startError, onRetry, resetFrom, unsaved }: StartProblems
       {resetFrom && <Notice kind="warn">{t("settings.reset", { file: resetFrom })}</Notice>}
       {unsaved !== null && <ErrorNotice error={unsaved} title={t("wizard.notSaved")} />}
     </>
+  );
+}
+
+/** The earlier run ended abnormally (recovery spec §5.3): when, and one click to the report with
+ * the crash note. Closing it tells the backend, which forgets the notice. */
+function CrashClosed({ notice, onClosed }: { notice: CrashNotice; onClosed: () => void }) {
+  const { t, language } = useI18n();
+  const ipc = useIpc();
+  const { go, route } = useNav();
+  const time = formatTime(notice.atMs, language);
+  return (
+    <Notice kind="warn">
+      <p>{notice.hasReport ? t("start.crashed", { time }) : t("start.crashedNoReport", { time })}</p>
+      <div className="row-actions">
+        <button type="button" className="primary" onClick={() => {
+            if (route.name !== "recovery") return go({ name: "help", tab: "report" });
+            // Recovery mode stays on its page: the report section is on it.
+            const section = document.getElementById("recovery-report");
+            section?.scrollIntoView?.();
+            section?.focus();
+          }}
+        >
+          {t("home.paused.report")}
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            onClosed();
+            ipc.crashDismiss().catch(() => {});
+          }}
+        >
+          {t("common.close")}
+        </button>
+      </div>
+    </Notice>
   );
 }
 

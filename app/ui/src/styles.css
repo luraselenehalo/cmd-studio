@@ -507,3 +507,30 @@ legend {
 progress {
   width: 100%;
 }
+
+/* The "still working" bar (recovery spec §6.1): at the top, over the page; empty until needed. */
+.working-bar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  padding: 0.5rem 1rem;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  border-left: 0.25rem solid var(--warn);
+}
+/* Empty: hidden by size, not by display:none, which would take the live region out of the
+   accessibility tree and a screen reader would not hear it fill. */
+.working-bar.empty {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  border: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}

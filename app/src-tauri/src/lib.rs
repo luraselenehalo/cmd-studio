@@ -7,6 +7,7 @@
 pub mod backend;
 pub mod command_names;
 pub mod console;
+pub mod crash;
 pub mod error;
 #[cfg(windows)]
 pub mod ipc;
@@ -16,6 +17,11 @@ pub mod logs;
 pub mod machine;
 pub mod open;
 pub mod settings;
+#[cfg(windows)]
+pub mod webview_watch;
+
+/// The one argument that opens the window instead of the CLI (recovery spec §4.4, §8).
+pub const RECOVERY_ARG: &str = "--recovery";
 
 #[cfg(test)]
 mod config_guard;
@@ -28,10 +34,9 @@ mod config_guard;
 /// WebView2, a `<data>\webview` folder that cannot be made) is handled inside `setup` and never
 /// returned to Tauri. After that, Tauri owns the thread.
 #[cfg(windows)]
-pub fn run_gui() {
+pub fn run_gui(how: backend::run::GuiStart) {
+    use backend::run::GuiStart;
     use tauri::Manager;
-    // The backend over this computer, with the preview's sample identity read from the
-    // environment (`machine::real_backend` is the one place that reads it).
     let backend = match machine::real_backend() {
         Ok(backend) => std::sync::Arc::new(backend),
         Err(why) => {
@@ -39,36 +44,188 @@ pub fn run_gui() {
             std::process::exit(1);
         }
     };
+    // The run's record, before the window (recovery spec §5.1); `--recovery`'s own steps run on
+    // a thread once the window is up, so a slow rollback never delays the window.
+    let decided = backend.start_run(how);
+    if how == GuiStart::Restarted {
+        // The change `app_restart` cut off is put back now, as its dialog promised (recovery
+        // spec §6.3): under the lock, one log line, bounded by the core's timeouts.
+        backend.restart_rollback();
+    }
     let for_window = backend.clone();
+    let for_instance = backend.clone();
+    let for_exit = backend.clone();
     let built = tauri::Builder::default()
-        // A second start focuses this window instead of opening another (spec §5.7). The plugin
-        // has no JS commands, so the capability file does not change. Registered first, as the
-        // plugin asks: a second start hands its arguments over and exits before the window.
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.unminimize();
-                let _ = window.set_focus();
-            }
-        }))
+        // A second start focuses this window instead of opening another (spec §5.7); one with
+        // `--recovery` makes this instance do the shortcut's work and reload into recovery mode
+        // (recovery spec §4.4). Registered first, as the plugin asks.
+        .plugin(tauri_plugin_single_instance::init(
+            move |app, args, _cwd| {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.unminimize();
+                    let _ = window.set_focus();
+                    if args.iter().any(|a| a == RECOVERY_ARG) {
+                        recover_in_place(&for_instance, window);
+                    }
+                }
+            },
+        ))
         .manage(backend)
         .invoke_handler(ipc::handler())
         .setup(move |app| {
             // Said and ended here, not returned: Tauri would turn the error into a panic.
             if let Err(why) = open_main_window(app, for_window.paths().webview()) {
-                console::fatal(&window_failed(&why));
+                // Recovery spec §5.4: Yes undoes everything through the backend, under the lock
+                // as every change is; No ends as before. Either way exit code 1, and the run
+                // record is left on purpose: a window that could not open is a start that
+                // failed, and the second one in a row opens the next start in recovery mode.
+                let logs = for_window.paths().logs();
+                if console::ask_yes_no(&window_question(&why, &logs)) {
+                    console::fatal(&revert_said(&for_window.revert_all(), &logs));
+                }
                 std::process::exit(1);
             }
-            start_crash_check(&for_window);
+            // Recovery spec §6.4: the renderer's death reloads the page; the third in a minute
+            // asks the Yes/No question instead, on a thread of its own (WebView2's thread must
+            // not block), then ends the app.
+            if let Some(window) = app.get_webview_window("main") {
+                let (for_note, b) = (for_window.clone(), for_window.clone());
+                let watched = webview_watch::watch_renderer(
+                    &window,
+                    move |line| for_note.note_line(line),
+                    move || {
+                        let on_thread = b.clone();
+                        let spawned = std::thread::Builder::new()
+                            .name("renderer-gave-up".to_string())
+                            .spawn(move || {
+                                let b = on_thread;
+                                let logs = b.paths().logs();
+                                let why = "its page stopped three times in a minute";
+                                if console::ask_yes_no(&window_question(why, &logs)) {
+                                    console::fatal(&revert_said(&b.revert_all(), &logs));
+                                }
+                                // The run had reached its UI: this end is the app's own choice,
+                                // not a crash. `exit` raises no Tauri event, so the record goes
+                                // here (K14); the next start shows no notice.
+                                b.end_run();
+                                std::process::exit(1);
+                            });
+                        // The box never shows if the thread cannot start: say so in the log.
+                        if let Err(e) = spawned {
+                            b.note_line(&format!("renderer gave-up thread=not_started {e}"));
+                        }
+                    },
+                );
+                if let Err(e) = watched {
+                    for_window.note_line(&format!("renderer watch=not_registered {e}"));
+                }
+            }
+            if how == GuiStart::Recovery {
+                start_recovery_entry(&for_window);
+            } else if decided.safe_mode.is_none() {
+                // Recovery mode starts no crash check (recovery spec §4.3).
+                start_crash_check(&for_window);
+            }
             Ok(())
         })
         .build(tauri::generate_context!());
     match built {
-        Ok(app) => app.run(|_, _| {}),
+        Ok(app) => app.run(move |_, event| {
+            if let tauri::RunEvent::Exit = event {
+                for_exit.end_run();
+            }
+        }),
         Err(e) => {
             console::fatal(&start_failed(&e.to_string()));
             std::process::exit(1);
         }
     }
+}
+
+/// `--recovery`'s steps 1–2 on a thread of their own (recovery spec §4.4), then `after`. The
+/// entry is `busy` under its own name while it runs, so the UI's start waits for it (§6.3); it
+/// is marked before the thread exists, so a UI that asks in between does not find it idle, and
+/// the thread clears it on every exit, a panic included ([`run_recovery_entry`]). A thread that
+/// cannot be started clears the mark and leaves the reason as the entry's outcome for the
+/// Recovery page; nothing waits on the window's thread.
+#[cfg(windows)]
+fn spawn_recovery_entry(
+    backend: &std::sync::Arc<backend::Backend<machine::RealMachine>>,
+    after: impl Fn() + Send + Sync + 'static,
+) {
+    let b = backend.clone();
+    let after = std::sync::Arc::new(after);
+    let for_thread = after.clone();
+    backend.busy_mark(backend::run::RECOVERY_ENTRY_BUSY);
+    let spawned = std::thread::Builder::new()
+        .name("recovery-entry".to_string())
+        .spawn(move || {
+            run_recovery_entry(
+                &b,
+                |b| {
+                    let _ = b.recovery_entry();
+                },
+                move || for_thread(),
+            );
+        });
+    if let Err(e) = spawned {
+        backend.busy_clear(backend::run::RECOVERY_ENTRY_BUSY);
+        backend.recovery_entry_not_run(&e.to_string());
+        // The page is reloaded all the same, so that it shows the reason.
+        after();
+    }
+}
+
+/// The entry thread's body: `entry` under a guard that clears the mark made before the thread
+/// and then runs `after` (the page's reload), on every exit of `entry`, a panic included. A
+/// panic there writes its crash note (`crash.rs`) and ends the thread; without the guard
+/// `app_status` would say `recovery_entry` for the rest of the run and the reloaded UI would
+/// wait for it forever. Generic over the machine so that a test runs it with an entry that
+/// panics; nothing in `after` may panic (a panic while unwinding aborts the process).
+#[cfg(windows)]
+fn run_recovery_entry<M: backend::Machine>(
+    backend: &backend::Backend<M>,
+    entry: impl FnOnce(&backend::Backend<M>),
+    after: impl FnOnce(),
+) {
+    struct AtEnd<'a, M: backend::Machine, F: FnOnce()> {
+        mark: Option<backend::run::Busy<'a, M>>,
+        after: Option<F>,
+    }
+    impl<M: backend::Machine, F: FnOnce()> Drop for AtEnd<'_, M, F> {
+        fn drop(&mut self) {
+            // The mark first, so the reloaded page's `app_status` finds the entry ended.
+            drop(self.mark.take());
+            if let Some(after) = self.after.take() {
+                after();
+            }
+        }
+    }
+    let _at_end = AtEnd {
+        mark: Some(backend.busy_until_dropped(backend::run::RECOVERY_ENTRY_BUSY)),
+        after: Some(after),
+    };
+    entry(backend);
+}
+
+/// The start with `--recovery`: the entry once the window is up; the window's first
+/// `app_status` finds it busy and asks again until it has ended.
+#[cfg(windows)]
+fn start_recovery_entry(backend: &std::sync::Arc<backend::Backend<machine::RealMachine>>) {
+    spawn_recovery_entry(backend, || {});
+}
+
+/// A second start with `--recovery` while this one runs (recovery spec §4.4): the entry, then
+/// the page is loaded again; the reloaded UI asks `app_status` first and finds safe mode on.
+#[cfg(windows)]
+fn recover_in_place(
+    backend: &std::sync::Arc<backend::Backend<machine::RealMachine>>,
+    window: tauri::WebviewWindow,
+) {
+    backend.enter_safe_mode(backend::run::SafeModeReason::Recovery);
+    spawn_recovery_entry(backend, move || {
+        let _ = window.eval("window.location.reload()");
+    });
 }
 
 /// Builds the window, the only place it is made. It is in tauri.conf.json with
@@ -143,6 +300,101 @@ fn start_failed(why: &str) -> String {
 #[cfg(windows)]
 fn window_failed(why: &str) -> String {
     format!("CMD Studio could not open its window: {why}")
+}
+
+/// The Yes/No question of a window that could not be built (recovery spec §5.4).
+#[cfg(windows)]
+pub fn window_question(why: &str, logs: &std::path::Path) -> String {
+    format!(
+        "{}. Your themes are safe. Undo everything CMD Studio changed on this computer (cmd, \
+         Windows Terminal, fonts)? The log is in {}.",
+        window_failed(why),
+        logs.display()
+    )
+}
+
+/// What the undo did, for the second box (recovery spec §5.4): done, not everything (the log
+/// says what to finish by hand), refused because busy, or refused for another reason.
+#[cfg(windows)]
+pub fn revert_said(
+    result: &Result<backend::apply::RevertOutcome, error::AppError>,
+    logs: &std::path::Path,
+) -> String {
+    match result {
+        Ok(out) if out.ok => {
+            "Everything CMD Studio changed on this computer is back as it was.".to_string()
+        }
+        Ok(_) => format!(
+            "Not everything could be undone. The log in {} says what to finish by hand.",
+            logs.display()
+        ),
+        Err(e) if e.code == "E_BUSY" => "Nothing was undone: another CMD Studio, or another \
+                                         program, is changing this computer right now (E_BUSY). \
+                                         Try again when it is done."
+            .to_string(),
+        Err(e) => format!("Nothing was undone ({}): {}", e.code, e.details),
+    }
+}
+
+/// The hidden argument `app_restart`'s child is started with (recovery spec §6.3): the pid of
+/// the process that is ending. The child waits for it before anything else (`main.rs`), so the
+/// single-instance plugin never finds the old window and hands the start to a dying process.
+pub const AFTER_PID_ARG: &str = "--after-pid";
+/// How long the child waits for the old process at most.
+pub const RESTART_WAIT_MS: u64 = 10_000;
+
+/// Starts this exe again as a normal start that waits for this process to be gone (recovery
+/// spec §6.3): the caller exits once it has spawned. No cmd.exe helper: cmd would load AutoRun.
+#[cfg(windows)]
+pub fn restart_process() -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    std::process::Command::new(exe)
+        .arg(AFTER_PID_ARG)
+        .arg(std::process::id().to_string())
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// The pid `--after-pid` names; `None` for anything that is not a number.
+pub fn after_pid(arg: &std::ffi::OsStr) -> Option<u32> {
+    arg.to_str()?.parse().ok()
+}
+
+/// Waits, polling every 100 ms, until `is_alive(pid)` says no or `limit` has passed: how long
+/// it waited. Pure, for the test: `main.rs` hands it the real process check and `sleep`.
+pub fn wait_until_gone(
+    pid: u32,
+    limit: std::time::Duration,
+    mut is_alive: impl FnMut(u32) -> bool,
+    mut sleep: impl FnMut(std::time::Duration),
+) -> std::time::Duration {
+    let step = std::time::Duration::from_millis(100);
+    let mut waited = std::time::Duration::ZERO;
+    while waited < limit && is_alive(pid) {
+        sleep(step);
+        waited += step;
+    }
+    waited
+}
+
+/// `main.rs`'s wait for the process `arg` names, up to [`RESTART_WAIT_MS`]: a process that is
+/// there (`process_created_at` answers a time) is alive; one that is gone, or cannot be opened,
+/// is not waited for.
+#[cfg(windows)]
+pub fn wait_for_old_process(arg: &std::ffi::OsStr) {
+    let Some(pid) = after_pid(arg) else {
+        return;
+    };
+    wait_until_gone(
+        pid,
+        std::time::Duration::from_millis(RESTART_WAIT_MS),
+        |p| {
+            cmdstudio_core::adapters::windows::host::process_created_at(p)
+                .is_ok_and(|c| c.is_some())
+        },
+        std::thread::sleep,
+    );
 }
 
 #[cfg(all(test, windows))]
@@ -254,10 +506,284 @@ mod tests {
         let window = text.find("open_main_window(app, ").unwrap();
         let check = text.find("start_crash_check(&for_window)").unwrap();
         assert!(window < check, "the check starts once the window is up");
+        let record = text.find("backend.start_run(how)").unwrap();
+        assert!(record < window, "the run's record comes before the window");
+        assert!(
+            text.contains("tauri::RunEvent::Exit"),
+            "a normal exit ends the run"
+        );
+        assert!(production().contains("for_exit.end_run()"));
+    }
+
+    /// Recovery spec §5.4: the window that cannot open asks, in English, whether to undo
+    /// everything, and says what the undo did.
+    #[test]
+    fn a_window_that_cannot_open_asks_to_undo_and_says_what_the_undo_did() {
+        use crate::backend::apply::RevertOutcome;
+        let logs = std::path::Path::new(r"C:\Users\x\AppData\Local\ai.resincore.cmdstudio\logs");
+        let q = window_question("no WebView2", logs);
+        assert_eq!(
+            q,
+            "CMD Studio could not open its window: no WebView2. Your themes are safe. Undo \
+             everything CMD Studio changed on this computer (cmd, Windows Terminal, fonts)? The \
+             log is in C:\\Users\\x\\AppData\\Local\\ai.resincore.cmdstudio\\logs."
+        );
+        let ok = RevertOutcome {
+            ok: true,
+            steps: vec![],
+            notes: vec![],
+            status: Some(crate::backend::apply::TxnStatus::Committed),
+            error: None,
+            unrestored: vec![],
+        };
+        assert_eq!(
+            revert_said(&Ok(ok.clone()), logs),
+            "Everything CMD Studio changed on this computer is back as it was."
+        );
+        let not_ok = RevertOutcome { ok: false, ..ok };
+        assert_eq!(
+            revert_said(&Ok(not_ok), logs),
+            "Not everything could be undone. The log in C:\\Users\\x\\AppData\\Local\\ai.resincore.cmdstudio\\logs says what to finish by hand."
+        );
+        let busy = Err(crate::error::AppError::coded(
+            "E_BUSY",
+            "cmdstudio.lock is held",
+        ));
+        assert_eq!(
+            revert_said(&busy, logs),
+            "Nothing was undone: another CMD Studio, or another program, is changing this computer right now (E_BUSY). Try again when it is done."
+        );
+        let other = Err(crate::error::AppError::coded(
+            "E_SNAPSHOT_READ",
+            "manifest.json is not JSON",
+        ));
+        assert_eq!(
+            revert_said(&other, logs),
+            "Nothing was undone (E_SNAPSHOT_READ): manifest.json is not JSON"
+        );
+        for text in [q, revert_said(&busy, logs)] {
+            assert!(text.is_ascii(), "{text}");
+        }
+        // The wiring, by text: Yes runs the backend's Undo everything, No ends as before, and
+        // `start_failed` keeps its plain box (no data folder to undo from).
+        let text = production();
+        assert!(
+            text.contains("console::ask_yes_no(&window_question("),
+            "the window's failure asks"
+        );
+        assert!(
+            text.contains("for_window.revert_all()"),
+            "Yes undoes everything"
+        );
+        assert!(
+            text.contains("console::fatal(&revert_said("),
+            "the outcome is said"
+        );
+        assert_eq!(
+            text.matches("console::fatal(&start_failed(").count(),
+            2,
+            "start_failed stays a plain box"
+        );
+        let console = include_str!("console.rs");
+        assert!(console.contains("message_box(message, MB_YESNO | MB_ICONQUESTION) == IDYES"));
+        assert!(console.contains("message_box(message, MB_OK | MB_ICONERROR)"));
+        assert!(
+            text.contains("webview_watch::watch_renderer("),
+            "the renderer is watched"
+        );
+        assert!(
+            text.contains("renderer gave-up thread=not_started"),
+            "a failed give-up spawn is said"
+        );
+    }
+
+    /// Recovery spec §6.3: the restart starts this exe again with `--after-pid <this pid>` and
+    /// nothing else; the process is never started here (the text is checked: the exe is never
+    /// run on this PC). `main.rs` takes that flag before the window and before the CLI.
+    #[test]
+    fn the_restart_starts_this_exe_after_this_pid() {
+        let body = body_of("pub fn restart_process(");
+        assert!(body.contains("std::env::current_exe()"));
+        assert!(body.contains("std::process::Command::new(exe)"));
+        assert!(body.contains(".arg(AFTER_PID_ARG)"));
+        assert!(body.contains(".arg(std::process::id().to_string())"));
+        assert_eq!(
+            body.matches(".arg(").count(),
+            2,
+            "the flag and the pid, nothing else"
+        );
+        assert!(body.contains(".spawn()"));
+        assert_eq!(AFTER_PID_ARG, "--after-pid");
+        let main = include_str!("main.rs");
+        assert!(
+            main.contains("[flag, pid] if flag == cmdstudio_app::AFTER_PID_ARG"),
+            "{main}"
+        );
+        assert!(main.contains("wait_for_old_process(pid)"));
+    }
+
+    /// Recovery spec §6.3: the child of a restart waits for the old pid, up to ten seconds, and
+    /// goes on at once when it is gone; a flag that is not a number waits for nothing.
+    #[test]
+    fn the_restarts_child_waits_for_the_old_process_up_to_ten_seconds() {
+        use std::time::Duration;
+        assert_eq!(after_pid(std::ffi::OsStr::new("4242")), Some(4242));
+        assert_eq!(after_pid(std::ffi::OsStr::new("x")), None);
+        let mut polls = 0;
+        let mut slept = Duration::ZERO;
+        let waited = wait_until_gone(
+            7,
+            Duration::from_millis(RESTART_WAIT_MS),
+            |pid| {
+                assert_eq!(pid, 7);
+                polls += 1;
+                polls <= 3
+            },
+            |d| slept += d,
+        );
+        assert_eq!(
+            (polls, slept, waited),
+            (4, Duration::from_millis(300), Duration::from_millis(300))
+        );
+        let waited = wait_until_gone(7, Duration::from_millis(RESTART_WAIT_MS), |_| true, |_| {});
+        assert_eq!(waited, Duration::from_millis(RESTART_WAIT_MS));
+        assert_eq!(
+            wait_until_gone(
+                7,
+                Duration::from_millis(RESTART_WAIT_MS),
+                |_| false,
+                |_| panic!("no sleep")
+            ),
+            Duration::ZERO
+        );
+    }
+
+    /// `--recovery` alone opens the window in recovery mode; every other argument is the CLI's
+    /// (recovery spec §4.4, §8). `main.rs` is read as text: the binary is never started here.
+    #[test]
+    fn only_the_recovery_argument_opens_the_window() {
+        let main = include_str!("main.rs");
+        assert_eq!(RECOVERY_ARG, "--recovery");
+        assert!(
+            main.contains("[one] if one == cmdstudio_app::RECOVERY_ARG"),
+            "{main}"
+        );
+        assert!(main.contains("GuiStart::Recovery"));
+        let gui = main.find("run_gui(GuiStart::Normal)").unwrap();
+        let cli = main.find("cmdstudio_cli::run(").unwrap();
+        assert!(gui < cli, "the window's cases come before the CLI");
+        assert!(
+            main.find("crash::install_hook").unwrap() < main.find("let args").unwrap(),
+            "the hook comes first"
+        );
+    }
+
+    /// Carry 3: the entry is marked busy before its thread exists (a UI that asks in between
+    /// does not find it idle), and a thread that cannot be started clears the mark and leaves
+    /// the reason for the Recovery page.
+    #[test]
+    fn the_entry_is_marked_before_its_thread_and_a_failed_spawn_clears_it() {
+        let body = body_of("fn spawn_recovery_entry(");
+        let marked = body.find(".busy_mark(").unwrap();
+        let spawned = body.find(".spawn(").unwrap();
+        let failed = body.find("if let Err(e) = spawned").unwrap();
+        let cleared = body.rfind(".busy_clear(").unwrap();
+        let said = body.find(".recovery_entry_not_run(").unwrap();
+        assert!(marked < spawned, "marked first");
+        assert!(
+            spawned < failed && failed < said,
+            "said only after a failed spawn"
+        );
+        assert!(
+            cleared > failed,
+            "the mark is cleared after the failed spawn is seen"
+        );
+        assert!(
+            body.matches(".busy_clear(").count() == 1,
+            "cleared by hand only when the thread could not start; the thread's own exit is the guard's"
+        );
+        let guarded = body.find("run_recovery_entry(").unwrap();
+        let entry = body.find(".recovery_entry()").unwrap();
+        assert!(
+            spawned < guarded && guarded < entry,
+            "the thread's body is the guarded entry"
+        );
+        // Fix 1, item 4: the callback (the page's reload) also runs when the thread could not
+        // start, so the reloaded page shows the reason.
+        let after_failure = body.get(failed..).unwrap_or("");
+        assert!(after_failure.contains("after()"), "{after_failure}");
+        assert!(body.contains("after: impl Fn() + Send + Sync + 'static"));
+    }
+
+    /// The final review's re-graded carry: the entry's thread clears the mark set before it on
+    /// every exit, a panic included, so `app_status` never says `recovery_entry` for the rest of
+    /// the run with no entry running; the page's reload (`after`) runs all the same.
+    #[test]
+    fn the_entrys_thread_clears_its_mark_when_the_entry_panics() {
+        use crate::backend::run::RECOVERY_ENTRY_BUSY;
+        let b = crate::backend::testing::backend();
+        let after = std::cell::Cell::new(0);
+        b.busy_mark(RECOVERY_ENTRY_BUSY);
+        let ended = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_recovery_entry(
+                &b,
+                |_| panic!("a bug in the entry"),
+                || after.set(after.get() + 1),
+            );
+        }));
+        assert!(ended.is_err(), "the panic goes on to the thread's end");
+        assert_eq!(b.app_status().unwrap().busy, None, "nothing stays busy");
+        assert_eq!(after.get(), 1, "the page is reloaded all the same");
+        // The plain path: the entry runs, the mark goes, then `after`.
+        b.busy_mark(RECOVERY_ENTRY_BUSY);
+        let seen = std::cell::Cell::new(None);
+        run_recovery_entry(
+            &b,
+            |b| seen.set(b.app_status().unwrap().busy),
+            || after.set(after.get() + 1),
+        );
+        assert_eq!(seen.into_inner().as_deref(), Some(RECOVERY_ENTRY_BUSY));
+        assert_eq!(b.app_status().unwrap().busy, None);
+        assert_eq!(after.get(), 2);
+    }
+
+    /// I1 (the final review): the start after `app_restart` rolls the cut-off change back before
+    /// the window, as the restart dialog promises: `main.rs` starts the `--after-pid` child as
+    /// `GuiStart::Restarted`, and `run_gui` runs the rollback after the record and before the
+    /// window, on that start only.
+    #[test]
+    fn the_restarted_start_rolls_back_before_the_window() {
+        let main = include_str!("main.rs");
+        let arm = main
+            .find("[flag, pid] if flag == cmdstudio_app::AFTER_PID_ARG")
+            .unwrap();
+        let restarted = main.find("run_gui(GuiStart::Restarted)").unwrap();
+        assert!(
+            arm < restarted,
+            "the --after-pid arm is the restarted start"
+        );
+        assert_eq!(main.matches("run_gui(GuiStart::Restarted)").count(), 1);
+        let text = production();
+        let record = text.find("backend.start_run(how)").unwrap();
+        let rollback = text.find("backend.restart_rollback()").unwrap();
+        let window = text.find("open_main_window(app, ").unwrap();
+        assert!(
+            record < rollback && rollback < window,
+            "after the record, before the window"
+        );
+        let guard = text.get(..rollback).unwrap_or("");
+        assert!(
+            guard
+                .trim_end()
+                .ends_with("if how == GuiStart::Restarted {")
+                || guard.contains("how == GuiStart::Restarted"),
+            "on the restarted start only"
+        );
+        assert_eq!(text.matches(".restart_rollback()").count(), 1);
     }
 }
 
 #[cfg(not(windows))]
-pub fn run_gui() {
+pub fn run_gui(_how: backend::run::GuiStart) {
     console::fatal("CMD Studio runs on Windows only.");
 }

@@ -6,7 +6,7 @@
 // commands it turns off; Try again asks about that add-on again; a plan that changed is shown
 // again, never applied; what a rollback left is listed under its header; focus follows the
 // stages; "busy" brackets the apply; "Copy details" says whether it copied.
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState, type ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
@@ -18,7 +18,7 @@ import { I18nProvider, type Language } from "../i18n";
 import { IpcProvider } from "../ipc/context";
 import { createMockIpc } from "../ipc/mock";
 import { PRESETS } from "../ipc/presets";
-import type { Ipc } from "../ipc/types";
+import { IpcError, type Ipc } from "../ipc/types";
 import { AppStateContext, DEFAULT_SETTINGS, useDraftProblems, type AppState, type LastApply } from "../state";
 import { AfterApplyBar } from "./AfterApplyBar";
 import { ApplyFlow, ProgressView } from "./ApplyFlow";
@@ -27,6 +27,8 @@ import { ErrorBoundary } from "./ErrorBoundary";
 import { ErrorNotice, NotesList, UnrestoredList } from "./Notices";
 import { TerminalPreview } from "./TerminalPreview";
 import { ThemeCard } from "./ThemeCard";
+import { WorkContext, WorkingBar } from "./WorkingBar";
+import type { WorkState, WorkStore } from "../ipc/work";
 
 function mount(children: ReactNode, { ipc = createMockIpc(), language = "en" }: { ipc?: Ipc; language?: Language } = {}) {
   const wrap = (inner: ReactNode) => (
@@ -306,6 +308,17 @@ describe("Notices", () => {
     mount(<UnrestoredList steps={steps} />, { language: "th" });
     expect(langOf(screen.getByText("ลบชุดสีเอง"))).toBe("th");
     expect(langOf(screen.getByText("Take out our part by hand"))).toBe("en");
+  });
+
+  it("offers Try again when given something to run, and nothing to press otherwise (I2)", async () => {
+    const error = { code: "E_TIMEOUT", messageTh: "(E_TIMEOUT)", messageEn: "(E_TIMEOUT)", details: "doctor_run did not answer within 60 s" };
+    const plain = mount(<ErrorNotice error={error} />);
+    expect(screen.queryByRole("button")).toBeNull();
+    plain.unmount();
+    const retry = vi.fn();
+    mount(<ErrorNotice error={error} onRetry={retry} />, { language: "th" });
+    await userEvent.setup().click(screen.getByRole("button", { name: "ลองใหม่" }));
+    expect(retry).toHaveBeenCalledTimes(1);
   });
 
   it("tells an AppError by all four fields, so a partial one is an internal problem, not a crash", () => {
@@ -675,6 +688,8 @@ describe("AfterApplyBar", () => {
         bump: () => {},
         recoveryActed: false,
         markRecoveryActed: () => {},
+        appStatus: null,
+        adoptSettings: () => {},
       };
       return (
         <AppStateContext.Provider value={state}>
@@ -697,5 +712,100 @@ describe("AfterApplyBar", () => {
     });
     expect(within(bar).getByText(/open a new cmd tab in Windows Terminal/)).toBeTruthy();
     expect(screen.queryByText(/open a new cmd window/)).toBeNull();
+  });
+});
+
+describe("the working bar", () => {
+  const store = (state: WorkState) => {
+    const listeners = new Set<() => void>();
+    return {
+      get: () => state,
+      subscribe: (l: () => void) => {
+        listeners.add(l);
+        return () => listeners.delete(l);
+      },
+      set: (next: WorkState) => {
+        state = next;
+        listeners.forEach((l) => l());
+      },
+    };
+  };
+  const mountBar = (work: WorkStore, ipc = createMockIpc()) =>
+    render(
+      <IpcProvider ipc={ipc}>
+        <I18nProvider language="en" setLanguage={() => {}}>
+          <WorkContext.Provider value={work}>
+            <WorkingBar />
+          </WorkContext.Provider>
+        </I18nProvider>
+      </IpcProvider>,
+    );
+
+  it("is an empty status region until something works, then names the task", () => {
+    const s = store({ task: null, offerRestart: false });
+    mountBar(s);
+    const region = screen.getByRole("status", { name: "Still working" });
+    expect(region.textContent).toBe("");
+    act(() => s.set({ task: "work.applying", offerRestart: false }));
+    expect(region.textContent).toContain("CMD Studio is still working: applying the theme…");
+    expect(screen.queryByRole("button", { name: "Restart CMD Studio" })).toBeNull();
+  });
+
+  it("offers the restart after three minutes, asks first, and restarts on yes", async () => {
+    const s = store({ task: "work.applying", offerRestart: true });
+    const ipc = createMockIpc();
+    const user = userEvent.setup();
+    mountBar(s, ipc);
+    await user.click(screen.getByRole("button", { name: "Restart CMD Studio" }));
+    const dialog = screen.getByRole("dialog", { name: "Restart CMD Studio" });
+    expect(dialog.textContent).toContain("A change that has not finished is put back when CMD Studio starts again.");
+    await user.click(within(dialog).getByRole("button", { name: "Restart CMD Studio" }));
+    expect(ipc.state.restarted).toBe(true);
+  });
+
+  it("shows 'restarting' and disables the button while the restart is pending, once", async () => {
+    const s = store({ task: "work.applying", offerRestart: true });
+    const ipc = createMockIpc();
+    const spy = vi.spyOn(ipc, "appRestart").mockReturnValue(new Promise(() => {}));
+    const user = userEvent.setup();
+    mountBar(s, ipc);
+    await user.click(screen.getByRole("button", { name: "Restart CMD Studio" }));
+    const dialog = screen.getByRole("dialog", { name: "Restart CMD Studio" });
+    await user.click(within(dialog).getByRole("button", { name: "Restart CMD Studio" }));
+    expect(dialog.textContent).toContain("restarting");
+    const again = within(dialog).getByRole("button", { name: "Restart CMD Studio" });
+    expect((again as HTMLButtonElement).disabled).toBe(true);
+    await user.click(again);
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps 'restarting' shown on an Ok answer", async () => {
+    const s = store({ task: "work.applying", offerRestart: true });
+    const user = userEvent.setup();
+    mountBar(s);
+    await user.click(screen.getByRole("button", { name: "Restart CMD Studio" }));
+    const dialog = screen.getByRole("dialog", { name: "Restart CMD Studio" });
+    await user.click(within(dialog).getByRole("button", { name: "Restart CMD Studio" }));
+    await waitFor(() => expect(dialog.textContent).toContain("restarting"));
+    expect(screen.getByRole("dialog", { name: "Restart CMD Studio" })).toBeTruthy();
+  });
+
+  it("a rejection shows the error and lets the restart be tried again", async () => {
+    const s = store({ task: "work.applying", offerRestart: true });
+    const ipc = createMockIpc();
+    const spy = vi
+      .spyOn(ipc, "appRestart")
+      .mockRejectedValueOnce(new IpcError({ code: "E_INTERNAL", messageTh: "ไม่ได้", messageEn: "spawn failed", details: "d" }))
+      .mockReturnValue(new Promise(() => {}));
+    const user = userEvent.setup();
+    mountBar(s, ipc);
+    await user.click(screen.getByRole("button", { name: "Restart CMD Studio" }));
+    await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Restart CMD Studio" }));
+    expect(await screen.findByText(/spawn failed/)).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Restart CMD Studio" }));
+    const dialog = screen.getByRole("dialog", { name: "Restart CMD Studio" });
+    expect((within(dialog).getByRole("button", { name: "Restart CMD Studio" }) as HTMLButtonElement).disabled).toBe(false);
+    await user.click(within(dialog).getByRole("button", { name: "Restart CMD Studio" }));
+    expect(spy).toHaveBeenCalledTimes(2);
   });
 });

@@ -1327,7 +1327,9 @@ pub fn sweep(sys: System<'_>, paths: &Paths) {
 mod tests {
     use super::*;
     use crate::adapters::fake::{FakeFonts, FakeFs, FakeHost, FakeMachine};
-    use crate::adapters::{AdapterError, AutoRun, DirEntry, Fonts, Fs, FsLock, Host, SystemInfo};
+    use crate::adapters::{
+        AdapterError, AutoRun, DirEntry, Fonts, Fs, FsLock, Host, ProcessStamp, SystemInfo,
+    };
     use crate::plan::NERD_FONT_FAMILY;
     use crate::resources::fake_resources;
     use crate::resources::NERD_FONT_FILE;
@@ -3693,6 +3695,12 @@ mod tests {
         }
         fn system_info(&self) -> SystemInfo {
             self.0.system_info()
+        }
+        fn this_process(&self) -> ProcessStamp {
+            self.0.this_process()
+        }
+        fn process_created_at(&self, pid: u32) -> Result<Option<u64>, AdapterError> {
+            self.0.process_created_at(pid)
         }
     }
 

@@ -294,6 +294,15 @@ pub struct SystemInfo {
     pub unreadable: Vec<String>,
 }
 
+/// A process as the run record names it (recovery spec §5.1): its id and when Windows created it,
+/// in milliseconds since 1970. Windows gives a pid again once its process is gone, so a pid alone
+/// never says "the same process": the creation time does. `None` when it could not be read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProcessStamp {
+    pub pid: u32,
+    pub created_at_ms: Option<u64>,
+}
+
 /// Identity, known folders, 8.3 names and the private ProgramData folder.
 pub trait Host {
     /// `FOLDERID_LocalAppData`.
@@ -312,6 +321,11 @@ pub trait Host {
     /// The machine's facts. A registry fact that cannot be read is named in
     /// `SystemInfo::unreadable`, never passed off as an answer.
     fn system_info(&self) -> SystemInfo;
+    /// This process (recovery spec §5.1).
+    fn this_process(&self) -> ProcessStamp;
+    /// When the process `pid` was created, or `None` when there is no process with that id now.
+    /// An id that is there but cannot be opened is an error, never "gone".
+    fn process_created_at(&self, pid: u32) -> Result<Option<u64>, AdapterError>;
 }
 
 /// One "Application Error" event (ID 1000) of Windows' Application log: a program that crashed,

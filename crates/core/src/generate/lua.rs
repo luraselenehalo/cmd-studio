@@ -47,24 +47,16 @@ pub const PAUSED_STILL: &str = "CMD Studio's theme is paused. Open CMD Studio to
 ///   to end instead (the plan's F5) would count a window opened and closed without a key as a
 ///   start that failed.
 /// - A tag older than `FORGET_AFTER` (ten minutes) is forgotten at a window's start, before
-///   the pause is decided and so before tasklist could run for it: deleted, and never counted.
+///   the pause is decided: deleted, and never counted.
 ///   A failure that old is not one of `PAUSE_AFTER` in a row, and a window that sat that long
 ///   without a prompt is no start that failed just now. A tag still being written (no time in it
-///   yet) is left alone, as everywhere. A `cmd /k <a long command>` window writes no tag at all:
-///   Clink loads its scripts only when cmd first reads a line, which such a window never does
-///   while its command runs (the VM check of 2026-10-18, finding F2).
-/// - Before it pauses the theme, and only then, the counter lists the running programs once
-///   (`tasklist /FO CSV /NH`): a stale tag whose pid is a running `cmd.exe` is a window whose
-///   scripts loaded and whose first prompt has not come yet (one still hanging, or a very slow
-///   one), not one that ended. At the pause decision it is kept: not counted, and not deleted
-///   with the others. A window's
-///   first prompt deletes every tag older than `STALE_AFTER` all the same, the live windows'
-///   included. Only the first two fields of each row are read, the image name and the pid,
-///   which tasklist never translates. A tasklist that cannot be run or read counts every stale
-///   tag, as before. tasklist is run by its full path,
-///   `<SystemRoot>\System32\tasklist.exe` (`C:\Windows` when `SystemRoot` is unset or empty),
-///   quoted as Oh My Posh's command is (spec §5.4, G17): `cmd /c` looks in the window's folder
-///   before PATH, so a bare `tasklist` would run a `tasklist.bat` that sits there.
+///   yet) is left alone, as everywhere.
+/// - A hung window counts, open or closed (the founder, 2026-10-19): three stale tags pause the
+///   next window while the three hung ones are still there. Nothing lists the running
+///   programs; the tasklist liveness check of 3b-1 is gone, and so is its 0.6 s at the pause
+///   decision. A `cmd /k <a long command>` window writes no tag at all: Clink loads its scripts
+///   only when cmd first reads a line, which such a window never does while its command runs
+///   (the VM check of 2026-10-18, finding F2).
 /// - Oh My Posh registers its filter at `_ZL_CLINK_PROMPT_PRIORITY + 1`, 1 when that is unset,
 ///   and Clink calls the lower number first: CMD Studio's is at 0, or lower when the variable
 ///   puts Oh My Posh's at 0 or below.
@@ -143,34 +135,6 @@ local function stale(now)
   for _, path in ipairs(forgotten) do old[#old + 1] = path end
   return old
 end
-local function pid_of(path)
-  return path:match("start%-(%d+)$")
-end
--- The pids of the cmd windows still running, from one tasklist, asked only when the theme would
--- pause: a window started as `cmd /k <a long command>` keeps its tag until that command ends.
--- Only a row's first two fields are read, the image name and the pid, which tasklist never
--- translates. nil when tasklist gives no row: then every stale tag counts. It is run by its full
--- path: cmd /c looks in the window's folder before PATH, and a tasklist.bat there would run.
--- The quotes are wrapped once more, as Oh My Posh's are below (spec gate G17).
-local function running_cmds()
-  local root = os.getenv("SystemRoot")
-  if root == nil or root == "" then root = "C:\\Windows" end
-  local exe = root .. "\\System32\\tasklist.exe"
-  local handle = io.popen('"' .. '"' .. exe .. '" /FO CSV /NH 2>nul' .. '"')
-  if not handle then return nil end
-  local text = handle:read("*a") or ""
-  handle:close()
-  local pids, rows = {}, 0
-  for line in text:gmatch("[^\r\n]+") do
-    local image, pid = line:match('^"([^"]*)","(%d+)",')
-    if image then
-      rows = rows + 1
-      if image:lower() == "cmd.exe" then pids[pid] = true end
-    end
-  end
-  if rows == 0 then return nil end
-  return pids
-end
 local function count_start()
   local f = io.open(paused_file, "rb")
   if f then
@@ -183,29 +147,15 @@ local function count_start()
     return false
   end
   local now = os.time()
-  -- The forgotten tags go before the pause is decided, so tasklist never runs for them.
+  -- The forgotten tags go first, so they are never counted.
   local old, forgotten = stale_split(now)
   for _, path in ipairs(forgotten) do os.remove(path) end
-  local live = {}
-  if #old >= PAUSE_AFTER then
-    local asked, running = pcall(running_cmds)
-    if asked and running then
-      live = running
-      local dead = {}
-      for _, path in ipairs(old) do
-        if not live[pid_of(path)] then dead[#dead + 1] = path end
-      end
-      old = dead
-    end
-  end
   if #old >= PAUSE_AFTER then
     local p = io.open(paused_file, "wb")
     if p then
       p:write(string.format('{"version":1,"reason":"cmdStarts","at":%.0f,"count":%d,"by":"clink"}\n', now * 1000, #old))
       p:close()
-      for _, path in ipairs(tags()) do
-        if not live[pid_of(path)] then os.remove(path) end
-      end
+      for _, path in ipairs(tags()) do os.remove(path) end
       paused_count = #old
       return true
     end
@@ -807,7 +757,11 @@ mod tests {
         let counter = s
             .find("local counted, paused = pcall(count_start)")
             .unwrap();
-        // Oh My Posh's popen, not the counter's own tasklist one, which is defined above it.
+        // The counter runs no program: Oh My Posh's popen is INIT_BODY's.
+        assert!(
+            !HEALTH_BODY.contains("io.popen"),
+            "the counter runs no program"
+        );
         let prompt = s.find("io.popen('\"' .. '\"' .. omp").unwrap();
         assert!(
             counter < prompt,

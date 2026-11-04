@@ -171,6 +171,25 @@ impl<M: Machine> Backend<M> {
             }
             Err(e) => out.push_str(&format!("could not be read: {e}\n")),
         }
+        // The newest crash note, when it belongs to this run or to the one that ended
+        // abnormally (recovery spec §5.3): the user sees it here before copying. The redaction
+        // below runs over it once more, which changes nothing.
+        if let Ok(Some(report)) = self.crash_report_read() {
+            let attach = self
+                .run_started_at()
+                .is_some_and(|started| report.at_ms >= started)
+                || self
+                    .app_status()
+                    .ok()
+                    .and_then(|s| s.crash_notice)
+                    .is_some_and(|n| n.has_report);
+            if attach {
+                out.push_str(&format!(
+                    "\n== crash report {} ==\n{}",
+                    report.file, report.text
+                ));
+            }
+        }
         let out = redact_sids(&out, sys.host.user_sid().ok().as_deref());
         Ok(names.iter().fold(out, |text, name| redact(&text, name)))
     }
@@ -183,30 +202,46 @@ impl<M: Machine> Backend<M> {
     /// `AppData` folder, still holds. None is empty. When no name is known at all (no `AppData`
     /// folder and no `USERNAME`), or the alias can't be read, this is the error, and nothing is
     /// copied.
-    fn user_names(&self) -> Result<Vec<String>, AppError> {
+    pub(crate) fn user_names(&self) -> Result<Vec<String>, AppError> {
+        let (names, why) = self.user_names_known();
+        match why {
+            Some(e) => Err(e),
+            None => Ok(names),
+        }
+    }
+
+    /// Every name [`Backend::user_names`] could tell, and the reason it would refuse, if it
+    /// would: the crash notes and the log redact with what is known even when the 8.3 alias
+    /// could not be read, while the diagnostics refuse.
+    pub(crate) fn user_names_known(&self) -> (Vec<String>, Option<AppError>) {
+        let mut why = None;
         let mut names: Vec<String> = self
             .windows_user_name()
             .map(str::to_string)
             .into_iter()
             .collect();
         if let Some(profile) = profile_of(&self.paths().data) {
-            let short = self.sys().host.short_path(&profile).map_err(|_| {
-                AppError::coded(
-                    "E_MACHINE_READ",
-                    "the 8.3 name of the profile folder could not be read, so the diagnostics \
-                     are not copied: it could be in them",
-                )
-            })?;
+            let mut folders = vec![profile.clone()];
+            match self.sys().host.short_path(&profile) {
+                Ok(short) => folders.push(short),
+                Err(_) => {
+                    why = Some(AppError::coded(
+                        "E_MACHINE_READ",
+                        "the 8.3 name of the profile folder could not be read, so the \
+                         diagnostics are not copied: it could be in them",
+                    ));
+                }
+            }
             names.extend(
-                [profile.as_path(), short.as_path()]
+                folders
                     .iter()
                     .filter_map(|p| p.file_name())
                     .map(|n| n.to_string_lossy().into_owned())
                     .filter(|n| !n.is_empty()),
             );
         }
-        if names.is_empty() {
-            return Err(AppError::internal(
+        if names.is_empty() && why.is_none() {
+            why = Some(AppError::internal(
                 "the data folder's path holds no AppData folder and USERNAME is not set, so the \
                  user name in the diagnostics could not be told; they are not copied with it in \
                  them",
@@ -214,7 +249,7 @@ impl<M: Machine> Backend<M> {
         }
         names.sort_by_key(|n| std::cmp::Reverse(n.chars().count()));
         names.dedup();
-        Ok(names)
+        (names, why)
     }
 
     /// The user name Windows gives (`USERNAME`), as the backend holds it for the preview's
@@ -361,33 +396,53 @@ pub fn user_name_of(local_app_data: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// Replaces the user name `user` by `%USERNAME%` wherever it is a whole folder name: right
-/// after `\` or `/`, and up to a character that is neither a letter or digit nor a combining
-/// mark (a mark belongs to the letter before it), or the end of the text. So with user
-/// `tester`, `\testers\` and `\tester2\` stay: they are other folders (a profile folder named
-/// `testers` is its own name, and is redacted as that); and with user `สม`, `\สม่ำเสมอ` stays.
-/// The name is matched letter by letter on the text as it is, without regard to case, so a
-/// letter that is longer or shorter in another case (İ, the Kelvin sign) never moves or hides a
-/// match.
+/// A user name of this many characters or more is taken out wherever it stands as a whole word;
+/// a shorter one only where it is a folder name (see [`redact`]).
+pub const WHOLE_WORD_FROM: usize = 3;
+
+/// Replaces the user name `user` by `%USERNAME%` wherever it stands whole: right after `\` or
+/// `/` (a folder name), and, for a name of [`WHOLE_WORD_FROM`] characters or more, after any
+/// other character that is not a letter, a digit or a combining mark, or at the start of the
+/// text (a panic message's `user <name>`, a prompt's `name@host`, an environment line's
+/// `USERNAME=<name>`); in both cases up to a character that is neither a letter or digit nor a
+/// combining mark (a mark belongs to the letter before it), or the end of the text. So with
+/// user `tester`, `\testers\`, `\tester2\` and `attester` stay: other words (a profile folder
+/// named `testers` is its own name, and is redacted as that); and with user `สม`, `\สม่ำเสมอ`
+/// stays. A name shorter than three characters gets the path rule only, so it never eats the
+/// pairs of letters of every message; a name that is also a common word (`core`, `user`)
+/// takes that word out of a message or a backtrace symbol too, which is the cost of taking it
+/// out everywhere. The name is matched letter by letter on the text as it is, without regard to
+/// case, so a letter that is longer or shorter in another case (İ, the Kelvin sign) never moves
+/// or hides a match.
 pub fn redact(text: &str, user: &str) -> String {
     if user.is_empty() {
         return text.to_string();
     }
+    let anywhere = user.chars().count() >= WHOLE_WORD_FROM;
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
-    while let Some(at) = rest.find(['\\', '/']) {
-        // A slash is one byte, so the text after it starts at a character.
-        let (Some(through_slash), Some(after)) = (rest.get(..=at), rest.get(at + 1..)) else {
+    let mut before: Option<char> = None;
+    while !rest.is_empty() {
+        let at_start = match before {
+            None => anywhere,
+            Some('\\' | '/') => true,
+            Some(c) => anywhere && !continues_word(c),
+        };
+        if at_start {
+            if let Some(len) = name_at(rest, user) {
+                out.push_str(USER_PLACEHOLDER);
+                before = user.chars().last();
+                rest = rest.get(len..).unwrap_or("");
+                continue;
+            }
+        }
+        let Some(c) = rest.chars().next() else {
             break;
         };
-        out.push_str(through_slash);
-        rest = after;
-        if let Some(len) = name_at(rest, user) {
-            out.push_str(USER_PLACEHOLDER);
-            rest = rest.get(len..).unwrap_or("");
-        }
+        out.push(c);
+        before = Some(c);
+        rest = rest.get(c.len_utf8()..).unwrap_or("");
     }
-    out.push_str(rest);
     out
 }
 
@@ -586,6 +641,40 @@ mod tests {
         ] {
             assert_eq!(redact(other, "tester"), other);
         }
+    }
+
+    /// M4 of the final review: a name of three characters or more is taken out wherever it
+    /// stands as a whole word, not only after a slash (a panic message's `user <name>`, a
+    /// prompt sample's `name@host`, an environment line's `USERNAME=<name>`); a name shorter
+    /// than that gets the path rule only, so a two-letter name never eats the pairs of letters
+    /// of every message.
+    #[test]
+    fn a_name_of_three_letters_or_more_is_redacted_wherever_it_stands_whole() {
+        for (text, expected) in [
+            ("user tester", "user %USERNAME%"),
+            ("tester@host", "%USERNAME%@host"),
+            ("USERNAME=tester", "USERNAME=%USERNAME%"),
+            ("tester", "%USERNAME%"),
+            ("at (tester)", "at (%USERNAME%)"),
+            (
+                "Tester: C:\\Users\\tester",
+                "%USERNAME%: C:\\Users\\%USERNAME%",
+            ),
+        ] {
+            assert_eq!(redact(text, "tester"), expected, "{text}");
+        }
+        // Still only as a whole word: other words that hold the name stay.
+        for other in ["testers", "attester", "tester2", "testerä", "contester's"] {
+            assert_eq!(redact(other, "tester"), other);
+        }
+        // A short name: after a slash only.
+        assert_eq!(redact("user ab", "ab"), "user ab");
+        assert_eq!(redact("ab@host", "ab"), "ab@host");
+        assert_eq!(redact(r"C:\Users\ab\x", "ab"), r"C:\Users\%USERNAME%\x");
+        assert_eq!(redact("user สมใจ", "สมใจ"), "user %USERNAME%");
+        assert_eq!(redact("user สม", "สม"), "user สม");
+        // Three characters is the least that counts.
+        assert_eq!(redact("user bob", "bob"), "user %USERNAME%");
     }
 
     /// Letters whose lower case is longer (İ) or shorter (the Kelvin sign) than they are never

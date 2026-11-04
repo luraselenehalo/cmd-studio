@@ -1,0 +1,26 @@
+--- refilter-5068.txt
+beginedit n=1 t=0.247 wall=1793767433
+wrapped 3 methods of 2 filters
+own n=1 t=0.256 wall=1793767433
+filter@0 start n=1 t=0.256 wall=1793767433
+filter@0 end n=1 t=0.257 wall=1793767433 results=0 second=nil
+filter@1 start n=1 t=0.258 wall=1793767433
+filter@1 end n=1 t=0.418 wall=1793767434 results=1 second=nil
+rightfilter@1 start n=1 t=0.419 wall=1793767434
+rightfilter@1 end n=1 t=0.420 wall=1793767434 results=2 second=false
+refilterprompt from ~clink~/app/prompt.lua:567: in function <~clink~/app/prompt.lua:558> t=0.512
+own n=2 t=0.514 wall=1793767434
+filter@0 start n=2 t=0.514 wall=1793767434
+filter@0 end n=2 t=0.515 wall=1793767434 results=0 second=nil
+filter@1 start n=2 t=0.516 wall=1793767434
+filter@1 end n=2 t=0.517 wall=1793767434 results=1 second=nil
+rightfilter@1 start n=2 t=0.518 wall=1793767434
+rightfilter@1 end n=2 t=0.518 wall=1793767434 results=2 second=false
+refilterprompt from ~clink~/app/prompt.lua:567: in function <~clink~/app/prompt.lua:558> t=0.617
+own n=3 t=0.618 wall=1793767434
+filter@0 start n=3 t=0.619 wall=1793767434
+filter@0 end n=3 t=0.620 wall=1793767434 results=0 second=nil
+filter@1 start n=3 t=0.621 wall=1793767434
+filter@1 end n=3 t=0.622 wall=1793767434 results=1 second=nil
+rightfilter@1 start n=3 t=0.623 wall=1793767434
+rightfilter@1 end n=3 t=0.623 wall=1793767434 results=2 second=false

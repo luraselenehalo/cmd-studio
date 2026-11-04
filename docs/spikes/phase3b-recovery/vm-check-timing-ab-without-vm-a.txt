@@ -1,0 +1,15 @@
+init.lua without the counter: 168 lines cut (from line 10 to 177)
+warm-up, not counted: 1323
+1280
+1566
+1532
+1276
+1304
+1271
+1321
+1245
+1247
+1334
+average of 10: 1338 ms; median 1292 ms; min 1245 ms; max 1566 ms
+start tags of the timed windows taken away: 0 of 11
+init.lua restored

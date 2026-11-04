@@ -6,6 +6,7 @@
 // given: the accent (as the accent and the cursor) and colors it has no answer for.
 import type { AdvancedInfo } from "../bindings/AdvancedInfo";
 import type { AppError } from "../bindings/AppError";
+import type { AppStatus } from "../bindings/AppStatus";
 import type { AppSettings } from "../bindings/AppSettings";
 import type { ApplyOutcome } from "../bindings/ApplyOutcome";
 import type { ApplyPlan } from "../bindings/ApplyPlan";
@@ -15,6 +16,8 @@ import type { CheckReport } from "../bindings/CheckReport";
 import type { Colors } from "../bindings/Colors";
 import type { ContrastIssue } from "../bindings/ContrastIssue";
 import type { CrashCheck } from "../bindings/CrashCheck";
+import type { CrashNotice } from "../bindings/CrashNotice";
+import type { CrashReport } from "../bindings/CrashReport";
 import type { DoctorReport } from "../bindings/DoctorReport";
 import type { FixProposal } from "../bindings/FixProposal";
 import type { ImportPreview } from "../bindings/ImportPreview";
@@ -25,12 +28,14 @@ import type { PauseOutcome } from "../bindings/PauseOutcome";
 import type { PauseReason } from "../bindings/PauseReason";
 import type { PlanOutcome } from "../bindings/PlanOutcome";
 import type { PreviewResult } from "../bindings/PreviewResult";
+import type { RecoveryEntry } from "../bindings/RecoveryEntry";
 import type { RecoveryStatus } from "../bindings/RecoveryStatus";
 import type { RestoreOutcome } from "../bindings/RestoreOutcome";
 import type { RestorePoint } from "../bindings/RestorePoint";
 import type { RestorePoints } from "../bindings/RestorePoints";
 import type { ResumeOutcome } from "../bindings/ResumeOutcome";
 import type { RevertOutcome } from "../bindings/RevertOutcome";
+import type { SafeModeReason } from "../bindings/SafeModeReason";
 import type { SettingsLoad } from "../bindings/SettingsLoad";
 import type { SystemReport } from "../bindings/SystemReport";
 import type { Theme } from "../bindings/Theme";
@@ -277,6 +282,16 @@ function pausedCheck(p: PauseInfo): CheckReport {
 }
 
 export interface MockOptions {
+  /** The app is in safe mode for this reason (recovery spec §5.2), as `app_status` says it. */
+  safeMode?: SafeModeReason;
+  /** The earlier run ended abnormally (recovery spec §5.3), as given. */
+  crashNotice?: CrashNotice;
+  /** The newest crash note, as given; none when not given. */
+  crashReport?: CrashReport;
+  /** `app_status.busy`, as given, every time (recovery spec §6.3). */
+  busy?: string;
+  /** What `--recovery` did, as given (recovery spec §4.4). */
+  recoveryEntry?: RecoveryEntry;
   /** Another Clink in AutoRun: `planApply` answers `otherClink` until `replaceOtherClink`. */
   otherClink?: string[];
   /** Every apply fails its check and rolls back with this code. */
@@ -347,6 +362,16 @@ export interface MockState {
   clipboardSuggestion: string;
   /** The theme's pause, as `paused.json` would hold it, with how far it reaches now. */
   paused: PauseInfo | null;
+  safeMode: SafeModeReason | null;
+  crashNotice: CrashNotice | null;
+  /** `app_status.busy` as given now; a test may clear it (recovery spec §6.3). */
+  busy: string | null;
+  /** `app_ready` was called. */
+  ready: boolean;
+  /** The UI's own errors given to `logUiError`, as "place: message". */
+  uiErrors: string[];
+  /** `app_restart` was called. */
+  restarted: boolean;
 }
 
 /**
@@ -393,6 +418,12 @@ export function createMockIpc(options: MockOptions = {}): Ipc & { state: MockSta
     calls: [],
     clipboardSuggestion: "",
     paused: options.paused ? structuredClone(options.paused) : null,
+    safeMode: options.safeMode ? structuredClone(options.safeMode) : null,
+    crashNotice: options.crashNotice ? structuredClone(options.crashNotice) : null,
+    busy: options.busy ?? null,
+    ready: false,
+    uiErrors: [],
+    restarted: false,
   };
   let nextMs = 1791694709000;
   const now = () => nextMs++;
@@ -978,6 +1009,7 @@ export function createMockIpc(options: MockOptions = {}): Ipc & { state: MockSta
       return { kind, request: null, plan: null };
     },
     async settingsGet(): Promise<SettingsLoad> {
+      state.calls.push("settingsGet");
       return { settings: { ...state.settings }, resetFrom: null };
     },
     async settingsSet(settings): Promise<AppSettings> {
@@ -1027,6 +1059,8 @@ export function createMockIpc(options: MockOptions = {}): Ipc & { state: MockSta
       state.calls.push("themeResume");
       const paused = state.paused;
       if (!paused) return { kind: "notPaused" };
+      // A state that cannot be told is not guessed (the backend's m4, 3b-1).
+      if (paused.level === "computerUnknown") return { kind: "notKnown" };
       // By level, as the backend: a pause in cmd (init.lua's, a record that can't be read, or an
       // app record older than the theme in use) is lifted at once.
       if (paused.level === "cmd") {
@@ -1042,6 +1076,41 @@ export function createMockIpc(options: MockOptions = {}): Ipc & { state: MockSta
         replaceOtherClink: false,
       };
       return { kind: "apply", request, plan: await ipc.planApply(request) };
+    },
+    async appReady(): Promise<void> {
+      state.calls.push("appReady");
+      state.ready = true;
+    },
+    async appStatus(): Promise<AppStatus> {
+      state.calls.push("appStatus");
+      return {
+        busy: state.busy,
+        safeMode: state.safeMode !== null,
+        safeModeReason: state.safeMode,
+        crashNotice: state.crashNotice,
+        recoveryEntry: options.recoveryEntry ?? null,
+      };
+    },
+    async crashDismiss(): Promise<void> {
+      state.calls.push("crashDismiss");
+      state.crashNotice = null;
+    },
+    async crashReportRead(): Promise<CrashReport | null> {
+      state.calls.push("crashReportRead");
+      return options.crashReport ? structuredClone(options.crashReport) : null;
+    },
+    async settingsReset(): Promise<SettingsLoad> {
+      state.calls.push("settingsReset");
+      state.settings = { language: "en", target: "all", setWtDefaultProfile: true, updates: "auto", wizardDone: false };
+      return { settings: { ...state.settings }, resetFrom: `settings.json.reset-${now()}` };
+    },
+    async logUiError(message, place): Promise<void> {
+      state.calls.push("logUiError");
+      state.uiErrors.push(`${place}: ${message}`);
+    },
+    async appRestart(): Promise<void> {
+      state.calls.push("appRestart");
+      state.restarted = true;
     },
   };
   return ipc;

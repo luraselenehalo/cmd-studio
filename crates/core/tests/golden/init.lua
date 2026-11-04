@@ -72,34 +72,6 @@ local function stale(now)
   for _, path in ipairs(forgotten) do old[#old + 1] = path end
   return old
 end
-local function pid_of(path)
-  return path:match("start%-(%d+)$")
-end
--- The pids of the cmd windows still running, from one tasklist, asked only when the theme would
--- pause: a window started as `cmd /k <a long command>` keeps its tag until that command ends.
--- Only a row's first two fields are read, the image name and the pid, which tasklist never
--- translates. nil when tasklist gives no row: then every stale tag counts. It is run by its full
--- path: cmd /c looks in the window's folder before PATH, and a tasklist.bat there would run.
--- The quotes are wrapped once more, as Oh My Posh's are below (spec gate G17).
-local function running_cmds()
-  local root = os.getenv("SystemRoot")
-  if root == nil or root == "" then root = "C:\\Windows" end
-  local exe = root .. "\\System32\\tasklist.exe"
-  local handle = io.popen('"' .. '"' .. exe .. '" /FO CSV /NH 2>nul' .. '"')
-  if not handle then return nil end
-  local text = handle:read("*a") or ""
-  handle:close()
-  local pids, rows = {}, 0
-  for line in text:gmatch("[^\r\n]+") do
-    local image, pid = line:match('^"([^"]*)","(%d+)",')
-    if image then
-      rows = rows + 1
-      if image:lower() == "cmd.exe" then pids[pid] = true end
-    end
-  end
-  if rows == 0 then return nil end
-  return pids
-end
 local function count_start()
   local f = io.open(paused_file, "rb")
   if f then
@@ -112,29 +84,15 @@ local function count_start()
     return false
   end
   local now = os.time()
-  -- The forgotten tags go before the pause is decided, so tasklist never runs for them.
+  -- The forgotten tags go first, so they are never counted.
   local old, forgotten = stale_split(now)
   for _, path in ipairs(forgotten) do os.remove(path) end
-  local live = {}
-  if #old >= PAUSE_AFTER then
-    local asked, running = pcall(running_cmds)
-    if asked and running then
-      live = running
-      local dead = {}
-      for _, path in ipairs(old) do
-        if not live[pid_of(path)] then dead[#dead + 1] = path end
-      end
-      old = dead
-    end
-  end
   if #old >= PAUSE_AFTER then
     local p = io.open(paused_file, "wb")
     if p then
       p:write(string.format('{"version":1,"reason":"cmdStarts","at":%.0f,"count":%d,"by":"clink"}\n', now * 1000, #old))
       p:close()
-      for _, path in ipairs(tags()) do
-        if not live[pid_of(path)] then os.remove(path) end
-      end
+      for _, path in ipairs(tags()) do os.remove(path) end
       paused_count = #old
       return true
     end

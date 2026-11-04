@@ -25,32 +25,11 @@ import type { Ipc } from "../ipc/types";
 import { useNav } from "../router";
 import { CORE_SAMPLE_IDENTITY, sampleContext } from "../sample";
 import { useAppState } from "../state";
+import { useRead } from "../useRead";
 import { copyName } from "./Themes";
 
 /** How many themes the quick switch offers (spec §4.3). */
 const RECENT = 5;
-
-/** One read of the page, done again whenever `version` changes: its answer or what failed. An
- * answer that comes after a newer read started is dropped. */
-function useRead<T>(read: (ipc: Ipc) => Promise<T>, version: number): { value: T | null; error: unknown } {
-  const ipc = useIpc();
-  const [state, setState] = useState<{ value: T | null; error: unknown }>({ value: null, error: null });
-  useEffect(() => {
-    let alive = true;
-    read(ipc).then(
-      (value) => {
-        if (alive) setState({ value, error: null });
-      },
-      (error: unknown) => {
-        if (alive) setState({ value: null, error });
-      },
-    );
-    return () => {
-      alive = false;
-    };
-  }, [ipc, read, version]);
-  return state;
-}
 
 // Module-level, so each read keeps one identity across renders.
 const readLibrary = (ipc: Ipc) => ipc.themesList();
@@ -240,7 +219,7 @@ export function Home() {
       <h1 ref={heading} tabIndex={-1}>
         {t("home.title")}
       </h1>
-      {recovery.error !== null && <ErrorNotice error={recovery.error} title={t("home.paused.unreadable")} />}
+      {recovery.error !== null && <ErrorNotice error={recovery.error} title={t("home.paused.unreadable")} onRetry={bump} />}
       {paused && <PausedBanner paused={paused} onResume={() => void resume.resume()} />}
       {startPauseShown && (
         <div className="card">
@@ -257,7 +236,7 @@ export function Home() {
           {statusText}
         </p>
         {report && <p>{t("home.status.checkedAt", { time: formatTime(report.checkedAtMs, language) })}</p>}
-        {checks.error !== null && <ErrorNotice error={checks.error} />}
+        {checks.error !== null && <ErrorNotice error={checks.error} onRetry={bump} />}
         <button type="button" onClick={() => go({ name: "help", tab: "doctor" })}>
           {t("home.status.open")}
         </button>
@@ -266,7 +245,7 @@ export function Home() {
       </div>
       <div className="card">
         <h2 style={{ marginTop: 0 }}>{t("home.active.title")}</h2>
-        {library.error !== null && <ErrorNotice error={library.error} />}
+        {library.error !== null && <ErrorNotice error={library.error} onRetry={bump} />}
         {!lib && library.error === null && <p>{t("common.loading")}</p>}
         {lib?.stateProblem && <ErrorNotice error={lib.stateProblem} title={t("home.active.unknown")} />}
         {lib && !lib.applied && (
@@ -327,7 +306,7 @@ export function Home() {
       </div>
       <div className="card">
         <h2 style={{ marginTop: 0 }}>{t("home.restore.title")}</h2>
-        {points.error !== null && <ErrorNotice error={points.error} />}
+        {points.error !== null && <ErrorNotice error={points.error} onRetry={bump} />}
         {points.value && !latest && <p>{t(anyPoint ? "home.restore.noneRestorable" : "home.restore.none")}</p>}
         {latest && (
           <p>

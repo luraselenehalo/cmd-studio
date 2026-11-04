@@ -2,12 +2,12 @@
 // itself rejects) the window shows the E_INTERNAL notice in English and Thai with Reload, never a
 // blank window; when it can, the app is mounted. `start` is what main.tsx calls, and main.tsx is
 // imported for real below, so the wiring is checked too.
-import { act, cleanup, screen, within } from "@testing-library/react";
+import { act, cleanup, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createMockIpc } from "./ipc/mock";
-import { start } from "./start";
+import { start, watchWindowErrors } from "./start";
 
 const roots: Root[] = [];
 
@@ -144,5 +144,85 @@ describe("main.tsx", () => {
     });
     expect(await screen.findByRole("heading", { name: "Make your cmd window beautiful and easy to read" })).toBeTruthy();
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+});
+
+describe("the catch-all (recovery spec §6.5)", () => {
+  it("shows the E_INTERNAL notice for an error the window reports, and logs it through the IPC", async () => {
+    const ipc = createMockIpc({ settings: { wizardDone: true } });
+    const container = document.createElement("div");
+    document.body.append(container);
+    await act(async () => {
+      await start(container, async () => ipc, () => {});
+    });
+    await screen.findByRole("heading", { name: "Home" });
+    await act(async () => {
+      window.dispatchEvent(new ErrorEvent("error", { error: new TypeError("x is undefined"), message: "x is undefined" }));
+    });
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Something went wrong");
+    expect(alert.textContent).toContain("Code E_INTERNAL");
+    expect(within(alert).getByText("x is undefined", { exact: false })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Reload/ })).toBeTruthy();
+    await waitFor(() => expect(ipc.state.uiErrors).toEqual(["window: TypeError: x is undefined"]));
+    container.remove();
+  });
+
+  it("logs a render error once, through the boundary (Task 9 carry)", async () => {
+    const ipc = createMockIpc({ settings: { wizardDone: true } });
+    // A reset notice whose file name cannot be written down: the shell throws while it renders.
+    const settingsGet = ipc.settingsGet.bind(ipc);
+    vi.spyOn(ipc, "settingsGet").mockImplementation(async () => ({
+      ...(await settingsGet()),
+      resetFrom: {
+        toString: () => {
+          throw new TypeError("cannot draw this");
+        },
+      } as unknown as string,
+    }));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const container = document.createElement("div");
+    document.body.append(container);
+    await act(async () => {
+      await start(container, async () => ipc, () => {});
+    });
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Code E_INTERNAL");
+    await waitFor(() => expect(ipc.state.calls.filter((c) => c === "logUiError").length).toBeGreaterThan(0));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(ipc.state.calls.filter((c) => c === "logUiError")).toHaveLength(1);
+    expect(ipc.state.uiErrors[0]).toContain("cannot draw this");
+    container.remove();
+  });
+
+  it("catches a promise nobody handled the same way, and sends at most twenty per load", async () => {
+    const ipc = createMockIpc({ settings: { wizardDone: true } });
+    const seen: unknown[] = [];
+    const stop = watchWindowErrors(ipc, (e) => seen.push(e));
+    for (let n = 0; n < 25; n++) {
+      const event = new Event("unhandledrejection") as Event & { reason?: unknown };
+      event.reason = new Error(`late ${n}`);
+      window.dispatchEvent(event);
+    }
+    await waitFor(() => expect(ipc.state.uiErrors).toHaveLength(20));
+    expect(seen).toHaveLength(25);
+    expect(ipc.state.uiErrors[0]).toBe("window: Error: late 0");
+    stop();
+    window.dispatchEvent(new ErrorEvent("error", { error: new Error("after") }));
+    expect(seen).toHaveLength(25);
+  });
+
+  it("logs a window error that carries no Error object without blanking the app", async () => {
+    const ipc = createMockIpc({ settings: { wizardDone: true } });
+    const seen: unknown[] = [];
+    const stop = watchWindowErrors(ipc, (e) => seen.push(e));
+    window.dispatchEvent(new ErrorEvent("error", { message: "ResizeObserver loop completed with undelivered notifications." }));
+    window.dispatchEvent(new ErrorEvent("error", { message: "Script error." }));
+    await waitFor(() => expect(ipc.state.uiErrors).toHaveLength(2));
+    expect(seen).toEqual([]);
+    expect(ipc.state.uiErrors[1]).toBe("window: Script error.");
+    stop();
   });
 });

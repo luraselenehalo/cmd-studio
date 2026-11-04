@@ -54,7 +54,8 @@ const T: u64 = 1_791_694_709;
 ///   raises, and filters the prompt once more when one has completed, as Clink does.
 /// - `__new_line()` is the next input line: the coroutines of the last one are dropped.
 ///
-/// `io.popen` answers a command that runs tasklist, by any path, with `__tasklist` (`nil`: the command cannot start;
+/// `io.popen` answers a command that runs tasklist, by any path, with `__tasklist` (nothing of
+/// init.lua's runs one since 3b-2: the field proves it; `nil`: the command cannot start;
 /// `__tasklist_raises`: the call raises) and every other command, Oh My Posh's, with
 /// `__popen_result`. Each command is noted in `__popen_cmds`.
 const STUBS: &str = r#"
@@ -934,131 +935,30 @@ fn a_thai_data_folder_counts_and_clears_the_same_with_names_or_whole_paths() -> 
 }
 
 #[test]
-fn a_stale_tag_of_a_cmd_window_still_running_is_neither_counted_nor_deleted() -> mlua::Result<()> {
-    // A window started as `cmd /k <a long command>` (a Windows Terminal profile that runs a dev
-    // server) keeps its tag until that command ends, maybe for hours: it is no window that
-    // failed to start. Before it pauses the theme, init.lua asks tasklist once.
+fn a_stale_tag_of_a_live_window_counts_and_nothing_runs_tasklist() -> mlua::Result<()> {
+    // The founder's decision of 2026-10-19 (3b-1's rulings file): a window that hangs is a start
+    // that failed, open or closed. Three stale tags pause the fourth window while the three
+    // hung windows are still there, and init.lua never starts tasklist (0.6 s on the VM).
     let mut disk = tags_of_age(&[1, 2, 3], 600);
-    let before = disk.clone();
     let w = open_with(&mut disk, window(4, T), |lua| {
         lua.globals().set(
             "__tasklist",
             tasklist(&[
-                ("System", 4),
                 ("cmd.exe", 1),
-                ("conhost.exe", 70),
                 ("cmd.exe", 2),
-                ("Cmd.EXE", 3),
+                ("cmd.exe", 3),
                 ("cmd.exe", 4),
             ]),
         )
     })?;
-    assert!(!w.paused && w.omp && w.shows_the_box());
-    let mut want = before;
-    want.insert(tag(4), format!("v1 {T}\n"));
-    assert_eq!(disk, want);
-    // One of four still runs: the three others pause the theme and go; the running one stays.
-    // A pid that another program has taken since is no cmd window, and the rows' other fields
-    // may be in Thai.
-    let mut disk = tags_of_age(&[1, 2, 3, 5], 600);
-    let w = open_with(&mut disk, window(6, T), |lua| {
-        lua.globals().set(
-            "__tasklist",
-            "\"node.exe\",\"1\",\"Console\",\"1\",\"80,000 K\"\r\n\
-             \"CMD.EXE\",\"5\",\"คอนโซล\",\"1\",\"4,512 K\"\r\n\
-             \"cmd.exe\",\"6\",\"คอนโซล\",\"1\",\"4,512 K\"\r\n\
-             \"cmd.exe\",\"30\",\"คอนโซล\",\"1\",\"4,512 K\"\r\n",
-        )
-    })?;
     assert!(w.paused);
     assert_eq!(w.lines(), [PAUSED_NOW.replace("%d", "3")]);
-    assert_eq!(
-        disk,
-        Disk::from([
-            (paused_file(), pause_record(T, 3)),
-            (tag(5), format!("v1 {}\n", T - 600)),
-        ])
-    );
-    Ok(())
-}
-
-#[test]
-fn a_tasklist_that_cannot_be_read_counts_every_stale_tag_as_before() -> mlua::Result<()> {
-    // No answer to rely on is no window still running. Nothing here is read for its English.
-    for (why, setup) in [
-        ("the command cannot start", "__tasklist = nil"),
-        ("it raises", "__tasklist_raises = true"),
-        ("it prints nothing", "__tasklist = ''"),
-        (
-            "it prints a message and no row",
-            "__tasklist = 'ข้อมูล: ไม่มีงานที่กำลังทำงาน\\r\\n'",
-        ),
-    ] {
-        let mut disk = tags_of_age(&[1, 2, 3], 600);
-        let w = open_with(&mut disk, window(4, T), |lua| lua.load(setup).exec())?;
-        assert!(w.paused, "{why}");
-        assert_eq!(w.lines(), [PAUSED_NOW.replace("%d", "3")], "{why}");
-        assert_eq!(
-            disk,
-            Disk::from([(paused_file(), pause_record(T, 3))]),
-            "{why}"
-        );
-    }
-    Ok(())
-}
-
-#[test]
-fn tasklist_runs_once_and_only_when_the_theme_would_pause() -> mlua::Result<()> {
-    // Its cost (a program started through cmd /c) is paid only at the pause decision, never on a
-    // window's usual start, its first prompt, nor while the theme is paused.
-    let mut disk = tags_of_age(&[1, 2], 600);
-    let w = open(&mut disk, window(3, T).prompted())?;
     assert!(w.tasklists.is_empty(), "{:?}", w.tasklists);
-    let mut disk = tags_of_age(&[1, 2, 3, 4, 5], 600);
-    let w = open(&mut disk, window(6, T))?;
-    assert!(w.paused);
-    assert_eq!(
-        w.tasklists,
-        [r#"""C:\Windows\System32\tasklist.exe" /FO CSV /NH 2>nul""#]
-    );
-    let w = open(&mut disk, window(7, T).prompted())?;
-    assert!(w.paused && w.tasklists.is_empty(), "{:?}", w.tasklists);
-    Ok(())
-}
-
-#[test]
-fn tasklist_is_run_by_its_full_system32_path_and_never_by_its_bare_name() -> mlua::Result<()> {
-    // `cmd /c` looks for a bare `tasklist` in the window's folder before PATH, and init.lua runs
-    // in the folder cmd was opened in: a tasklist.bat in a downloaded repo would run. The path is
-    // absolute, from SystemRoot (C:\Windows when it is unset or empty), and quoted as Oh My Posh's
-    // is: `cmd /c` drops the outer quotes and keeps the ones around the path (spec §5.4, G17).
-    for (root, want) in [
-        (
-            Some(r"C:\WINDOWS"),
-            r#"""C:\WINDOWS\System32\tasklist.exe" /FO CSV /NH 2>nul""#,
-        ),
-        (
-            Some(r"D:\Win dows"),
-            r#"""D:\Win dows\System32\tasklist.exe" /FO CSV /NH 2>nul""#,
-        ),
-        (
-            Some(""),
-            r#"""C:\Windows\System32\tasklist.exe" /FO CSV /NH 2>nul""#,
-        ),
-        (
-            None,
-            r#"""C:\Windows\System32\tasklist.exe" /FO CSV /NH 2>nul""#,
-        ),
-    ] {
-        let mut disk = tags_of_age(&[1, 2, 3], 600);
-        let w = open_with(&mut disk, window(4, T), |lua| match root {
-            Some(r) => lua.globals().get::<Table>("__env")?.set("SystemRoot", r),
-            None => Ok(()),
-        })?;
-        assert_eq!(w.tasklists, [want], "{root:?}");
-        // and its answer is read as before: none of the three is running
-        assert!(w.paused, "{root:?}");
-    }
+    assert_eq!(disk, Disk::from([(paused_file(), pause_record(T, 3))]));
+    // Two stale tags and the fourth window's own: no pause, no tasklist, as before.
+    let mut disk = tags_of_age(&[1, 2], 600);
+    let w = open(&mut disk, window(5, T).prompted())?;
+    assert!(!w.paused && w.tasklists.is_empty());
     Ok(())
 }
 
@@ -1232,7 +1132,7 @@ fn a_tag_is_counted_at_600_seconds_and_forgotten_from_601() -> mlua::Result<()> 
 }
 
 #[test]
-fn tasklist_is_not_run_when_only_forgotten_tags_are_over_the_threshold() -> mlua::Result<()> {
+fn forgotten_tags_are_never_counted_and_nothing_runs_tasklist() -> mlua::Result<()> {
     // Three forgotten tags and two stale ones: the forgotten go first, so the pause is decided
     // over two, under PAUSE_AFTER, and tasklist (a program started through cmd /c) never runs.
     let mut disk = tags_of_age(&[1, 2, 3], 3 * 60 * 60);
@@ -1242,13 +1142,13 @@ fn tasklist_is_not_run_when_only_forgotten_tags_are_over_the_threshold() -> mlua
     let mut want = tags_of_age(&[5, 6], 120);
     want.insert(tag(7), format!("v1 {T}\n"));
     assert_eq!(disk, want);
-    // Three stale ones beside two forgotten: tasklist runs once, the pause counts the three, and
-    // the forgotten are gone without being counted.
+    // Three stale ones beside two forgotten: the pause counts the three, and the forgotten are
+    // gone without being counted. Nothing runs tasklist (3b-2).
     let mut disk = tags_of_age(&[1, 2], 3 * 60 * 60);
     disk.extend(tags_of_age(&[5, 6, 8], 120));
     let w = open(&mut disk, window(9, T))?;
     assert!(w.paused);
-    assert_eq!(w.tasklists.len(), 1, "{:?}", w.tasklists);
+    assert!(w.tasklists.is_empty(), "{:?}", w.tasklists);
     assert_eq!(w.lines(), [PAUSED_NOW.replace("%d", "3")]);
     assert_eq!(disk, Disk::from([(paused_file(), pause_record(T, 3))]));
     Ok(())

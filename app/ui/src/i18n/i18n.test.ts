@@ -14,6 +14,7 @@ const SAME_IN_BOTH = new Set<string>([
   "language.en",
   "language.th",
   "home.update.placeholder",
+  "recovery.update.placeholder",
   "home.restore.latest",
   "editor.prompt.layout.powerline",
   "help.credits.signpath",
@@ -36,7 +37,7 @@ describe("the two dictionaries", () => {
 
   it("have no empty text except the reserved update notice", () => {
     for (const [key, text] of Object.entries(en)) {
-      if (key === "home.update.placeholder") continue;
+      if (key === "home.update.placeholder" || key === "recovery.update.placeholder") continue;
       expect(text.trim(), key).not.toBe("");
       expect(th[key as keyof typeof th].trim(), key).not.toBe("");
     }
@@ -93,6 +94,25 @@ describe("the two dictionaries", () => {
     expect(th["home.restore.none"]).toBe("ยังไม่มีจุดย้อนกลับ CMD Studio จะสร้างให้ทุกครั้งที่ใช้ธีม");
     expect(en["wizard.where.allHint"]).toMatch(/^cmd windows opened from the Start menu, Win\+R or Windows Terminal /);
     expect(th["wizard.where.allHint"]).toMatch(/^หน้าต่าง cmd ที่เปิดจากเมนู Start, Win\+R หรือ Windows Terminal /);
+  });
+
+  it("hold the Start-menu shortcut sentence of the guide until phase 4 makes the shortcut (M7)", () => {
+    expect(en["help.guide.cmdWontOpen"]).toBe(
+      "If cmd won't open: open CMD Studio. When cmd keeps failing to start because of the theme, CMD Studio pauses the theme by itself, and you can also press Pause the theme on the home page.",
+    );
+    expect(th["help.guide.cmdWontOpen"]).not.toMatch(/เมนู Start|CMD Studio Recovery/);
+    expect(th["help.guide.cmdWontOpen"]).toMatch(/^ถ้า cmd เปิดไม่ขึ้น: เปิด CMD Studio เมื่อ cmd/);
+  });
+
+  it("say which change the start still waits for, and say the entry's pause only when it paused (M1, M3)", () => {
+    expect(en["start.busyWith"]).toBe("CMD Studio is still {task}. It waits for that to finish…");
+    expect(th["start.busyWith"]).toBe("CMD Studio {task}อยู่ รอให้เสร็จก่อน…");
+    expect(en).not.toHaveProperty("start.busy");
+    expect(en["recovery.entry.didPause"]).toBe("When it opened, CMD Studio put back any change that was cut off and paused the theme on this computer:");
+    expect(en["recovery.entry.didSkip"]).toBe("When it opened, CMD Studio put back any change that was cut off. The theme was not paused:");
+    expect(th["recovery.entry.didSkip"]).toBe("ตอนเปิด CMD Studio ได้ย้อนการเปลี่ยนแปลงที่ค้างอยู่ ไม่ได้หยุดธีม:");
+    expect(en).not.toHaveProperty("recovery.entry.did");
+    expect(en).not.toHaveProperty("recovery.entry.skipped");
   });
 
   // Spot checks of buttons, not a proof for every text: these buttons start with a verb.

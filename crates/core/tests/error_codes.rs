@@ -3,7 +3,8 @@
 //! somewhere. The app's own table of those meanings (`const MEANINGS` in `error.rs`) counts for
 //! the first half only: it lists every row by construction, so it cannot show that a row is used.
 //! The table also holds each code's Thai meaning, for the app's own UI; the CLI prints the code
-//! and English text only.
+//! and English text only. A row that only the UI says (`UI_ONLY`) is checked against the
+//! TypeScript instead.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -103,6 +104,12 @@ fn without_meanings_table(source: &str) -> (String, bool) {
     (rest, found)
 }
 
+/// The rows of §5.9 that only the UI says (recovery spec §6.2): the TypeScript raises them, the
+/// Rust side only knows their meaning. A test of its own
+/// (`every_ui_only_code_is_said_by_the_typescript`,
+/// plan 3b-2 Task 8) checks that the TypeScript does say each.
+const UI_ONLY: &[&str] = &["E_TIMEOUT"];
+
 #[test]
 fn the_codes_of_spec_5_9_and_the_codes_the_code_says_are_the_same() {
     let mut files = Vec::new();
@@ -135,12 +142,35 @@ fn the_codes_of_spec_5_9_and_the_codes_the_code_says_are_the_same() {
     let spec = spec_codes();
     assert!(!spec.is_empty());
     let not_in_spec: Vec<_> = said.difference(&spec).collect();
-    let never_said: Vec<_> = spec.difference(&used).collect();
+    let never_said: Vec<_> = spec
+        .difference(&used)
+        .filter(|code| !UI_ONLY.contains(&code.as_str()))
+        .collect();
     assert!(
         not_in_spec.is_empty() && never_said.is_empty(),
         "codes the code says that §5.9 does not list: {not_in_spec:?}; \
          codes §5.9 lists that the code never says: {never_said:?}"
     );
+}
+
+/// Each code only the UI says is raised by the UI's IPC wrapper, as a string literal in
+/// `app/ui/src/ipc/work.ts` (the one place that makes an `E_TIMEOUT`).
+#[test]
+fn every_ui_only_code_is_said_by_the_typescript() {
+    let work = root()
+        .join("app")
+        .join("ui")
+        .join("src")
+        .join("ipc")
+        .join("work.ts");
+    let source = std::fs::read_to_string(&work).unwrap();
+    for code in UI_ONLY {
+        assert!(
+            source.contains(&format!("\"{code}\"")),
+            "{} does not say {code}",
+            work.display()
+        );
+    }
 }
 
 #[test]

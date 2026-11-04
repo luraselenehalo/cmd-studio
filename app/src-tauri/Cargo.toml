@@ -43,6 +43,9 @@ uuid = { version = "1", features = ["v4", "serde"] }
 ts-rs = { version = "=12.0.1", features = ["uuid-impl", "serde-json-impl", "no-serde-warnings"] }
 
 [target.'cfg(windows)'.dependencies]
+# WebView2's ProcessFailed (recovery spec §6.4): the renderer's death reloads the page. The
+# version is the one wry 0.57.0 already pins in Cargo.lock; nothing new is downloaded.
+webview2-com = "=0.39.1"
 # console.rs: AttachConsole for the CLI mode of a windows-subsystem exe, only when GetStdHandle
 # and GetFileType (Storage_FileSystem) say the output goes nowhere yet; MessageBoxW for a start
 # that fails before the window exists. open.rs: CREATE_NEW_CONSOLE for the cmd window it opens,

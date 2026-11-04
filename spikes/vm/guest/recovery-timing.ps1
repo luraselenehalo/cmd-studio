@@ -16,14 +16,41 @@
 # setup pays for Defender's scan and Clink's DLL cache copy, and that would fall on one side of a
 # without/with-the-counter comparison only. Every call warms up the same way, so the two averages
 # are alike in that. In the spike the deciding number for the counter's cost was the `p3b counter
-# ms=` line (recovery-setup.ps1 -Counter); the shipped init.lua logs no such line, so Task 12
-# compares this average with the spike's without the counter (timing-vm-a.txt: 815 ms on VM-A).
-param([int] $Runs = 10, [string] $Data = (Join-Path $env:LOCALAPPDATA 'ai.resincore.cmdstudio-spike3b'), [switch] $InstallMarker, [int] $Warmup = 1)
+# ms=` line (recovery-setup.ps1 -Counter); the shipped init.lua logs no such line. 3b-1's Task 12
+# compared this average with the spike's without the counter (timing-vm-a.txt: 815 ms on VM-A),
+# measured on another boot from another init.lua, which settled nothing (its finding F4). Plan
+# 3b-2 Task 12 (vm-check-3b2.md step 10) compares two runs of this script in one boot instead:
+# `-InstallMarker` once, then the script with the shipped init.lua, then `-WithoutCounter`, which
+# takes the counter's block (HEALTH_BODY) out of init.lua for its run and puts the file back.
+# The counter's cost per start is the difference of the two averages. A run without the counter
+# writes no start tags, so its last line says `0 of N` taken away: expected, not a fault.
+param([int] $Runs = 10, [string] $Data = (Join-Path $env:LOCALAPPDATA 'ai.resincore.cmdstudio-spike3b'), [switch] $InstallMarker, [int] $Warmup = 1, [switch] $WithoutCounter)
 $ErrorActionPreference = 'Stop'
 if ($env:COMPUTERNAME -notlike 'CMDSTUDIO-*') { throw "VM only: $env:COMPUTERNAME is not a CMD Studio test VM, and this script starts and closes cmd windows" }
 if ($InstallMarker) {
   $text = "local p3b_data = [==[$Data]==]`n" + [IO.File]::ReadAllText('C:\cmdstudio\spikes\recovery\timing.lua')
   [IO.File]::WriteAllText((Join-Path $Data 'generated\zz-timing.lua'), $text, (New-Object Text.UTF8Encoding $false))
+}
+# Carry F4 of plan 3b-1: the same boot, the same data folder, the same marker, once with the
+# shipped init.lua and once with the start counter (HEALTH_BODY) cut out of it. The cut is from
+# the line that starts the counter to the line before Oh My Posh's part (the first line of
+# INIT_BODY in crates\core\src\generate\lua.rs); the original is put back afterwards, whatever
+# happens. The counter's cost per start is the difference of the two averages.
+$initLua = Join-Path $Data 'generated\init.lua'
+$backup = "$initLua.with-counter"
+if ($WithoutCounter -and (Test-Path -LiteralPath $backup)) { throw "$backup is still there: an earlier run did not put init.lua back; move it back by hand first" }
+# The backup copy and the cut write sit inside the try, so a write that fails half-way still
+# ends with the finally putting the original back.
+try {
+if ($WithoutCounter) {
+  $lines = [IO.File]::ReadAllLines($initLua)
+  $from = [Array]::FindIndex($lines, [Predicate[string]]{ param($l) $l.StartsWith('-- The start counter (recovery spec') })
+  $to = [Array]::FindIndex($lines, [Predicate[string]]{ param($l) $l.StartsWith('-- cmd /c drops the outermost quotes') })
+  if ($from -lt 0 -or $to -le $from) { throw "init.lua has no counter block to cut (from=$from to=$to)" }
+  Copy-Item -LiteralPath $initLua -Destination $backup -Force
+  $cut = $lines[0..($from - 1)] + $lines[$to..($lines.Length - 1)]
+  [IO.File]::WriteAllLines($initLua, $cut, (New-Object Text.UTF8Encoding $false))
+  "init.lua without the counter: $($lines.Length - $cut.Length) lines cut (from line $($from + 1) to $to)"
 }
 $tagsFound = 0
 $times = foreach ($i in 1..($Warmup + $Runs)) {
@@ -51,3 +78,6 @@ if ($ms.Count) {
   "average of $($ms.Count): $([int](($ms | Measure-Object -Average).Average)) ms; median $median ms; min $($sorted[0]) ms; max $($sorted[-1]) ms"
 }
 "start tags of the timed windows taken away: $tagsFound of $($Warmup + $Runs)"
+} finally {
+  if ($WithoutCounter -and (Test-Path -LiteralPath $backup)) { Move-Item -LiteralPath $backup -Destination $initLua -Force; 'init.lua restored' }
+}

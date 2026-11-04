@@ -28,6 +28,7 @@ pub mod doctor;
 pub mod launch;
 pub mod preview;
 pub mod recovery;
+pub mod run;
 pub mod system;
 
 /// What the backend runs on: the real adapters (`crate::machine::RealMachine`) or the core's
@@ -80,6 +81,8 @@ pub struct Backend<M> {
     /// Where the start's check of Windows' crash reports leaves its answer for
     /// `recovery_status` (recovery spec §4.3).
     crash: recovery::CrashSlot,
+    /// This run: the record, safe mode, the crash notice, what runs now (recovery spec §5).
+    run: run::RunState,
 }
 
 impl<M: Machine> Backend<M> {
@@ -106,6 +109,7 @@ impl<M: Machine> Backend<M> {
             library_lock: Mutex::new(()),
             sample,
             crash: recovery::CrashSlot::new(),
+            run: run::RunState::new(),
         }
     }
 
@@ -141,6 +145,11 @@ impl<M: Machine> Backend<M> {
         f: impl FnOnce(&Self) -> Result<T, AppError>,
     ) -> Result<T, AppError> {
         let started = Instant::now();
+        // Named as what runs now while it runs (recovery spec §6.3); the guard clears it also
+        // when `f` panics (the worker then answers E_INTERNAL).
+        let _busy = crate::command_names::CHANGES_MACHINE
+            .contains(&name)
+            .then(|| self.busy(name));
         let result = f(self);
         let ms = started.elapsed().as_millis();
         let ended = match &result {
@@ -213,6 +222,57 @@ impl<M: Machine> Backend<M> {
             settings::save(self.sys().fs, &self.paths.settings_file(), &settings)?;
             cache.settings = settings.clone();
             Ok(settings)
+        })
+    }
+
+    /// "Reset the app's settings" (recovery spec §5.2): settings.json is set aside as
+    /// `settings.json.reset-<ms>` and the defaults stand, in memory and on the next read; the
+    /// name of the file set aside is told, once, like a damaged file's. Nothing to set aside
+    /// when there is no file.
+    pub fn settings_reset(&self) -> Result<SettingsLoad, AppError> {
+        // Not through `with_settings`: that reads the file first, and a file that cannot be
+        // read is the very case a reset is for (K20 g). The lock is held for the whole of it.
+        let mut held = self.settings.lock().unwrap_or_else(PoisonError::into_inner);
+        let fs = self.sys().fs;
+        let file = self.paths.settings_file();
+        // A damaged file an earlier read set aside and has not yet told the page about is
+        // told now, unless this reset sets a file aside itself.
+        let pending = held.as_mut().and_then(|cache| cache.reset_from.take());
+        let reset_from = if fs.exists(&file) {
+            let mut ms = self.now_ms();
+            let aside = loop {
+                let candidate = self.paths.settings_reset_file(ms);
+                if !fs.exists(&candidate) {
+                    break candidate;
+                }
+                ms = ms.saturating_add(1);
+            };
+            fs.rename(&file, &aside).map_err(|e| {
+                AppError::coded(
+                    "E_DATA_WRITE",
+                    format!(
+                        "{} could not be set aside as {}: {e}",
+                        file.display(),
+                        aside.display()
+                    ),
+                )
+            })?;
+            // The earlier damaged file's name can't be told as well (one name per answer): it
+            // goes to the log, so it is not lost silently.
+            if let Some(name) = &pending {
+                self.note_line(&format!("settings reset pending={name}"));
+            }
+            aside.file_name().map(|n| n.to_string_lossy().into_owned())
+        } else {
+            pending
+        };
+        *held = Some(SettingsCache {
+            settings: AppSettings::default(),
+            reset_from: None,
+        });
+        Ok(SettingsLoad {
+            settings: AppSettings::default(),
+            reset_from,
         })
     }
 
@@ -477,6 +537,11 @@ pub(crate) mod testing {
         &b.machine.fs
     }
 
+    /// The fake host under the backend (see [`fake_fs`]).
+    pub(crate) fn fake_host(b: &Backend<FakeMachine>) -> &cmdstudio_core::adapters::fake::FakeHost {
+        &b.machine.host
+    }
+
     /// The fake crash reports under the backend (see [`fake_fs`]).
     pub(crate) fn fake_events(b: &Backend<FakeMachine>) -> &FakeEventLog {
         &b.machine.event_log
@@ -574,6 +639,72 @@ mod tests {
         // What `settings_get` returns is held in memory; the file is what was saved.
         let on_disk = crate::settings::load(b.sys().fs, &b.paths().settings_file(), 0).unwrap();
         assert_eq!(on_disk.settings, mine);
+    }
+
+    /// Recovery spec §5.2: "Reset the app's settings" sets settings.json aside as
+    /// `settings.json.reset-<ms>`, the defaults stand from then on, and the page is told which
+    /// file was set aside. With no file, nothing is set aside.
+    #[test]
+    fn resetting_the_settings_sets_the_file_aside_and_the_defaults_stand() {
+        let b = backend();
+        let mine = AppSettings {
+            language: crate::settings::Language::Th,
+            wizard_done: true,
+            ..AppSettings::default()
+        };
+        b.settings_set(mine).unwrap();
+        let reset = b.settings_reset().unwrap();
+        assert_eq!(reset.settings, AppSettings::default());
+        let aside = reset.reset_from.unwrap();
+        assert!(aside.starts_with("settings.json.reset-"), "{aside}");
+        assert!(!b.sys().fs.exists(&b.paths().settings_file()));
+        assert!(b
+            .sys()
+            .fs
+            .exists(&b.paths().settings_file().with_file_name(&aside)));
+        assert_eq!(b.settings_get().unwrap().settings, AppSettings::default());
+        assert_eq!(b.settings_or_default(), AppSettings::default());
+        let b = backend();
+        let reset = b.settings_reset().unwrap();
+        assert_eq!(
+            (reset.settings, reset.reset_from),
+            (AppSettings::default(), None)
+        );
+        // A file that cannot be read is the case a reset is for: it is set aside all the same.
+        let b = backend();
+        let file = b.paths().settings_file();
+        b.sys().fs.write_atomic(&file, b"{ not json").unwrap();
+        crate::backend::testing::fake_fs(&b).fail_reads_of(&file);
+        assert_eq!(b.settings_get().unwrap_err().code, "E_MACHINE_READ");
+        let reset = b.settings_reset().unwrap();
+        assert!(reset
+            .reset_from
+            .unwrap()
+            .starts_with("settings.json.reset-"));
+        assert!(!b.sys().fs.exists(&file));
+        assert_eq!(b.settings_get().unwrap().settings, AppSettings::default());
+    }
+
+    /// A damaged file an earlier read set aside, not yet told to the page, is not lost silently
+    /// when a reset then sets another file aside: its name goes to the log.
+    #[test]
+    fn a_reset_that_sets_a_file_aside_logs_the_damaged_name_it_could_not_tell() {
+        let b = backend();
+        let file = b.paths().settings_file();
+        b.sys().fs.write_atomic(&file, b"{ not json").unwrap();
+        assert_eq!(b.settings_or_default(), AppSettings::default());
+        b.settings_set(AppSettings::default()).unwrap();
+        assert!(b.sys().fs.exists(&file));
+        let reset = b.settings_reset().unwrap();
+        assert!(reset
+            .reset_from
+            .unwrap()
+            .starts_with("settings.json.reset-"));
+        let log = b.log_tail(10);
+        assert!(
+            log.contains("settings reset pending=settings.json.damaged-"),
+            "{log}"
+        );
     }
 
     #[test]

@@ -5,4 +5,4 @@ import type { PlanOutcome } from "./PlanOutcome";
 /**
  * What "Turn the theme back on" does (spec §4.1, §8).
  */
-export type ResumeOutcome = { "kind": "resumed" } | { "kind": "apply", request: ApplyRequest, plan: PlanOutcome, } | { "kind": "pickTheme" } | { "kind": "notPaused" };
+export type ResumeOutcome = { "kind": "resumed" } | { "kind": "apply", request: ApplyRequest, plan: PlanOutcome, } | { "kind": "pickTheme" } | { "kind": "notPaused" } | { "kind": "notKnown" };

@@ -14,6 +14,10 @@
 #                    filter call of the window's first line, and wraps the filters registered
 #                    after it with a start and an end line each: when the coroutine ends, Clink
 #                    refilters the prompt once (§13); the lines say how often, and what it cost.
+#                    Since plan 3b-2 Task 12 (carry F3 of 3b-1: a second refilter was seen) the
+#                    probe also wraps clink.refilterprompt and logs `refilterprompt from <caller>`
+#                    before the `own n=` line of each refilter a script asked for; an `own n=`
+#                    with no such line before it is Clink's own refilter after the coroutine.
 # -Install writes the probe with `local p3b_data = [==[<data>]==]` and `local p3b_priority = <n>`
 # in front; -Report prints the lines of every <data>\<probe>-<pid>.txt the probe wrote; -Remove
 # deletes the probe and those files. Close every cmd window before -Install and -Remove.

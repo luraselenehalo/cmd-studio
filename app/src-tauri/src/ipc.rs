@@ -5,8 +5,8 @@
 //! `command_names::COMMANDS`, to what Tauri registers and to what `capabilities/default.json`
 //! allows (spec §5.10), and check which commands log.
 //!
-//! Every command that reads or changes the machine, the data folder or the settings (26 of
-//! the 30) writes exactly one log line through [`Backend::logged`]: its name (a constant of
+//! Every command that reads or changes the machine, the data folder or the settings (33 of
+//! the 37) writes exactly one log line through [`Backend::logged`]: its name (a constant of
 //! `command_names`, never text built at run time), how long it took, and `ok` or the error's
 //! code. The two that ask the user for a file (`theme_import_preview`, `theme_export`) log once
 //! for the whole command: the time includes the user's time in the dialog, and a cancel is
@@ -26,6 +26,7 @@ use crate::backend::apply::{
 use crate::backend::doctor::{DoctorReport, FixProposal};
 use crate::backend::preview::{self, ContrastIssue, PreviewResult};
 use crate::backend::recovery::{PauseOutcome, RecoveryStatus, ResumeOutcome};
+use crate::backend::run::{AppStatus, CrashReport};
 use crate::backend::system::SystemReport;
 use crate::backend::{AdvancedInfo, Backend};
 use crate::command_names as names;
@@ -387,6 +388,85 @@ pub async fn theme_resume(state: TauriState<'_, Shared>) -> Result<ResumeOutcome
     blocking(move || b.logged(names::THEME_RESUME, |b| b.theme_resume())).await
 }
 
+/// The UI drew its first page (recovery spec §5.1).
+#[tauri::command]
+pub async fn app_ready(state: TauriState<'_, Shared>) -> Result<(), AppError> {
+    let b = state.inner().clone();
+    blocking(move || b.logged(names::APP_READY, |b| b.app_ready())).await
+}
+
+/// What runs now, safe mode and why, the crash notice, what `--recovery` did (recovery spec
+/// §6.3, §8). The first thing the UI asks on every load.
+#[tauri::command]
+pub async fn app_status(state: TauriState<'_, Shared>) -> Result<AppStatus, AppError> {
+    let b = state.inner().clone();
+    blocking(move || b.logged(names::APP_STATUS, |b| b.app_status())).await
+}
+
+#[tauri::command]
+pub async fn crash_dismiss(state: TauriState<'_, Shared>) -> Result<(), AppError> {
+    let b = state.inner().clone();
+    blocking(move || {
+        b.logged(names::CRASH_DISMISS, |b| {
+            b.crash_dismiss();
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn crash_report_read(
+    state: TauriState<'_, Shared>,
+) -> Result<Option<CrashReport>, AppError> {
+    let b = state.inner().clone();
+    blocking(move || b.logged(names::CRASH_REPORT_READ, |b| b.crash_report_read())).await
+}
+
+#[tauri::command]
+pub async fn settings_reset(state: TauriState<'_, Shared>) -> Result<SettingsLoad, AppError> {
+    let b = state.inner().clone();
+    blocking(move || b.logged(names::SETTINGS_RESET, |b| b.settings_reset())).await
+}
+
+/// The UI's own error (recovery spec §6.5), logged redacted, twenty per run.
+#[tauri::command]
+pub async fn log_ui_error(
+    state: TauriState<'_, Shared>,
+    message: String,
+    place: String,
+) -> Result<(), AppError> {
+    let b = state.inner().clone();
+    blocking(move || b.logged(names::LOG_UI_ERROR, |b| b.log_ui_error(&message, &place))).await
+}
+
+/// Starts CMD Studio again and ends this process (recovery spec §6.3): a transaction that
+/// runs is cut off here and rolled back by the journal when the child starts
+/// (`GuiStart::Restarted`, `lib.rs`), as the restart dialog promises. The answer never reaches
+/// the window; the exit comes after the spawn, so a spawn that fails is an error the window
+/// still sees. This process's run record goes here, once the spawn went through: Tauri's
+/// `exit` falls back to `process::exit` with no exit event when its loop cannot be reached, and
+/// a record left with `uiReadyAt` set would open the child on a false crash notice. `end_run`
+/// is idempotent, so the exit event's own call changes nothing.
+#[tauri::command]
+pub async fn app_restart(app: AppHandle, state: TauriState<'_, Shared>) -> Result<(), AppError> {
+    let b = state.inner().clone();
+    let spawned = blocking(move || {
+        let spawned = b.logged(names::APP_RESTART, |_| {
+            crate::restart_process().map_err(AppError::internal)
+        });
+        if spawned.is_ok() {
+            b.end_run();
+        }
+        spawned
+    })
+    .await;
+    if spawned.is_ok() {
+        app.exit(0);
+    }
+    spawned
+}
+
 /// Every command, for `tauri::Builder::invoke_handler`.
 pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
@@ -420,6 +500,13 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         recovery_status,
         theme_pause,
         theme_resume,
+        app_ready,
+        app_status,
+        crash_dismiss,
+        crash_report_read,
+        settings_reset,
+        log_ui_error,
+        app_restart,
     ]
 }
 
@@ -453,7 +540,7 @@ mod tests {
                 "{name} has no #[tauri::command] function"
             );
         }
-        assert_eq!(COMMANDS.len(), 30);
+        assert_eq!(COMMANDS.len(), 37);
     }
 
     #[test]
@@ -544,7 +631,28 @@ mod tests {
                 "{name} logs under {constant}"
             );
         }
-        assert_eq!(logging, 26);
+        assert_eq!(logging, 33);
+    }
+
+    /// The final review's re-graded carry: `app_restart` ends this process's run record itself,
+    /// after the spawn went through and before `app.exit(0)`. Tauri's `exit` falls back to
+    /// `process::exit` when its event loop cannot be reached, and a record left with `uiReadyAt`
+    /// set would open the restarted app on a false crash notice. `end_run` is idempotent, so the
+    /// exit event's own call is harmless.
+    #[test]
+    fn the_restart_ends_the_run_record_before_it_exits() {
+        let start = SOURCE.find("pub async fn app_restart(").unwrap();
+        let body = SOURCE.get(start..).unwrap().split_once("\n}\n").unwrap().0;
+        let logged = body.find(".logged(names::APP_RESTART").unwrap();
+        let ended = body.find("b.end_run()").unwrap();
+        let exit = body.find("app.exit(0)").unwrap();
+        assert!(logged < ended, "the record goes after the spawn's log line");
+        assert!(ended < exit, "the record goes before the exit");
+        assert_eq!(body.matches("end_run()").count(), 1);
+        assert!(
+            body.contains("if spawned.is_ok() {\n            b.end_run();"),
+            "only after a spawn that went through: {body}"
+        );
     }
 
     /// A pure command runs on the window's thread: a panic in it must come back as an error,

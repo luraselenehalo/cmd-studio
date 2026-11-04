@@ -11,6 +11,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { ApplyRequest } from "../bindings/ApplyRequest";
 import type { CheckReport } from "../bindings/CheckReport";
+import type { CrashReport } from "../bindings/CrashReport";
 import type { DoctorReport } from "../bindings/DoctorReport";
 import type { FixKind } from "../bindings/FixKind";
 import type { PauseInfo } from "../bindings/PauseInfo";
@@ -67,7 +68,7 @@ export function Help({ tab }: { tab: HelpTab }) {
   );
 }
 
-function Doctor() {
+export function Doctor() {
   const ipc = useIpc();
   const { t, language } = useI18n();
   const { version, bump, setLastApply } = useAppState();
@@ -206,7 +207,7 @@ function Doctor() {
         <span role="status">{checking ? t("help.doctor.checking") : ""}</span>
         <span role="status">{changed ? t("help.doctor.fixChanged") : ""}</span>
       </div>
-      {loadError !== null && <ErrorNotice error={loadError} />}
+      {loadError !== null && <ErrorNotice error={loadError} onRetry={bump} />}
       {fixError !== null && <ErrorNotice error={fixError} />}
       {report && (
         <ul className="check-list">
@@ -289,7 +290,7 @@ function pointLabel(p: RestorePoint, t: Translate, language: Language): string {
 /** What a restore did, and the points as they were before it, to name the applies it undid. */
 type RestoreResult = { kind: "restore"; outcome: RestoreOutcome; before: RestorePoint[] } | { kind: "error"; error: unknown };
 
-function RestorePointsTab() {
+export function RestorePointsTab() {
   const ipc = useIpc();
   const { t, language } = useI18n();
   const { version, bump, lastApply, setLastApply } = useAppState();
@@ -349,7 +350,7 @@ function RestorePointsTab() {
   return (
     <div>
       <h2>{t("help.restore.title")}</h2>
-      {loadError !== null && <ErrorNotice error={loadError} />}
+      {loadError !== null && <ErrorNotice error={loadError} onRetry={bump} />}
       <div role="status">{busy ? t("help.restore.working") : ""}</div>
       {result && (
         <div ref={resultBox} tabIndex={-1}>
@@ -471,7 +472,7 @@ function RestoreResultView({ outcome, before }: { outcome: RestoreOutcome; befor
 
 type RevertResult = { kind: "revert"; outcome: RevertOutcome } | { kind: "error"; error: unknown };
 
-function Revert() {
+export function Revert() {
   const ipc = useIpc();
   const { t } = useI18n();
   const { bump, setLastApply } = useAppState();
@@ -589,12 +590,15 @@ function RevertResultView({ outcome }: { outcome: RevertOutcome }) {
   );
 }
 
-function Report() {
+export function Report() {
   const ipc = useIpc();
   const { t } = useI18n();
+  const { version, bump } = useAppState();
   const [text, setText] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<unknown>(null);
   const [openError, setOpenError] = useState<unknown>(null);
+  /** The newest crash note, when there is one (recovery spec §5.3). */
+  const [note, setNote] = useState<CrashReport | null>(null);
   // The same copy as the apply's "Copy details", saying the same way whether it copied.
   const { copied, copy } = useCopyDiagnostics();
 
@@ -602,11 +606,26 @@ function Report() {
     let alive = true;
     ipc.diagnosticsCopy().then(
       (d) => {
-        if (alive) setText(d);
+        if (!alive) return;
+        setText(d);
+        setLoadError(null);
       },
       (e: unknown) => {
         if (alive) setLoadError(e);
       },
+    );
+    return () => {
+      alive = false;
+    };
+  }, [ipc, version]);
+
+  useEffect(() => {
+    let alive = true;
+    ipc.crashReportRead().then(
+      (n) => {
+        if (alive) setNote(n);
+      },
+      () => {},
     );
     return () => {
       alive = false;
@@ -646,12 +665,20 @@ function Report() {
       </div>
       {copied instanceof IpcError && <ErrorNotice error={copied} title={t("apply.copyFailed")} />}
       {openError !== null && <ErrorNotice error={openError} />}
-      {loadError !== null && <ErrorNotice error={loadError} />}
+      {loadError !== null && <ErrorNotice error={loadError} onRetry={bump} />}
       {text === null && loadError === null && <p role="status">{t("common.loading")}</p>}
       {text !== null && (
         <pre className="log" lang="en">
           {text}
         </pre>
+      )}
+      {note && (
+        <>
+          <h3>{t("help.report.crashNote", { file: note.file })}</h3>
+          <pre className="log" lang="en">
+            {note.text}
+          </pre>
+        </>
       )}
     </div>
   );
