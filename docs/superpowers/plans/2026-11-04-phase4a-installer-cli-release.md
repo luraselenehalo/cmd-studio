@@ -1797,7 +1797,7 @@ Issues and pull requests at [GitHub](https://github.com/luraselenehalo/cmd-studi
 
 - [ ] **Step 2: Check the pins**
 
-`grep -n "1.9.34\|31.5.0\|3.5.1" README.md` must show the three versions as `crates/core/src/plan.rs` and `resources.rs` pin them; `grep -n "mrgun" README.md` must print nothing. Render check: GitHub renders the table and the links; nothing to run.
+`grep -n "1.9.34\|31.5.0\|3.5.1" README.md` must show the three versions as `crates/core/src/plan.rs` and `resources.rs` pin them; `grep -n -i "$USERNAME" README.md` (the dev PC's user name, read from the environment, never typed) must print nothing. Render check: GitHub renders the table and the links; nothing to run.
 
 - [ ] **Step 3: Commit**
 
