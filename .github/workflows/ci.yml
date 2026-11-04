@@ -8,6 +8,8 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # release.yml calls this workflow on a tag: the same gates and the same installer, never a copy (spec §6.4)
+  workflow_call:
 permissions:
   contents: read
 concurrency:
