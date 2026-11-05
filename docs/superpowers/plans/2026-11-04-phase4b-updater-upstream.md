@@ -1,12 +1,12 @@
 # Phase 4b Implementation Plan — The updater: its code and UI over a fake, the install-moment spike, the key-dependent wiring, the upstream-watch workflow, and the update VM check
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. The tasks keep the outline's numbers; they run in this order: **Task 2, Task 3, Task 1 (its CI half by the implementer, its VM half by the controller), Task 4, Task 5, Task 7, Task 8 (Steps 1–3), Task 6 (waits for the founder's key), Task 9 (waits for a published release with updater assets; the controller runs it), Task 8 Step 4 (the VM facts).** The first six of those run and pass without the updater key. Task 1's VM run and Task 9's run are the controller's (VirtualBox VMs); an implementer never runs them. No founder step is needed before Task 6.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. The tasks keep the outline's numbers; they run in this order: **Task 2, Task 3, Task 4, Task 5, Task 1 (its CI half by the implementer, its VM half by the controller, after Task 5 so that U4 can show the re-apply's absence), Task 7, Task 8 (Steps 1–3), Task 6 (waits for the founder's key), then the controller's version bump to 0.1.1 (Task 9 Step 0, only once a CI run of the branch at 0.1.0 after Task 6 exists and its run id is noted), Task 9 (waits for the published v0.1.1; the controller runs it), Task 8 Step 4 (the VM facts).** The first six of those run and pass without the updater key. Task 1's VM run and Task 9's run are the controller's (VirtualBox VMs); an implementer never runs them. No founder step is needed before Task 6.
 
 **Goal:** CMD Studio updates itself from GitHub Releases: it checks on every launch, in the mode of `settings.json` (automatic by default, notify first, off), never interrupts a transaction, never steals focus, stays silent offline, always says "Updated to vX" with a link to what changed, and after an update installs the new runtime folder, re-applies the current theme through a transaction and deletes the old runtime when nothing holds it; OMP, Clink and the font move only with the app, through a daily workflow that opens a PR when upstream has a new version; update passes on every tier (spec §8).
 
-**Architecture:** `tauri-plugin-updater` (2.13.x, pinned) is used from Rust only, behind an `Updater` trait that the app's `backend/update.rs` drives (`check`, `download`, `install_now`), with a fake for every test; no JS permission is granted to the window and no npm package is added. The state machine is pure: `UpdateMode` × network outcome × lock state → `UpdateState`, exposed by a new read-only IPC `update_status` and driven by `update_install` (the notify-mode button, the Recovery page's "Update now"). Two install paths, both production code: **at close** (automatic mode: the verified installer, written to `<data>\updates\`, is started by the app's own spawn with `/S /UPDATE` at `RunEvent::Exit`, no relaunch) and **now** (the user's click: the plugin's own `Update::install`, which runs the installer with `/S /R /UPDATE /ARGS` and ends the process, so the app comes back by itself). Before either, the app writes `<data>\update.json` (`{version, from, to, notesUrl}`) and ends its run record; the next start reads it, shows the notice through `app_status.updated`, re-applies the theme if the runtime pins changed, prunes old runtime folders, and `app_ready` deletes the file. The moment of the automatic install is the spike's decision (Task 1): the primary is "at close, silent, no relaunch"; Task 3 is written for it with the fallbacks named. The release workflow signs the installer with the founder's key and uploads `latest.json`; a daily workflow rewrites `scripts/fetch-resources.ps1`'s pins and opens a PR, never merging, never tagging.
+**Architecture:** `tauri-plugin-updater` (2.13.x, pinned) is used from Rust only, for the check and the verified download, behind an `Updater` trait that the app's `backend/update.rs` drives (`check`, `download`), with a fake for every test; no JS permission is granted to the window and no npm package is added. The state machine is pure: `UpdateMode` × network outcome × lock state → `UpdateState`, exposed by a new read-only IPC `update_status` and driven by `update_install` (the notify-mode button, the Recovery page's "Update now"). Two install paths, both the app's own spawn of the verified installer written to `<data>\updates\` (its SHA-256 checked against the verified bytes first): **at close** (automatic mode: `/S /UPDATE` at `RunEvent::Exit`, after the run record ended, no relaunch) and **now** (the user's click: `/S /R /UPDATE /ARGS` with no arguments, so the installer starts the app again as a normal start, and this process exits). The plugin's own `Update::install` is not used: it relaunches the app with this process's arguments (`--recovery`, `--after-pid`), which a user's click must not carry over. Before either path the app writes `<data>\update.json` (`{version, from, to, notesUrl}`) and ends its run record; the next start reads it, shows the notice through `app_status.updated`, re-applies the theme if the runtime pins changed, prunes old runtime folders (one place, under the lock, never in safe mode), and `app_ready` deletes the file. A second instance and an `app_restart` exit never install. The moment of the automatic install is the spike's decision (Task 1): the primary is "at close, silent, no relaunch"; Task 3 is written for it with the fallbacks named. The release workflow signs the installer with the founder's key through a `ci.yml` `sign` input (pull-request builds stay unsigned) and uploads `latest.json`; a daily workflow rewrites `scripts/fetch-resources.ps1`'s pins and opens a PR, never merging, never tagging.
 
-**Tech Stack:** Rust 1.99.0, Tauri 2.12.4 (`@tauri-apps/cli` 2.12.3, `@tauri-apps/api` 2.12.4), `tauri-plugin-updater` **=2.13.3** (the newest 2.13.x on the crates.io index on 2026-11-05: tauri `^2.12`, tauri-plugin `^2.7.1`, minisign-verify `^0.3`, reqwest `^0.13`; G10's table lists 2.13.2, which has the same tauri requirement; see G-UPD), `semver` =1.0.28 (already in the tree through tauri-utils), minisign through the plugin (the key pair from `tauri signer generate`), ts-rs 12.0.1, React 19.3.1 / Vitest 5.0.5, GitHub Actions (`windows-latest`, `ubuntu-latest`; `gh`, `jq`, `python3`, `7z`), PowerShell 5.1 and 7 for the upstream script (on this PC only in `-WhatIf` and `-Fixture` mode), VirtualBox VMs; `python3 -m http.server` on the host for the spike's `latest.json`.
+**Tech Stack:** Rust 1.99.0, Tauri 2.12.4 (`@tauri-apps/cli` 2.12.3, `@tauri-apps/api` 2.12.4), `tauri-plugin-updater` **=2.13.3** (the newest 2.13.x on the crates.io index on 2026-11-05: tauri `^2.12`, tauri-plugin `^2.7.1`, minisign-verify `^0.3`, reqwest `^0.13`; G10's table lists 2.13.2, which has the same tauri requirement; see G-UPD), `semver` =1.0.28 (already in the tree through tauri-utils), minisign through the plugin (the key pair from `tauri signer generate`), ts-rs 12.0.1, React 19.3.1 / Vitest 5.0.5, GitHub Actions (`windows-latest`, `ubuntu-latest`; `gh`, `jq`, `python3`, `7z`), PowerShell 5.1 and 7 for the upstream script (on this PC only in `-WhatIf` and `-Fixture` mode), VirtualBox VMs; a guarded PowerShell `TcpListener` script inside the guest (`http://127.0.0.1:8765/`) for the spike's `latest.json` and installers (no host server, no firewall change).
 
 **Spec:** `docs/superpowers/specs/2026-10-10-cmd-studio-design.md` §2.1 (no silent change), §5.3 (`update.json`, the log lines), §5.5 (the lock), §5.7 (the two commands, `--cleanup`'s list), §5.9 (no new code: `E_BUSY` and `E_INTERNAL` cover the updater), §5.10 (the one program run from outside `runtime\`: the signed installer), §6.2 (all of it; the ⬜ install moment), §6.4 (the updater manifest, the upstream-watch workflow), §8; `docs/superpowers/specs/2026-10-17-recovery-mode-design.md` §5.2 (the "Update now" line on the Recovery page), §6.3 (the restart's journal rule; the busy wait after a reload). Phase 4a's plan and its rulings (`docs/superpowers/plans/2026-11-04-phase4a-installer-cli-release-rulings.md`) are the prerequisite and bind this plan where they name 4b: the carries "the spike checks whether a manual over-install can keep the theme" and "the 4b plan's `latest.json` URL must use the release asset name `CMD-Studio_<version>_x64-setup.exe`", and the VM finding "step 6 moves to 4b's VM run".
 
@@ -16,7 +16,7 @@
 
 The outline assumed a few behaviours; the plan below reads as the sources say.
 
-- **The plugin's quiet install relaunches the app.** `tauri-plugin-updater`'s Windows `install_inner` (`~/.cargo/registry/src/*/tauri-plugin-updater-2.10.1/src/updater.rs:787-866`; 2.13.3 is reread in G-UPD) builds the NSIS arguments as `install_mode.nsis_args()` + `/UPDATE` + `/ARGS` + the app's own arguments + `installer_args`, where `nsis_args()` is `["/S", "/R"]` for `quiet` and `["/P", "/R"]` for `passive` (`src/config.rs:36-47`), runs `on_before_exit`, starts the file with `ShellExecuteW`, and calls `std::process::exit(0)`. The template's `.onInstSuccess` (`installer.nsi` l.27442-27452 of the text in `app/node_modules/@tauri-apps/cli-win32-x64-msvc/cli.win32-x64-msvc.node`) reads `/R` in silent and passive mode and runs `cmdstudio.exe` again. So the outline's F1 ("quiet `install()` does not relaunch") cannot hold, and the plugin's `install` is exactly the "now" path a click asks for: silent, and the app comes back. The automatic at-close install is the app's own spawn with `/S /UPDATE` and no `/R` (no relaunch), which Task 1's U3 confirms.
+- **The plugin's quiet install relaunches the app, with this process's own arguments.** `tauri-plugin-updater`'s Windows `install_inner` (`~/.cargo/registry/src/*/tauri-plugin-updater-2.10.1/src/updater.rs:787-866`; 2.13.3 is reread in G-UPD) builds the NSIS arguments as `install_mode.nsis_args()` + `/UPDATE` + `/ARGS` + **the current process's arguments** (`current_exe_args`, taken from `env::args_os` in the plugin's `lib.rs:86-88`) + `installer_args`, where `nsis_args()` is `["/S", "/R"]` for `quiet` and `["/P", "/R"]` for `passive` (`src/config.rs:36-47`), runs `on_before_exit`, starts the file with `ShellExecuteW`, and calls `std::process::exit(0)`. The template's `.onInstSuccess` (`installer.nsi` l.27443-27452 of the text in `app/node_modules/@tauri-apps/cli-win32-x64-msvc/cli.win32-x64-msvc.node`) reads `/R` in silent and passive mode and runs `cmdstudio.exe` with the `/ARGS` text. So the outline's F1 ("quiet `install()` does not relaunch") cannot hold; and a click on the Recovery page (a `--recovery` start) would bring the app back in recovery mode, and `app_restart`'s child (`--after-pid <pid>`) with a dead pid. The plan therefore uses the plugin for `check` and `download` only, and starts the installer itself in both paths (`update::start_installer`): `/S /UPDATE` at close (no relaunch, U3), `/S /R /UPDATE /ARGS` with nothing after `/ARGS` for "Update now" (the installer starts the app again as a normal start, U2), with `end_run` only after the download was verified and the file written, just before the spawn.
 - **In update mode the old uninstaller never runs, and under `/S` the reinstall page is never reached.** `PageLeaveReinstall` (l.26995-27006) goes to `reinst_done` when `$UpdateMode = 1` before any uninstall; the `/UPDATE` append at l.27042 is on the non-WiX branch of `reinst_uninstall`, reached only when the new installer itself was not started with `/UPDATE`; and NSIS calls no custom page function in silent mode (the template's own comment at l.27220: "the modes that skip the reinstall page choice: silent, passive and update"). So the updater path exercises no `$UpdateMode` guard of `hooks.nsh`: the new installer writes over the files (`Section Install` l.27340-27362, `CheckIfAppIsRunning` first, which in silent mode ends a running app through the Restart Manager, l.27847-27860), and POSTINSTALL renames the `.com` and rewrites the Recovery shortcut as on every install. U2 and U3 check the theme and AutoRun after the update, not an uninstaller's run.
 - **A by-hand upgrade keeps the theme only through the page's second choice.** For a newer version the "already installed" page (l.26927-26931, 26955-26990) offers "Uninstall before installing" (the first radio, checked by default) and "Do not uninstall"; the first runs the old uninstaller **without** `/UPDATE` (full cleanup, the theme off, the wizard again, as 4a's VM-B step 9b showed), the second installs over the files and keeps everything. A silent `/S` install keeps everything too. There is no other signal from the newer installer to the old uninstaller. The release notes say so (Task 6); U6 confirms the page's words.
 - **The plugin's `check()` never reads the pubkey.** Only `download()` verifies (`verify_signature`, `updater.rs:713`). An empty `pubkey` would not make `check` fail, so the app's `TauriUpdater::check` refuses before any network request when the config's pubkey is empty (Task 3): one log line, `update check=manifest`, and nothing else, until Task 6 fills it.
@@ -35,23 +35,25 @@ Every task's requirements include these. Values are copied from the spec, the br
 - **The installer (spec §6.1, §6.3, G10):** unchanged in 4b: NSIS, `installMode: "currentUser"`, `app/src-tauri/windows/hooks.nsh` as 4a shipped it (no line of it changes in 4b; `config_guard.rs`'s hooks tests keep passing). The updater runs the new installer with `/S` (silent) and never shows a page; the hooks' `$UpdateMode` guards stay as they are.
 - **The user Path (founder 2026-11-04, spec §5.7):** unchanged; an update's POSTINSTALL runs `--add-to-path` again, which changes nothing when the entry is there (Task 9 reads the Path after the update: one entry).
 - **One version (spec §6.4, brief):** `[workspace.package] version` in `Cargo.toml` is the source; `tauri.conf.json` has no `version` key; `app/package.json` and `app/package-lock.json` carry the same string; `config_guard::the_version_has_one_source` pins it; the release workflow refuses a tag that is not `v<that version>`. The app's running version for the updater is `tauri::Context::package_info().version` (Cargo's, or a `--config` override's in the spike), never a second constant.
-- **Release (spec §6.4, §6.5, brief):** the workflow runs on a pushed tag `v*` (the founder tags and pushes; agents never tag, never push) or by hand (`workflow_dispatch`, a dry run that uploads an artifact and creates nothing); it creates a **draft**, never publishes; from Task 6 on the draft is a normal release named "pre-release for testers" in its title and notes (not flagged pre-release: see "The endpoint" under Decisions); the SignPath step stays commented; winget is a founder step.
+- **Release (spec §6.4, §6.5, brief):** the workflow runs on a pushed tag `v*` (the founder tags and pushes; agents never tag, never push) or by hand (`workflow_dispatch`, a dry run that uploads an artifact and creates nothing); it creates a **draft**, never publishes; from Task 6 on the draft is a normal release named "pre-release for testers" in its title and notes (not flagged pre-release: see "The endpoint" under Decisions); the SignPath step stays commented; winget is a founder step. **Signing is the release path's only:** `release.yml` calls `ci.yml` with `sign: true` and `secrets: inherit`; `ci.yml`'s `workflow_call` input `sign` merges `bundle.createUpdaterArtifacts: true` into the bundle config for that run and sets the signing env, so the installer is signed and its `.sig` travels in the artifact; `tauri.bundle.conf.json` never carries `createUpdaterArtifacts` (`config_guard` pins its absence), and every push, pull-request or fork run builds unsigned without the secret.
 - **The modes (spec §6.2, founder 2026-10-16):** `UpdateMode::Auto` (default), `Notify`, `Off`, read from `settings.json` at every launch through `Backend::settings_or_default` (a damaged `settings.json` means the defaults, phase 2b, so Auto).
-- **Never interrupts a transaction:** the install step runs only after `Fs::try_lock` of `<data>\cmdstudio.lock` answers `Some` (`None` is `E_BUSY`: the at-close install is postponed to the next launch with one log line `update postponed=busy`; "Update now" answers `E_BUSY` to the window); the lock is held into the installer's start and released by the process's end.
-- **Never steals focus:** no window, dialog or relaunch comes from the updater without the user's click; the automatic install runs at close with `/S /UPDATE` and no `/R`; the "Updated to vX" notice is a `StartNotices` card on the next start, not a popup; the notify card is a card on the home page.
+- **Never interrupts a transaction:** the install step runs only after `Fs::try_lock` of `<data>\cmdstudio.lock` answers `Some` (`None` is `E_BUSY`: the at-close install is postponed to the next launch with one log line `update postponed=busy`; "Update now" answers `E_BUSY` to the window); the lock is taken just before the record is written and the installer started, and let go when that step returns (the installer never touches the data folder, so nothing needs it longer).
+- **Never steals focus:** no window, dialog or relaunch comes from the updater without the user's click; the automatic install runs at close with `/S /UPDATE` and no `/R`; "Update now" runs `/S /R /UPDATE /ARGS` with nothing after `/ARGS`, so the app comes back as a normal start (never `--recovery`, never `--after-pid`); the "Updated to vX" notice is a `StartNotices` card on the next start, not a popup; the notify card is a card on the home page.
+- **One instance, one close:** a second instance (one whose `start_run` found an earlier record still running) never reads the update record, never checks and never installs; an exit asked for by `app_restart` never installs at close (`update postponed=restart`): the update waits for the next normal close.
+- **The prune, one place:** old runtime folders go after a successful re-apply and at a normal start outside safe mode, under `try_lock` (a busy lock skips it until the next start); never from `update_after_start`, never in recovery mode.
 - **Always says it (spec §2.1):** every completed update shows "Updated to vX" with a link, once, until closed; the card goes with `update.json`'s deletion, which `app_ready` does after the UI has shown it (no `update_dismiss` command: Close hides the card for this run).
 - **Offline is silent:** a check that fails (no network, DNS, GitHub 5xx, a bad `latest.json`, a signature mismatch, an empty pubkey) writes one log line `update check=<kind>` (or `update download=<kind>`) and nothing else; the state is `idle`; nothing is shown.
 - **Add-ons move with the app only (spec §6.2):** no code path downloads OMP, Clink or a font; the runtime folder comes from `resources\` of the new install, checked against `manifest.json` as today.
-- **The one program run from outside `runtime\` (spec §5.10):** the installer the plugin verified (minisign, the pubkey in `tauri.conf.json`), from `<data>\updates\<file>` whose SHA-256 the app compares with the hash of the verified bytes before it starts it, or the plugin's own temp file inside `Update::install`; with `/S`; nothing else. Nothing from `latest.json` but the version and the signature reaches a command line.
+- **The one program run from outside `runtime\` (spec §5.10):** the installer the plugin verified (minisign, the pubkey in `tauri.conf.json`), from `<data>\updates\<file>` whose SHA-256 the app compares with the hash of the verified bytes before it starts it, with `/S /UPDATE` (at close) or `/S /R /UPDATE /ARGS` (now); nothing else, and never the plugin's own `install`. Nothing from `latest.json` but the version (SemVer-checked) and the signature reaches a file name or a command line.
 - **IPC, capability, CSP:** 37 + `update_status` + `update_install` = **39** names in `command_names.rs`, the capability, `ipc.rs`'s counts (39 commands, 35 logging); `app_status` gains `updated: Option<Updated>`; `ExternalTarget` gains `ReleaseNotes { version: String }` whose URL is `https://github.com/luraselenehalo/cmd-studio/releases/tag/v<version>` for a `version` that parses as SemVer and nothing else; the capability grants no `updater:` permission; `apply-progress` stays the only event; the CSP of `config_guard.rs` is unchanged (the updater's requests are Rust's, not the window's).
 - **The new crate.** `tauri-plugin-updater = "=2.13.3"` in `app/src-tauri/Cargo.toml` (and `semver = "=1.0.28"`); `Cargo.lock` gains the plugin's tree (reqwest 0.13 with rustls, minisign-verify, tempfile, infer, zip …) and is committed with Task 3. No npm package: `app/package.json` and `app/package-lock.json` do not change in 4b (the version bump of Task 9's Step 0 excepted).
-- **Secrets:** agents never read, write, print or echo `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` or `UPSTREAM_WATCH_TOKEN`; workflows reference them as `${{ secrets.NAME }}` only, and never in a step that prints its environment; the spike's ephemeral key is generated inside the CI run, written only under `$RUNNER_TEMP`, and never uploaded (its `.pub` is).
+- **Secrets:** agents never read, write, print or echo `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` or `UPSTREAM_WATCH_TOKEN`; workflows reference them as `${{ secrets.NAME }}` only, in the signing path alone (`inputs.sign`), and never in a step that prints its environment; a pull request's CI never needs them; the spike's ephemeral key is generated inside the CI run, written only under `$RUNNER_TEMP`, and never uploaded (its `.pub` is).
 - **The updater's endpoint** is `https://github.com/luraselenehalo/cmd-studio/releases/latest/download/latest.json`, which GitHub serves from the newest published, non-pre-release release; see "The endpoint" under Decisions for what that asks of the founder. `config_guard.rs` pins it, `windows.installMode: "quiet"`, and the absence of `dangerousInsecureTransportProtocol` in the committed config.
 - **Bindings.** 4b changes exported types (`AppStatus`, `ExternalTarget`) and adds `UpdateState`, `UpdateStatus`, `Updated`. Regenerate by the manual steps only: delete the generated `.ts` files that change, then `cargo test -p cmdstudio-app --lib export_bindings` with `TS_RS_EXPORT_DIR` set to `<repo>\app\ui\src\bindings`. Never run `scripts/export-bindings.ps1`; never pass `-ExecutionPolicy`. CI's "Bindings are fresh" step is the gate.
 - **The checks.** Each Rust task ends with `cargo fmt --all`, then `cargo clippy --workspace --all-targets -- -D warnings`, `cargo clippy -p cmdstudio-core --all-targets -- -D warnings`, `cargo clippy -p cmdstudio-core --all-targets --features fake -- -D warnings`, `cargo clippy -p cmdstudio-core --all-targets --features ts -- -D warnings`, and `cargo fmt --all -- --check`. Each UI task ends with `npm run typecheck` and `npm test`, then `TZ=UTC npm test` (Git Bash: `TZ=UTC npm test`; PowerShell: `$env:TZ='UTC'; npm test`), and, when it touches the bundle, `npm run build` and `bash scripts/check-dist.sh`, all in `<repo>\app`. Workflow files are checked with `python3 -c "import yaml,sys; yaml.safe_load(open(sys.argv[1]))" <file>` (if PyYAML is absent on this PC, say "parsed in CI") and by CI itself. PowerShell scripts of this plan are parse-checked with `[System.Management.Automation.Language.Parser]::ParseFile`; the upstream script additionally runs its own test in fixture mode (Task 7), which touches the network never and the repo never.
-- **PC safety (the brief, binding).** The dev PC is the founder's own. Never run the built app, `cmdstudio.exe`, `cmdstudio-cli.exe`/`cmdstudio.com`, an installer, an uninstaller, a VM guest script, a Lua probe or a stand-in binary; never run `npx tauri dev`, Oh My Posh or Clink; never run a spike build. Run `cmd.exe` only with `/d`. Never touch this PC's AutoRun, fonts, Windows Terminal settings, `%LOCALAPPDATA%\ai.resincore.cmdstudio`, `%ProgramData%` or the user Path: every updater test runs over the fake machine and the fake updater; no test of this plan opens a network connection. Never read this PC's event log, registry or windows. Never pass `-ExecutionPolicy`. Never write a file outside the repo and the session scratchpad. Never set `CMDSTUDIO_SYSTEM_TESTS`, `CMDSTUDIO_OMP_TESTS` or `CMDSTUDIO_ALLOW_PARITY_SKIP`. Building the installer locally (`npm run tauri -- build` with the bundle on) makes the Tauri CLI download NSIS into `%LOCALAPPDATA%\tauri`: a download, which needs the founder's explicit permission; without it build with `--no-bundle` and let CI make the installer. Windows Application Control blocks (`os error 4551`) are rerun once and never worked around: mark the step "not run locally (WDAC); CI is the gate" and go on. Scripts written for a VM (`spikes/vm/guest/*.ps1`, `docs/spikes/phase4-update/*.ps1`) are parse-checked only, never run, not even as a dry run; `guard.test.ps1` included.
+- **PC safety (the brief, binding).** The dev PC is the founder's own. Never run the built app, `cmdstudio.exe`, `cmdstudio-cli.exe`/`cmdstudio.com`, an installer, an uninstaller, a VM guest script, a Lua probe or a stand-in binary; never run `npx tauri dev`, Oh My Posh or Clink; never run a spike build. Run `cmd.exe` only with `/d`. Never touch this PC's AutoRun, fonts, Windows Terminal settings, `%LOCALAPPDATA%\ai.resincore.cmdstudio`, `%ProgramData%` or the user Path: every updater test runs over the fake machine and the fake updater; no test of this plan opens a network connection. Never read this PC's event log, registry or windows. Never pass `-ExecutionPolicy`. Never write a file outside the repo and the session scratchpad. Never set `CMDSTUDIO_SYSTEM_TESTS`, `CMDSTUDIO_OMP_TESTS` or `CMDSTUDIO_ALLOW_PARITY_SKIP`. Building the installer locally (`npm run tauri -- build` with the bundle on) makes the Tauri CLI download NSIS into `%LOCALAPPDATA%\tauri`: a download, which needs the founder's explicit permission; without it build with `--no-bundle` and let CI make the installer. Windows Application Control blocks (`os error 4551`) are rerun once and never worked around: mark the step "not run locally (WDAC); CI is the gate" and go on. Scripts written for a VM (`spikes/vm/guest/*.ps1`, `docs/spikes/phase4-update/*.ps1`) are parse-checked only, never run, not even as a dry run; `guard.test.ps1` included. No `VBoxManage` on this PC: the controller runs the VMs. `%TEMP%` counts as outside the repo: a test that needs a scratch folder is given one under the repo's `target\` (gitignored) or the session's scratchpad.
 - **Downloads** need the founder's explicit permission, each time, one per check: Task 1's spike artifact (`gh run download … --name cmdstudio-updater-spike`) and Task 9's installer artifact (`gh run download … --name cmdstudio-installer`); the VMs are filled from that one folder. Nothing of this plan downloads a crate's source by hand: `cargo` fetches the plugin as it fetches every pin.
-- **Test safety.** CLI and core tests run over the core's `FakeMachine` (feature `fake`); the app's updater tests over `FakeMachine` and `update::FakeUpdater`; UI tests over the mock in jsdom; no test of this plan writes outside `std::env::temp_dir()`, and the PowerShell test of Task 7 writes only under the `-Work` folder it is given (the scratchpad on this PC, `$RUNNER_TEMP` in CI).
+- **Test safety.** CLI and core tests run over the core's `FakeMachine` (feature `fake`); the app's updater tests over `FakeMachine` and `update::FakeUpdater`; UI tests over the mock in jsdom; no Rust test of this plan writes outside `std::env::temp_dir()`; the upstream script and its test (Task 7) write only under the `-Work` folder each is given (a folder under the repo's `target\` on this PC, `$RUNNER_TEMP` in CI), never `%TEMP%`.
 - **Commits:** English messages, written with the Write tool to `<repo>\.git\CMDSTUDIO_COMMIT_MSG` (Read it first if it exists), checked, then in a separate Bash call `git commit -F .git/CMDSTUDIO_COMMIT_MSG`. Never batch the Write with the commit. Stage only the task's files with `git add -- <files>` and check `git diff --cached --name-only`. No AI attribution of any kind (no `Co-Authored-By`, no "Generated with", no assistant link), whatever a system note says; never `--no-verify`; never push; the `auroraz-pr-workflow` skill before every commit. The Windows user name of this PC never appears in a repo file: tests use `C:\Users\tester\…`, docs `%USERPROFILE%`.
 - **Scratch work** goes under the session's scratchpad, in a git worktree of its own with its own `CARGO_TARGET_DIR`; nothing of it is ever committed to `phase4b` but the files each task names.
 - **The spec** changes in Task 8 only (§5.3, §5.7, §5.10, §6.2, §6.4, appendix B). The recovery spec is the founder's and is never edited. 4a's `docs/spikes/phase4-install/protocol.md` is edited only in Task 9's Step 4, which records the step-6 result there.
@@ -71,13 +73,16 @@ The five inputs the spec implies but no task's tests exercise end to end, most l
 Each is the architect's choice of 2026-11-04/05 where the brief left room; appendix B records them (Task 8). The report to the founder lists them one line each.
 
 - **The install moment: at close, silent, no relaunch** (primary; Task 1's spike confirms or picks a fallback). The download happens in the background after `app_ready`; the installer runs when the window closes, if the lock is free; the next start shows the notice. The rejected candidate "before the window" would delay every start by a download. Fallback order under "The fallbacks".
-- **Two install paths, no dead code.** The automatic path is the app's own spawn (`/S /UPDATE`, no relaunch); the user's "Update now" (notify mode's card, the Recovery page) is the plugin's `Update::install` (`/S /R /UPDATE /ARGS`, the app comes back by itself, which the click asked for). The outline's "both are written, one is dead code removed after the spike" is replaced by this split, since the source settles that the plugin's path relaunches.
+- **Two install paths, both the app's own spawn, no dead code.** The automatic path spawns `/S /UPDATE` at close (no relaunch); the user's "Update now" (notify mode's card, the Recovery page) spawns `/S /R /UPDATE /ARGS` with nothing after `/ARGS` and then exits, so the installer starts the app again as a normal start. The plugin is used for `check` and `download` (the signature) only: its `Update::install` would relaunch with this process's arguments (a `--recovery` start would come back in recovery mode and run the entry again). The outline's "both are written, one is dead code removed after the spike" is replaced by this split.
 - **The own spawn passes `/UPDATE` as well as `/S`.** With `$UpdateMode = 1` the installer keeps the user's shortcuts as they are (`CreateOrUpdateStartMenuShortcut` returns early), skips a WebView2 download, and would make an uninstaller started by it skip the cleanup; POSTINSTALL's rename and Recovery shortcut run regardless. U3 runs with it.
+- **The run record ends before the installer starts, in both paths**, and only once the download was verified and the file written (a failed spawn writes the record back): the installer's Restart Manager may end the app before its own exit code runs, and a record left behind would open the updated app on a false "closed unexpectedly" notice.
+- **A second instance and a restart never install.** `start_run`'s "still-running" instance (single-instance ends it a moment later) reads no record, checks nothing and installs nothing; `app_restart` marks the backend restarting, and the exit it asks for installs nothing (`update postponed=restart`).
+- **The UI polls `update_status` until the check has run.** The check starts only after `app_ready`, after the home page's first read, so `UpdateOffer` (Home and the Recovery page) reads again every 2 s while `checkedAtMs` is null or the state is `checking`/`downloading`, for at most a minute; no new event, no new command.
 - **The endpoint.** GitHub's `releases/latest/download/latest.json` skips releases flagged "pre-release", so an app checking it would never see a v0.x flagged that way. Decision: **the endpoint is that fixed URL, and from the first release the founder publishes with updater assets on, releases are not flagged pre-release; the title and the notes keep saying "pre-release for testers".** Task 6 drops `--prerelease` from `release.yml:78` (the words stay). The alternative, if the founder wants the flag: a second, fixed release tagged `updater` whose one asset `latest.json` the workflow replaces (`gh release upload updater latest.json --clobber`) on every publish, and the endpoint `releases/download/updater/latest.json`; Task 6 names both and builds the one the founder picks.
 - **An empty pubkey is a refused check, not a network request.** Until Task 6 the committed config holds `pubkey: ""`; `TauriUpdater::check` answers `UpdateError::Manifest` before the plugin is asked, so a dev build makes no request at every start.
 - **`update.json` in the data folder**, written before the installer starts, read at the next start and deleted by `app_ready`; `--cleanup` knows it and `updates\`; `updates\` is emptied at every start before the check, so a postponed download is fetched again rather than trusted across runs.
 - **The re-apply after an update runs at the next start, in the background, under `busy = "update_reapply"`** (a name of its own like `recovery_entry`, not an entry of `CHANGES_MACHINE`, which lists IPC commands), only when a theme is applied and `state.json`'s runtime versions differ from the new pins; the UI shows the busy wait it already has (recovery spec §6.3) with its own words; its log line `update reapply=ok|<code>`.
-- **Old runtime folders are pruned best effort** after a successful re-apply and at every start: every `runtime\omp-*` and `runtime\clink-*` (and every `clink-*` directly in the user's ProgramData folder) whose name is not the pinned one and that is not one `state.json` names (the applied `omp_version`'s folder and the folder of the Clink exe AutoRun runs); a folder held open (a cmd window still has the DLL) stays until the next start.
+- **Old runtime folders are pruned best effort**, in one place (`Backend::prune_runtimes`, under `try_lock`), after a successful re-apply and at every normal start outside safe mode: every `runtime\omp-*` and `runtime\clink-*` (and every `clink-*` directly in the user's ProgramData folder) whose name is not the pinned one and that is not one `state.json` names: `runtime\omp-<applied.omp_version>` and `runtime\clink-<applied.clink_version>` by their long paths (AutoRun may hold the 8.3 form for a Thai user name, G19, which a string compare would never match), or the ProgramData folder the launch names; a folder held open (a cmd window still has the DLL) stays until the next start; a busy lock skips the prune.
 - **The upstream-watch PR changes `scripts/fetch-resources.ps1` only**, and its body lists what a human finishes: `OMP_VERSION`/`CLINK_VERSION` in `crates/core/src/plan.rs`, `NERD_FONTS_VERSION` in `crates/core/src/resources.rs`, `app/ui/src/screens/credits.ts`, `docs/credits.md`, `.github/release-notes.md`, the README, and the parity test. CI then fails on the PR until those are done: that is the gate (spec §6.4: "never lower a test").
 - **PRs from the workflow need a token that triggers CI:** `GITHUB_TOKEN`'s pushes and PRs do not run `pull_request` workflows; the founder's fine-grained PAT `UPSTREAM_WATCH_TOKEN` (contents: write, pull requests: write, this repo only) does. Without it the workflow still opens the PR (the repository setting "Allow GitHub Actions to create and approve pull requests" must be on) and the founder closes and reopens it to run CI (noted in the workflow).
 - **No npm package.** The window never calls the plugin; `@tauri-apps/plugin-updater` is not installed. If the founder wants the JS API later, it is that package at the plugin's version, with `updater:default` in the capability, and a change to `ipc.rs`'s capability test.
@@ -88,29 +93,30 @@ Before the task that uses each, the implementer opens the real thing and reads t
 
 | # | Confirm | Where | Used by |
 |---|---|---|---|
-| G-UPD | **Read on 2026-11-05 in 2.10.1** (the one version in this PC's registry); **reread in 2.13.3 by Task 3's implementer after `cargo fetch`**, file:line into the module doc of `update.rs`: (a) `Update::download` fetches the bytes, calls `verify_signature(&buffer, &self.signature, &self.config.pubkey)` and returns them without running anything (`src/updater.rs:652-715`); (b) `Update::install` on Windows → `install_inner`: `extract` (the bytes to a temp file), the NSIS arguments `nsis_args()` + `/UPDATE` + `/ARGS` + the app's own arguments + `installer_args`, `on_before_exit`, `ShellExecuteW(open, file, args)`, `std::process::exit(0)` (`:787-866`); `nsis_args()` for `quiet` is `/S /R` (`src/config.rs:36-47`); (c) `Updater::check` replaces `{{current_version}}`/`{{target}}`/`{{arch}}` in the endpoint, GETs it with `Accept: application/json`, parses `RemoteRelease`, and answers `None` unless `version_comparator` (default `release.version > current`) says so; a manifest that is not JSON or has no `windows-x86_64[-nsis]` target is an `Err` (`:386-566`); (d) `UpdaterBuilder::version_comparator`, `on_before_exit`, `installer_args`; `UpdaterExt::updater_builder()` on `AppHandle` (`src/lib.rs:33-90`); (e) `Config` deserializes `pubkey: String` (required), `endpoints`, `windows.installMode` (`quiet`/`passive`/`basicUi`), `dangerousInsecureTransportProtocol` (`src/config.rs:94-164`); `validate_endpoints` refuses `http:` in a release build unless that flag is set; (f) the plugin's `Error` variants (`src/error.rs`) for `update::classify` | the cargo registry after `cargo fetch` | Task 3 |
+| G-UPD | **Read on 2026-11-05 in 2.10.1** (the one version in this PC's registry); **reread in 2.13.3 by Task 3's implementer after `cargo fetch`**, file:line into the module doc of `update.rs`: (a) `Update::download` fetches the bytes, calls `verify_signature(&buffer, &self.signature, &self.config.pubkey)` and returns them without running anything (`src/updater.rs:652-715`); (b) `Update::install` on Windows → `install_inner`: `extract` (the bytes to a temp file), the NSIS arguments `nsis_args()` + `/UPDATE` + `/ARGS` + the current process's arguments (`current_exe_args`) + `installer_args`, `on_before_exit`, `ShellExecuteW(open, file, args)`, `std::process::exit(0)` (`:787-866`); `nsis_args()` for `quiet` is `/S /R` (`src/config.rs:36-47`): known, and the reason the app spawns the installer itself (Decisions); (c) `Updater::check` replaces `{{current_version}}`/`{{target}}`/`{{arch}}` in the endpoint, GETs it with `Accept: application/json`, parses `RemoteRelease`, and answers `None` unless `version_comparator` (default `release.version > current`) says so; a manifest that is not JSON or has no `windows-x86_64[-nsis]` target is an `Err` (`:386-566`); (d) `UpdaterBuilder::version_comparator`, `on_before_exit`, `installer_args`; `UpdaterExt::updater_builder()` on `AppHandle` (`src/lib.rs:33-90`); (e) `Config` deserializes `pubkey: String` (required), `endpoints`, `windows.installMode` (`quiet`/`passive`/`basicUi`), `dangerousInsecureTransportProtocol` (`src/config.rs:94-164`); `validate_endpoints` refuses `http:` in a release build unless that flag is set; (f) the plugin's `Error` variants (`src/error.rs`; in 2.10.1: `EmptyEndpoints`, `Io`, `Semver`, `Serialization`, `ReleaseNotFound`, `UnsupportedArch`, `UnsupportedOs`, `FailedToDetermineExtractPath`, `UrlParse`, `Reqwest`, `TargetNotFound`, `TargetsNotFound`, `Network`, `Minisign`, `Base64`, `SignatureUtf8`, `Extract`, `TempDirNotOnSameMountPoint`, `BinaryNotFoundInArchive`, `TempDirNotFound`, `AuthenticationFailed`, `DebInstallFailed`, `PackageInstallFailed`, `InvalidUpdaterFormat`, `Http`, `InvalidHeaderValue`, `InvalidHeaderName`, `FormatDate`, `InsecureTransportProtocol`, `Tauri`), every one of which `update::classify` maps, a variant 2.13.3 adds falling to `Other` | the cargo registry after `cargo fetch` | Task 3 |
 | G-NSI-U | **Read on 2026-11-05** from the `installer.nsi` template embedded in `app/node_modules/@tauri-apps/cli-win32-x64-msvc/cli.win32-x64-msvc.node` (line numbers are `sed -n`'s over the binary's text lines): `.onInit` parses `/P`, `/NS`, `/UPDATE` (l.27171-27185); `PageLeaveReinstall` l.26995-27075 (`$UpdateMode = 1 → reinst_done` at l.27004-27006; the `/UPDATE` and `/P` appends l.27042-27043 on the `${Else}` branch of `reinst_uninstall`); `PageReinstall`'s radios and their default l.26955-26990 (the first radio checked unless the user chose the second before); `Section Install` l.27340-27362 (`PREINSTALL`, `CheckIfAppIsRunning`, the files); `.onInstSuccess` l.27442-27452 (`/R` in silent/passive mode → `nsis_tauri_utils::RunAsUser "$INSTDIR\cmdstudio.exe" "<the /ARGS text>"`); `CheckIfAppIsRunning` l.27836-27888 (`IfSilent kill_` → `RmShutdown` force); `CreateOrUpdateStartMenuShortcut` returns early when `$UpdateMode = 1` (l.27638-27643); `Section Uninstall` l.27476-27600 (`PREUNINSTALL` first, the `$UpdateMode <> 1` blocks) | the CLI binary's embedded template | Tasks 1, 3, 9 |
-| G-SIG | The Tauri CLI's `signer generate` takes `-w/--write-keys <path>` (writes the private key there and the public key at `<path>.pub`), `-p/--password`, `-f/--force`, `--ci` ("Skip prompting for values": no password); the bundler reads `TAURI_SIGNING_PRIVATE_KEY` (a path or the key's text) and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (the strings are in the CLI binary; `write-keys`, "Skip prompting for values", both variable names). With `bundle.createUpdaterArtifacts: true` the bundler signs the NSIS installer and writes `<installer>.sig` beside it (the base64 minisign signature text that `latest.json`'s `signature` carries verbatim) and fails when the key variable is missing. Confirmed by the first spike build's log and listing | the CLI binary; Task 1's CI run | Tasks 1, 6 |
+| G-SIG | The Tauri CLI's `signer generate` takes `-w/--write-keys <path>` (writes the private key there and the public key at `<path>.pub`), `-p/--password`, `-f/--force`, `--ci` ("Skip prompting for values": no password); the bundler reads `TAURI_SIGNING_PRIVATE_KEY` (a path or the key's text) and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (the strings are in the CLI binary; `write-keys`, "Skip prompting for values", both variable names). With `bundle.createUpdaterArtifacts: true` (merged in by `ci.yml` for the spike and for `inputs.sign`, never committed) the bundler signs the NSIS installer and writes `<installer>.sig` beside it (the base64 minisign signature text that `latest.json`'s `signature` carries verbatim) and fails when the key variable is missing. Confirmed by the first spike build's log and listing | the CLI binary; Task 1's CI run | Tasks 1, 6 |
 | G-IDX | **Read on 2026-11-05** from the crates.io sparse index (`index.crates.io/ta/ur/tauri-plugin-updater`): 2.13.0–2.13.3 require tauri `^2.12` and tauri-plugin `^2.7`/`^2.7.1`; 2.13.3 is the newest 2.13.x; 2.14.0/2.14.1 exist with the same tauri requirement; 2.10.x–2.12.0 require tauri `^2.10`. Tauri stays at 2.12.4. If `cargo` cannot resolve `=2.13.3` with the pinned `tauri =2.12.4` (a `tauri-utils` conflict through `tauri-plugin ^2.7.1`), pin `=2.12.0` instead and record it (fallback F-PIN) | `cargo fetch` in Task 3 Step 0 | Task 3 |
 | G-GH | `releases/latest/download/latest.json` is served from the newest published release that is not a draft and not flagged pre-release (GitHub's "latest" rule); `gh release create` without `--prerelease` makes a release that qualifies once published; `gh release upload <tag> <file> --clobber` replaces an asset. `secrets: inherit` on a `workflow_call` job passes the caller's secrets to the called workflow | GitHub's docs for `gh release` and reusable workflows | Tasks 6, 7, 9 |
-| G-VBOX | VirtualBox NAT guests reach the host at `10.0.2.2`; `VBoxManage controlvm <vm> setlinkstate1 off|on` disconnects and reconnects the NIC; the host's firewall must let `python3` listen on 8765 (a founder's one-time allow when Windows asks) | `spikes/vm/README.md`, VirtualBox's manual | Tasks 1, 9 |
+| G-VBOX | `VBoxManage controlvm <vm> setlinkstate1 off|on` disconnects and reconnects the guest's NIC (the controller's host command; Task 9's offline case against GitHub). The spike's manifests and installers are served inside the guest by `spikes/vm/guest/update-server.ps1`, a `System.Net.Sockets.TcpListener` on `127.0.0.1:8765` (loopback: no firewall, no http.sys URL ACL, so a non-admin user may listen), started as a hidden process from the desktop task as 4a's `-HoldFont` holder is (`Start-Process -WindowStyle Hidden -PassThru`, its pid in a file), so it outlives the task; a stopped listener is a refused connection, which reqwest reports as an error and `classify` says as `offline` (U7) | `spikes/vm/README.md`, `spikes/vm/guest/install-check.ps1:217-225`, VirtualBox's manual | Tasks 1, 9 |
 
 ## Spike results the later tasks depend on (Task 1)
 
-| # | What the spike shows (VM-A, or VM-B when no VM with Windows Terminal starts; a spike build with an ephemeral key, `latest.json` served from the host at `http://10.0.2.2:8765/`) | Tasks 2–9 assume | Used by | If not |
+| # | What the spike shows (VM-A, or VM-B when no VM with Windows Terminal starts; a spike build with an ephemeral key, `latest.json` and the installers served inside the guest at `http://127.0.0.1:8765/` by `update-server.ps1`) | Tasks 2–9 assume | Used by | If not |
 |---|---|---|---|---|
 | U1 | `Update::download()` of tauri-plugin-updater 2.13.3 verifies the minisign signature and returns the bytes without running anything; the app writes them to `updates\cmdstudio-0.1.0-spike.2-setup.exe` and the log has `update downloaded=0.1.0-spike.2` | yes | Task 3 | the updater is dropped from v0.x and the founder decides (no fallback: the plugin's contract) |
-| U2 | "Update now" (notify mode's card) through `Update::install` in `installMode: "quiet"`: the window disappears at once (the plugin's `exit(0)`), the installer runs with `/S /R /UPDATE /ARGS` and no window, no uninstaller runs (G-NSI-U), the app comes back by itself (`/R`) within the measured time, AutoRun and the theme are untouched, `cmdstudio.exe` is spike.2, and the returned app shows "Updated to v0.1.0-spike.2" | the relaunch happens; the cleanup never runs | Task 3, Task 4 | if the cleanup ran (AutoRun lost CMD Studio's part): stop, G-NSI-U's reading is wrong (back to 4a); if no relaunch: the "now" path keeps working and the card's words drop "opens again by itself" |
+| U2 | "Update now" (notify mode's card): the app downloads and verifies, writes the file, the record and the run's end, spawns the installer with `/S /R /UPDATE /ARGS` and exits; the installer runs with no window, no uninstaller runs (G-NSI-U), and starts the app again as a normal start (the home page, not recovery mode) within the measured time; AutoRun and the theme are untouched, `cmdstudio.exe` is spike.2, and the returned app shows "Updated to v0.1.0-spike.2" | the relaunch is a normal start; the cleanup never runs | Task 3, Task 4 | if the cleanup ran (AutoRun lost CMD Studio's part): stop, G-NSI-U's reading is wrong (back to 4a); if no relaunch comes (F-NOW): the "now" path keeps working, the card's words drop "opens again by itself", and the user starts the app |
 | U3 | The app's own spawn of the verified file with `/S /UPDATE` at `RunEvent::Exit` (automatic mode) installs without a window and without relaunching the app; `cmdstudio.exe`'s file is replaced although the exiting process still runs for a moment (the template's `CheckIfAppIsRunning` ends it in silent mode); `update.json` is there; AutoRun untouched; the time from the close to the new exe is measured | yes: the primary design | Task 3 | F2 |
-| U4 | After U3 the user starts the new app: the notice "Updated to v0.1.0-spike.2" shows with its link ("What changed" opens the browser at `…/releases/tag/v0.1.0-spike.2`), and, the pins being equal between the two spike builds, no re-apply runs (the log has `update installed to=0.1.0-spike.2` and no `update reapply=` line); `update.json` is gone after the home page drew | the notice shows; no re-apply when the pins are equal | Tasks 3, 5 | a notice that does not show is a Task 3 bug, not a fallback |
+| U4 | After U3 the user starts the new app: the notice "Updated to v0.1.0-spike.2" shows with its link ("What changed" opens the browser at `…/releases/tag/v0.1.0-spike.2`), and, the pins being equal between the two spike builds, no re-apply runs (the log has `update installed to=0.1.0-spike.2` and no `update reapply=` line; part A runs after Task 5, so the line's absence is a fact, not a vacancy); `update.json` is gone after the home page drew | the notice shows; no re-apply when the pins are equal | Tasks 3, 5 | a notice that does not show is a Task 3 bug, not a fallback |
 | U5 | `Updater::check()` against a `latest.json` whose `version` equals the current one logs `update check=none`; against one that is not JSON `update check=manifest`; nothing shows on screen either time | yes | Task 3 | `version_comparator` closure set explicitly (it is, Task 3) |
 | U6 | A by-hand install of spike.2 over spike.1 (interactive) shows the "already installed" page; choosing "Do not uninstall" installs over the files and keeps AutoRun and the theme; the page's exact words are recorded for the release notes. (The first radio's path, the full cleanup, is 4a's 9b and is not repeated.) | a by-hand upgrade can keep the theme through the second radio | Task 6 (the notes), Task 8 | the notes say "let CMD Studio update itself" only |
-| U7 | `UpdateMode::Off`: no request reaches the host's server log and the app's log has `update mode=off`; offline (the NIC off, automatic mode): `update check=offline` and nothing on screen | yes | Tasks 3, 9 | a request in Off mode is a Task 3 bug |
+| U7 | `UpdateMode::Off`: the guest server's request log gains no line and the app's log has `update mode=off`; offline (the guest server stopped, automatic mode: a refused connection): `update check=offline` and nothing on screen. (Task 9's B5 repeats both against GitHub, with the NIC off as the offline case.) | yes | Tasks 3, 9 | a request in Off mode is a Task 3 bug |
 
 ### The fallbacks
 
-- **F2 (U3: the own spawn fails to replace the running exe, or shows a window):** "at launch when idle": the download finishes, and when `app_status.busy` is null, no editor has an unsaved change (the UI answers a third command `update_can_install`) and the lock is free, the app writes `update.json`, `end_run`, and calls `Update::install` (the relaunch of U2 is then wanted); the window disappears and comes back within the installer's time; appendix B records the moment as "ตอนเปิด เมื่อว่าง". In Task 3 the at-exit branch is deleted and `update_install` is called from `update_check_and_download`'s end when `update_can_install` answers yes.
+- **F2 (U3: the own spawn fails to replace the running exe, or shows a window):** "at launch when idle": the download finishes, and when `app_status.busy` is null, no editor has an unsaved change (the UI answers a third command `update_can_install`) and the lock is free, the app runs the "now" path (the relaunch of U2 is then wanted); the window disappears and comes back within the installer's time; appendix B records the moment as "ตอนเปิด เมื่อว่าง". In Task 3 the at-exit branch is deleted and `update_install` is called from `update_check_and_download`'s end when `update_can_install` answers yes.
 - **F3 (neither the primary nor F2 holds):** "ask to restart": a notify-style card "v<X> is ready: restart CMD Studio to install it" with a button that calls `update_install`; automatic mode behaves as notify for the install step only (the download stays automatic). The founder is told.
+- **F-NOW (U2: `/R` brings no app back, or brings it back with an argument):** the "now" path spawns `/S /UPDATE` only and the card says "CMD Studio closes to install v<X>; open it again from the Start menu"; the words of `home.update.installing` change, nothing else.
 - **F-PIN (G-IDX):** `tauri-plugin-updater = "=2.12.0"` and the same reading of its source (its `install_inner` is the same code).
 - **F-VER (Task 1):** the bundler refuses `0.1.0-spike.1` as a version (NSIS takes SemVer with a pre-release; if `makensis` or the bundler's version check does not), the spike builds use `0.1.1` and `0.1.2`, the `latest.json` and the protocol say those, and the spike.1 installer is a downgrade for the installed 0.1.0 (allowed: `allowDowngrades` is Tauri's default).
 - **F1 is withdrawn** (the source settles it; see "What the sources settled").
@@ -120,15 +126,15 @@ Before the task that uses each, the implementer opens the real thing and reads t
 The brief names three 4a minors as candidates. Folded, with a test, where 4b edits the file anyway:
 
 - **M6 (the version grep anchored to `[workspace.package]`): folded.** Task 1 edits `ci.yml`'s listing step and Task 6 edits `release.yml`'s version step; both greps become an `awk` that reads `version = ` only inside the `[workspace.package]` table, and `config_guard::the_workflows_read_the_version_under_workspace_package` pins that text in both files (Task 6).
-- **M9 / Task 1's deferred (`start_app_beside` inherits stdio): left.** 4b does not edit `console.rs`. The updater's own spawn (`update::install_quiet`, Task 3) sets its child's stdio to null from the start, so the new code does not repeat the slip.
+- **M9 / Task 1's deferred (`start_app_beside` inherits stdio): left.** 4b does not edit `console.rs`. The updater's own spawn (`update::start_installer`, Task 3) sets its child's stdio to null from the start, so the new code does not repeat the slip.
 - **M10 (the ARM64 refusal's empty `$INSTDIR`): left.** `hooks.nsh` is not edited in 4b (Global Constraints).
 
 Every other 4a minor stays where the rulings file lists it.
 
 ## File map
 
-- `app/src-tauri/src/update.rs` — the `Updater` trait, `Available`, `UpdateError`, `TauriUpdater` (the plugin), `FakeUpdater` (tests), `install_quiet(file)` (the own spawn), `start_check` (the thread after `app_ready`), `newer` (the version comparator) (Task 3).
-- `app/src-tauri/src/backend/update.rs` — `UpdateRecord`, `UpdateState`, `UpdateStatus`, `Updated`, `UPDATE_REAPPLY_BUSY`, `Backend::{update_check_and_download, update_status, update_install, update_at_exit, update_after_start, update_record_consumed, updated}` (Task 3); `Backend::{update_needs_reapply, update_reapply}` (Task 5).
+- `app/src-tauri/src/update.rs` — the `Updater` trait (`check`, `download`), `Available`, `UpdateError`, `classify`, `TauriUpdater` (the plugin), `FakeUpdater` (tests), `start_installer(file, relaunch)` (the own spawn, both paths), `start_check` (the thread after `app_ready`), `is_newer` (the version comparator) (Task 3).
+- `app/src-tauri/src/backend/update.rs` — `UpdateRecord`, `UpdateState`, `UpdateStatus`, `Updated`, `UPDATE_REAPPLY_BUSY`, `Backend::{update_check_and_download, update_status, update_install, update_at_exit, update_after_start, update_record_consumed, updated, mark_restarting}` (Task 3); `Backend::{update_needs_reapply, update_reapply, prune_runtimes, prune_at_start}` (Task 5). `app/src-tauri/src/backend/run.rs` — `run_is_ours`, `rewrite_run_record`, `app_ready` consumes the record (Task 3); `AppStatus.updated` (Task 4).
 - `crates/core/src/recovery.rs` — `Paths::update_file()`, `Paths::updates_dir()` (Task 2).
 - `crates/cli/src/lib.rs` — `cmd_studios_own_file` and `put_there_by_cmd_studio` know `update.json`, `updates\` and the temp name (Task 2).
 - `crates/core/src/plan.rs` — `runtime_changed(&State) -> bool` (Task 2); `crates/core/src/cleanup.rs` — `runtime_dirs_named_by`, `prune_old_runtimes` (Task 2).
@@ -136,29 +142,30 @@ Every other 4a minor stays where the rulings file lists it.
 - `app/src-tauri/src/ipc.rs`, `command_names.rs`, `capabilities/default.json`, `backend/run.rs` (`AppStatus.updated`) — the two commands (Task 4).
 - `app/src-tauri/src/lib.rs` — the plugin registration, `TauriUpdater` in Tauri's state, `update_after_start` after the record, the exit hook (Task 3); the re-apply thread (Task 5).
 - `app/src-tauri/src/config_guard.rs` — `plugins.updater` pinned (Task 3); `createUpdaterArtifacts` and the pubkey's shape (Task 6); the workflows' version grep (Task 6).
-- `app/src-tauri/tauri.conf.json` — `plugins.updater` (`pubkey: ""`, `endpoints`, `windows.installMode: "quiet"`) (Task 3; the pubkey in Task 6); `app/src-tauri/tauri.bundle.conf.json` — `bundle.createUpdaterArtifacts: true` (Task 6).
+- `app/src-tauri/tauri.conf.json` — `plugins.updater` (`pubkey: ""`, `endpoints`, `windows.installMode: "quiet"`) (Task 3; the pubkey in Task 6). `app/src-tauri/tauri.bundle.conf.json` is not changed: `createUpdaterArtifacts` comes through `ci.yml`'s `sign` input (Task 6) and the spike's override (Task 1).
 - `app/src-tauri/Cargo.toml`, `Cargo.lock` — the plugin and `semver` (Task 3).
 - `app/ui/src/ipc/types.ts`, `tauri.ts`, `mock.ts`, `work.ts`, `app/ui/src/App.tsx` (the "Updated to" card in `StartNotices`), `app/ui/src/state.tsx`, `app/ui/src/screens/Home.tsx` (the notify card), `Settings.tsx` (the note's words), `Recovery.tsx` (the "Update now" line), `Advanced.tsx` ("Last checked"), `i18n/en.ts`, `th.ts`, `i18n.test.ts`, `App.test.tsx`, `ipc/mock.test.ts`, `ipc/work.test.ts`, the bindings (Task 4).
-- `.github/workflows/ci.yml` — the spike input and job steps, the signing env, the `.sig` in the artifact, the version grep (Tasks 1, 6); `.github/workflows/release.yml` — `latest.json`, the `.sig`, no `--prerelease`, `secrets: inherit` (Task 6); `.github/release-notes.md` — how to upgrade (Task 6); `.github/workflows/upstream-watch.yml`, `scripts/upstream-watch.ps1`, `scripts/upstream-watch.test.ps1` (Task 7).
-- `docs/spikes/phase4-update/protocol.md` (part A the spike, part B the update check), `docs/spikes/phase4-update/results.md` (the spike's results and the decision), `docs/spikes/phase4-update/helpers.ps1` (host), `spikes/vm/guest/update-check.ps1`, `spikes/vm/guest/guard.test.ps1` (Tasks 1, 9).
+- `.github/workflows/ci.yml` — the spike input and job steps, the version grep (Task 1); the `workflow_call` input `sign` (the merged `createUpdaterArtifacts`, the signing env, the `.sig` in the artifact, all under it) and the upstream test step (Tasks 6, 7); `.github/workflows/release.yml` — `with: sign: true`, `secrets: inherit`, `latest.json`, the `.sig`, no `--prerelease` (Task 6); `.github/release-notes.md` — how to upgrade (Task 6); `.github/workflows/upstream-watch.yml`, `scripts/upstream-watch.ps1`, `scripts/upstream-watch.test.ps1` (Task 7).
+- `docs/spikes/phase4-update/protocol.md` (part A the spike, part B the update check), `docs/spikes/phase4-update/results.md` (the spike's results and the decision), `docs/spikes/phase4-update/helpers.ps1` (host), `spikes/vm/guest/update-check.ps1`, `spikes/vm/guest/update-server.ps1` (the guest's web server), `spikes/vm/guest/guard.test.ps1` (Tasks 1, 9).
 - `docs/superpowers/specs/2026-10-10-cmd-studio-design.md` — §5.3, §5.7, §5.10, §6.2, §6.4, appendix B (Task 8).
 
 ---
 ### Task 1: The updater spike (the build in CI, the run on a VM)
 
-**Needs no founder step.** Runs after Task 3 is committed: the spike is the first consumer of Task 3's code, built twice at two versions with an ephemeral key, and run on a VM against a `latest.json` the host serves. Its result (U1–U7) confirms the primary install moment or picks a fallback, and settles the by-hand upgrade's words for Task 6's release notes. The CI half is the implementer's; the VM half is the controller's.
+**Needs no founder step.** Its CI half runs after Task 3 is committed (the spike builds that code); its VM half after Task 5 is committed (U2 needs Task 4's notify card, U4 needs Task 5's re-apply to be absent for a reason). The spike is built twice at two versions with an ephemeral key, and run on a VM against a `latest.json` served **inside the guest** by a small guarded web server on `127.0.0.1:8765` (no host listener, no firewall change: the ledger's ruling). Its result (U1–U7) confirms the primary install moment or picks a fallback, and settles the by-hand upgrade's words for Task 6's release notes. The CI half is the implementer's; the VM half is the controller's.
 
 **Files:**
 - Modify: `.github/workflows/ci.yml` (the `workflow_dispatch` input `updater_spike`; two steps at the end of the `app` job; the listing step's version grep anchored, M6)
 - Create: `docs/spikes/phase4-update/protocol.md` (part A; Task 9 adds part B)
 - Create: `docs/spikes/phase4-update/helpers.ps1` (host)
 - Create: `docs/spikes/phase4-update/results.md` (the template; the controller fills it)
-- Create: `spikes/vm/guest/update-check.ps1`
-- Modify: `spikes/vm/guest/guard.test.ps1` (`'update-check.ps1' = @('-Snapshot', 'before')`)
+- Create: `spikes/vm/guest/update-check.ps1` (the guest's snapshots, mode switch, waits)
+- Create: `spikes/vm/guest/update-server.ps1` (the guest's web server)
+- Modify: `spikes/vm/guest/guard.test.ps1` (`'update-check.ps1' = @('-Snapshot', 'before')`, `'update-server.ps1' = @('-Stop')`)
 
 **Interfaces:**
-- Consumes: Task 3's `update.rs` and `backend/update.rs` (the log lines `update check=…`, `update available=…`, `update downloaded=…`, `update installing=… how=exit|now`, `update installed to=…`, `update mode=off`; the file `updates\cmdstudio-<version>-setup.exe`; `update.json`), Task 4's cards (the spike runs after Task 4 when the controller's VM time comes later; U2 needs the notify card, so the VM run waits for Task 4 at the latest), `settings.json`'s `updates` field, 4a's `docs/spikes/phase4-install/helpers.ps1` (`Install-Phase4Setup`, `Start-Phase4Install`, `Start-Phase4App`, `Close-Phase4App`, `Close-Phase4Cmd`, `Get-Phase4Installed`, `Invoke-Phase4Control`) and `docs/spikes/phase3-vm-check/helpers.ps1` (`Start-CleanVm`, `Send-Key`, `Get-GuestAutoRun`, `Invoke-GuestButton`), `spikes/vm/vm.ps1` (`Invoke-GuestPs`, `Invoke-GuestDesktop`, `Copy-ToGuest`, `Save-Shot`).
-- Produces: the CI artifact `cmdstudio-updater-spike` (`CMD Studio_0.1.0-spike.1_x64-setup.exe`, `CMD Studio_0.1.0-spike.2_x64-setup.exe`, their `.sig` files, `latest.json`, `latest.same.json`, `latest.bad.json`, `spike.key.pub`); `update-check.ps1 -Snapshot <label> | -SetMode auto|notify|off | -WaitForVersion <v> [-WaitSeconds n] | -Log | -StartApp`; the host helpers `Install-Phase4bSetup`, `Start-Phase4bInstall`, `Get-Phase4bSnapshot`, `Set-Phase4bMode`, `Wait-Phase4bVersion`, `Get-Phase4bLog`, `Start-Phase4bServer`, `Stop-Phase4bServer`, `Set-Phase4bLatest`, `Set-Phase4bNic`; `results.md` with the decision (primary, F2 or F3) that Task 3's last step and Task 8 read.
+- Consumes: Task 3's `update.rs` and `backend/update.rs` (the log lines `update check=…`, `update available=…`, `update downloaded=…`, `update installing=… how=exit|now`, `update installed to=…`, `update mode=off`; the file `updates\cmdstudio-<version>-setup.exe`; `update.json`), Task 4's cards, Task 5's absence of `update reapply=` when the pins are equal, `settings.json`'s `updates` field, 4a's `docs/spikes/phase4-install/helpers.ps1` (`Start-Phase4Install`, `Close-Phase4App`, `Close-Phase4Cmd`, `Get-Phase4Installed`, `Invoke-Phase4Control`, `$P4`) and `docs/spikes/phase3-vm-check/helpers.ps1` (`Start-CleanVm`, `Send-Key`, `Get-GuestAutoRun`, which runs `read-autorun.vbs` from `$P3.Check`, `Invoke-GuestButton`, `$P3`), `spikes/vm/vm.ps1` (`Invoke-GuestPs`, `Invoke-GuestDesktop`, `Copy-ToGuest`, `Save-Shot`).
+- Produces: the CI artifact `cmdstudio-updater-spike` (`CMD Studio_0.1.0-spike.1_x64-setup.exe`, `CMD Studio_0.1.0-spike.2_x64-setup.exe`, their `.sig` files, `latest.json`, `latest.same.json`, `latest.bad.json`, `spike.key.pub`); `update-check.ps1 -Snapshot <label> | -SetMode auto|notify|off | -WaitForVersion <v> [-WaitSeconds n] | -Log | -StartApp [-Recovery]`; `update-server.ps1 -Start | -Stop | -Serve [-Root <dir>] [-Port n]` (the request log `<Root>\server.log`); the host helpers `Install-Phase4bSetup`, `Start-Phase4bInstall`, `Get-Phase4bSnapshot`, `Set-Phase4bMode`, `Wait-Phase4bVersion`, `Get-Phase4bLog`, `Start-Phase4bApp`, `Start-Phase4bServer`, `Stop-Phase4bServer`, `Get-Phase4bServerLog`, `Set-Phase4bLatest`, `Set-Phase4bNic`; `results.md` with the decision (primary, F2, F3, F-NOW) that Task 3's last step and Task 8 read.
 
 - [ ] **Step 1: The spike input and the two steps in `ci.yml`**
 
@@ -181,12 +188,13 @@ In the `app` job, after the last step (the `cmdstudio-exe` upload), add:
       # Phase 4b Task 1's spike (docs/spikes/phase4-update/protocol.md part A), only on a
       # workflow_dispatch with updater_spike: an ephemeral minisign key made here under
       # $RUNNER_TEMP and never uploaded (its .pub is), two builds of this same code at the
-      # versions 0.1.0-spike.1 and 0.1.0-spike.2, each signed, with the updater pointed at the
-      # VM's host (http://10.0.2.2:8765 and dangerousInsecureTransportProtocol, which the
-      # committed config forbids: config_guard), and a latest.json that offers spike.2, one
-      # that offers spike.1 again (U5: equal), and one that is not JSON (U5: malformed). jq
-      # merges the bundle file with the override (`*` is jq's recursive merge), so one --config
-      # is passed as always. Mixed path separators from $RUNNER_TEMP are fine in Git Bash.
+      # versions 0.1.0-spike.1 and 0.1.0-spike.2, each signed, with the updater pointed at a
+      # server inside the VM (http://127.0.0.1:8765, served by spikes/vm/guest/update-server.ps1;
+      # dangerousInsecureTransportProtocol, which the committed config forbids: config_guard),
+      # and a latest.json that offers spike.2, one that offers spike.1 again (U5: equal), and one
+      # that is not JSON (U5: malformed). jq merges the bundle file with the override (`*` is
+      # jq's recursive merge), so one --config is passed as always. Mixed path separators from
+      # $RUNNER_TEMP are fine in Git Bash.
       - name: Updater spike builds (ephemeral key, two versions, latest.json)
         if: github.event_name == 'workflow_dispatch' && inputs.updater_spike
         shell: bash
@@ -201,7 +209,7 @@ In the `app` job, after the last step (the `cmdstudio-exe` upload), add:
           mkdir -p ../spike
           for n in 1 2; do
             v="0.1.0-spike.$n"
-            jq -n --arg v "$v" --arg pub "$pub" '{version: $v, plugins: {updater: {pubkey: $pub, endpoints: ["http://10.0.2.2:8765/latest.json"], dangerousInsecureTransportProtocol: true, windows: {installMode: "quiet"}}}, bundle: {createUpdaterArtifacts: true}}' > "$RUNNER_TEMP/spike$n.override.json"
+            jq -n --arg v "$v" --arg pub "$pub" '{version: $v, plugins: {updater: {pubkey: $pub, endpoints: ["http://127.0.0.1:8765/latest.json"], dangerousInsecureTransportProtocol: true, windows: {installMode: "quiet"}}}, bundle: {createUpdaterArtifacts: true}}' > "$RUNNER_TEMP/spike$n.override.json"
             jq -s '.[0] * .[1]' src-tauri/tauri.bundle.conf.json "$RUNNER_TEMP/spike$n.override.json" > "$RUNNER_TEMP/spike$n.conf.json"
             npm run tauri -- build --config "$RUNNER_TEMP/spike$n.conf.json"
             cp "../target/release/bundle/nsis/CMD Studio_${v}_x64-setup.exe" "../target/release/bundle/nsis/CMD Studio_${v}_x64-setup.exe.sig" ../spike/
@@ -209,8 +217,8 @@ In the `app` job, after the last step (the `cmdstudio-exe` upload), add:
           when="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           sig2="$(tr -d '\r\n' < "../spike/CMD Studio_0.1.0-spike.2_x64-setup.exe.sig")"
           sig1="$(tr -d '\r\n' < "../spike/CMD Studio_0.1.0-spike.1_x64-setup.exe.sig")"
-          jq -n --arg sig "$sig2" --arg when "$when" '{version: "0.1.0-spike.2", notes: "the updater spike", pub_date: $when, platforms: {"windows-x86_64": {signature: $sig, url: "http://10.0.2.2:8765/CMD%20Studio_0.1.0-spike.2_x64-setup.exe"}}}' > ../spike/latest.json
-          jq -n --arg sig "$sig1" --arg when "$when" '{version: "0.1.0-spike.1", notes: "the updater spike", pub_date: $when, platforms: {"windows-x86_64": {signature: $sig, url: "http://10.0.2.2:8765/CMD%20Studio_0.1.0-spike.1_x64-setup.exe"}}}' > ../spike/latest.same.json
+          jq -n --arg sig "$sig2" --arg when "$when" '{version: "0.1.0-spike.2", notes: "the updater spike", pub_date: $when, platforms: {"windows-x86_64": {signature: $sig, url: "http://127.0.0.1:8765/CMD%20Studio_0.1.0-spike.2_x64-setup.exe"}}}' > ../spike/latest.json
+          jq -n --arg sig "$sig1" --arg when "$when" '{version: "0.1.0-spike.1", notes: "the updater spike", pub_date: $when, platforms: {"windows-x86_64": {signature: $sig, url: "http://127.0.0.1:8765/CMD%20Studio_0.1.0-spike.1_x64-setup.exe"}}}' > ../spike/latest.same.json
           printf '{ "version": "0.1.0-spike.2", not json' > ../spike/latest.bad.json
           cp "$RUNNER_TEMP/spike.key.pub" ../spike/
           test ! -e ../spike/spike.key
@@ -223,7 +231,7 @@ In the `app` job, after the last step (the `cmdstudio-exe` upload), add:
           if-no-files-found: error
 ```
 
-`inputs.updater_spike` is empty (false) on `push`, `pull_request` and `workflow_call`, so the steps are skipped there. If the bundler refuses the empty password variable for a key made with `--ci` (the log says so), remove the `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` line; if it refuses the pre-release versions, F-VER. The `.sig` content is one base64 line; `tr -d '\r\n'` keeps `latest.json` to one string.
+`inputs.updater_spike` is empty (false) on `push`, `pull_request` and `workflow_call`, so the steps are skipped there; the normal bundle step before them builds unsigned (Task 6's `sign` input is off on a dispatch). If the bundler refuses the empty password variable for a key made with `--ci` (the log says so), remove the `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` line; if it refuses the pre-release versions, F-VER. The `.sig` content is one base64 line; `tr -d '\r\n'` keeps `latest.json` to one string.
 
 M6 in the same file: in the step "The installer holds both exes, the resources and the licenses", replace the line
 
@@ -246,7 +254,9 @@ with
 Run: `python3 -c "import yaml,sys; yaml.safe_load(open(sys.argv[1]))" .github/workflows/ci.yml`
 Expected: no output (parsed). If PyYAML is absent, say "parsed in CI".
 
-- [ ] **Step 3: `update-check.ps1`**
+- [ ] **Step 3: `update-check.ps1` and `update-server.ps1`**
+
+`spikes/vm/guest/update-check.ps1`:
 
 ```powershell
 # Runs inside a test VM (plan 4b Tasks 1 and 9): what an update of CMD Studio must leave, read and
@@ -259,13 +269,14 @@ Expected: no output (parsed). If PyYAML is absent, say "parsed in CI".
 # settings.json's "updates" field (the app must be closed; a missing file is made with that field
 # alone, the rest being the app's defaults). -WaitForVersion <v> polls DisplayVersion up to
 # -WaitSeconds and prints the seconds it took, or TIMEOUT. -Log prints the log's `update ` lines.
-# -StartApp opens the Start-menu shortcut "CMD Studio.lnk" as a click does. Run on the user's
-# desktop (Invoke-GuestDesktop): HKCU and the environment are the signed-in user's only there.
+# -StartApp opens the Start-menu shortcut "CMD Studio.lnk" as a click does; with -Recovery the
+# "CMD Studio Recovery.lnk" one. Run on the user's desktop (Invoke-GuestDesktop): HKCU and the
+# environment are the signed-in user's only there.
 param(
   [ValidatePattern('^[a-z0-9]*$')] [string] $Snapshot = '',
   [ValidateSet('', 'auto', 'notify', 'off')] [string] $SetMode = '',
   [string] $WaitForVersion = '', [int] $WaitSeconds = 180,
-  [switch] $Log, [switch] $StartApp,
+  [switch] $Log, [switch] $StartApp, [switch] $Recovery,
   [string] $Out = 'C:\cmdstudio\out\phase4b'
 )
 $ErrorActionPreference = 'Stop'
@@ -333,6 +344,7 @@ function State {
     path       = PathEntries
     updateJson = TextOrAbsent (Join-Path $data 'update.json')
     updates    = Entries (Join-Path $data 'updates')
+    runJson    = TextOrAbsent (Join-Path $data 'run.json')
     log        = UpdateLines
     processes  = (@(Get-Process cmdstudio -ErrorAction SilentlyContinue | ForEach-Object { "$($_.Id)" }) -join ',')
   }
@@ -366,7 +378,7 @@ if ($WaitForVersion) {
 }
 if ($Log) { UpdateLines }
 if ($StartApp) {
-  $lnk = Join-Path $sm 'CMD Studio.lnk'
+  $lnk = Join-Path $sm $(if ($Recovery) { 'CMD Studio Recovery.lnk' } else { 'CMD Studio.lnk' })
   if (-not (Test-Path -LiteralPath $lnk)) { throw "no shortcut at $lnk" }
   Start-Process -FilePath $lnk | Out-Null
   Start-Sleep -Seconds 10
@@ -374,7 +386,75 @@ if ($StartApp) {
 }
 ```
 
-Parse-check on this PC: `[System.Management.Automation.Language.Parser]::ParseFile('<repo>\spikes\vm\guest\update-check.ps1', [ref]$null, [ref]$errors); $errors.Count` must print `0`. Add `'update-check.ps1' = @('-Snapshot', 'before')` to `guard.test.ps1`'s `$changers` (the guard is the script's first statement after `$ErrorActionPreference`, as the test's regex expects). The guard total is computed by the script itself (`2 * $changers.Count + 3`).
+`spikes/vm/guest/update-server.ps1`:
+
+```powershell
+# Runs inside a test VM (plan 4b Tasks 1 and 9): a small web server on the guest's own loopback,
+# http://127.0.0.1:8765/, over one folder, for the updater's latest.json and the spike's installers,
+# so that nothing listens on the host and no firewall changes (the ledger's ruling). -Start runs
+# the listener as a hidden process of its own (as 4a's -HoldFont does, so it outlives the desktop
+# task that starts it), writes its pid to <Root>\server.pid, waits 3 s and says whether the port
+# answers; -Stop ends that process; -Serve is the listener itself (what -Start runs). GET only:
+# the path is decoded (%20), a file directly under -Root is answered with its bytes and its
+# Content-Length, anything else with 404; one request per connection; one line per request is
+# appended to <Root>\server.log (U7 reads it: no line in Off mode). A TcpListener, not
+# HttpListener: no http.sys URL ACL, so the signed-in user may listen without admin rights.
+param(
+  [switch] $Start, [switch] $Stop, [switch] $Serve,
+  [string] $Root = 'C:\cmdstudio\phase4b\setup',
+  [int] $Port = 8765
+)
+$ErrorActionPreference = 'Stop'
+if ($env:COMPUTERNAME -notlike 'CMDSTUDIO-*') { throw "VM only: $env:COMPUTERNAME is not a CMD Studio test VM, and this script listens on a port and starts programs" }
+$pidFile = Join-Path $Root 'server.pid'
+$logFile = Join-Path $Root 'server.log'
+$utf8 = New-Object Text.UTF8Encoding $false
+if ($Start) {
+  $p = Start-Process -PassThru -WindowStyle Hidden "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath, '-Serve', '-Root', $Root, '-Port', "$Port")
+  [IO.File]::WriteAllText($pidFile, "$($p.Id)", $utf8)
+  Start-Sleep -Seconds 3
+  $answers = try { $c = New-Object Net.Sockets.TcpClient -ArgumentList '127.0.0.1', $Port; $c.Close(); $true } catch { $false }
+  "server pid $($p.Id) on 127.0.0.1:$Port over $Root; answers: $answers"
+}
+if ($Stop) {
+  if (-not (Test-Path -LiteralPath $pidFile)) { 'no server.pid: nothing to stop'; return }
+  $id = [int](Get-Content -LiteralPath $pidFile)
+  Stop-Process -Id $id -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $pidFile
+  Start-Sleep -Seconds 1
+  $answers = try { $c = New-Object Net.Sockets.TcpClient -ArgumentList '127.0.0.1', $Port; $c.Close(); $true } catch { $false }
+  "server $id stopped; answers: $answers"
+}
+if ($Serve) {
+  $listener = New-Object Net.Sockets.TcpListener -ArgumentList ([Net.IPAddress]::Loopback), $Port
+  $listener.Start()
+  while ($true) {
+    $client = $listener.AcceptTcpClient()
+    try {
+      $stream = $client.GetStream()
+      $reader = New-Object IO.StreamReader -ArgumentList $stream, ([Text.Encoding]::ASCII)
+      $request = $reader.ReadLine()
+      while ($true) { $line = $reader.ReadLine(); if ($null -eq $line -or $line -eq '') { break } }
+      $parts = "$request" -split ' '
+      $name = if ($parts.Count -ge 2) { [Uri]::UnescapeDataString($parts[1].TrimStart('/')) } else { '' }
+      $file = Join-Path $Root $name
+      $ok = ($parts.Count -ge 2) -and ($parts[0] -eq 'GET') -and ($name -ne '') -and ($name -notmatch '[\\/]|\.\.') -and (Test-Path -LiteralPath $file -PathType Leaf)
+      $body = if ($ok) { [IO.File]::ReadAllBytes($file) } else { [Text.Encoding]::ASCII.GetBytes('not found') }
+      $status = if ($ok) { '200 OK' } else { '404 Not Found' }
+      $type = if ($name -like '*.json') { 'application/json' } else { 'application/octet-stream' }
+      $head = [Text.Encoding]::ASCII.GetBytes("HTTP/1.1 $status`r`nContent-Type: $type`r`nContent-Length: $($body.Length)`r`nConnection: close`r`n`r`n")
+      $stream.Write($head, 0, $head.Length)
+      $stream.Write($body, 0, $body.Length)
+      $stream.Flush()
+      [IO.File]::AppendAllText($logFile, "$(Get-Date -Format o) $request -> $status`n", $utf8)
+    } catch {
+      [IO.File]::AppendAllText($logFile, "$(Get-Date -Format o) error: $($_.Exception.Message)`n", $utf8)
+    } finally { $client.Close() }
+  }
+}
+```
+
+Parse-check both on this PC: `[System.Management.Automation.Language.Parser]::ParseFile('<repo>\spikes\vm\guest\update-check.ps1', [ref]$null, [ref]$errors); $errors.Count` must print `0`, and the same for `update-server.ps1`. Add `'update-check.ps1' = @('-Snapshot', 'before')` and `'update-server.ps1' = @('-Stop')` to `guard.test.ps1`'s `$changers` (each guard is the script's first statement after `$ErrorActionPreference`, as the test's regex expects; `-Stop` never reaches the pid file on a machine that is not a VM). The guard total is computed by the script itself (`2 * $changers.Count + 3`). Expected: `0` printed twice.
 
 - [ ] **Step 4: `helpers.ps1` for the host**
 
@@ -382,34 +462,43 @@ Parse-check on this PC: `[System.Management.Automation.Language.Parser]::ParseFi
 # Host-side helpers for the phase 4b spike and update check (protocol.md). Dot-source after
 # spikes\vm\vm.ps1, docs\spikes\phase3-vm-check\helpers.ps1 and docs\spikes\phase4-install\helpers.ps1,
 # in Windows PowerShell 5.1 on the host, from the repo root. Only the CMD Studio test VMs get
-# anything from them; this PC's installer is never run, and nothing here reads this PC's registry,
-# fonts or Windows Terminal. Guest paths are built from the VM's user name, never from this host's
-# environment (a `$env:` in a double-quoted string would expand on the host PC).
+# anything from them; this PC's installer is never run, nothing listens on this PC, and nothing
+# here reads this PC's registry, fonts or Windows Terminal. Guest paths are built from the VM's
+# user name, never from this host's environment (a `$env:` in a double-quoted string would expand
+# on the host PC).
 $P4B = @{
-  Setup = 'C:\cmdstudio\phase4b\setup'     # the spike's two installers, or the update check's one
+  Setup = 'C:\cmdstudio\phase4b\setup'     # the installers and the manifests; update-server.ps1 serves it
   Guest = 'C:\cmdstudio\spikes\vm\guest'   # every script of spikes\vm\guest
   Out   = 'C:\cmdstudio\out\phase4b'       # the snapshots
-  Port  = 8765
 }
-# The scripts and the downloaded CI artifact into the VM (every *-setup.exe in $Artifact), each
-# installer's hash compared with the host's. 4a's $P4.Setup is pointed at $P4B.Setup afterwards, so
-# that 4a's Start-Phase4Install (-Setup <folder>: one installer there) keeps working for one file.
+# The scripts and the downloaded CI artifact into the VM: every script of spikes\vm\guest,
+# phase 3's read-autorun.vbs where Get-GuestAutoRun looks for it (as 4a's setup does), and every
+# *-setup.exe and *.json of $Artifact into $P4B.Setup, each installer's hash compared with the
+# host's; the artifact's latest.json is kept as latest.real.json for Set-Phase4bLatest. 4a's
+# $P4.Setup is pointed at $P4B.Setup afterwards, so 4a's helpers keep working for one installer.
 function Install-Phase4bSetup($Vm, [string] $User, [string] $Artifact) {
   $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path
   Invoke-GuestPs $Vm "New-Item -ItemType Directory -Force -Path '$($P4B.Out)', '$($P4B.Setup)' | Out-Null" $User 60 | Out-Null
   $guest = @(Get-ChildItem -LiteralPath (Join-Path $repo 'spikes\vm\guest') -File | ForEach-Object FullName)
   Copy-ToGuest $Vm $guest ($P4B.Guest + '\') $User | Out-Null
-  $exes = @(Get-ChildItem -LiteralPath $Artifact -Filter '*-setup.exe')
-  if ($exes.Count -eq 0) { throw "no *-setup.exe in $Artifact" }
-  Copy-ToGuest $Vm @($exes | ForEach-Object FullName) ($P4B.Setup + '\') $User | Out-Null
-  foreach ($exe in $exes) {
+  Copy-ToGuest $Vm @((Join-Path $repo 'docs\spikes\phase3-vm-check\read-autorun.vbs')) ($P3.Check + '\') $User | Out-Null
+  $files = @(Get-ChildItem -LiteralPath $Artifact -File | Where-Object { $_.Name -like '*-setup.exe' -or $_.Name -like '*.json' })
+  if (@($files | Where-Object { $_.Name -like '*-setup.exe' }).Count -eq 0) { throw "no *-setup.exe in $Artifact" }
+  Copy-ToGuest $Vm @($files | ForEach-Object FullName) ($P4B.Setup + '\') $User | Out-Null
+  foreach ($exe in @($files | Where-Object { $_.Name -like '*-setup.exe' })) {
     $hostHash = (Get-FileHash -LiteralPath $exe.FullName -Algorithm SHA256).Hash
     $inVm = "$(Invoke-GuestPs $Vm "(Get-FileHash -LiteralPath '$($P4B.Setup)\$($exe.Name)' -Algorithm SHA256).Hash" $User 180)".Trim()
     Write-Host ('installer: ' + $exe.Name + ' ' + $exe.Length + ' bytes; same file in the VM: ' + ($inVm -eq $hostHash))
   }
-  $exes | ForEach-Object Name
+  if (Test-Path -LiteralPath (Join-Path $Artifact 'latest.json')) {
+    Invoke-GuestPs $Vm "Copy-Item -LiteralPath '$($P4B.Setup)\latest.json' -Destination '$($P4B.Setup)\latest.real.json' -Force" $User 60 | Out-Null
+  }
+  $script:P4.Setup = $P4B.Setup
+  $files | ForEach-Object Name
 }
-# One of the spike's installers (-Which 1 or 2), on the desktop; -Silent runs it with /S and waits.
+# One of the spike's installers (-Which 1 or 2), on the desktop; -Silent runs it with /S and waits
+# (no app starts then). 4a's install-check.ps1 -Setup takes a file, so the name with its spaces
+# never passes through a command line unquoted.
 function Start-Phase4bInstall($Vm, [int] $Which, [string] $User = 'tester', [switch] $Silent) {
   $file = "$($P4B.Setup)\CMD Studio_0.1.0-spike.$Which" + '_x64-setup.exe'
   if ($Silent) { Invoke-GuestDesktop $Vm "$($P4.Guest)\install-check.ps1" "-InstallSilent -Setup '$file'" $User 600 }
@@ -419,59 +508,57 @@ function Get-Phase4bSnapshot($Vm, [string] $Which, [string] $User = 'tester') { 
 function Set-Phase4bMode($Vm, [ValidateSet('auto', 'notify', 'off')] [string] $Mode, [string] $User = 'tester') { Invoke-GuestDesktop $Vm "$($P4B.Guest)\update-check.ps1" "-SetMode $Mode" $User 60 }
 function Wait-Phase4bVersion($Vm, [string] $Version, [string] $User = 'tester', [int] $Seconds = 180) { Invoke-GuestDesktop $Vm "$($P4B.Guest)\update-check.ps1" "-WaitForVersion $Version -WaitSeconds $Seconds" $User ($Seconds + 60) }
 function Get-Phase4bLog($Vm, [string] $User = 'tester') { Invoke-GuestDesktop $Vm "$($P4B.Guest)\update-check.ps1" '-Log' $User 60 }
-function Start-Phase4bApp($Vm, [string] $User = 'tester') { Invoke-GuestDesktop $Vm "$($P4B.Guest)\update-check.ps1" '-StartApp' $User 120 }
-
-# The host's web server over the spike artifact's folder, for the VM's updater (10.0.2.2 is the
-# host on VirtualBox NAT). Its request log goes to $Dir\server.log: U7's "no request in Off mode"
-# is read there. Windows asks once to let python listen: the founder allows it.
-function Start-Phase4bServer([string] $Dir) {
-  $log = Join-Path $Dir 'server.log'
-  $p = Start-Process -FilePath python -ArgumentList @('-m', 'http.server', "$($P4B.Port)", '--bind', '0.0.0.0', '--directory', $Dir) -PassThru -WindowStyle Hidden -RedirectStandardError $log
-  "server pid $($p.Id) on port $($P4B.Port), log $log"
-  $p.Id
+function Start-Phase4bApp($Vm, [string] $User = 'tester', [switch] $Recovery) {
+  $args = if ($Recovery) { '-StartApp -Recovery' } else { '-StartApp' }
+  Invoke-GuestDesktop $Vm "$($P4B.Guest)\update-check.ps1" $args $User 120
 }
-function Stop-Phase4bServer([int] $ServerPid) { Stop-Process -Id $ServerPid -Force; "server $ServerPid stopped" }
-# Which manifest the VM gets as latest.json: 'latest' (spike.2), 'same' (spike.1 again, U5) or
-# 'bad' (not JSON, U5). The artifact's latest.json is kept as latest.real.json the first time.
-function Set-Phase4bLatest([string] $Dir, [ValidateSet('latest', 'same', 'bad')] [string] $Which) {
-  $real = Join-Path $Dir 'latest.real.json'
-  if (-not (Test-Path -LiteralPath $real)) { Copy-Item -LiteralPath (Join-Path $Dir 'latest.json') -Destination $real }
-  $from = switch ($Which) { 'latest' { $real } 'same' { Join-Path $Dir 'latest.same.json' } 'bad' { Join-Path $Dir 'latest.bad.json' } }
-  Copy-Item -LiteralPath $from -Destination (Join-Path $Dir 'latest.json') -Force
-  "latest.json is now the '$Which' manifest"
+# The guest's web server over $P4B.Setup (update-server.ps1), started on the desktop as a hidden
+# process of its own; its request log is read for U7's "no request in Off mode".
+function Start-Phase4bServer($Vm, [string] $User = 'tester') { Invoke-GuestDesktop $Vm "$($P4B.Guest)\update-server.ps1" "-Start -Root '$($P4B.Setup)'" $User 60 }
+function Stop-Phase4bServer($Vm, [string] $User = 'tester') { Invoke-GuestDesktop $Vm "$($P4B.Guest)\update-server.ps1" "-Stop -Root '$($P4B.Setup)'" $User 60 }
+function Get-Phase4bServerLog($Vm, [string] $User = 'tester') {
+  Invoke-GuestPs $Vm "if (Test-Path -LiteralPath '$($P4B.Setup)\server.log') { Get-Content -LiteralPath '$($P4B.Setup)\server.log' } else { 'no server.log' }" $User 60
 }
-# The VM's network cable, for U7's offline run: VBoxManage's link state of adapter 1.
+# Which manifest the VM's server answers as latest.json: 'latest' (the artifact's, offering
+# spike.2), 'same' (spike.1 again, U5) or 'bad' (not JSON, U5); a copy inside the guest.
+function Set-Phase4bLatest($Vm, [ValidateSet('latest', 'same', 'bad')] [string] $Which, [string] $User = 'tester') {
+  $from = switch ($Which) { 'latest' { 'latest.real.json' } 'same' { 'latest.same.json' } 'bad' { 'latest.bad.json' } }
+  Invoke-GuestPs $Vm "Copy-Item -LiteralPath '$($P4B.Setup)\$from' -Destination '$($P4B.Setup)\latest.json' -Force; 'latest.json is now $Which'" $User 60
+}
+# The VM's network cable, for Task 9's offline case against GitHub (the controller's host command).
 function Set-Phase4bNic([string] $VmName, [ValidateSet('on', 'off')] [string] $State) {
   & (Join-Path $env:ProgramFiles 'Oracle\VirtualBox\VBoxManage.exe') controlvm $VmName setlinkstate1 $State
   "nic of $VmName $State"
 }
 ```
 
-Parse-check it as the guest script. `$P4` is 4a's table (dot-sourced before this file); `Start-Phase4bInstall` passes the file path quoted, since 4a's `install-check.ps1 -Setup` takes a file or a folder and the name has spaces.
+Parse-check it as the guest scripts. `$P3` and `$P4` are phase 3's and 4a's tables (dot-sourced before this file).
 
 - [ ] **Step 5: `protocol.md`, part A**
 
 ```markdown
 # Phase 4b — the updater spike (part A, Task 1) and the update VM check (part B, Task 9)
 
-Both halves are the controller's. Nothing here runs on the dev PC, not even as a dry run; every guest script refuses a machine whose name does not start with `CMDSTUDIO-`. cmd runs without `/d` inside the VMs. Do not repair a VM: record the step and go on. Guest paths are written as `C:\Users\$u\…` on the host, never `$env:…`. The words are `en.ts`'s (`th.ts`'s on VM-C once Thai is chosen). The VMs: `spikes/vm/README.md`; **VM-A and VM-C need a powered-off `clean` snapshot** (their saved-state `clean` fails to start with HGCM `VERR_ACCESS_DENIED`, 4a's finding): the founder takes one before the run; VM-B (Windows 10, no Windows Terminal) is the fallback for every step that does not need Windows Terminal, which is every step of part A and every step of part B but the failed-cleanup step.
+Both halves are the controller's. Nothing here runs on the dev PC, not even as a dry run; every guest script refuses a machine whose name does not start with `CMDSTUDIO-`. cmd runs without `/d` inside the VMs. Do not repair a VM: record the step and go on. Guest paths are written as `C:\Users\$u\…` on the host, never `$env:…`. The words are `en.ts`'s (`th.ts`'s on VM-C once Thai is chosen). The VMs: `spikes/vm/README.md`; **VM-A and VM-C need a powered-off `clean` snapshot** (their saved-state `clean` fails to start with HGCM `VERR_ACCESS_DENIED`, 4a's finding): the founder takes one before the run; VM-B (Windows 10, no Windows Terminal) is the fallback for every step that does not need Windows Terminal, which is every step of part A and every step of part B but the failed-cleanup step. Nothing of either part listens on the host: the spike's manifests and installers are served inside the guest (`update-server.ps1` on `127.0.0.1:8765`), and part B goes to GitHub.
 
 ## Part A: the spike (Task 1)
 
-- **What it shows:** the install-moment decision of spec §6.2 (U1–U7 in the plan's table) with a build of this branch's own code, signed with an ephemeral key, against a `latest.json` the host serves.
+- **What it shows:** the install-moment decision of spec §6.2 (U1–U7 in the plan's table) with a build of this branch's own code, signed with an ephemeral key, against a `latest.json` served inside the guest.
 - **The build:** CI's artifact `cmdstudio-updater-spike` of a `workflow_dispatch` run of `ci.yml` on this branch with `updater_spike` on (`gh workflow run ci.yml --ref phase4b -f updater_spike=true`, after the controller's push). **One download, with the founder's explicit yes first:** `gh run download <run id> --name cmdstudio-updater-spike --dir <scratchpad>\p4b-spike`. The folder holds the two installers, their `.sig` files, `latest.json`, `latest.same.json`, `latest.bad.json` and `spike.key.pub`. Record the commit and the run id in `results.md`.
-- **Setup (once per host session):** Windows PowerShell 5.1 on the host, from the repo root: `. .\spikes\vm\vm.ps1`, `. .\docs\spikes\phase3-vm-check\helpers.ps1`, `. .\docs\spikes\phase4-install\helpers.ps1`, `. .\docs\spikes\phase4-update\helpers.ps1`; `$spike = '<scratchpad>\p4b-spike'`; `$server = Start-Phase4bServer $spike` (the founder allows python through the firewall when Windows asks); `Set-Phase4bLatest $spike latest`. Per VM: `$vm`, `$u` as 4a's protocol sets them; `Start-CleanVm $vm $u`; `Install-Phase4bSetup $vm $u $spike` (prints `same file in the VM: True` twice); `$P4.Setup = $P4B.Setup`; `Invoke-GuestDesktop $vm "$($P4B.Guest)\guard.test.ps1" '' $u` must end with the computed total of checks passing.
-- **How results are judged:** by `update-check.ps1`'s printed lines (`installed:`, `log:`, `updateJson:`, `processes:`), by `Wait-Phase4bVersion`'s seconds, by `server.log`'s request lines on the host, and by screenshots where nothing prints (the cards, no window after a close).
+- **Setup (once per host session):** Windows PowerShell 5.1 on the host, from the repo root: `. .\spikes\vm\vm.ps1`, `. .\docs\spikes\phase3-vm-check\helpers.ps1`, `. .\docs\spikes\phase4-install\helpers.ps1`, `. .\docs\spikes\phase4-update\helpers.ps1`; `$spike = '<scratchpad>\p4b-spike'`. Per VM, and again after every `Start-CleanVm`: `$vm`, `$u` as 4a's protocol sets them; `Start-CleanVm $vm $u`; `Install-Phase4bSetup $vm $u $spike` (prints `same file in the VM: True` twice); `Invoke-GuestDesktop $vm "$($P4B.Guest)\guard.test.ps1" '' $u` must end with the computed total of checks passing; `Start-Phase4bServer $vm $u` (prints `answers: True`); `Set-Phase4bLatest $vm latest $u`.
+- **The modes:** the app's first start after an install is in automatic mode, and its check would download and its close would install (U3) before the step that tests it: so every set-up run installs silently (no app start), sets **notify** before the first start, and switches to automatic only in the step that tests the close (A3) or the offline case (A7).
+- **How results are judged:** by `update-check.ps1`'s printed lines (`installed:`, `log:`, `updateJson:`, `updates:`, `runJson:`, `processes:`), by `Wait-Phase4bVersion`'s seconds, by `Get-Phase4bServerLog`'s request lines, and by screenshots where nothing prints (the cards, no window after a close).
 
 | # | Do (VM-A; VM-B when no VM with Windows Terminal starts) | PASS when | Result |
 |---|---|---|---|
-| A1 | **spike.1 installed, Terracotta applied.** `Start-Phase4bInstall $vm 1 $u` (interactive; drive the pages as 4a's step 2, "Run CMD Studio" ticked), the wizard to Terracotta applied, "Go to the home page"; `Close-Phase4App $vm $u`; `Get-Phase4bSnapshot $vm a1 $u`. | `installed: DisplayVersion=0.1.0-spike.1`; `autorun:` holds CMD Studio's part; `log:` has `update check=…` (the manifest offered spike.2 at this first start, so `update available=0.1.0-spike.2` and, in automatic mode, `update downloaded=0.1.0-spike.2` and `updates: cmdstudio-0.1.0-spike.2-setup.exe <size>`: that is U1). | |
-| A2 | **U5, a manifest that is not JSON, then one that offers the same version.** `Set-Phase4bLatest $spike bad`; `Start-Phase4bApp $vm $u`; wait 20 s; `Save-Shot $vm 'p4b-a2-bad'`; `Close-Phase4App $vm $u`; `Get-Phase4bLog $vm $u`. Then `Set-Phase4bLatest $spike same`; the same again with the shot `p4b-a2-same`. | The log gains `update check=manifest`, then `update check=none`; the shots show the home page with no card and no box; `updates:` is `ABSENT` after each start (the folder is emptied at every start before the check). | |
-| A3 | **U1 + U3: the automatic install at close.** `Set-Phase4bLatest $spike latest`; `Start-Phase4bApp $vm $u`; wait 30 s; `Get-Phase4bLog $vm $u` (`update downloaded=0.1.0-spike.2`). `Close-Phase4App $vm $u` (prints `closed with CloseMainWindow: 1`), at once `Wait-Phase4bVersion $vm 0.1.0-spike.2 $u`, then after 3 s `Save-Shot $vm 'p4b-a3-after-close'`; `Get-Phase4bSnapshot $vm a3 $u`; `Get-GuestAutoRun $vm 'a3' $u`. | `Wait-Phase4bVersion` prints `version 0.1.0-spike.2 after <n> s` (record n); the shot shows the desktop with no CMD Studio window and no installer page; `processes:` is empty (no relaunch); `updateJson:` is the record `{"version":1,"from":"0.1.0-spike.1","to":"0.1.0-spike.2","notesUrl":"https://github.com/luraselenehalo/cmd-studio/releases/tag/v0.1.0-spike.2"}`; `log:` ends with `update installing=0.1.0-spike.2 how=exit`; AutoRun unchanged from A1; `install:` lists `cmdstudio.com` and no `cmdstudio-cli.exe`; `shortcuts:` the two. | |
-| A4 | **U4: the notice.** `Start-Phase4bApp $vm $u`; wait 15 s; `Save-Shot $vm 'p4b-a4-notice'`; `Invoke-GuestButton $vm 'What changed' $u`; wait 5 s; `Save-Shot $vm 'p4b-a4-browser'`; `Invoke-GuestButton $vm 'Close' $u`; `Get-Phase4bLog $vm $u`; `Get-Phase4bSnapshot $vm a4 $u`. | The home page shows "Updated to v0.1.0-spike.2." with "What changed" and "Close"; the browser opens at `…/releases/tag/v0.1.0-spike.2` (a 404 page is fine); the log has `update installed to=0.1.0-spike.2` and no `update reapply=` line (the pins are equal); `updateJson: ABSENT` (deleted by `app_ready`); `updates: ABSENT`. | |
-| A5 | **U2: "Update now" through the plugin.** Fresh `Start-CleanVm`, Setup, A1 again but close the app, then `Set-Phase4bMode $vm notify $u`; `Set-Phase4bLatest $spike latest`; `Start-Phase4bApp $vm $u`; wait 20 s; `Save-Shot $vm 'p4b-a5-card'`; `Invoke-GuestButton $vm 'Update now' $u`; at once `Wait-Phase4bVersion $vm 0.1.0-spike.2 $u`; wait 20 s; `Save-Shot $vm 'p4b-a5-back'`; `Get-Phase4bSnapshot $vm a5 $u`; `Get-GuestAutoRun $vm 'a5' $u`. | The card "CMD Studio v0.1.0-spike.2 is available." with "Update now" and "Later" shows, and no download happened before the click (`updates: ABSENT` in the log before it); after the click the window goes at once, `Wait-Phase4bVersion` prints the seconds, and the app is back by itself (`processes:` one pid; the shot shows the home page with "Updated to v0.1.0-spike.2."); `log:` has `update installing=0.1.0-spike.2 how=now` then, after the restart, `update installed to=0.1.0-spike.2`; AutoRun unchanged; no uninstaller ran (AutoRun kept, `install:` as in A3). | |
-| A6 | **U6: a by-hand install of spike.2 over spike.1, "Do not uninstall".** Fresh `Start-CleanVm`, Setup, A1 (closed). `Start-Phase4bInstall $vm 2 $u` (interactive). Welcome: Next. The "Already Installed" page: `Save-Shot $vm 'p4b-a6-page'`, `Invoke-Phase4Control $vm 'Do not uninstall' $u` (`selected: True`; fallback `Send-Key $vm Down`), zoom the shot, Next; the pages on as 4a's step 2 ("Run CMD Studio" ticked). Wait 15 s. `Get-Phase4bSnapshot $vm a6 $u`; `Get-GuestAutoRun $vm 'a6' $u`; `Save-Shot $vm 'p4b-a6-home'`. | The page's exact words for the two radios are recorded (the first is Tauri's "Uninstall before installing", checked by default); after the install `installed: DisplayVersion=0.1.0-spike.2`, AutoRun unchanged (no uninstaller ran), the theme still applied (the home page shows Terracotta in use), no "Updated to" card (no record: a by-hand install writes none). | |
-| A7 | **U7: Off, and offline.** From A6's state, close the app; `Set-Phase4bMode $vm off $u`; note the last line of `<spike>\server.log` on the host; `Start-Phase4bApp $vm $u`; wait 20 s; `Get-Phase4bLog $vm $u`; `Close-Phase4App $vm $u`. Then `Set-Phase4bMode $vm auto $u`; `Set-Phase4bNic <vm name> off`; `Start-Phase4bApp $vm $u`; wait 30 s; `Save-Shot $vm 'p4b-a7-offline'`; `Get-Phase4bLog $vm $u`; `Close-Phase4App $vm $u`; `Set-Phase4bNic <vm name> on`. | Off: the log's new line is `update mode=off` and `server.log` gained no request line. Offline: `update check=offline`, the shot shows the home page with no card and no box. | |
+| A1 | **spike.1 installed silently, notify mode, Terracotta applied.** `Start-Phase4bInstall $vm 1 $u -Silent`; `Set-Phase4bMode $vm notify $u`; `Start-Phase4bApp $vm $u`; the wizard to Terracotta applied (phase 3's protocol Run 2 step 4), "Go to the home page"; wait 20 s; `Save-Shot $vm 'p4b-a1-home'`; `Close-Phase4App $vm $u`; `Get-Phase4bSnapshot $vm a1 $u`; `Get-GuestAutoRun $vm 'a1' $u`; `Get-Phase4bServerLog $vm $u`. | `installed: DisplayVersion=0.1.0-spike.1`; `autorun:` holds CMD Studio's part; `log:` has `update available=0.1.0-spike.2` and no `update downloaded=` (notify downloads nothing); `updates: ABSENT`; the shot shows the notify card "CMD Studio v0.1.0-spike.2 is available." with "Update now" and "Later" (the card came within the poll's minute); the server log has one `GET /latest.json HTTP/1.1 -> 200 OK` line. | |
+| A2 | **U5, a manifest that is not JSON, then one that offers the same version.** `Set-Phase4bLatest $vm bad $u`; `Start-Phase4bApp $vm $u`; wait 20 s; `Save-Shot $vm 'p4b-a2-bad'`; `Close-Phase4App $vm $u`; `Get-Phase4bLog $vm $u`. Then `Set-Phase4bLatest $vm same $u`; the same again with the shot `p4b-a2-same`. | The log gains `update check=manifest`, then `update check=none`; the shots show the home page with no card and no box; `updates: ABSENT` after each start. | |
+| A3 | **U1 + U3: the automatic install at close.** `Set-Phase4bLatest $vm latest $u`; `Set-Phase4bMode $vm auto $u`; `Start-Phase4bApp $vm $u`; wait 30 s; `Get-Phase4bLog $vm $u` (`update downloaded=0.1.0-spike.2`); `Get-Phase4bSnapshot $vm a3pre $u` (`updates:` lists `cmdstudio-0.1.0-spike.2-setup.exe <size>`: U1). `Close-Phase4App $vm $u` (prints `closed with CloseMainWindow: 1`), at once `Wait-Phase4bVersion $vm 0.1.0-spike.2 $u`, then after 3 s `Save-Shot $vm 'p4b-a3-after-close'`; `Get-Phase4bSnapshot $vm a3 $u`; `Get-GuestAutoRun $vm 'a3' $u`. | `Wait-Phase4bVersion` prints `version 0.1.0-spike.2 after <n> s` (record n); the shot shows the desktop with no CMD Studio window and no installer page; `processes:` is empty (no relaunch); `runJson: ABSENT` (the run ended before the installer started); `updateJson:` is the record `{"version":1,"from":"0.1.0-spike.1","to":"0.1.0-spike.2","notesUrl":"https://github.com/luraselenehalo/cmd-studio/releases/tag/v0.1.0-spike.2"}`; `log:` ends with `update installing=0.1.0-spike.2 how=exit`; AutoRun unchanged from A1; `install:` lists `cmdstudio.com` and no `cmdstudio-cli.exe`; `shortcuts:` the two; the server log has the installer's `GET /CMD%20Studio_0.1.0-spike.2_x64-setup.exe HTTP/1.1 -> 200 OK`. | |
+| A4 | **U4: the notice.** `Start-Phase4bApp $vm $u`; wait 15 s; `Save-Shot $vm 'p4b-a4-notice'`; `Invoke-GuestButton $vm 'What changed' $u`; wait 5 s; `Save-Shot $vm 'p4b-a4-browser'`; `Invoke-GuestButton $vm 'Close' $u`; `Get-Phase4bLog $vm $u`; `Get-Phase4bSnapshot $vm a4 $u`. | The home page shows "Updated to v0.1.0-spike.2." with "What changed" and "Close", and no "closed unexpectedly" notice; the browser opens at `…/releases/tag/v0.1.0-spike.2` (a 404 page is fine); the log has `update installed to=0.1.0-spike.2`, no `update reapply=` line (the pins are equal) and `update check=none` (the manifest offers spike.2, which runs); `updateJson: ABSENT` (deleted by `app_ready`); `updates: ABSENT`. | |
+| A5 | **U2: "Update now" from the home page.** Fresh `Start-CleanVm`, Setup, A1 (closed, notify, `latest` served). `Start-Phase4bApp $vm $u`; wait 20 s; `Save-Shot $vm 'p4b-a5-card'`; `Invoke-GuestButton $vm 'Update now' $u`; at once `Wait-Phase4bVersion $vm 0.1.0-spike.2 $u`; wait 20 s; `Save-Shot $vm 'p4b-a5-back'`; `Get-Phase4bSnapshot $vm a5 $u`; `Get-GuestAutoRun $vm 'a5' $u`. | The card shows; after the click the window goes at once, `Wait-Phase4bVersion` prints the seconds, and the app is back by itself on its **home page** (a normal start: no "Recovery mode" heading; `processes:` one pid); `log:` has `update downloaded=0.1.0-spike.2` then `update installing=0.1.0-spike.2 how=now` and, after the restart, `update installed to=0.1.0-spike.2`; AutoRun unchanged; no uninstaller ran (`install:` as in A3). | |
+| A5b | **U2 from the Recovery page (a `--recovery` start must not come back as one).** Fresh `Start-CleanVm`, Setup, A1 (closed). `Start-Phase4bApp $vm $u -Recovery`; wait 20 s; `Save-Shot $vm 'p4b-a5b-recovery'`; `Invoke-GuestButton $vm 'Update now' $u`; `Wait-Phase4bVersion $vm 0.1.0-spike.2 $u`; wait 20 s; `Save-Shot $vm 'p4b-a5b-back'`; `Get-Phase4bLog $vm $u`. | The Recovery page shows "CMD Studio v0.1.0-spike.2 is available; a new version may fix what went wrong." with "Update now"; after the update the app is back on its **home page** (the Start-menu shortcut's start, not recovery mode), with "Updated to v0.1.0-spike.2."; the log has no second `recovery_entry`/`pause` line after the restart. | |
+| A6 | **U6: a by-hand install of spike.2 over spike.1, "Do not uninstall".** Fresh `Start-CleanVm`, Setup, A1 (closed). `Start-Phase4bInstall $vm 2 $u` (interactive). Welcome: Next. The "Already Installed" page: `Save-Shot $vm 'p4b-a6-page'`, `Invoke-Phase4Control $vm 'Do not uninstall' $u` (`selected: True`; fallback `Send-Key $vm Down`), zoom the shot, Next; the pages on as 4a's step 2 ("Run CMD Studio" ticked). Wait 20 s. `Get-Phase4bSnapshot $vm a6 $u`; `Get-GuestAutoRun $vm 'a6' $u`; `Save-Shot $vm 'p4b-a6-home'`. | The page's exact words for the two radios are recorded (the first is Tauri's "Uninstall before installing", checked by default); after the install `installed: DisplayVersion=0.1.0-spike.2`, AutoRun unchanged (no uninstaller ran), the theme still applied (the home page shows Terracotta in use), no "Updated to" card (no record: a by-hand install writes none), and `log:` has `update check=none` (spike.2 runs, the manifest offers spike.2). | |
+| A7 | **U7: Off, and offline.** From A6's state, close the app; `Set-Phase4bMode $vm off $u`; `Get-Phase4bServerLog $vm $u` (count its lines); `Start-Phase4bApp $vm $u`; wait 20 s; `Get-Phase4bLog $vm $u`; `Close-Phase4App $vm $u`; `Get-Phase4bServerLog $vm $u`. Then `Set-Phase4bMode $vm auto $u`; `Stop-Phase4bServer $vm $u` (prints `answers: False`); `Start-Phase4bApp $vm $u`; wait 30 s; `Save-Shot $vm 'p4b-a7-offline'`; `Get-Phase4bLog $vm $u`; `Close-Phase4App $vm $u`. | Off: the log's new line is `update mode=off` and the server log gained no line. Offline: `update check=offline` (a refused connection), the shot shows the home page with no card and no box, and the close installs nothing (`installed:` still spike.2, no `update installing=`). | |
 
 ### Results (part A)
 
@@ -485,19 +572,19 @@ In `results.md`.
 
 - **Run:** <date>, commit <sha>, CI run <id> (the `cmdstudio-updater-spike` artifact), VM <A or B>.
 - **U1 (download, verified, written):** <PASS and the log lines, or the finding>.
-- **U2 ("Update now" through the plugin: silent, no uninstaller, the app back by itself):** <PASS, the seconds from the click to the new version and to the window, or the finding>.
-- **U3 (the own spawn at close: silent, no relaunch, the exe replaced):** <PASS, the seconds from the close to the new version, or the finding>.
-- **U4 (the notice, its link, no re-apply with equal pins, the record gone):** <…>.
+- **U2 ("Update now": silent, no uninstaller, the app back by itself as a normal start, from the home page and from the Recovery page):** <PASS, the seconds from the click to the new version and to the window, or the finding>.
+- **U3 (the own spawn at close: silent, no relaunch, the exe replaced, the run record ended first):** <PASS, the seconds from the close to the new version, or the finding>.
+- **U4 (the notice, its link, no re-apply with equal pins, no false crash notice, the record gone):** <…>.
 - **U5 (a manifest that is not JSON, and one with the same version):** <…>.
 - **U6 (a by-hand upgrade keeps the theme through "Do not uninstall"; the page's words):** <the two radios' exact texts>.
-- **U7 (Off makes no request; offline is silent):** <…>.
-- **Decision:** the install moment is **<primary | F2 | F3>**, because <one sentence>. Task 3's last step and Task 8 read this line.
+- **U7 (Off makes no request; a refused connection is silent):** <…>.
+- **Decision:** the install moment is **<primary | F2 | F3>** and the "now" path is **<as planned | F-NOW>**, because <one sentence>. Task 3's last step and Task 8 read this line.
 - **Screenshots** (`spikes\vm\tmp\<vm>-p4b-*.png`): <labels>.
 ```
 
 - [ ] **Step 7: Parse checks, then commit**
 
-Parse-check `update-check.ps1`, `helpers.ps1` and `guard.test.ps1` with `ParseFile`; each must report 0 errors. Parse `ci.yml`.
+Parse-check `update-check.ps1`, `update-server.ps1`, `helpers.ps1` and `guard.test.ps1` with `ParseFile`; each must report 0 errors. Parse `ci.yml`. Expected: `0` four times; `ci.yml` parses with no output.
 
 Write `.git/CMDSTUDIO_COMMIT_MSG`:
 
@@ -506,23 +593,26 @@ ci, docs, spikes: the updater spike's build and protocol (phase 4b)
 
 ci.yml: a workflow_dispatch input updater_spike that builds two spike
 installers (0.1.0-spike.1 and .2) signed with an ephemeral key made in
-the run and never uploaded, with the updater pointed at the VM's host,
-and a latest.json for each case (newer, same, malformed), uploaded as
-cmdstudio-updater-spike; the installer listing's version grep reads
-the line under [workspace.package] (4a's M6). update-check.ps1 (VM
-only): snapshots of the installed version, AutoRun, the install
-folder, the shortcuts, the Path, update.json, updates\ and the log's
-update lines; -SetMode, -WaitForVersion, -Log, -StartApp. helpers.ps1
-on the host, with the web server and the NIC switch. protocol.md part
-A (U1-U7) and the results template. Parse-checked only; the controller
+the run and never uploaded, with the updater pointed at a server
+inside the VM (127.0.0.1:8765), and a latest.json for each case
+(newer, same, malformed), uploaded as cmdstudio-updater-spike; the
+installer listing's version grep reads the line under
+[workspace.package] (4a's M6). update-check.ps1 (VM only): snapshots
+of the installed version, AutoRun, the install folder, the shortcuts,
+the Path, update.json, updates\, run.json and the log's update lines;
+-SetMode, -WaitForVersion, -Log, -StartApp [-Recovery].
+update-server.ps1 (VM only): a TcpListener on the guest's loopback
+over the setup folder, with a request log. helpers.ps1 on the host.
+protocol.md part A (U1-U7, notify mode until the step that tests the
+close) and the results template. Parse-checked only; the controller
 runs it.
 ```
 
-Then `git add -- .github/workflows/ci.yml docs/spikes/phase4-update/protocol.md docs/spikes/phase4-update/helpers.ps1 docs/spikes/phase4-update/results.md spikes/vm/guest/update-check.ps1 spikes/vm/guest/guard.test.ps1`, check `git diff --cached --name-only`, then `git commit -F .git/CMDSTUDIO_COMMIT_MSG`.
+Then `git add -- .github/workflows/ci.yml docs/spikes/phase4-update/protocol.md docs/spikes/phase4-update/helpers.ps1 docs/spikes/phase4-update/results.md spikes/vm/guest/update-check.ps1 spikes/vm/guest/update-server.ps1 spikes/vm/guest/guard.test.ps1`, check `git diff --cached --name-only`, then `git commit -F .git/CMDSTUDIO_COMMIT_MSG`.
 
 - [ ] **Step 8: The run (controller)**
 
-After Task 4 is committed (U2 needs the notify card): the controller pushes the branch, dispatches `ci.yml` with `updater_spike` on, reads the spike step's log (the two installers named with their versions, two `.sig` files, `latest.json`: G-SIG settled; a refusal of the pre-release version is F-VER), downloads the artifact once with the founder's yes, runs part A on VM-A (VM-B as the fallback), fills `results.md`, and commits it (`docs: the updater spike's results (phase 4b Task 1)`). A FAIL of U1 stops the phase and goes to the founder; U3's failure picks F2, which Task 3's last step then builds; U2's or U4's failure goes back to Task 3 or Task 4 as a bug.
+After Task 5 is committed (U2 needs the notify card, U4 the re-apply's absence as a fact): the controller pushes the branch, dispatches `ci.yml` with `updater_spike` on, reads the spike step's log (the two installers named with their versions, two `.sig` files, `latest.json`: G-SIG settled; a refusal of the pre-release version is F-VER), downloads the artifact once with the founder's yes, runs part A on VM-A (VM-B as the fallback), fills `results.md`, and commits it (`docs: the updater spike's results (phase 4b Task 1)`). A FAIL of U1 stops the phase and goes to the founder; U3's failure picks F2, U2's relaunch failure F-NOW, which Task 3's last step then builds; a wrong notice or card goes back to Task 3 or Task 4 as a bug.
 
 ---
 ### Task 2: The core and the paths: `update.json`, `updates\`, `runtime_changed`, `prune_old_runtimes`, `--cleanup`
@@ -536,12 +626,12 @@ The first task to run. Pure additions to the core and the CLI: where the updater
 - Modify: `crates/cli/src/lib.rs` (`put_there_by_cmd_studio`, `cmd_studios_own_file`, their doc comments, two tests)
 
 **Interfaces:**
-- Consumes: `Paths { data }`, `Paths::{runtime_root, omp_dir, clink_dir}`, `State`, `Applied { omp_version, clink_version, launch }`, `Launch::to_clink`, `ClinkLaunch::exe`, `OMP_VERSION`, `CLINK_VERSION`, `program_data_dir`, `Fs::{list_dir, remove_dir_all}`, `DirEntry { path, is_dir }`, `cleanup::same_path` (private helper of that file).
+- Consumes: `Paths { data }`, `Paths::{runtime_root, omp_dir, clink_dir}`, `State`, `Applied { omp_version, clink_version, launch }`, `Launch::{Direct, ShortPath, ProgramData}`, `OMP_VERSION`, `CLINK_VERSION`, `program_data_dir`, `Fs::{list_dir, remove_dir_all}`, `DirEntry { path, is_dir }`, `crate::exec::same_path` (`exec.rs:161`, `pub(crate)`, imported at `cleanup.rs:25`; a string compare, so every folder a prune keeps is named by its long path).
 - Produces: `Paths::update_file() -> PathBuf` (`<data>\update.json`), `Paths::updates_dir() -> PathBuf` (`<data>\updates`); `plan::runtime_changed(state: &State) -> bool`; `cleanup::runtime_dirs_named_by(state: &State, paths: &Paths) -> Vec<PathBuf>`; `cleanup::prune_old_runtimes(sys: System<'_>, paths: &Paths, keep: &[PathBuf]) -> Vec<PathBuf>`; `--cleanup --data-dir` takes `update.json`, `updates\` and `.update.json.<hex 32>.cmdstudio-tmp` as CMD Studio's own.
 
 - [ ] **Step 0: The baselines**
 
-In the scratch worktree: `cargo test --workspace 2>&1 | grep -E "^test result"` (one line per crate and test binary), `cargo test -p cmdstudio-app --lib 2>&1 | grep "^test result"`, and in `app/`: `npm test 2>&1 | grep -E "Test Files|Tests "`. Note the counts for this task's commit message.
+In the scratch worktree: `cargo test --workspace 2>&1 | grep -E "^test result"` (one line per crate and test binary), `cargo test -p cmdstudio-app --lib 2>&1 | grep "^test result"`, and in `app/`: `npm test 2>&1 | grep -E "Test Files|Tests "`. Note the counts for this task's commit message. Expected: one `test result: ok.` line per test binary (no `FAILED`), one for the app library, and Vitest's two summary lines, every file and test passing.
 
 - [ ] **Step 1: The failing tests**
 
@@ -656,13 +746,15 @@ In `crates/core/src/cleanup.rs`'s test module:
         assert!(!m.fs.exists(Path::new(r"C:\e")));
     }
 
-    /// What a prune must keep whatever its version: the applied theme's OMP folder and the folder
-    /// of the Clink exe AutoRun runs, under the data folder or under ProgramData; none without a theme.
+    /// What a prune must keep whatever its version: the applied theme's OMP and Clink folders by
+    /// their long paths under the data folder (AutoRun may hold the 8.3 form for a Thai user
+    /// name, G19, which the string compare of `same_path` never matches), or the ProgramData
+    /// folder the launch names; none without a theme.
     #[test]
     fn the_runtime_folders_state_json_names_are_kept() {
         use crate::state::{Applied, Launch};
         let paths = Paths {
-            data: PathBuf::from(r"C:\d"),
+            data: PathBuf::from(r"C:\Users\ผู้ทดสอบ ไทย\AppData\Local\ai.resincore.cmdstudio"),
         };
         let applied = |launch: Launch| Applied {
             theme_id: uuid::Uuid::nil(),
@@ -678,19 +770,26 @@ In `crates/core/src/cleanup.rs`'s test module:
             snapshot_id: "1791694709000-0123abcd".into(),
             applied_at_ms: 1_791_694_709_000,
         };
+        let long_omp = paths.runtime_root().join("omp-31.4.0");
+        let long_clink = paths.runtime_root().join("clink-1.9.0");
         let direct = State {
             applied: Some(applied(Launch::Direct {
-                exe: PathBuf::from(r"C:\d\runtime\clink-1.9.0\clink_x64.exe"),
+                exe: long_clink.join("clink_x64.exe"),
             })),
             ..State::default()
         };
         assert_eq!(
             runtime_dirs_named_by(&direct, &paths),
-            [
-                PathBuf::from(r"C:\d\runtime\omp-31.4.0"),
-                PathBuf::from(r"C:\d\runtime\clink-1.9.0")
-            ]
+            [long_omp.clone(), long_clink.clone()]
         );
+        // The 8.3 form AutoRun holds for this user (spec §5.4): the long path is kept all the same.
+        let short = State {
+            applied: Some(applied(Launch::ShortPath {
+                exe: PathBuf::from(r"C:\Users\3607~1\AppData\Local\AIRESI~1.CMD\runtime\clink-1.9.0\clink_x64.exe"),
+            })),
+            ..State::default()
+        };
+        assert_eq!(runtime_dirs_named_by(&short, &paths), [long_omp.clone(), long_clink.clone()]);
         let program_data = State {
             applied: Some(applied(Launch::ProgramData {
                 dir: PathBuf::from(r"C:\ProgramData\ai.resincore.cmdstudio-S-1-5-21-1-2-3-1001\clink-1.9.0"),
@@ -700,11 +799,47 @@ In `crates/core/src/cleanup.rs`'s test module:
         assert_eq!(
             runtime_dirs_named_by(&program_data, &paths),
             [
-                PathBuf::from(r"C:\d\runtime\omp-31.4.0"),
+                long_omp,
                 PathBuf::from(r"C:\ProgramData\ai.resincore.cmdstudio-S-1-5-21-1-2-3-1001\clink-1.9.0")
             ]
         );
         assert_eq!(runtime_dirs_named_by(&State::default(), &paths), Vec::<PathBuf>::new());
+    }
+
+    /// Review Focus 5, G19: a prune keeps the applied Clink folder when AutoRun names it in its
+    /// 8.3 form, since the folder `list_dir` lists is the long one.
+    #[test]
+    fn a_short_path_launch_keeps_its_long_folder() {
+        use crate::state::{Applied, Launch};
+        let m = FakeMachine::new();
+        let paths = Paths {
+            data: PathBuf::from(r"C:\Users\ผู้ทดสอบ ไทย\AppData\Local\ai.resincore.cmdstudio"),
+        };
+        let old = paths.runtime_root().join("clink-1.9.0");
+        m.fs.put(old.join("clink_dll_x64.dll"), b"x");
+        m.fs.put(paths.runtime_root().join("omp-31.4.0").join("oh-my-posh.exe"), b"x");
+        let state = State {
+            applied: Some(Applied {
+                theme_id: uuid::Uuid::nil(),
+                theme_name: "Terracotta".into(),
+                target: Target::All,
+                set_default: true,
+                launch: Launch::ShortPath {
+                    exe: PathBuf::from(r"C:\Users\3607~1\AppData\Local\AIRESI~1.CMD\runtime\clink-1.9.0\clink_x64.exe"),
+                },
+                omp_version: "31.4.0".into(),
+                clink_version: "1.9.0".into(),
+                generated: Default::default(),
+                wt_font: None,
+                clink_log_len: 0,
+                snapshot_id: "1791694709000-0123abcd".into(),
+                applied_at_ms: 1_791_694_709_000,
+            }),
+            ..State::default()
+        };
+        let keep = runtime_dirs_named_by(&state, &paths);
+        assert_eq!(prune_old_runtimes(m.system(), &paths, &keep), Vec::<PathBuf>::new());
+        assert!(m.fs.exists(&old) && m.fs.exists(&paths.runtime_root().join("omp-31.4.0")));
     }
 ```
 
@@ -722,8 +857,8 @@ and in `cleanup_with_a_data_dir_refuses_names_that_only_look_like_the_apps_own`,
 
 - [ ] **Step 2: Run them to see them fail**
 
-Run: `cargo test -p cmdstudio-core --features fake --lib recovery::tests::update_json plan::tests::runtime_changed cleanup::tests::old_runtime cleanup::tests::the_runtime_folders`
-Expected: compile errors (`update_file`, `updates_dir`, `runtime_changed`, `prune_old_runtimes`, `runtime_dirs_named_by` not found).
+Run (one filter per command): `cargo test -p cmdstudio-core --features fake --lib recovery::tests::update_json`, then `… plan::tests::runtime_changed`, then `… cleanup::tests::old_runtime`, then `… cleanup::tests::the_runtime_folders`, then `… cleanup::tests::a_short_path_launch`.
+Expected: each a compile error (`update_file`, `updates_dir`, `runtime_changed`, `prune_old_runtimes`, `runtime_dirs_named_by` not found).
 Run: `cargo test -p cmdstudio-cli cleanup_with_a_data_dir`
 Expected: `cleanup_with_a_data_dir_takes_the_apps_own_entries_for_cmd_studios` fails with exit code 2 ("update.json" named as not CMD Studio's); the refusing test passes already.
 
@@ -763,23 +898,26 @@ pub fn runtime_changed(state: &crate::state::State) -> bool {
 
 - [ ] **Step 5: The prune**
 
-In `crates/core/src/cleanup.rs`, after `remove_program_data` (line ~1600; `same_path` and `program_data_dir` are in scope there; add `use crate::plan::CLINK_VERSION;` and `use crate::state::State;` to the file's imports if they are not already):
+In `crates/core/src/cleanup.rs`, after `remove_program_data` (`cleanup.rs:1556`; `same_path` is `crate::exec::same_path`, imported at line 25, `program_data_dir` and `State` at lines 23 and 33; add `use crate::plan::CLINK_VERSION;` and `use std::path::PathBuf;` to the imports, which hold `Path` only):
 
 ```rust
 /// The runtime folders `state.json` names, which a prune keeps whatever their version (phase
-/// 4b): the applied theme's `runtime\omp-<its version>` and the folder of the Clink exe its
-/// `<clink-launch>` runs, which AutoRun points at until a re-apply. None without a theme.
+/// 4b): the applied theme's `runtime\omp-<its version>` and `runtime\clink-<its version>` by
+/// their long paths under the data folder (AutoRun may run the Clink exe by its 8.3 path, spec
+/// §5.4 and G19, which the string compare of `same_path` would never match against the long
+/// folder `list_dir` lists), or the ProgramData folder the launch names. None without a theme.
 pub fn runtime_dirs_named_by(state: &State, paths: &Paths) -> Vec<PathBuf> {
     let Some(applied) = &state.applied else {
         return Vec::new();
     };
-    let mut dirs = vec![paths
-        .runtime_root()
-        .join(format!("omp-{}", applied.omp_version))];
-    if let Some(dir) = applied.launch.to_clink().exe().parent() {
-        dirs.push(dir.to_path_buf());
-    }
-    dirs
+    let root = paths.runtime_root();
+    let clink = match &applied.launch {
+        Launch::Direct { .. } | Launch::ShortPath { .. } => {
+            root.join(format!("clink-{}", applied.clink_version))
+        }
+        Launch::ProgramData { dir } => dir.clone(),
+    };
+    vec![root.join(format!("omp-{}", applied.omp_version)), clink]
 }
 
 /// Deletes the runtime folders of other versions than this build pins (spec §6.2 step 3, phase
@@ -821,12 +959,12 @@ pub fn prune_old_runtimes(sys: System<'_>, paths: &Paths, keep: &[PathBuf]) -> V
 }
 ```
 
-If `same_path` in that file is written for the other argument order, or `list_dir` of a missing folder answers `Ok(vec![])` in the fake (then the `C:\e` assertion still holds), the tests say so.
+(`Launch` is `crate::state::Launch`, imported with `State`. The fake's `list_dir` of a missing folder answers `Ok(vec![])` (`fake.rs:287`), so the `C:\e` case prunes nothing and makes nothing.)
 
 - [ ] **Step 6: Run the core's tests**
 
-Run: `cargo test -p cmdstudio-core --features fake --lib recovery::tests::update_json plan::tests::runtime_changed cleanup::tests::old_runtime cleanup::tests::the_runtime_folders`
-Expected: the four tests pass.
+Run (one filter per command): `cargo test -p cmdstudio-core --features fake --lib recovery::tests::update_json`, `… plan::tests::runtime_changed`, `… cleanup::tests::old_runtime`, `… cleanup::tests::the_runtime_folders`, `… cleanup::tests::a_short_path_launch`.
+Expected: the five tests pass.
 
 - [ ] **Step 7: The CLI's own-file lists**
 
@@ -840,7 +978,7 @@ Expected: both tests pass (the own-entries test leaves only `themes`; `update.js
 
 - [ ] **Step 8: The checks, then commit**
 
-The four clippy runs, `cargo fmt --all`, `cargo fmt --all -- --check`, `cargo test -p cmdstudio-core` (no fake feature: the library still builds), `cargo test --workspace`.
+The four clippy runs, `cargo fmt --all`, `cargo fmt --all -- --check`, `cargo test -p cmdstudio-core` (no fake feature: the library still builds), `cargo test --workspace`. Expected: clippy prints no warning, `cargo fmt --all -- --check` prints nothing, every test passes.
 
 Write `.git/CMDSTUDIO_COMMIT_MSG`:
 
@@ -864,38 +1002,39 @@ Then `git add -- crates/core/src/recovery.rs crates/core/src/plan.rs crates/core
 ---
 ### Task 3: The updater behind a trait, the state machine, `update.json`, the check at launch, the install at close and the install now
 
-Runs after Task 2. The plugin goes behind `Updater`; the backend's state machine is tested over `FakeUpdater` and the fake machine; `lib.rs` wires the plugin, the record's read after the run record, and the exit hook. Both install paths are production code (Decisions): the automatic one at close (the own spawn, `/S /UPDATE`) and "Update now" through the plugin's `install` (`/S /R /UPDATE /ARGS`, the process ends inside, the app comes back). The committed config holds an empty pubkey until Task 6, which `TauriUpdater::check` refuses before any request.
+Runs after Task 2. The plugin goes behind `Updater` for the check and the verified download; the backend's state machine is tested over `FakeUpdater` and the fake machine; `lib.rs` wires the plugin, the record's read after the run record, and the exit hook. Both install paths are the app's own spawn of the verified file (Decisions): at close `/S /UPDATE` (no relaunch), and "Update now" `/S /R /UPDATE /ARGS` with nothing after `/ARGS` (the installer starts the app again as a normal start). The run record ends only once the download was verified and the file written, just before the spawn; a second instance and an `app_restart` exit install nothing. The committed config holds an empty pubkey until Task 6, which `TauriUpdater::check` refuses before any request.
 
 **Files:**
 - Modify: `app/src-tauri/Cargo.toml` (`tauri-plugin-updater`, `semver`), `Cargo.lock`
 - Create: `app/src-tauri/src/update.rs`
 - Create: `app/src-tauri/src/backend/update.rs`
 - Modify: `app/src-tauri/src/backend/mod.rs` (`pub mod update;`, the `update` field, `new()`)
-- Modify: `app/src-tauri/src/backend/run.rs` (`app_ready` consumes the record)
+- Modify: `app/src-tauri/src/backend/run.rs` (`run_is_ours`, `rewrite_run_record`; `app_ready` consumes the record)
 - Modify: `app/src-tauri/src/open.rs` (`ExternalTarget::ReleaseNotes`, `release_url`, `Place::Url(String)`)
 - Modify: `app/src-tauri/src/lib.rs` (`pub mod update;`, the plugin, `TauriUpdater` in Tauri's state, `update_after_start`, the exit hook)
 - Modify: `app/src-tauri/src/config_guard.rs` (`plugins.updater` pinned)
 - Modify: `app/src-tauri/tauri.conf.json` (`plugins.updater`)
 
 **Interfaces:**
-- Consumes: `Paths::{update_file, updates_dir, lock_file}` (Task 2), `Backend::{settings_or_default, note_line, now_ms, end_run, paths, sys}`, `Fs::{try_lock, write_atomic, read, exists, remove_file, remove_dir_all}`, `cmdstudio_core::resources::sha256_hex`, `AppError::{coded, internal}`, `UpdateMode`, the plugin's `UpdaterExt::updater_builder`, `UpdaterBuilder::{version_comparator, build}`, `Updater::check`, `Update::{download, install, version}`, `Config.plugins`.
-- Produces: `cmdstudio_app::update::{Updater, Available { version, notes_url }, UpdateError::{Offline, Manifest, Signature, Install}, UpdateError::kind() -> &'static str, TauriUpdater::new(AppHandle), install_quiet(&Path) -> Result<(), String>, start_check(&AppHandle, Arc<Backend<RealMachine>>), is_newer(&Version, &Version) -> bool}`; `cmdstudio_app::backend::update::{UpdateRecord, UpdateState, UpdateStatus { mode, state, checked_at_ms }, Updated { from, to, notes_url }, UPDATE_RECORD_VERSION, UPDATE_REAPPLY_BUSY}`; `Backend::{update_check_and_download(&dyn Updater) -> UpdateState, update_status() -> Result<UpdateStatus, AppError>, update_install(&dyn Updater) -> Result<(), AppError>, update_at_exit(&dyn Fn(&Path) -> Result<(), String>), update_after_start(&str), update_record_consumed(), updated() -> Option<Updated>}`; `open::{ExternalTarget::ReleaseNotes { version: String }, release_url(&str) -> Option<String>, RELEASES_URL}`; the log lines `update mode=off`, `update check=<kind|none>`, `update available=<v>`, `update download=<kind|write>`, `update downloaded=<v>`, `update postponed=busy|lock|record`, `update install=file-changed|spawn|<kind>`, `update installing=<v> how=exit|now`, `update installed to=<v>`, `update failed to=<v> running=<v>`, `update record=unreadable|damaged`, `update updates=kept`, `update check=thread <e>`; the file `updates\cmdstudio-<version>-setup.exe`; `update.json` `{"version":1,"from":…,"to":…,"notesUrl":…}`.
+- Consumes: `Paths::{update_file, updates_dir, lock_file}` (Task 2), `Backend::{settings_or_default, note_line, now_ms, end_run, paths, sys}`, `RunState` (private to `run.rs`: the two new methods live there), `Fs::{try_lock, write_atomic, read, exists, remove_file, remove_dir_all}`, `cmdstudio_core::resources::sha256_hex`, `AppError::{coded, internal}`, `UpdateMode`, the plugin's `UpdaterExt::updater_builder`, `UpdaterBuilder::{version_comparator, build}`, `Updater::check`, `Update::{download, version}`, `Config.plugins`.
+- Produces: `cmdstudio_app::update::{Updater { check, download }, Available { version, notes_url }, UpdateError::{Offline, Manifest, Signature, Install, Other}, UpdateError::{kind() -> &'static str, log_text() -> String}, TauriUpdater::new(AppHandle), classify, start_installer(&Path, relaunch: bool) -> Result<(), String>, start_check(&AppHandle, Arc<Backend<RealMachine>>), is_newer(&Version, &Version) -> bool}`; `cmdstudio_app::backend::update::{UpdateRecord, UpdateState, UpdateStatus { mode, state, checked_at_ms }, Updated { from, to, notes_url }, UPDATE_RECORD_VERSION, UPDATE_REAPPLY_BUSY}`; `Backend::{update_check_and_download(&dyn Updater) -> UpdateState, update_status() -> Result<UpdateStatus, AppError>, update_install(&dyn Updater, &dyn Fn(&Path, bool) -> Result<(), String>) -> Result<(), AppError>, update_at_exit(&dyn Fn(&Path, bool) -> Result<(), String>), update_after_start(&str), update_record_consumed(), updated() -> Option<Updated>, mark_restarting()}`; `Backend::{run_is_ours() -> bool, rewrite_run_record()}` (`pub(crate)`, in `run.rs`); `open::{ExternalTarget::ReleaseNotes { version: String }, release_url(&str) -> Option<String>, RELEASES_URL}`; the log lines `update mode=off`, `update check=<kind|none>` (`offline other=<text>` for an unclassified error), `update available=<v>`, `update download=<kind|write>`, `update downloaded=<v>`, `update postponed=busy|lock|record|restart`, `update install=file-changed|spawn`, `update installing=<v> how=exit|now`, `update installed to=<v>`, `update failed to=<v> running=<v>`, `update record=unreadable|damaged`, `update updates=kept`, `update check=thread <e>|thread no-updater`; the file `updates\cmdstudio-<version>-setup.exe`; `update.json` `{"version":1,"from":…,"to":…,"notesUrl":…}`.
 
 - [ ] **Step 0: The pins and G-UPD**
 
 In `app/src-tauri/Cargo.toml`, under `[dependencies]` after `rfd`:
 
 ```toml
-# The updater (spec §6.2, phase 4b): GitHub Releases through latest.json, minisign-verified,
-# used from Rust only (update.rs): the window gets none of its commands (capabilities/default.json,
-# pinned by ipc.rs). G10's table lists 2.13.2; 2.13.3 is the newest 2.13.x on the index
-# (tauri ^2.12, so Tauri stays at 2.12.4). Default features: rustls-tls, zip.
+# The updater (spec §6.2, phase 4b): GitHub Releases through latest.json, minisign-verified; used
+# from Rust only (update.rs), for the check and the download: the window gets none of its
+# commands (capabilities/default.json, pinned by ipc.rs), and the app starts the installer itself.
+# G10's table lists 2.13.2; 2.13.3 is the newest 2.13.x on the index (tauri ^2.12, so Tauri stays
+# at 2.12.4). Default features: rustls-tls, zip.
 tauri-plugin-updater = "=2.13.3"
 # open.rs: a version from latest.json or update.json must parse as SemVer before it reaches a URL.
 semver = "=1.0.28"
 ```
 
-Run: `cargo fetch` (in the scratch worktree; `Cargo.lock` gains the plugin's tree). Expected: it resolves; if it does not (G-IDX), F-PIN with `=2.12.0` and the same steps. Then reread, in `~/.cargo/registry/src/*/tauri-plugin-updater-2.13.3/src/`, the facts of G-UPD (a)–(f) and write their file:line into the module doc of `update.rs` (Step 4). `cargo tree -p cmdstudio-app -i tauri-utils` must show one `tauri-utils` version (2.10.2); two would be the G-IDX conflict.
+Run: `cargo fetch` (in the scratch worktree; `Cargo.lock` gains the plugin's tree). Expected: it resolves; if it does not (G-IDX), F-PIN with `=2.12.0` and the same steps. Then reread, in `~/.cargo/registry/src/*/tauri-plugin-updater-2.13.3/src/`, the facts of G-UPD (a)–(f) and write their file:line into the module doc of `update.rs` (Step 4); for (f) list every variant of its `src/error.rs` against `classify` below (a variant 2.13.3 adds that `check` or `download` can raise gets an explicit arm by its meaning; the rest fall to `Other`). `cargo tree -p cmdstudio-app -i tauri-utils` must show one `tauri-utils` version (2.10.2); two would be the G-IDX conflict.
 
 - [ ] **Step 1: The failing tests**
 
@@ -919,29 +1058,43 @@ mod tests {
         assert!(!is_newer(&v("0.1.0"), &v("0.1.0-rc.1")));
     }
 
-    /// The log says the kind of a failure and never its text, which may hold a URL or a path.
+    /// The log says the kind of a failure and never its text, except for an error no arm of
+    /// `classify` names: silent as offline, its text folded onto the line so that the kind can be
+    /// added (Q18).
     #[test]
-    fn each_error_has_a_one_word_kind() {
+    fn each_error_has_a_one_word_kind_and_an_unknown_one_keeps_its_text() {
         assert_eq!(UpdateError::Offline("dns".into()).kind(), "offline");
         assert_eq!(UpdateError::Manifest("x".into()).kind(), "manifest");
         assert_eq!(UpdateError::Signature("x".into()).kind(), "signature");
         assert_eq!(UpdateError::Install("x".into()).kind(), "install");
+        assert_eq!(UpdateError::Other("x".into()).kind(), "offline");
+        assert_eq!(UpdateError::Offline("dns".into()).log_text(), "offline");
+        assert_eq!(
+            UpdateError::Other("a new\nvariant: it said so".into()).log_text(),
+            "offline other=a new variant: it said so"
+        );
+        let long = "x".repeat(400);
+        assert_eq!(UpdateError::Other(long).log_text().len(), "offline other=".len() + 160);
         assert!(UpdateError::Offline("no route to host".into()).to_string().contains("no route to host"));
     }
 
-    /// The automatic install at close (U3): the own spawn runs the file silently as an update, with
-    /// no relaunch and with its stdio closed, and waits for nothing. Read as text: no installer is
-    /// ever started on this PC.
+    /// The own spawn (U2, U3): the file is run silently as an update, with its stdio closed and
+    /// never waited for; `/R /ARGS` (with nothing after them: a normal start) only when asked.
+    /// Read as text: no installer is ever started on this PC.
     #[cfg(windows)]
     #[test]
-    fn the_own_spawn_is_silent_and_does_not_relaunch() {
+    fn the_own_spawn_is_silent_and_relaunches_only_when_asked() {
         let source = include_str!("update.rs");
-        let start = source.find("pub fn install_quiet(").unwrap();
+        let start = source.find("pub fn start_installer(").unwrap();
         let body = source.get(start..).unwrap().split_once("\n}\n").unwrap().0;
-        assert!(body.contains(r#".args(["/S", "/UPDATE"])"#), "{body}");
-        assert!(!body.contains("/R"), "no relaunch");
+        assert!(body.contains(r#"let mut args = vec!["/S", "/UPDATE"];"#), "{body}");
+        assert!(body.contains(r#"args.extend(["/R", "/ARGS"]);"#), "{body}");
+        assert!(body.contains("if relaunch {"), "the relaunch is asked for, never the default");
         assert_eq!(body.matches("Stdio::null()").count(), 3, "stdin, stdout and stderr closed");
         assert!(body.contains(".spawn()") && !body.contains(".wait("), "never waited for");
+        let check = source.get(source.find("pub fn start_check(").unwrap()..).unwrap().split_once("\n}\n").unwrap().0;
+        assert!(check.contains("try_state::<"), "no panic when the updater is not managed");
+        assert!(check.contains("update check=thread no-updater"));
     }
 
     /// The fake updater records what the backend asked of it, in order.
@@ -952,11 +1105,7 @@ mod tests {
         assert_eq!(a.version, "0.2.0");
         assert_eq!(a.notes_url, "https://github.com/luraselenehalo/cmd-studio/releases/tag/v0.2.0");
         assert_eq!(fake.download(&a).unwrap(), b"MZ-the-installer".to_vec());
-        let ran = std::cell::Cell::new(false);
-        fake.install_now(&a, b"MZ-the-installer".to_vec(), &|| {}).unwrap();
-        fake.install_now(&a, vec![], &|| ran.set(true)).unwrap();
-        assert!(ran.get(), "the hook runs before the installer");
-        assert_eq!(fake.calls(), ["check", "download 0.2.0", "install 0.2.0 16", "install 0.2.0 0"]);
+        assert_eq!(fake.calls(), ["check", "download 0.2.0"]);
         assert_eq!(FakeUpdater::none().check().unwrap(), None);
         assert_eq!(
             FakeUpdater::failing(UpdateError::Offline("x".into())).check().unwrap_err().kind(),
@@ -966,17 +1115,25 @@ mod tests {
 }
 ```
 
-`app/src-tauri/src/backend/update.rs` (created here with its tests; the body comes in Step 5):
+`app/src-tauri/src/backend/update.rs` (created here with its tests; the body comes in Step 5). Every test starts the run first (`started()`): only the process that wrote the run record reads the updater's record, checks, or installs (Q8), as `lib.rs` orders it.
 
 ```rust
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::testing::{backend, fake_fs};
+    use crate::backend::run::GuiStart;
+    use crate::backend::testing::{backend, fake_fs, fake_host};
     use crate::settings::AppSettings;
     use crate::update::{FakeUpdater, UpdateError};
     use cmdstudio_core::adapters::fake::FakeMachine;
     use std::cell::RefCell;
+
+    /// A backend whose run is its own: `start_run` wrote the record, as `run_gui` does first.
+    fn started() -> Backend<FakeMachine> {
+        let b = backend();
+        b.start_run(GuiStart::Normal);
+        b
+    }
 
     fn set_mode<M: Machine>(b: &Backend<M>, updates: UpdateMode) {
         b.settings_set(AppSettings {
@@ -998,10 +1155,12 @@ mod tests {
         Some(serde_json::from_slice(&bytes).unwrap())
     }
 
+    const RECORD_0_2_0: &[u8] = br#"{"version":1,"from":"0.1.0","to":"0.2.0","notesUrl":"https://github.com/luraselenehalo/cmd-studio/releases/tag/v0.2.0"}"#;
+
     /// Spec §6.2: Off checks nothing and says so once per run.
     #[test]
     fn off_checks_nothing_and_logs_once() {
-        let b = backend();
+        let b = started();
         set_mode(&b, UpdateMode::Off);
         let fake = FakeUpdater::offering("0.2.0");
         assert_eq!(b.update_check_and_download(&fake), UpdateState::Off);
@@ -1016,7 +1175,7 @@ mod tests {
     /// is downloaded, nothing is shown, and the time of the check is noted.
     #[test]
     fn offline_is_silent_and_idle() {
-        let b = backend();
+        let b = started();
         let fake = FakeUpdater::failing(UpdateError::Offline("dns".into()));
         assert_eq!(b.update_check_and_download(&fake), UpdateState::Idle);
         assert_eq!(fake.calls(), ["check"]);
@@ -1024,26 +1183,32 @@ mod tests {
         assert!(!b.sys().fs.exists(&b.paths().updates_dir()));
         assert_eq!(b.updated(), None);
         assert!(b.update_status().unwrap().checked_at_ms.is_some());
+        // An error no arm names: silent as offline, its text on the line (Q18).
+        let b = started();
+        let fake = FakeUpdater::failing(UpdateError::Other("a variant 2.14 added".into()));
+        assert_eq!(b.update_check_and_download(&fake), UpdateState::Idle);
+        assert_eq!(update_lines(&b), ["update check=offline other=a variant 2.14 added"]);
     }
 
-    /// U5: a manifest that is not JSON, or offers no Windows target, is a refused check, said as such.
+    /// U5: a manifest that is not JSON, or offers no Windows target, is a refused check, said as
+    /// such; an up-to-date one is `none`.
     #[test]
     fn a_malformed_manifest_is_offline() {
-        let b = backend();
+        let b = started();
         let fake = FakeUpdater::failing(UpdateError::Manifest("expected value at line 1".into()));
         assert_eq!(b.update_check_and_download(&fake), UpdateState::Idle);
         assert_eq!(update_lines(&b), ["update check=manifest"]);
-        let b = backend();
+        let b = started();
         assert_eq!(b.update_check_and_download(&FakeUpdater::none()), UpdateState::Idle);
         assert_eq!(update_lines(&b), ["update check=none"]);
     }
 
     /// Spec §6.2 (automatic, the primary): the installer is downloaded after the check, written to
-    /// updates\ in one step, and started at close with the record written and the run ended.
+    /// updates\ in one step, and started at close with the record written (the run ended before,
+    /// by lib.rs) and no relaunch.
     #[test]
     fn auto_downloads_and_is_ready_at_exit() {
-        let b = backend();
-        b.start_run(crate::backend::run::GuiStart::Normal);
+        let b = started();
         b.update_after_start("0.1.0");
         let fake = FakeUpdater::offering("0.2.0");
         assert_eq!(b.update_check_and_download(&fake), UpdateState::Ready { version: "0.2.0".into() });
@@ -1054,11 +1219,12 @@ mod tests {
         assert_eq!(b.update_status().unwrap().state, UpdateState::Ready { version: "0.2.0".into() });
 
         let spawned = RefCell::new(Vec::new());
-        b.update_at_exit(&|f| {
-            spawned.borrow_mut().push(f.to_path_buf());
+        b.end_run();
+        b.update_at_exit(&|f, relaunch| {
+            spawned.borrow_mut().push((f.to_path_buf(), relaunch));
             Ok(())
         });
-        assert_eq!(spawned.into_inner(), [file]);
+        assert_eq!(spawned.into_inner(), [(file, false)]);
         assert_eq!(
             record(&b),
             Some(UpdateRecord {
@@ -1076,32 +1242,41 @@ mod tests {
     }
 
     /// Spec §6.2 (notify): nothing is downloaded until the button; "Update now" downloads, writes
-    /// the record, ends the run and hands the bytes to the plugin's install, which ends the process.
+    /// the record, ends the run and starts the installer with a relaunch; the window's own exit
+    /// then installs nothing more (the state says so).
     #[test]
     fn notify_waits_for_the_button() {
-        let b = backend();
-        b.start_run(crate::backend::run::GuiStart::Normal);
+        let b = started();
         b.update_after_start("0.1.0");
         set_mode(&b, UpdateMode::Notify);
         let fake = FakeUpdater::offering("0.2.0");
         assert_eq!(b.update_check_and_download(&fake), UpdateState::Available { version: "0.2.0".into() });
         assert_eq!(fake.calls(), ["check"]);
         assert!(!b.sys().fs.exists(&b.paths().updates_dir()));
-        let spawned = RefCell::new(0);
-        b.update_at_exit(&|_| {
-            *spawned.borrow_mut() += 1;
+        let spawned = RefCell::new(Vec::new());
+        let spawn = |f: &Path, relaunch: bool| {
+            spawned.borrow_mut().push((f.to_path_buf(), relaunch));
             Ok(())
-        });
-        assert_eq!(spawned.into_inner(), 0, "nothing is ready: nothing starts at close");
+        };
+        b.update_at_exit(&spawn);
+        assert!(spawned.borrow().is_empty(), "nothing is ready: nothing starts at close");
 
-        b.update_install(&fake).unwrap();
-        assert_eq!(fake.calls(), ["check", "download 0.2.0", "install 0.2.0 16"]);
+        b.update_install(&fake, &spawn).unwrap();
+        let file = b.paths().updates_dir().join("cmdstudio-0.2.0-setup.exe");
+        assert_eq!(*spawned.borrow(), [(file, true)]);
+        assert_eq!(fake.calls(), ["check", "download 0.2.0"]);
         assert_eq!(record(&b).map(|r| r.to), Some("0.2.0".into()));
         assert!(!b.sys().fs.exists(&b.paths().run_file()), "the run ended before the installer");
-        assert_eq!(update_lines(&b).last().map(String::as_str), Some("update installing=0.2.0 how=now"));
+        let lines = update_lines(&b);
+        assert_eq!(lines.get(lines.len() - 2).map(String::as_str), Some("update downloaded=0.2.0"));
+        assert_eq!(lines.last().map(String::as_str), Some("update installing=0.2.0 how=now"));
+        assert_eq!(b.update_status().unwrap().state, UpdateState::Installing { version: "0.2.0".into() });
+        // The exit that follows (app.exit): nothing starts twice.
+        b.update_at_exit(&spawn);
+        assert_eq!(spawned.borrow().len(), 1);
         // Nothing to install: refused with an internal error, nothing written.
-        let b = backend();
-        let e = b.update_install(&FakeUpdater::none()).unwrap_err();
+        let b = started();
+        let e = b.update_install(&FakeUpdater::none(), &spawn).unwrap_err();
         assert_eq!(e.code, "E_INTERNAL");
         assert!(!b.sys().fs.exists(&b.paths().update_file()));
     }
@@ -1111,28 +1286,30 @@ mod tests {
     /// download and checks again.
     #[test]
     fn a_busy_lock_postpones_the_install_and_tries_next_launch() {
-        let b = backend();
+        let b = started();
         b.update_after_start("0.1.0");
         let fake = FakeUpdater::offering("0.2.0");
         assert_eq!(b.update_check_and_download(&fake), UpdateState::Ready { version: "0.2.0".into() });
         let held = b.sys().fs.try_lock(&b.paths().lock_file()).unwrap().unwrap();
         let spawned = RefCell::new(0);
-        b.update_at_exit(&|_| {
+        let spawn = |_: &Path, _: bool| {
             *spawned.borrow_mut() += 1;
             Ok(())
-        });
-        assert_eq!(spawned.into_inner(), 0);
+        };
+        b.update_at_exit(&spawn);
+        assert_eq!(*spawned.borrow(), 0);
         assert_eq!(update_lines(&b).last().map(String::as_str), Some("update postponed=busy"));
         assert_eq!(
             b.update_status().unwrap().state,
             UpdateState::Postponed { version: "0.2.0".into(), reason: "busy".into() }
         );
         assert_eq!(record(&b), None);
-        assert_eq!(b.update_install(&fake).unwrap_err().code, "E_BUSY");
+        assert_eq!(b.update_install(&fake, &spawn).unwrap_err().code, "E_BUSY");
+        assert!(b.sys().fs.exists(&b.paths().run_file()), "the run goes on");
         drop(held);
         // The next launch: the last run's download is not trusted, the folder is emptied, the
         // check runs anew.
-        let next = backend();
+        let next = started();
         fake_fs(&next).put(next.paths().updates_dir().join("cmdstudio-0.2.0-setup.exe"), b"old");
         next.update_after_start("0.1.0");
         assert!(!next.sys().fs.exists(&next.paths().updates_dir()));
@@ -1145,11 +1322,8 @@ mod tests {
     /// for the run; a start without a record shows nothing.
     #[test]
     fn update_json_makes_the_notice_once_and_goes_with_app_ready() {
-        let b = backend();
-        fake_fs(&b).put(
-            b.paths().update_file(),
-            br#"{"version":1,"from":"0.1.0","to":"0.2.0","notesUrl":"https://github.com/luraselenehalo/cmd-studio/releases/tag/v0.2.0"}"#,
-        );
+        let b = started();
+        fake_fs(&b).put(b.paths().update_file(), RECORD_0_2_0);
         b.update_after_start("0.2.0");
         assert_eq!(
             b.updated(),
@@ -1161,11 +1335,10 @@ mod tests {
         );
         assert_eq!(update_lines(&b), ["update installed to=0.2.0"]);
         assert!(b.sys().fs.exists(&b.paths().update_file()), "kept until the UI has shown it");
-        b.start_run(crate::backend::run::GuiStart::Normal);
         b.app_ready().unwrap();
         assert!(!b.sys().fs.exists(&b.paths().update_file()));
         assert!(b.updated().is_some(), "the card stays for the run");
-        let next = backend();
+        let next = started();
         next.update_after_start("0.2.0");
         assert_eq!(next.updated(), None);
         assert_eq!(update_lines(&next), Vec::<String>::new());
@@ -1175,11 +1348,8 @@ mod tests {
     /// there: no notice, one log line, the record gone.
     #[test]
     fn a_failed_install_is_logged_and_the_file_goes() {
-        let b = backend();
-        fake_fs(&b).put(
-            b.paths().update_file(),
-            br#"{"version":1,"from":"0.1.0","to":"0.2.0","notesUrl":"https://github.com/luraselenehalo/cmd-studio/releases/tag/v0.2.0"}"#,
-        );
+        let b = started();
+        fake_fs(&b).put(b.paths().update_file(), RECORD_0_2_0);
         b.update_after_start("0.1.0");
         assert_eq!(b.updated(), None);
         assert_eq!(update_lines(&b), ["update failed to=0.2.0 running=0.1.0"]);
@@ -1195,14 +1365,14 @@ mod tests {
             r#"{"version":2,"from":"0.1.0","to":"0.2.0","notesUrl":""}"#,
             r#"{"version":1,"from":"0.1.0","to":"../x","notesUrl":""}"#,
         ] {
-            let b = backend();
+            let b = started();
             fake_fs(&b).put(b.paths().update_file(), text);
             b.update_after_start("0.2.0");
             assert_eq!(b.updated(), None, "{text}");
             assert_eq!(update_lines(&b), ["update record=damaged"], "{text}");
             assert!(!b.sys().fs.exists(&b.paths().update_file()), "{text}");
         }
-        let b = backend();
+        let b = started();
         fake_fs(&b).put(b.paths().update_file(), "{}");
         fake_fs(&b).fail_reads_of(b.paths().update_file());
         b.update_after_start("0.2.0");
@@ -1214,63 +1384,117 @@ mod tests {
     /// it is started; one that changed is deleted and never started, and "Update now" downloads again.
     #[test]
     fn a_download_that_changed_on_disk_is_not_installed() {
-        let b = backend();
-        b.start_run(crate::backend::run::GuiStart::Normal);
+        let b = started();
         b.update_after_start("0.1.0");
         let fake = FakeUpdater::offering("0.2.0");
         assert_eq!(b.update_check_and_download(&fake), UpdateState::Ready { version: "0.2.0".into() });
         let file = b.paths().updates_dir().join("cmdstudio-0.2.0-setup.exe");
         fake_fs(&b).put(&file, b"MZ-something-else");
-        let spawned = RefCell::new(0);
-        b.update_at_exit(&|_| {
-            *spawned.borrow_mut() += 1;
+        let spawned = RefCell::new(Vec::new());
+        let spawn = |f: &Path, relaunch: bool| {
+            spawned.borrow_mut().push((f.to_path_buf(), relaunch));
             Ok(())
-        });
-        assert_eq!(spawned.into_inner(), 0);
+        };
+        b.update_at_exit(&spawn);
+        assert!(spawned.borrow().is_empty());
         assert_eq!(update_lines(&b).last().map(String::as_str), Some("update install=file-changed"));
         assert!(!b.sys().fs.exists(&file));
         assert_eq!(record(&b), None);
-        b.update_install(&fake).unwrap();
-        assert_eq!(fake.calls(), ["check", "download 0.2.0", "download 0.2.0", "install 0.2.0 16"]);
+        b.update_install(&fake, &spawn).unwrap();
+        assert_eq!(fake.calls(), ["check", "download 0.2.0", "download 0.2.0"]);
+        assert_eq!(*spawned.borrow(), [(file, true)]);
     }
 
     /// A download that cannot be written is said and leaves the state idle; a spawn that fails
-    /// at close takes the record back; an install through the plugin that fails is an error the
-    /// window sees, with the record taken back and the state as before.
+    /// at close takes the record back; a "now" spawn that fails is an error the window sees, with
+    /// the record taken back, the run record written again (Q16) and the state as before.
     #[test]
     fn a_download_or_a_start_that_fails_is_said_and_leaves_no_record() {
-        let b = backend();
+        let b = started();
         b.update_after_start("0.1.0");
         let file = b.paths().updates_dir().join("cmdstudio-0.2.0-setup.exe");
         fake_fs(&b).fail_writes_to(&file);
         assert_eq!(b.update_check_and_download(&FakeUpdater::offering("0.2.0")), UpdateState::Idle);
         assert_eq!(update_lines(&b), ["update available=0.2.0", "update download=write"]);
 
-        let b = backend();
+        let b = started();
         b.update_after_start("0.1.0");
         let fake = FakeUpdater::offering("0.2.0");
         b.update_check_and_download(&fake);
-        b.update_at_exit(&|_| Err("access denied".into()));
+        b.update_at_exit(&|_, _| Err("access denied".into()));
         assert_eq!(update_lines(&b).last().map(String::as_str), Some("update install=spawn"));
         assert_eq!(record(&b), None);
 
-        let b = backend();
-        b.start_run(crate::backend::run::GuiStart::Normal);
+        let b = started();
         b.update_after_start("0.1.0");
         let fake = FakeUpdater::offering("0.2.0");
-        *fake.install.borrow_mut() = Err(UpdateError::Install("ShellExecuteW answered 5".into()));
         b.update_check_and_download(&fake);
-        let e = b.update_install(&fake).unwrap_err();
+        let e = b.update_install(&fake, &|_, _| Err("ShellExecuteW answered 5".into())).unwrap_err();
         assert_eq!(e.code, "E_INTERNAL");
-        assert_eq!(update_lines(&b).last().map(String::as_str), Some("update install=install"));
+        assert_eq!(update_lines(&b).last().map(String::as_str), Some("update install=spawn"));
         assert_eq!(record(&b), None);
+        assert!(b.sys().fs.exists(&b.paths().run_file()), "the run goes on, its record back");
         assert_eq!(b.update_status().unwrap().state, UpdateState::Ready { version: "0.2.0".into() });
+    }
+
+    /// Q8: an instance whose start found an earlier run still running (single-instance ends it a
+    /// moment later) reads no record, empties nothing, checks nothing and installs nothing.
+    #[test]
+    fn a_second_instance_reads_checks_and_installs_nothing() {
+        let b = backend();
+        fake_host(&b).processes.borrow_mut().insert(9999, 5);
+        fake_fs(&b).put(
+            b.paths().run_file(),
+            br#"{"version":1,"pid":9999,"createdAt":5,"startedAt":1791694000000,"uiReadyAt":1791694100000,"failedStarts":0,"safeMode":false}"#,
+        );
+        b.start_run(GuiStart::Normal);
+        assert!(!b.run_is_ours());
+        let leftover = b.paths().updates_dir().join("cmdstudio-0.2.0-setup.exe");
+        fake_fs(&b).put(&leftover, b"the first instance's download");
+        fake_fs(&b).put(b.paths().update_file(), RECORD_0_2_0);
+        b.update_after_start("0.2.0");
+        assert_eq!(b.updated(), None);
+        assert!(b.sys().fs.exists(&leftover), "the first instance's download stays");
+        assert!(b.sys().fs.exists(&b.paths().update_file()));
+        let fake = FakeUpdater::offering("0.3.0");
+        assert_eq!(b.update_check_and_download(&fake), UpdateState::Idle);
+        assert_eq!(fake.calls(), Vec::<String>::new());
+        let spawned = RefCell::new(0);
+        b.update_at_exit(&|_, _| {
+            *spawned.borrow_mut() += 1;
+            Ok(())
+        });
+        assert_eq!(spawned.into_inner(), 0);
+        assert_eq!(update_lines(&b), Vec::<String>::new());
+    }
+
+    /// Q9: the exit `app_restart` asks for installs nothing (its child is starting); the update
+    /// waits for the next normal close.
+    #[test]
+    fn a_restart_exit_installs_nothing() {
+        let b = started();
+        b.update_after_start("0.1.0");
+        let fake = FakeUpdater::offering("0.2.0");
+        assert_eq!(b.update_check_and_download(&fake), UpdateState::Ready { version: "0.2.0".into() });
+        b.mark_restarting();
+        let spawned = RefCell::new(0);
+        b.update_at_exit(&|_, _| {
+            *spawned.borrow_mut() += 1;
+            Ok(())
+        });
+        assert_eq!(spawned.into_inner(), 0);
+        assert_eq!(update_lines(&b).last().map(String::as_str), Some("update postponed=restart"));
+        assert_eq!(
+            b.update_status().unwrap().state,
+            UpdateState::Postponed { version: "0.2.0".into(), reason: "restart".into() }
+        );
+        assert_eq!(record(&b), None);
     }
 
     /// The check runs once per run: a second app_ready (a reload) asks the updater nothing more.
     #[test]
     fn the_check_runs_once_per_run() {
-        let b = backend();
+        let b = started();
         let fake = FakeUpdater::offering("0.2.0");
         assert_eq!(b.update_check_and_download(&fake), UpdateState::Ready { version: "0.2.0".into() });
         assert_eq!(b.update_check_and_download(&fake), UpdateState::Ready { version: "0.2.0".into() });
@@ -1279,7 +1503,9 @@ mod tests {
 }
 ```
 
-(`fake_fs(&b).put(path, bytes)` is the fake file system's own writer, which bypasses failure injection; `b.sys().fs` is the `dyn Fs` and has no `put`.) In `open.rs`'s test module, replace `each_external_target_opens_what_the_spec_names`'s `Place::Url("…")` literals with `Place::Url("…".to_string())` (and in the two tests after it: `Place::Url(STORE_URL.to_string())`, `Place::Url(TERMINAL_URL.to_string())`, `Place::Url(ISSUES_URL.to_string())`, and the `match p { Place::Url(url) if *url == STORE_URL => …` arms become `if url == STORE_URL`), and add:
+Each test writes its own spawner closure (a `RefCell` it records into). `fake_fs(&b).put(path, bytes)` is the fake file system's own writer, which bypasses failure injection; `b.sys().fs` is the `dyn Fs` and has no `put`.
+
+In `open.rs`'s test module, four existing tests change and one is new: in `each_external_target_opens_what_the_spec_names`, `the_first_place_that_opens_ends_it` and `when_nothing_opens_every_reason_is_kept_first_one_first`, every `Place::Url("…")` literal becomes `Place::Url("…".to_string())` (`Place::Url(STORE_URL.to_string())`, `Place::Url(TERMINAL_URL.to_string())`, `Place::Url(ISSUES_URL.to_string())`), and the `match p { Place::Url(url) if *url == STORE_URL => …` arms become `if url == STORE_URL`; `the_ui_can_only_name_a_target` gains, after the four unit targets, `let notes = ExternalTarget::ReleaseNotes { version: "0.2.0".into() }; assert_eq!(serde_json::to_string(&notes).unwrap(), r#"{"releaseNotes":{"version":"0.2.0"}}"#); assert_eq!(serde_json::from_str::<ExternalTarget>(r#"{"releaseNotes":{"version":"0.2.0"}}"#).unwrap(), notes);` and `r#"{"releaseNotes":"0.2.0"}"#` and `"\"releaseNotes\""` in its refused list (its comment: "the five names"). The new test:
 
 ```rust
     /// Review Focus 4, spec §5.10: the release page is opened for a SemVer version and nothing
@@ -1308,8 +1534,6 @@ mod tests {
         );
     }
 ```
-
-and to `the_ui_can_only_name_a_target`: after the four unit targets, `let notes = ExternalTarget::ReleaseNotes { version: "0.2.0".into() }; assert_eq!(serde_json::to_string(&notes).unwrap(), r#"{"releaseNotes":{"version":"0.2.0"}}"#); assert_eq!(serde_json::from_str::<ExternalTarget>(r#"{"releaseNotes":{"version":"0.2.0"}}"#).unwrap(), notes);` and `r#"{"releaseNotes":"0.2.0"}"#` and `"\"releaseNotes\""` to the refused list.
 
 In `config_guard.rs`, after `the_main_binary_is_the_default_run_of_the_app_crate`:
 
@@ -1348,9 +1572,10 @@ In `lib.rs`'s test module, after `the_restarted_start_rolls_back_before_the_wind
     /// Spec §6.2 (phase 4b): the record of an update is read right after the run record and
     /// before the window (so the first app_status has the notice), with the version the built
     /// config says; the plugin is registered after single-instance and the updater is Tauri
-    /// state; at exit the automatic install runs before the run record ends.
+    /// state; at exit the run record ends first and the automatic install follows (Q7: the
+    /// installer's Restart Manager may end this process before the exit code runs on).
     #[test]
-    fn the_update_record_is_read_after_the_run_record_and_the_install_runs_at_exit() {
+    fn the_update_record_is_read_after_the_run_record_and_the_install_follows_the_runs_end() {
         let text = production();
         let context = text.find("let context = tauri::generate_context!()").unwrap();
         let version = text.find("context.package_info().version.to_string()").unwrap();
@@ -1364,9 +1589,9 @@ In `lib.rs`'s test module, after `the_restarted_start_rolls_back_before_the_wind
         assert!(single < updater, "single-instance first, as its plugin asks");
         assert!(text.contains("app.manage(std::sync::Arc::new(update::TauriUpdater::new(app.handle().clone())))"));
         let exit = text.find("tauri::RunEvent::Exit").unwrap();
-        let install = text.find("for_exit.update_at_exit(&update::install_quiet)").unwrap();
         let ended = text.find("for_exit.end_run()").unwrap();
-        assert!(exit < install && install < ended, "the install, then the record's end");
+        let install = text.find("for_exit.update_at_exit(&update::start_installer)").unwrap();
+        assert!(exit < ended && ended < install, "the record's end, then the install");
         assert_eq!(text.matches(".build(context)").count(), 1);
     }
 ```
@@ -1390,25 +1615,27 @@ After the `"app"` block and before `"bundle"`:
   },
 ```
 
-(`pubkey` is filled in Task 6. The plugin's `Config` requires the key to be present; an empty string deserializes, and `TauriUpdater::check` refuses it before any request.)
+(`pubkey` is filled in Task 6. The plugin's `Config` requires the key to be present; an empty string deserializes, and `TauriUpdater::check` refuses it before any request. `installMode` is read by the plugin's own `install`, which the app does not call; it is pinned so that the config says what the app does.)
 
 - [ ] **Step 4: `update.rs`**
 
 ```rust
 //! The updater behind a trait (spec §6.2, phase 4b). [`Updater`] is what the backend drives
-//! (`backend/update.rs`): a check, a download, and the plugin's own install for "Update now".
-//! [`TauriUpdater`] is tauri-plugin-updater behind it; the tests' [`FakeUpdater`] answers what a
-//! test scripts. The plugin is used from Rust only: the window gets no `updater:` permission
-//! (`capabilities/default.json`, pinned by `ipc.rs`), so its JS commands cannot be called.
-//! [`install_quiet`] is the automatic install at close: the app's own spawn of the verified file.
+//! (`backend/update.rs`): a check and a verified download. [`TauriUpdater`] is
+//! tauri-plugin-updater behind it; the tests' [`FakeUpdater`] answers what a test scripts. The
+//! plugin is used from Rust only, for those two steps: the window gets no `updater:` permission
+//! (`capabilities/default.json`, pinned by `ipc.rs`), and the installer is started by the app
+//! itself ([`start_installer`]), both at close and for "Update now": the plugin's own `install`
+//! would start the app again with this process's arguments (`--recovery`, `--after-pid`).
 //!
 //! Read on <date> in tauri-plugin-updater 2.13.3 (G-UPD): `Update::download` verifies the
 //! minisign signature against the config's pubkey and returns the bytes (`src/updater.rs:<l>`);
-//! `Update::install` on Windows writes the bytes to a temp file, starts it with
-//! `/S /R /UPDATE /ARGS …` in quiet mode after `on_before_exit`, and ends the process with
-//! `std::process::exit(0)` (`:<l>`); `check` answers `None` unless the comparator says the offered
+//! `Update::install` on Windows writes the bytes to a temp file and starts it with
+//! `/S /R /UPDATE /ARGS <this process's arguments>` in quiet mode, then `std::process::exit(0)`
+//! (`:<l>`; known, not used); `check` answers `None` unless the comparator says the offered
 //! version is newer (`:<l>`); `check` never reads the pubkey (only `download` does), which is why
-//! [`TauriUpdater::check`] refuses an empty one first.
+//! [`TauriUpdater::check`] refuses an empty one first; the `Error` variants (`src/error.rs:<l>`)
+//! are mapped by [`classify`].
 use serde_json::Value;
 use std::path::Path;
 use std::sync::{Mutex, PoisonError};
@@ -1423,10 +1650,12 @@ pub struct Available {
 }
 
 /// Why a step of the updater did not go through. The variant is what the log says
-/// ([`UpdateError::kind`]), never the text, which may hold a URL or a path.
+/// ([`UpdateError::kind`]), never the text, which may hold a URL, except for an error no arm of
+/// [`classify`] names: that one is silent as offline and keeps its text on the log line, so the
+/// next version of this file can give it a kind (Q18).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UpdateError {
-    /// No network, DNS, a server that did not answer or answered an error.
+    /// No network, DNS, a server that did not answer or answered an error, a refused connection.
     Offline(String),
     /// `latest.json` could not be used: not JSON, no Windows target, a version that is not
     /// SemVer, or no public key to check it with.
@@ -1435,15 +1664,33 @@ pub enum UpdateError {
     Signature(String),
     /// The installer could not be started.
     Install(String),
+    /// A plugin error none of the arms names.
+    Other(String),
 }
 
 impl UpdateError {
     pub fn kind(&self) -> &'static str {
         match self {
-            UpdateError::Offline(_) => "offline",
+            UpdateError::Offline(_) | UpdateError::Other(_) => "offline",
             UpdateError::Manifest(_) => "manifest",
             UpdateError::Signature(_) => "signature",
             UpdateError::Install(_) => "install",
+        }
+    }
+
+    /// What the log line carries after `check=`/`download=`: the kind, and for an unclassified
+    /// error its text, folded onto one line and cut at 160 characters.
+    pub fn log_text(&self) -> String {
+        match self {
+            UpdateError::Other(text) => {
+                let folded: String = text
+                    .replace(['\r', '\n'], " ")
+                    .chars()
+                    .take(160)
+                    .collect();
+                format!("{} other={folded}", self.kind())
+            }
+            _ => self.kind().to_string(),
         }
     }
 }
@@ -1455,22 +1702,16 @@ impl std::fmt::Display for UpdateError {
             UpdateError::Manifest(why) => write!(f, "the update manifest could not be used: {why}"),
             UpdateError::Signature(why) => write!(f, "the signature did not match: {why}"),
             UpdateError::Install(why) => write!(f, "the installer could not be started: {why}"),
+            UpdateError::Other(why) => write!(f, "the updater failed: {why}"),
         }
     }
 }
 
-/// What the backend asks of the updater. `install_now` runs `before_exit` (the record and the
-/// run's end) and then the plugin's install, which ends the process; it returns only when the
-/// installer could not be started.
+/// What the backend asks of the updater: whether a newer version is offered, and its bytes,
+/// verified. Starting the installer is the backend's own ([`start_installer`]).
 pub trait Updater {
     fn check(&self) -> Result<Option<Available>, UpdateError>;
     fn download(&self, available: &Available) -> Result<Vec<u8>, UpdateError>;
-    fn install_now(
-        &self,
-        available: &Available,
-        bytes: Vec<u8>,
-        before_exit: &dyn Fn(),
-    ) -> Result<(), UpdateError>;
 }
 
 /// U5's rule, set explicitly on the plugin's builder: only a strictly higher version is an update.
@@ -1478,9 +1719,9 @@ pub fn is_newer(current: &semver::Version, offered: &semver::Version) -> bool {
     offered > current
 }
 
-/// tauri-plugin-updater, read from `plugins.updater` of tauri.conf.json (the pubkey, the endpoint,
-/// the quiet install mode). What the last `check` found is kept for `download` and `install_now`:
-/// the plugin's `Update` holds the download URL and the signature `latest.json` gave.
+/// tauri-plugin-updater, read from `plugins.updater` of tauri.conf.json (the pubkey, the
+/// endpoint). What the last `check` found is kept for `download`: the plugin's `Update` holds the
+/// download URL and the signature `latest.json` gave.
 pub struct TauriUpdater {
     app: AppHandle,
     found: Mutex<Option<Update>>,
@@ -1509,25 +1750,37 @@ impl TauriUpdater {
     }
 }
 
-/// The plugin's error by its meaning (G-UPD (f): name the variants as `src/error.rs` of 2.13.3
-/// spells them; `_` covers the rest). Network and I/O are `Offline`; the signature's decoding or
-/// check is `Signature`; the manifest, the targets, the endpoint and the version are `Manifest`;
-/// anything else happened at the install.
+/// The plugin's error by its meaning (G-UPD (f): the variants of 2.10.1's `src/error.rs`, reread
+/// in 2.13.3). Network, I/O and HTTP are `Offline`; the signature's decoding or check is
+/// `Signature`; the manifest, the targets, the endpoint, the version and the date are `Manifest`;
+/// the rest (the plugin's own install, which the app never calls, and any variant a later
+/// version adds) is `Other`: silent as offline, its text on the log line.
 fn classify(e: tauri_plugin_updater::Error) -> UpdateError {
     use tauri_plugin_updater::Error;
     let text = e.to_string();
     match e {
-        Error::Network(_) | Error::Reqwest(_) | Error::Io(_) => UpdateError::Offline(text),
-        Error::Minisign(_) | Error::Base64(_) | Error::SignatureUtf8(_) => UpdateError::Signature(text),
-        Error::ReleaseNotFound
+        Error::Network(_)
+        | Error::Reqwest(_)
+        | Error::Io(_)
+        | Error::Http(_)
+        | Error::InvalidHeaderValue(_)
+        | Error::InvalidHeaderName(_) => UpdateError::Offline(text),
+        Error::Minisign(_) | Error::Base64(_) | Error::SignatureUtf8(_) => {
+            UpdateError::Signature(text)
+        }
+        Error::EmptyEndpoints
+        | Error::ReleaseNotFound
+        | Error::TargetNotFound(_)
         | Error::TargetsNotFound(_)
         | Error::Serialization(_)
-        | Error::EmptyEndpoints
-        | Error::InsecureTransportProtocol
-        | Error::UnsupportedOs
         | Error::Semver(_)
-        | Error::UrlParse(_) => UpdateError::Manifest(text),
-        _ => UpdateError::Install(text),
+        | Error::UrlParse(_)
+        | Error::UnsupportedOs
+        | Error::UnsupportedArch
+        | Error::InsecureTransportProtocol
+        | Error::FormatDate
+        | Error::InvalidUpdaterFormat => UpdateError::Manifest(text),
+        _ => UpdateError::Other(text),
     }
 }
 
@@ -1569,34 +1822,23 @@ impl Updater for TauriUpdater {
             })?;
         tauri::async_runtime::block_on(update.download(|_, _| {}, || {})).map_err(classify)
     }
-
-    fn install_now(
-        &self,
-        available: &Available,
-        bytes: Vec<u8>,
-        before_exit: &dyn Fn(),
-    ) -> Result<(), UpdateError> {
-        let found = self.found.lock().unwrap_or_else(PoisonError::into_inner);
-        let update = found
-            .as_ref()
-            .filter(|u| u.version == available.version)
-            .ok_or_else(|| {
-                UpdateError::Manifest(format!("no check offered version {}", available.version))
-            })?;
-        before_exit();
-        update.install(bytes).map_err(classify)
-    }
 }
 
-/// The automatic install at close (spec §6.2, the primary; U3): the verified installer in
-/// `updates\`, started silently (`/S`) as an update (`/UPDATE`: the installer keeps the user's
-/// shortcuts as they are and skips a WebView2 download, G-NSI-U), never waited for, with the
-/// child's stdio closed. No `/R`: the app does not come back by itself.
+/// The app's own start of the verified installer (spec §6.2, §5.10; U2, U3): silently (`/S`), as
+/// an update (`/UPDATE`: the installer keeps the user's shortcuts as they are and skips a
+/// WebView2 download, G-NSI-U), never waited for, with the child's stdio closed. With `relaunch`
+/// (the user's "Update now") `/R /ARGS` with nothing after them: the installer's `.onInstSuccess`
+/// starts `cmdstudio.exe` again with no arguments, a normal start. Without (the close): no `/R`,
+/// and the app does not come back by itself.
 #[cfg(windows)]
-pub fn install_quiet(file: &Path) -> Result<(), String> {
+pub fn start_installer(file: &Path, relaunch: bool) -> Result<(), String> {
     use std::process::Stdio;
+    let mut args = vec!["/S", "/UPDATE"];
+    if relaunch {
+        args.extend(["/R", "/ARGS"]);
+    }
     std::process::Command::new(file)
-        .args(["/S", "/UPDATE"])
+        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1606,20 +1848,27 @@ pub fn install_quiet(file: &Path) -> Result<(), String> {
 }
 
 #[cfg(not(windows))]
-pub fn install_quiet(_file: &Path) -> Result<(), String> {
+pub fn start_installer(_file: &Path, _relaunch: bool) -> Result<(), String> {
     Err("CMD Studio runs on Windows only".to_string())
 }
 
 /// The check for a new version, once the window is up (`app_ready`, spec §6.2), on a thread of
-/// its own: the window never waits for the network. The backend runs it once per run. A thread
-/// that cannot start is one log line; the next start tries again.
+/// its own: the window never waits for the network. The backend runs it once per run, and only
+/// for a run that is its own. A thread that cannot start, or an updater that was not put into
+/// Tauri's state, is one log line; the next start tries again.
 #[cfg(windows)]
 pub fn start_check(
     app: &AppHandle,
     backend: std::sync::Arc<crate::backend::Backend<crate::machine::RealMachine>>,
 ) {
     use tauri::Manager;
-    let updater = app.state::<std::sync::Arc<TauriUpdater>>().inner().clone();
+    let Some(updater) = app
+        .try_state::<std::sync::Arc<TauriUpdater>>()
+        .map(|s| s.inner().clone())
+    else {
+        backend.note_line("update check=thread no-updater");
+        return;
+    };
     let for_thread = backend.clone();
     let spawned = std::thread::Builder::new()
         .name("update-check".to_string())
@@ -1636,7 +1885,6 @@ pub fn start_check(
 pub(crate) struct FakeUpdater {
     pub check: std::cell::RefCell<Result<Option<Available>, UpdateError>>,
     pub bytes: std::cell::RefCell<Result<Vec<u8>, UpdateError>>,
-    pub install: std::cell::RefCell<Result<(), UpdateError>>,
     calls: std::cell::RefCell<Vec<String>>,
 }
 
@@ -1651,7 +1899,6 @@ impl FakeUpdater {
                 notes_url,
             }))),
             bytes: std::cell::RefCell::new(Ok(b"MZ-the-installer".to_vec())),
-            install: std::cell::RefCell::new(Ok(())),
             calls: std::cell::RefCell::new(Vec::new()),
         }
     }
@@ -1684,33 +1931,23 @@ impl Updater for FakeUpdater {
             .push(format!("download {}", available.version));
         self.bytes.borrow().clone()
     }
-    fn install_now(
-        &self,
-        available: &Available,
-        bytes: Vec<u8>,
-        before_exit: &dyn Fn(),
-    ) -> Result<(), UpdateError> {
-        self.calls
-            .borrow_mut()
-            .push(format!("install {} {}", available.version, bytes.len()));
-        before_exit();
-        self.install.borrow().clone()
-    }
 }
 ```
 
-`Config.plugins` is `PluginConfig(pub HashMap<String, JsonValue>)` (`tauri-utils-2.10.2/src/config.rs:4150`); `AppHandle::config()` is `Manager::config`, so `use tauri::Manager;` goes at the top when the compiler asks. `tauri::async_runtime::block_on` runs the plugin's futures on our own thread (never the window's: `start_check` and `update_install`'s worker). `UpdaterExt` is implemented for every `Manager`, `AppHandle` included. If `Update`'s `version` field is not public in 2.13.3 (it is `pub version: String` in 2.10.1), keep the version beside the `Update` in the `found` slot as `(String, Update)`.
+`Config.plugins` is `PluginConfig(pub HashMap<String, JsonValue>)` (`tauri-utils-2.10.2/src/config.rs:4150`); `AppHandle::config()` is `Manager::config`, so `use tauri::Manager;` goes at the top when the compiler asks. `tauri::async_runtime::block_on` runs the plugin's futures on our own thread (never the window's: `start_check` and `update_install`'s worker). If the plugin's `Error` enum is exhaustive and clippy says the `_` arm is unreachable, every variant is named: move the install-side ones (`Extract`, `TempDir*`, `BinaryNotFoundInArchive`, `AuthenticationFailed`, `DebInstallFailed`, `PackageInstallFailed`, `FailedToDetermineExtractPath`, `Tauri`) into an explicit `=> UpdateError::Other(text)` arm and drop the `_`. If `Update`'s `version` field is not public in 2.13.3 (it is `pub version: String` in 2.10.1), keep the version beside the `Update` in the `found` slot as `(String, Update)`.
 
-- [ ] **Step 5: `backend/update.rs`, the backend's field, `app_ready`**
+- [ ] **Step 5: `backend/update.rs`, `run.rs`'s two helpers, the backend's field, `app_ready`**
 
 ```rust
 //! The updater's state in the app (spec §6.2, §2.1, §5.5, phase 4b): the check after the window
 //! is up, the download in the background, the install at close (the own spawn, when the lock is
-//! free) or now (the plugin, on the user's click), the record `<data>\update.json` written before
-//! either, read at the next start for "Updated to vX" and deleted once the UI has shown it. Every
-//! step writes one log line of names, versions and codes, never a URL or a path: the updater is
-//! silent on screen until an update happened. The machine is never touched here: the installer
-//! does that, and only after the lock was taken.
+//! free) or now (the own spawn with a relaunch, on the user's click), the record
+//! `<data>\update.json` written before either, read at the next start for "Updated to vX" and
+//! deleted once the UI has shown it. Every step writes one log line of names, versions and
+//! codes, never a URL or a path. The machine is never touched here: the installer does that, and
+//! only after the lock was taken and the run record ended. Only the process that wrote the run
+//! record does any of it (`run_is_ours`): an instance that single-instance is about to end reads,
+//! checks and installs nothing.
 use super::{Backend, Machine};
 use crate::error::AppError;
 use crate::settings::UpdateMode;
@@ -1745,7 +1982,7 @@ pub struct UpdateRecord {
 pub enum UpdateState {
     /// `UpdateMode::Off`: nothing was asked.
     Off,
-    /// No update, or a check that failed (one log line).
+    /// No update, or a check that failed (one log line), or the check has not run yet.
     #[default]
     Idle,
     Checking,
@@ -1757,7 +1994,8 @@ pub enum UpdateState {
     /// The installer was started (at close, or now).
     Installing { version: String },
     /// The install at close did not run: `busy` (the lock), `lock` (the lock file), `record`
-    /// (update.json could not be written). The next launch tries again.
+    /// (update.json could not be written), `restart` (the exit is `app_restart`'s). The next
+    /// launch, or the next normal close, tries again.
     Postponed { version: String, reason: String },
 }
 
@@ -1768,6 +2006,7 @@ pub enum UpdateState {
 pub struct UpdateStatus {
     pub mode: UpdateMode,
     pub state: UpdateState,
+    /// `None` until the check of this run has run (the UI polls until then).
     #[ts(type = "number | null")]
     pub checked_at_ms: Option<u64>,
 }
@@ -1801,6 +2040,8 @@ struct UpdateInner {
     available: Option<Available>,
     ready: Option<Ready>,
     updated: Option<Updated>,
+    /// `app_restart` spawned its child: the exit that follows installs nothing (Q9).
+    restarting: bool,
 }
 
 /// The updater's state of this run, behind one lock (a poisoned lock is used as it is).
@@ -1835,16 +2076,17 @@ impl<M: Machine> Backend<M> {
     }
 
     /// The check and, in automatic mode, the download (spec §6.2), once per run, after the window
-    /// is up (`update::start_check`). Off is one log line. A check that fails is one log line and
-    /// `Idle`: nothing is shown. Notify stops at `Available`; Auto downloads, verifies (the
-    /// updater), writes the file in one step and is `Ready` for the close.
+    /// is up (`update::start_check`), for a run that is this process's own. Off is one log line.
+    /// A check that fails is one log line and `Idle`: nothing is shown. Notify stops at
+    /// `Available`; Auto downloads, verifies (the updater), writes the file in one step and is
+    /// `Ready` for the close.
     pub fn update_check_and_download(&self, updater: &dyn Updater) -> UpdateState {
         let first = self.update.with(|u| {
             let first = !u.checked;
             u.checked = true;
             first
         });
-        if !first {
+        if !first || !self.run_is_ours() {
             return self.update.with(|u| u.state.clone());
         }
         let mode = self.settings_or_default().updates;
@@ -1858,7 +2100,7 @@ impl<M: Machine> Backend<M> {
         self.update.with(|u| u.checked_at_ms = Some(now));
         let available = match checked {
             Err(e) => {
-                self.note_line(&format!("update check={}", e.kind()));
+                self.note_line(&format!("update check={}", e.log_text()));
                 return self.set_update_state(UpdateState::Idle);
             }
             Ok(None) => {
@@ -1884,26 +2126,23 @@ impl<M: Machine> Backend<M> {
                     version: available.version,
                 })
             }
-            Err(kind) => {
-                self.note_line(&format!("update download={kind}"));
+            Err(why) => {
+                self.note_line(&format!("update download={why}"));
                 self.set_update_state(UpdateState::Idle)
             }
         }
     }
 
     /// Downloads and verifies through the updater, writes the bytes to `updates\` in one step and
-    /// keeps their hash, so that the file is checked again before it is ever started.
-    fn update_download(
-        &self,
-        updater: &dyn Updater,
-        available: &Available,
-    ) -> Result<(), &'static str> {
-        let bytes = updater.download(available).map_err(|e| e.kind())?;
+    /// keeps their hash, so that the file is checked again before it is ever started. The error
+    /// is the log's word.
+    fn update_download(&self, updater: &dyn Updater, available: &Available) -> Result<(), String> {
+        let bytes = updater.download(available).map_err(|e| e.log_text())?;
         let file = self.update_file_for(&available.version);
         self.sys()
             .fs
             .write_atomic(&file, &bytes)
-            .map_err(|_| "write")?;
+            .map_err(|_| "write".to_string())?;
         let sha256 = sha256_hex(&bytes);
         self.update.with(|u| {
             u.ready = Some(Ready {
@@ -1929,6 +2168,11 @@ impl<M: Machine> Backend<M> {
         self.update.with(|u| u.updated.clone())
     }
 
+    /// `app_restart` spawned its child (`ipc.rs`): the exit it asks for installs nothing (Q9).
+    pub fn mark_restarting(&self) {
+        self.update.with(|u| u.restarting = true);
+    }
+
     /// The lock of spec §5.5, tried once: `E_BUSY` while another change runs.
     fn update_lock(&self) -> Result<FsLock, AppError> {
         match self.sys().fs.try_lock(&self.paths().lock_file()) {
@@ -1944,15 +2188,15 @@ impl<M: Machine> Backend<M> {
         }
     }
 
-    /// The downloaded file's bytes, when it still is the file that was verified (Review Focus 1);
-    /// one that changed or went is deleted, said, and forgotten, so the caller downloads again.
-    fn update_ready_bytes(&self) -> Option<Vec<u8>> {
+    /// The downloaded file, when it still is the file that was verified (Review Focus 1); one that
+    /// changed or went is deleted, said, and forgotten, so the caller downloads again.
+    fn update_ready_file(&self) -> Option<PathBuf> {
         let (file, sha256) = self
             .update
             .with(|u| u.ready.as_ref().map(|r| (r.file.clone(), r.sha256.clone())))?;
         let bytes = self.sys().fs.read(&file).ok().flatten();
         match bytes {
-            Some(bytes) if sha256_hex(&bytes) == sha256 => Some(bytes),
+            Some(bytes) if sha256_hex(&bytes) == sha256 => Some(file),
             _ => {
                 let _ = self.sys().fs.remove_file(&file);
                 self.update.with(|u| u.ready = None);
@@ -1988,60 +2232,95 @@ impl<M: Machine> Backend<M> {
     }
 
     /// "Update now" (the notify card, the Recovery page; spec §6.2): the offered version is
-    /// downloaded if it is not yet, the lock is taken (E_BUSY while a change runs), the record is
-    /// written and the run ended inside the updater's hook, and the plugin's install starts the
-    /// installer silently with a relaunch and ends this process. Answers only on a failure: the
-    /// record is taken back then, and the state is as before.
-    pub fn update_install(&self, updater: &dyn Updater) -> Result<(), AppError> {
+    /// downloaded and verified if it is not yet (before the lock: a download may take minutes),
+    /// the lock is taken (E_BUSY while a change runs), the file is checked against its hash, the
+    /// record is written, the run ended, and the installer started by `spawn` with a relaunch
+    /// (`update::start_installer`); the caller then ends the process (`app.exit(0)`, whose exit
+    /// hook installs nothing more: the state is `Installing`). Answers only on a failure: the
+    /// record is taken back, the run record written again (Q16), and the state is as before.
+    pub fn update_install(
+        &self,
+        updater: &dyn Updater,
+        spawn: &dyn Fn(&Path, bool) -> Result<(), String>,
+    ) -> Result<(), AppError> {
         let Some(available) = self.update.with(|u| u.available.clone()) else {
             return Err(AppError::internal("no update is available to install"));
         };
-        let _lock = self.update_lock()?;
-        let bytes = match self.update_ready_bytes() {
-            Some(bytes) => bytes,
-            None => updater.download(&available).map_err(|e| {
-                self.note_line(&format!("update download={}", e.kind()));
-                AppError::internal(format!("the update could not be downloaded: {e}"))
-            })?,
+        let ready = UpdateState::Ready {
+            version: available.version.clone(),
         };
+        if self.update_ready_file().is_none() {
+            self.set_update_state(UpdateState::Downloading {
+                version: available.version.clone(),
+            });
+            if let Err(why) = self.update_download(updater, &available) {
+                self.note_line(&format!("update download={why}"));
+                self.set_update_state(UpdateState::Available {
+                    version: available.version.clone(),
+                });
+                return Err(AppError::internal(format!(
+                    "the update could not be downloaded ({why})"
+                )));
+            }
+            self.note_line(&format!("update downloaded={}", available.version));
+        }
+        self.set_update_state(ready.clone());
+        let _lock = self.update_lock()?;
+        let Some(file) = self.update_ready_file() else {
+            self.set_update_state(UpdateState::Available {
+                version: available.version.clone(),
+            });
+            return Err(AppError::internal(
+                "the downloaded installer changed on disk; try again",
+            ));
+        };
+        if !self.write_update_record(&self.update_record_for(&available)) {
+            return Err(AppError::coded(
+                "E_DATA_WRITE",
+                "update.json could not be written, so the update was not started",
+            ));
+        }
         self.note_line(&format!("update installing={} how=now", available.version));
         self.set_update_state(UpdateState::Installing {
             version: available.version.clone(),
         });
-        let record = self.update_record_for(&available);
-        let started = updater.install_now(&available, bytes, &|| {
-            self.write_update_record(&record);
-            self.end_run();
-        });
-        if let Err(e) = started {
+        self.end_run();
+        if let Err(why) = spawn(&file, true) {
             let _ = self.sys().fs.remove_file(&self.paths().update_file());
-            self.note_line(&format!("update install={}", e.kind()));
-            let before = match self.update.with(|u| u.ready.is_some()) {
-                true => UpdateState::Ready {
-                    version: available.version.clone(),
-                },
-                false => UpdateState::Available {
-                    version: available.version.clone(),
-                },
-            };
-            self.set_update_state(before);
+            self.rewrite_run_record();
+            self.note_line("update install=spawn");
+            self.set_update_state(ready);
             return Err(AppError::internal(format!(
-                "the update could not be installed: {e}"
+                "the update could not be installed: {why}"
             )));
         }
         Ok(())
     }
 
-    /// At close (spec §6.2's primary; `lib.rs` on `RunEvent::Exit`): when a verified download is
-    /// ready and the lock is free, the record is written and the file started with `spawn`
-    /// (`update::install_quiet`); the lock is held into the start and let go with the process.
-    /// Busy, a lock file that cannot be opened, or a record that cannot be written postpone the
-    /// install to the next launch, each with one log line; a file that changed is never started.
-    pub fn update_at_exit(&self, spawn: &dyn Fn(&Path) -> Result<(), String>) {
-        let Some(available) = self.update.with(|u| u.ready.as_ref().map(|r| r.available.clone()))
-        else {
+    /// At close (spec §6.2's primary; `lib.rs` on `RunEvent::Exit`, after `end_run`): when a
+    /// verified download is ready, this run is its own, the exit is not `app_restart`'s and the
+    /// state is not already `Installing`, and the lock is free, the record is written and the file
+    /// started with `spawn` (no relaunch); the lock is let go when this returns, which is after the
+    /// start. Busy, a lock file that cannot be opened, a record that cannot be written, or a
+    /// restart postpone the install to the next launch or close, each with one log line; a file
+    /// that changed is never started.
+    pub fn update_at_exit(&self, spawn: &dyn Fn(&Path, bool) -> Result<(), String>) {
+        if !self.run_is_ours() {
+            return;
+        }
+        let (available, restarting, installing) = self.update.with(|u| {
+            (
+                u.ready.as_ref().map(|r| r.available.clone()),
+                u.restarting,
+                matches!(u.state, UpdateState::Installing { .. }),
+            )
+        });
+        let Some(available) = available else {
             return;
         };
+        if installing {
+            return;
+        }
         let postponed = |reason: &str| {
             self.note_line(&format!("update postponed={reason}"));
             self.set_update_state(UpdateState::Postponed {
@@ -2049,19 +2328,21 @@ impl<M: Machine> Backend<M> {
                 reason: reason.to_string(),
             });
         };
+        if restarting {
+            return postponed("restart");
+        }
         let _lock = match self.sys().fs.try_lock(&self.paths().lock_file()) {
             Ok(Some(lock)) => lock,
             Ok(None) => return postponed("busy"),
             Err(_) => return postponed("lock"),
         };
-        if self.update_ready_bytes().is_none() {
+        let Some(file) = self.update_ready_file() else {
             return;
-        }
-        let file = self.update_file_for(&available.version);
+        };
         if !self.write_update_record(&self.update_record_for(&available)) {
             return postponed("record");
         }
-        match spawn(&file) {
+        match spawn(&file, false) {
             Ok(()) => {
                 self.note_line(&format!(
                     "update installing={} how=exit",
@@ -2078,13 +2359,18 @@ impl<M: Machine> Backend<M> {
         }
     }
 
-    /// After the run record and before the window (`lib.rs`): the last run's download is thrown
-    /// away (never trusted across runs), and `update.json`, when there, makes the notice if its
-    /// `to` is this run's version (`update installed to=…`); else the installer did not finish
-    /// (`update failed to=…`), and the record goes. A record that cannot be read stays and is
-    /// said; one that is not this version's, not JSON, or names a version that is not SemVer is
-    /// damaged: said and deleted.
+    /// After the run record and before the window (`lib.rs`), for a run that is this process's
+    /// own: the last run's download is thrown away (never trusted across runs), and
+    /// `update.json`, when there, makes the notice if its `to` is this run's version
+    /// (`update installed to=…`); else the installer did not finish (`update failed to=…`), and
+    /// the record goes. A record that cannot be read stays and is said; one that is not this
+    /// version's, not JSON, or names a version that is not SemVer is damaged: said and deleted.
+    /// The prune of old runtime folders is not here (Task 5: one place, under the lock, never in
+    /// safe mode).
     pub fn update_after_start(&self, current_version: &str) {
+        if !self.run_is_ours() {
+            return;
+        }
         self.update
             .with(|u| u.current = Some(current_version.to_string()));
         let fs = self.sys().fs;
@@ -2133,6 +2419,25 @@ impl<M: Machine> Backend<M> {
 }
 ```
 
+In `backend/run.rs`, after `run_started_at`:
+
+```rust
+    /// Whether this process wrote the run's record (`start_run` found no live earlier run): only
+    /// then does it read the updater's record, check, or install. An instance that
+    /// single-instance is about to end does none of it (Q8).
+    pub(crate) fn run_is_ours(&self) -> bool {
+        self.run.with(|r| r.mine.is_some())
+    }
+
+    /// Writes this run's record again after `end_run` took it away for an install that then did
+    /// not start (Q16): the run goes on and must be noticed if it ends abnormally.
+    pub(crate) fn rewrite_run_record(&self) {
+        if let Some(mine) = self.run.with(|r| r.mine.clone()) {
+            self.write_record(&mine);
+        }
+    }
+```
+
 In `backend/mod.rs`: `pub mod update;` after `pub mod system;`; the field `/// The updater's state of this run (spec §6.2, phase 4b).` `update: update::UpdateSlot,` after `run`; `update: update::UpdateSlot::new(),` in `new()`. In `backend/run.rs`'s `app_ready`, after the `if let Some(mine) = mine { self.write_record(&mine); }` block: `self.update_record_consumed();`.
 
 - [ ] **Step 6: `open.rs`**
@@ -2159,7 +2464,18 @@ pub fn release_url(version: &str) -> Option<String> {
 }
 ```
 
-`external_places` gains the arm `ExternalTarget::ReleaseNotes { version } => release_url(&version).map(Place::Url).into_iter().collect(),` (an empty list for a version that is not SemVer). `open_external` says it: before `open_first`, `if places.is_empty() { return Err(format!("{target:?} names nothing that can be opened")); }` (the version's text is in the `Debug` form; it is the record's or the manifest's, never a path). The module doc's "one of four targets" becomes "one of five". `the_ui_can_only_name_a_target`'s comment: "the five names".
+`external_places` gains the arm `ExternalTarget::ReleaseNotes { version } => release_url(&version).map(Place::Url).into_iter().collect(),` (an empty list for a version that is not SemVer). `open_external` says it: its body becomes
+
+```rust
+    let what = format!("{target:?}");
+    let places = external_places(target, data, logs);
+    if places.is_empty() {
+        return Err(format!("{what} names nothing that can be opened"));
+    }
+    open_first(&places, shell_open)
+```
+
+(the `Debug` text is formed before the move, Q19; it holds the record's or the manifest's version, never a path). The module doc's "one of four targets" becomes "one of five"; `the_ui_can_only_name_a_target`'s comment: "the five names".
 
 - [ ] **Step 7: `lib.rs`**
 
@@ -2176,19 +2492,21 @@ After `let decided = backend.start_run(how);`:
 
 ```rust
     // The record of an update (spec §6.2, phase 4b), before the window: the first app_status has
-    // the notice. The last run's download goes here too.
+    // the notice. The last run's download goes here too. Nothing for an instance whose record is
+    // another process's (start_run's "still-running").
     backend.update_after_start(&app_version);
 ```
 
-In the builder chain, after the single-instance plugin: `.plugin(tauri_plugin_updater::Builder::new().build())` with the comment `// The updater (spec §6.2, phase 4b), used from Rust only (update.rs); the window gets none of its commands.` In `setup`, first line: `app.manage(std::sync::Arc::new(update::TauriUpdater::new(app.handle().clone())));`. `.build(tauri::generate_context!())` becomes `.build(context)`. The run closure:
+In the builder chain, after the single-instance plugin: `.plugin(tauri_plugin_updater::Builder::new().build())` with the comment `// The updater (spec §6.2, phase 4b), used from Rust only (update.rs) for the check and the download; the window gets none of its commands.` In `setup`, first line: `app.manage(std::sync::Arc::new(update::TauriUpdater::new(app.handle().clone())));`. `.build(tauri::generate_context!())` becomes `.build(context)`. The run closure:
 
 ```rust
         Ok(app) => app.run(move |_, event| {
             if let tauri::RunEvent::Exit = event {
-                // The automatic install, when a verified download waits and the lock is free
-                // (spec §6.2's primary), then the run's record.
-                for_exit.update_at_exit(&update::install_quiet);
+                // The run's record ends first (Q7: the installer's Restart Manager may end this
+                // process before the exit code runs on), then the automatic install when a
+                // verified download waits and the lock is free (spec §6.2's primary).
                 for_exit.end_run();
+                for_exit.update_at_exit(&update::start_installer);
             }
         }),
 ```
@@ -2197,64 +2515,71 @@ The `#[cfg(not(windows))] run_gui` is unchanged. `update_after_start` is a metho
 
 - [ ] **Step 8: Run the tests**
 
-Run: `cargo test -p cmdstudio-app --lib update:: open:: config_guard:: lib`
-Expected: the 4 tests of `update.rs`, the 12 of `backend/update.rs`, `open.rs`'s 6 (two changed, one new), `config_guard`'s new test and `lib.rs`'s new text test pass; `ipc.rs`'s tests still pass (no command changed yet; the capability test counts 37 until Task 4).
+Run, one filter per command: `cargo test -p cmdstudio-app --lib update::` (the 4 tests of `update.rs` and the 14 of `backend/update.rs`: the filter matches both modules), `cargo test -p cmdstudio-app --lib open::` (four changed, one new), `cargo test -p cmdstudio-app --lib config_guard::the_updater_config`, `cargo test -p cmdstudio-app --lib tests::the_update_record_is_read_after_the_run_record`.
+Expected: each passes; `cargo test -p cmdstudio-app --lib` as a whole passes too (`ipc.rs`'s tests count 37 until Task 4).
 
 - [ ] **Step 9: The checks, then commit**
 
-The four clippy runs, `cargo fmt --all`, `cargo fmt --all -- --check`, `cargo test --workspace`, `cargo build -p cmdstudio-app` (the plugin links; no `resources/` needed). Do not run the app.
+The four clippy runs, `cargo fmt --all`, `cargo fmt --all -- --check`, `cargo test --workspace`, `cargo build -p cmdstudio-app` (the plugin links; no `resources/` needed). Do not run the app. Expected: clippy prints no warning, `cargo fmt --all -- --check` prints nothing, every test passes.
 
 Write `.git/CMDSTUDIO_COMMIT_MSG`:
 
 ```
 app: the updater behind a trait, its state machine and update.json (spec §6.2, phase 4b)
 
-tauri-plugin-updater =2.13.3 (Rust only; the window gets none of its
-commands) behind update::Updater, with TauriUpdater (an empty pubkey is
-refused before any request; the version comparator set explicitly),
-FakeUpdater for the tests, install_quiet (the own spawn: /S /UPDATE,
-no relaunch, stdio closed) and start_check (a thread after app_ready).
-backend/update.rs: the state machine (Off, Idle, Checking, Available,
-Downloading, Ready, Installing, Postponed) over the mode of
-settings.json; the download written to updates\ with its hash, which
-the file must still match before it is started; update_at_exit under
-the lock (busy postpones), update_install (the plugin's install with
-the record and the run's end in its hook), update_after_start (the
-record read after the run record: "installed to", "failed to",
-damaged or unreadable), app_ready consumes the record. open.rs:
+tauri-plugin-updater =2.13.3 (Rust only, for the check and the
+verified download; the window gets none of its commands) behind
+update::Updater, with TauriUpdater (an empty pubkey is refused before
+any request; the version comparator set explicitly; every plugin
+error classified, an unknown one silent as offline with its text on
+the log line), FakeUpdater for the tests, start_installer (the own
+spawn of the verified file: /S /UPDATE at close, /S /R /UPDATE /ARGS
+for Update now so the app comes back as a normal start; stdio closed)
+and start_check (a thread after app_ready). backend/update.rs: the
+state machine (Off, Idle, Checking, Available, Downloading, Ready,
+Installing, Postponed) over the mode of settings.json; the download
+written to updates\ with its hash, which the file must still match
+before it is started; update_at_exit after the run record ended,
+under the lock (busy, a restart's exit or a second instance install
+nothing); update_install (download, lock, record, the run ended,
+the spawn with a relaunch; a failed start writes the run record
+back); update_after_start (the record read after the run record, for
+this process's own run only: "installed to", "failed to", damaged or
+unreadable); app_ready consumes the record. open.rs:
 ExternalTarget::ReleaseNotes for a SemVer version only. tauri.conf.json:
 plugins.updater with the one endpoint, a quiet install and an empty
 pubkey until the founder's key, pinned by config_guard. lib.rs: the
 plugin, the updater as Tauri state, the record before the window, the
-install at exit before the run's end.
+run's end then the install at exit.
 ```
 
 Then `git add -- app/src-tauri/Cargo.toml Cargo.lock app/src-tauri/src/update.rs app/src-tauri/src/backend/update.rs app/src-tauri/src/backend/mod.rs app/src-tauri/src/backend/run.rs app/src-tauri/src/open.rs app/src-tauri/src/lib.rs app/src-tauri/src/config_guard.rs app/src-tauri/tauri.conf.json`, check `git diff --cached --name-only`, then `git commit -F .git/CMDSTUDIO_COMMIT_MSG`.
 
 - [ ] **Step 10: After the spike (Task 1's `results.md`)**
 
-The primary confirmed: nothing to change; Task 8 records it. F2 chosen: `update_at_exit` and `lib.rs`'s exit call go; `update_check_and_download` ends, after `Ready`, by asking the window `update_can_install` (a third command, Task 4's shape: read-only, answers whether `app_status.busy` is null and no editor holds an unsaved change) and, on yes, calling `update_install` (the plugin's path, with its relaunch); `auto_downloads_and_is_ready_at_exit` becomes `auto_downloads_and_installs_when_idle`; `the_own_spawn_is_silent_and_does_not_relaunch` goes with `install_quiet`. F3 chosen: `update_at_exit` and the exit call go; `Ready` is shown by Task 4's card as "v<X> is ready: restart CMD Studio to install it" with "Update now". Either is one commit `app: the install moment after the spike (phase 4b Task 1: <F2|F3>)`.
+The primary confirmed: nothing to change; Task 8 records it. F2 chosen: `update_at_exit` and `lib.rs`'s exit call go; `update_check_and_download` ends, after `Ready`, by asking the window `update_can_install` (a third command, Task 4's shape: read-only, answers whether `app_status.busy` is null and no editor holds an unsaved change) and, on yes, running the "now" path (`update_install`'s steps, with its relaunch); `auto_downloads_and_is_ready_at_exit` becomes `auto_downloads_and_installs_when_idle`. F3 chosen: `update_at_exit` and the exit call go; `Ready` is shown by Task 4's card as "v<X> is ready: restart CMD Studio to install it" with "Update now". F-NOW chosen: `update_install` spawns with `relaunch: false` and `home.update.installing`'s words say to open the app again from the Start menu. Each is one commit `app: the install moment after the spike (phase 4b Task 1: <F2|F3|F-NOW>)`.
 
 ---
 ### Task 4: The two IPC commands, `app_status.updated`, the bindings, the mock, and the UI
 
-Runs after Task 3. `update_status` (read only) and `update_install` (ends the process, like `app_restart`), `app_ready` starting the check, `app_status.updated`, the bindings regenerated by the manual steps, the mock's `update` option, and the four places of the UI: the "Updated to vX" card above every screen, the notify card on the home page, the Recovery page's "Update now" line, the Advanced page's "Last checked", and the Settings note's new words.
+Runs after Task 3. `update_status` (read only) and `update_install` (ends the process, like `app_restart`), `app_ready` starting the check, `app_restart` marking the restart, `app_status.updated`, the bindings regenerated by the manual steps, the mock's `update` option, and the four places of the UI: the "Updated to vX" card above every screen, the notify card on the home page (which polls `update_status` until the check of this run has run: the check starts only after `app_ready`, after the page's first read, Q5), the Recovery page's "Update now" line, the Advanced page's "Last checked", and the Settings note's new words.
 
 **Files:**
 - Modify: `app/src-tauri/src/command_names.rs` (`UPDATE_STATUS`, `UPDATE_INSTALL`, `COMMANDS`, the doc's count)
-- Modify: `app/src-tauri/src/ipc.rs` (the two commands; `app_ready` starts the check; the tests' counts 39 and 35; a text test)
+- Modify: `app/src-tauri/src/ipc.rs` (the two commands; `app_ready` starts the check; `app_restart` marks the restart; the tests' counts 39 and 35; a text test; the doc of `open_external`'s "four fixed places")
 - Modify: `app/src-tauri/capabilities/default.json` (`allow-update-status`, `allow-update-install`; the description's list)
-- Modify: `app/src-tauri/src/backend/run.rs` (`AppStatus.updated`; `app_status` fills it; its tests' literals)
+- Modify: `app/src-tauri/src/backend/run.rs` (`AppStatus.updated`; `app_status` fills it; one test)
+- Modify: `app/src-tauri/src/config_guard.rs` (its module doc's "all 37 commands" → 39)
 - Modify: `app/ui/src/bindings/AppStatus.ts`, `ExternalTarget.ts`; Create: `UpdateState.ts`, `UpdateStatus.ts`, `Updated.ts` (regenerated, never written by hand)
-- Modify: `app/ui/src/ipc/types.ts`, `tauri.ts`, `mock.ts`, `work.ts`, `mock.test.ts`, `work.test.ts`
+- Modify: `app/ui/src/ipc/types.ts`, `tauri.ts`, `mock.ts`, `work.ts` (the kinds and tasks, "sixteen tasks"), `mock.test.ts`, `work.test.ts`
 - Modify: `app/ui/src/App.tsx` (`UpdatedNotice` in `StartNotices`, `updateClosed`, `updateLater`), `app/ui/src/state.tsx` (`updateLater`, `markUpdateLater`)
-- Create: `app/ui/src/components/UpdateOffer.tsx` (the notify card and the Recovery line, one component)
-- Modify: `app/ui/src/screens/Home.tsx`, `Recovery.tsx`, `Advanced.tsx`, `Settings.tsx` (no code change: the note's key keeps its name)
+- Create: `app/ui/src/components/UpdateOffer.tsx` (the notify card and the Recovery line, one component, with the poll)
+- Modify: `app/ui/src/screens/Home.tsx`, `Recovery.tsx`, `Advanced.tsx` (`Settings.tsx` needs no change: the note's key keeps its name)
 - Modify: `app/ui/src/i18n/en.ts`, `th.ts`, `i18n.test.ts`, `app/ui/src/App.test.tsx`
 
 **Interfaces:**
-- Consumes: `Backend::{update_status, update_install, updated}`, `update::{TauriUpdater, start_check}`, `UpdateStatus`, `UpdateState`, `Updated` (Task 3).
-- Produces: the IPC `update_status() -> UpdateStatus`, `update_install() -> ()`; `AppStatus.updated: Option<Updated>`; `Ipc.updateStatus(): Promise<UpdateStatus>`, `Ipc.updateInstall(): Promise<void>`; `MockOptions.update?: "off" | "idle" | "available" | "ready" | "updated"`, `MockOptions.updateVersion?: string` (default `"0.2.0"`), `MockState.update`, `MockState.updated`, `MockState.updateInstalls`; `AppState.updateLater`, `AppState.markUpdateLater`; `UpdateOffer({ status, where })`; the keys `start.updated`, `start.whatChanged`, `home.update.available`, `home.update.now`, `home.update.later`, `home.update.ready`, `home.update.installing`, `recovery.update.available`, `recovery.update.none`, `advanced.update.checked`, `advanced.update.notChecked`, `work.updating`, and the new text of `settings.updates.note`.
+- Consumes: `Backend::{update_status, update_install, updated, mark_restarting}`, `update::{TauriUpdater, start_check, start_installer}`, `UpdateStatus`, `UpdateState`, `Updated` (Task 3).
+- Produces: the IPC `update_status() -> UpdateStatus`, `update_install() -> ()` (the process exits on success); `AppStatus.updated: Option<Updated>`; `Ipc.updateStatus(): Promise<UpdateStatus>`, `Ipc.updateInstall(): Promise<void>`; `MockOptions.update?: "off" | "pending" | "idle" | "available" | "ready" | "updated"` (`pending`: the check has not run, `checkedAtMs` null), `MockOptions.updateVersion?: string` (default `"0.2.0"`), `MockState.update`, `MockState.updated`, `MockState.updateInstalls`; `AppState.updateLater`, `AppState.markUpdateLater`; `UpdateOffer({ where })`, `UPDATE_POLL_MS = 2000`, `UPDATE_POLL_LIMIT = 30`; the keys `start.updated`, `start.whatChanged`, `home.update.available`, `home.update.now`, `home.update.later`, `home.update.ready`, `home.update.installing`, `recovery.update.available`, `recovery.update.none`, `advanced.update.checked`, `advanced.update.notChecked`, `work.updating`, and the new text of `settings.updates.note`.
 
 - [ ] **Step 1: The Rust side's failing tests**
 
@@ -2262,10 +2587,11 @@ In `ipc.rs`'s tests: `assert_eq!(COMMANDS.len(), 37)` → `39`; `assert_eq!(logg
 
 ```rust
     /// Spec §6.2 (phase 4b): the check for a new version starts from app_ready, after the run is
-    /// noted ready and off the window's thread, and the install-now command hands the plugin's
-    /// updater to the backend.
+    /// noted ready and off the window's thread; the install-now command hands the plugin's
+    /// updater and the app's own installer start to the backend and ends the process only after
+    /// the backend answered Ok; the restart marks the backend first, so its exit installs nothing.
     #[test]
-    fn the_check_starts_after_app_ready_and_the_install_uses_the_plugin() {
+    fn the_check_starts_after_app_ready_and_the_install_now_ends_the_process() {
         let start = SOURCE.find("pub async fn app_ready(").unwrap();
         let body = SOURCE.get(start..).unwrap().split_once("\n}\n").unwrap().0;
         let logged = body.find(".logged(names::APP_READY").unwrap();
@@ -2274,11 +2600,19 @@ In `ipc.rs`'s tests: `assert_eq!(COMMANDS.len(), 37)` → `39`; `assert_eq!(logg
         let start = SOURCE.find("pub async fn update_install(").unwrap();
         let body = SOURCE.get(start..).unwrap().split_once("\n}\n").unwrap().0;
         assert!(body.contains("TauriState<'_, Arc<TauriUpdater>>"));
-        assert!(body.contains("b.update_install(u.as_ref())"));
+        let installed = body.find("b.update_install(u.as_ref(), &crate::update::start_installer)").unwrap();
+        let exit = body.find("app.exit(0)").unwrap();
+        assert!(installed < exit, "the exit comes after the backend's Ok");
+        assert!(body.contains("if started.is_ok() {\n        app.exit(0);"), "{body}");
+        let start = SOURCE.find("pub async fn app_restart(").unwrap();
+        let body = SOURCE.get(start..).unwrap().split_once("\n}\n").unwrap().0;
+        let ended = body.find("b.end_run()").unwrap();
+        let marked = body.find("b.mark_restarting()").unwrap();
+        assert!(ended < marked, "the record's end, then the mark, inside the spawned-ok block");
     }
 ```
 
-In `backend/run.rs`'s tests, every `AppStatus { … }` literal and `toEqual`-style comparison that lists the fields gains `updated: None` (grep `recovery_entry:` in that test module); `the_status_names_the_change_that_runs` adds, at its end:
+`the_status_names_the_change_that_runs` in `backend/run.rs`'s tests adds, at its end:
 
 ```rust
         // The notice of an update rides on the same status (spec §2.1).
@@ -2290,8 +2624,8 @@ In `backend/run.rs`'s tests, every `AppStatus { … }` literal and `toEqual`-sty
         assert_eq!(b.app_status().unwrap().updated.map(|u| u.to), Some("0.2.0".to_string()));
 ```
 
-Run: `cargo test -p cmdstudio-app --lib ipc:: run::`
-Expected: the counts fail (37 ≠ 39), the new text test fails (`update_install` not found), `updated` is not a field.
+Run: `cargo test -p cmdstudio-app --lib ipc::`, then `cargo test -p cmdstudio-app --lib run::`
+Expected: the counts fail (37 ≠ 39), the new text test fails (`update_install` not found); `updated` is not a field of `AppStatus` (a compile error in `run::`).
 
 - [ ] **Step 2: The commands**
 
@@ -2321,25 +2655,37 @@ pub async fn update_status(state: TauriState<'_, Shared>) -> Result<UpdateStatus
     blocking(move || b.logged(names::UPDATE_STATUS, |b| b.update_status())).await
 }
 
-/// "Update now" (the notify card, the Recovery page; spec §6.2): the offered version is
-/// downloaded if it is not yet, the record is written, the run ended, and the installer started
-/// silently with a relaunch through the plugin, which ends this process; the app comes back by
-/// itself. Answers only when it could not: E_BUSY while a change runs, E_INTERNAL otherwise.
+/// "Update now" (the notify card, the Recovery page; spec §6.2): the backend downloads the
+/// offered version if it is not yet, takes the lock, writes the record, ends the run and starts
+/// the installer itself with a relaunch (`update::start_installer`: the app comes back as a
+/// normal start); then this process ends. The exit raises the exit hook, which installs nothing
+/// more (the state is `Installing`). Answers only when it could not: E_BUSY while a change
+/// runs, E_INTERNAL otherwise; the run goes on then, its record written back.
 #[tauri::command]
 pub async fn update_install(
+    app: AppHandle,
     state: TauriState<'_, Shared>,
     updater: TauriState<'_, Arc<TauriUpdater>>,
 ) -> Result<(), AppError> {
     let b = state.inner().clone();
     let u = updater.inner().clone();
-    blocking(move || b.logged(names::UPDATE_INSTALL, |b| b.update_install(u.as_ref()))).await
+    let started = blocking(move || {
+        b.logged(names::UPDATE_INSTALL, |b| {
+            b.update_install(u.as_ref(), &crate::update::start_installer)
+        })
+    })
+    .await;
+    if started.is_ok() {
+        app.exit(0);
+    }
+    started
 }
 ```
 
-Both at the end of `generate_handler![…]`. `capabilities/default.json`: `"allow-update-status"`, `"allow-update-install"` at the end of `permissions`; the description's list gains "update_status and update_install". `backend/run.rs`: `AppStatus` gains `/// The last run's update went through (spec §2.1): the notice, until closed.` `pub updated: Option<super::update::Updated>,` after `recovery_entry`; `app_status` fills `updated: self.updated(),` (outside the `self.run.with` closure: `let updated = self.updated();` first).
+Both at the end of `generate_handler![…]`. In `app_restart`, inside `if spawned.is_ok() {`, after `b.end_run();`: `b.mark_restarting();` with the comment `// Q9: the exit asked for below installs nothing (the child is starting).` (the existing text test `the_restart_ends_the_run_record_before_it_exits` keeps passing: its needle is the block's first two lines). The doc of `open_external` (`ipc.rs:340`) says "one of the five fixed places"; `config_guard.rs`'s module doc (line 3) "the IPC of all 39 commands". `capabilities/default.json`: `"allow-update-status"`, `"allow-update-install"` at the end of `permissions`; the description's list gains "update_status and update_install". `backend/run.rs`: `AppStatus` gains `/// The last run's update went through (spec §2.1): the notice, until closed.` `pub updated: Option<super::update::Updated>,` after `recovery_entry`; `app_status` fills `updated: self.updated(),` (outside the `self.run.with` closure: `let updated = self.updated();` first).
 
-Run: `cargo test -p cmdstudio-app --lib ipc:: run::`
-Expected: pass (39 commands, 35 logging, the capability's set equal).
+Run: `cargo test -p cmdstudio-app --lib ipc::`, then `cargo test -p cmdstudio-app --lib run::`
+Expected: pass (39 commands, 35 logging, the capability's set equal; the status carries `updated`).
 
 - [ ] **Step 3: The bindings**
 
@@ -2370,6 +2716,8 @@ Delete `app/ui/src/bindings/AppStatus.ts` and `ExternalTarget.ts`; then, from `a
   it("answers the updater from its option, installs on Update now, and says updated (phase 4b)", async () => {
     const plain = createMockIpc();
     expect(await plain.updateStatus()).toEqual({ mode: "auto", state: { kind: "idle" }, checkedAtMs: 1791694709000 });
+    const pending = createMockIpc({ update: "pending" });
+    expect(await pending.updateStatus()).toEqual({ mode: "auto", state: { kind: "idle" }, checkedAtMs: null });
     await expect(plain.updateInstall()).rejects.toMatchObject({ code: "E_INTERNAL" });
     const off = createMockIpc({ update: "off", settings: { updates: "off" } });
     expect((await off.updateStatus()).state).toEqual({ kind: "off" });
@@ -2402,6 +2750,39 @@ describe("the updater (spec §6.2, phase 4b)", () => {
     await open(user, "Home");
     expect(screen.queryByText("Updated to v0.2.0.")).toBeNull();
     expect(ipc.state.calls.filter((c) => c === "crashDismiss")).toEqual([]);
+  });
+
+  it("shows the offer once the check of this run has run, polling until then (Q5)", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const { ipc } = await home({ update: "pending", settings: { updates: "notify" } });
+      expect(screen.queryByText("CMD Studio v0.2.0 is available.")).toBeNull();
+      // The backend's check ran meanwhile (after app_ready): the next poll finds it.
+      ipc.state.update = { mode: "notify", state: { kind: "available", version: "0.2.0" }, checkedAtMs: 1791694709000 };
+      await vi.advanceTimersByTimeAsync(2100);
+      expect(await screen.findByText("CMD Studio v0.2.0 is available.")).toBeTruthy();
+      expect(ipc.state.calls.filter((c) => c === "updateStatus").length).toBeGreaterThanOrEqual(2);
+      // Settled: no more polls.
+      const polls = ipc.state.calls.filter((c) => c === "updateStatus").length;
+      await vi.advanceTimersByTimeAsync(6000);
+      expect(ipc.state.calls.filter((c) => c === "updateStatus").length).toBe(polls);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reads the updater once when the check has run already, and never when Off", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const { ipc } = await home({ update: "idle" });
+      await vi.advanceTimersByTimeAsync(6000);
+      expect(ipc.state.calls.filter((c) => c === "updateStatus")).toHaveLength(1);
+      const off = await home({ update: "off", settings: { updates: "off" } });
+      await vi.advanceTimersByTimeAsync(6000);
+      expect(off.ipc.state.calls.filter((c) => c === "updateStatus")).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("offers the available version on the home page with Update now and Later, and Later holds for the run", async () => {
@@ -2461,7 +2842,7 @@ describe("the updater (spec §6.2, phase 4b)", () => {
 ```
 
 Run (in `app/`): `npm test -- i18n work mock App`
-Expected: the i18n test fails on the missing keys and the old note; `work.test` fails (`KINDS.updateStatus` undefined); `mock.test` fails (`updateStatus` is not a function); the eight App tests fail.
+Expected: the i18n test fails on the missing keys and the old note; `work.test` fails (`KINDS.updateStatus` undefined); `mock.test` fails (`updateStatus` is not a function); the ten App tests fail.
 
 - [ ] **Step 5: `types.ts`, `tauri.ts`, `work.ts`, `mock.ts`**
 
@@ -2479,15 +2860,16 @@ Expected: the i18n test fails on the missing keys and the old note; `work.test` 
 
 `tauri.ts`: `updateStatus: () => call("update_status"), updateInstall: () => call("update_install"),`.
 
-`work.ts`: `KINDS` gains `updateStatus: "read", updateInstall: "exit",`; `TASK` gains `updateStatus: "work.reading", updateInstall: "work.updating",`; the module doc's "the restart itself is neither timed nor shown" becomes "the restart and Update now are neither timed nor shown".
+`work.ts`: `KINDS` gains `updateStatus: "read", updateInstall: "exit",`; `TASK` gains `updateStatus: "work.reading", updateInstall: "work.updating",`; its comment "fifteen tasks" becomes "sixteen tasks"; the module doc's "the restart itself is neither timed nor shown" becomes "the restart and Update now are neither timed nor shown".
 
 `mock.ts`: imports `UpdateStatus`, `Updated`, `UpdateState`. `MockOptions` gains:
 
 ```ts
-  /** Where the updater is when the mock starts (spec §6.2), as `update_status` says it; `updated`
-   * is the notice of a start after an update (`app_status.updated`) with the state idle. Not given:
-   * idle, as after a check that found nothing. `off` with `settings: { updates: "off" }`. */
-  update?: "off" | "idle" | "available" | "ready" | "updated";
+  /** Where the updater is when the mock starts (spec §6.2), as `update_status` says it; `pending`
+   * is a check that has not run yet (`checkedAtMs` null: the UI polls); `updated` is the notice of
+   * a start after an update (`app_status.updated`) with the state idle. Not given: idle, as after a
+   * check that found nothing. `off` with `settings: { updates: "off" }`. */
+  update?: "off" | "pending" | "idle" | "available" | "ready" | "updated";
   /** The version the updater offers or brought; 0.2.0 when not given. */
   updateVersion?: string;
 ```
@@ -2498,7 +2880,7 @@ Expected: the i18n test fails on the missing keys and the old note; `work.test` 
     update: {
       mode: options.settings?.updates ?? "auto",
       state: updateState(options.update ?? "idle", options.updateVersion ?? "0.2.0"),
-      checkedAtMs: options.update === "off" ? null : 1791694709000,
+      checkedAtMs: options.update === "off" || options.update === "pending" ? null : 1791694709000,
     },
     updated:
       options.update === "updated"
@@ -2633,21 +3015,64 @@ function UpdatedNotice({ updated, onClosed }: { updated: Updated; onClosed: () =
 // The updater's offer (spec §6.2): on the home page, a card when a newer version waits for "Update
 // now" (notify mode) or is downloaded and installs at close (automatic mode); on the Recovery page,
 // one line that says Update now when a version waits, else that none waits (recovery spec §5.2).
-// "Update now" hands the install to the backend, which ends the process and brings the app back by
-// itself; the card says so while that happens. "Later" (home only) hides the offer for the run.
-import { useState } from "react";
+// The check of a run starts only after app_ready, after this page's first read, so the offer reads
+// update_status again every two seconds while the check has not run (`checkedAtMs` null) or is under
+// way, for at most a minute (Q5); Off and a settled check end the reads. "Update now" hands the
+// install to the backend, which ends the process and brings the app back by itself as a normal
+// start; the card says so while that happens. "Later" (home only) hides the offer for the run.
+import { useEffect, useState } from "react";
 import type { UpdateStatus } from "../bindings/UpdateStatus";
 import { useI18n } from "../i18n";
 import { useIpc } from "../ipc/context";
 import { useAppState } from "../state";
 import { ErrorNotice } from "./Notices";
 
-export function UpdateOffer({ status, where }: { status: UpdateStatus | null; where: "home" | "recovery" }) {
+/** How often the offer reads `update_status` while the check of this run may still change it. */
+export const UPDATE_POLL_MS = 2000;
+/** How many reads at most: a minute, then the offer stays as it last read it. */
+export const UPDATE_POLL_LIMIT = 30;
+
+/** Whether the updater may still change: the check has not run, or is checking or downloading. */
+function stillComing(status: UpdateStatus): boolean {
+  if (status.state.kind === "off") return false;
+  return status.checkedAtMs === null || status.state.kind === "checking" || status.state.kind === "downloading";
+}
+
+export function UpdateOffer({ where }: { where: "home" | "recovery" }) {
   const { t } = useI18n();
   const ipc = useIpc();
-  const { updateLater, markUpdateLater } = useAppState();
+  const { version, updateLater, markUpdateLater } = useAppState();
+  const [status, setStatus] = useState<UpdateStatus | null>(null);
   const [installing, setInstalling] = useState<string | null>(null);
   const [error, setError] = useState<unknown>(null);
+
+  // One read, and more while the check may still change the answer; a read that fails is silent
+  // (the updater says nothing until it has something) and read again on the next tick.
+  useEffect(() => {
+    let alive = true;
+    let reads = 0;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const again = () => {
+      if (alive && reads < UPDATE_POLL_LIMIT) timer = setTimeout(read, UPDATE_POLL_MS);
+    };
+    const read = () => {
+      reads += 1;
+      ipc.updateStatus().then(
+        (s) => {
+          if (!alive) return;
+          setStatus(s);
+          if (stillComing(s)) again();
+        },
+        () => again(),
+      );
+    };
+    read();
+    return () => {
+      alive = false;
+      if (timer !== null) clearTimeout(timer);
+    };
+  }, [ipc, version]);
+
   const state = status?.state ?? null;
   const version = state && "version" in state ? state.version : null;
   const updateNow = (v: string) => {
@@ -2695,9 +3120,9 @@ export function UpdateOffer({ status, where }: { status: UpdateStatus | null; wh
 }
 ```
 
-`Home.tsx`: `const readUpdate = (ipc: Ipc) => ipc.updateStatus();` beside the other module-level reads; `const update = useRead(readUpdate, version);` in the component; `import { UpdateOffer } from "../components/UpdateOffer";`; the slot line `<div data-slot="update-notice">{t("home.update.placeholder")}</div>` and its comment become `<UpdateOffer status={update.value} where="home" />` (a read that failed is silent here: the updater is silent until it has something, and `update.error` is not shown). The file's header comment: "A line is kept for Phase 4's …" becomes "The updater's offer sits under the status (`UpdateOffer`)".
+`Home.tsx`: `import { UpdateOffer } from "../components/UpdateOffer";`; the slot line `<div data-slot="update-notice">{t("home.update.placeholder")}</div>` and its comment become `<UpdateOffer where="home" />` (the component reads and polls `update_status` itself). The file's header comment: "A line is kept for Phase 4's …" becomes "The updater's offer sits under the status (`UpdateOffer`)".
 
-`Recovery.tsx`: `const readUpdate = (ipc: Ipc) => ipc.updateStatus();`, `const update = useRead(readUpdate, version);`, the placeholder line becomes `<UpdateOffer status={update.value} where="recovery" />`; the header's last sentence names it.
+`Recovery.tsx`: the placeholder line becomes `<UpdateOffer where="recovery" />`; the header's last sentence names it.
 
 `Advanced.tsx`: `const [update, setUpdate] = useState<UpdateStatus | null>(null);` read in the same effect as `advancedRead` (`ipc.updateStatus().then((u) => { if (alive) setUpdate(u); }, () => {})`); after the versions table, inside the `info &&` block:
 
@@ -2718,18 +3143,20 @@ Expected: all pass; the i18n rules hold (every new key in both dictionaries, Tha
 
 - [ ] **Step 9: The checks, then commit**
 
-The four clippy runs, `cargo fmt --all`, `cargo fmt --all -- --check`, `cargo test -p cmdstudio-app`.
+The four clippy runs, `cargo fmt --all`, `cargo fmt --all -- --check`, `cargo test -p cmdstudio-app`. Expected: clippy prints no warning, `cargo fmt --all -- --check` prints nothing, every test passes.
 
 Write `.git/CMDSTUDIO_COMMIT_MSG`:
 
 ```
 app, ui: update_status, update_install, app_status.updated and the updater's cards (spec §6.2, phase 4b)
 
-The 39th and 38th commands: update_status (read only) and
-update_install ("Update now": the plugin's install through the
-backend, which ends the process); app_ready starts the check once the
-window is up. app_status.updated carries the notice of a start after
-an update. Bindings regenerated (AppStatus, ExternalTarget, UpdateState,
+The 38th and 39th commands: update_status (read only) and
+update_install ("Update now": the backend's download, lock, record
+and own installer start with a relaunch, then the process ends);
+app_ready starts the check once the window is up; app_restart marks
+the restart so that its exit installs nothing. app_status.updated
+carries the notice of a start after an update. The offer polls
+update_status until the check of the run has run. Bindings regenerated (AppStatus, ExternalTarget, UpdateState,
 UpdateStatus, Updated). UI: "Updated to vX" with What changed (the
 release page, for a SemVer version only) and Close above every screen;
 the notify card on the home page with Update now and Later (for the
@@ -2739,23 +3166,23 @@ page's "last checked"; the Settings note's words; the mock's update
 option. The two reserved placeholder keys go.
 ```
 
-Then `git add -- app/src-tauri/src/command_names.rs app/src-tauri/src/ipc.rs app/src-tauri/capabilities/default.json app/src-tauri/src/backend/run.rs app/ui/src/bindings/AppStatus.ts app/ui/src/bindings/ExternalTarget.ts app/ui/src/bindings/UpdateState.ts app/ui/src/bindings/UpdateStatus.ts app/ui/src/bindings/Updated.ts app/ui/src/ipc/types.ts app/ui/src/ipc/tauri.ts app/ui/src/ipc/mock.ts app/ui/src/ipc/work.ts app/ui/src/ipc/mock.test.ts app/ui/src/ipc/work.test.ts app/ui/src/App.tsx app/ui/src/state.tsx app/ui/src/components/UpdateOffer.tsx app/ui/src/screens/Home.tsx app/ui/src/screens/Recovery.tsx app/ui/src/screens/Advanced.tsx app/ui/src/i18n/en.ts app/ui/src/i18n/th.ts app/ui/src/i18n/i18n.test.ts app/ui/src/App.test.tsx`, check `git diff --cached --name-only`, then `git commit -F .git/CMDSTUDIO_COMMIT_MSG`.
+Then `git add -- app/src-tauri/src/command_names.rs app/src-tauri/src/ipc.rs app/src-tauri/capabilities/default.json app/src-tauri/src/backend/run.rs app/src-tauri/src/config_guard.rs app/ui/src/bindings/AppStatus.ts app/ui/src/bindings/ExternalTarget.ts app/ui/src/bindings/UpdateState.ts app/ui/src/bindings/UpdateStatus.ts app/ui/src/bindings/Updated.ts app/ui/src/ipc/types.ts app/ui/src/ipc/tauri.ts app/ui/src/ipc/mock.ts app/ui/src/ipc/work.ts app/ui/src/ipc/mock.test.ts app/ui/src/ipc/work.test.ts app/ui/src/App.tsx app/ui/src/state.tsx app/ui/src/components/UpdateOffer.tsx app/ui/src/screens/Home.tsx app/ui/src/screens/Recovery.tsx app/ui/src/screens/Advanced.tsx app/ui/src/i18n/en.ts app/ui/src/i18n/th.ts app/ui/src/i18n/i18n.test.ts app/ui/src/App.test.tsx`, check `git diff --cached --name-only`, then `git commit -F .git/CMDSTUDIO_COMMIT_MSG`.
 
 ---
 ### Task 5: After an update: the re-apply through a transaction and the pruning
 
-Runs after Task 4. Spec §6.2 "after an update" steps 2 and 3: when the theme applied runs on runtime folders of other versions than this build pins (an update went through, or a by-hand upgrade), the next normal start applies it again through `plan_apply` and `apply` (a transaction under the lock, a restore point), on a thread under `busy = "update_reapply"` so the UI waits as it waits for any change; then the old runtime folders go, best effort, and at every start. A re-apply that does not commit leaves the theme on the old runtime, which `state.json` still names, so nothing of it is pruned, and the notice says so.
+Runs after Task 4. Spec §6.2 "after an update" steps 2 and 3: when the theme applied runs on runtime folders of other versions than this build pins (an update went through, or a by-hand upgrade), the next normal start applies it again through `plan_apply` and `apply` (a transaction under the lock, a restore point), on a thread under `busy = "update_reapply"` so the UI waits as it waits for any change; then the old runtime folders go, best effort. The prune has one place (`Backend::prune_runtimes`, under `try_lock`; a busy lock skips it), run after a successful re-apply and at a normal start that needs no re-apply, never in safe mode and never from `update_after_start` (Q17). A re-apply that does not commit leaves the theme on the old runtime, which `state.json` still names, so nothing of it is pruned, and the notice says so.
 
 **Files:**
-- Modify: `app/src-tauri/src/backend/update.rs` (`Updated.reapply_failed`, `Backend::{update_needs_reapply, update_reapply, prune_runtimes}`, the prune at every start, tests)
+- Modify: `app/src-tauri/src/backend/update.rs` (`Updated.reapply_failed`, `Backend::{update_needs_reapply, update_reapply, prune_runtimes, prune_at_start}`, tests)
 - Modify: `app/src-tauri/src/backend/mod.rs` (`testing::fake_process`)
-- Modify: `app/src-tauri/src/lib.rs` (`spawn_update_reapply`, called in `setup` outside safe mode; a text test)
+- Modify: `app/src-tauri/src/lib.rs` (`spawn_update_reapply` or `prune_at_start`, in `setup` outside safe mode; a text test)
 - Modify: `app/ui/src/bindings/Updated.ts` (regenerated)
 - Modify: `app/ui/src/App.tsx` (`StartWait`'s words for `update_reapply`; the card's failure text), `app/ui/src/ipc/mock.ts` (`updateReapplyFailed`), `i18n/en.ts`, `th.ts`, `App.test.tsx`
 
 **Interfaces:**
 - Consumes: `plan::runtime_changed`, `cleanup::{runtime_dirs_named_by, prune_old_runtimes}` (Task 2), `Backend::{plan_apply, apply}`, `PlanOutcome::{Ready, OtherClink}`, `ApplyRequest`, `ApplyStatus::Committed`, `State::load`, `Backend::{busy_mark, busy_until_dropped, busy_clear}`, `UPDATE_REAPPLY_BUSY` (Task 3).
-- Produces: `Updated.reapply_failed: Option<String>` (the code, when the re-apply did not commit); `Backend::update_needs_reapply() -> bool`, `Backend::update_reapply()`, `Backend::prune_runtimes() -> usize`; the log lines `update reapply=ok|<code>|thread <e>`, `update pruned=<n>`; `testing::fake_process(&Backend<FakeMachine>) -> &FakeProcess`; the keys `start.updateReapply`, `start.updatedReapplyFailed`; `MockOptions.updateReapplyFailed?: string`.
+- Produces: `Updated.reapply_failed: Option<String>` (the code, when the re-apply did not commit); `Backend::update_needs_reapply() -> bool`, `Backend::update_reapply()`, `Backend::prune_runtimes() -> Option<usize>` (`None` when the lock is busy), `Backend::prune_at_start()`; the log lines `update reapply=ok|<code>|thread <e>`, `update pruned=<n>|busy`; `testing::fake_process(&Backend<FakeMachine>) -> &FakeProcess`; the keys `start.updateReapply`, `start.updatedReapplyFailed`; `MockOptions.updateReapplyFailed?: string`.
 
 - [ ] **Step 1: The failing tests**
 
@@ -2791,7 +3218,7 @@ In `backend/update.rs`'s test module, the imports gain `use crate::backend::test
     /// carries no failure.
     #[test]
     fn a_changed_runtime_pin_re_applies_the_theme_once() {
-        let b = backend();
+        let b = started();
         applied_on_an_old_omp(&b);
         fake_fs(&b).put(
             b.paths().update_file(),
@@ -2832,7 +3259,7 @@ In `backend/update.rs`'s test module, the imports gain `use crate::backend::test
     /// the notice.
     #[test]
     fn a_failed_re_apply_keeps_the_old_runtime_and_says_so() {
-        let b = backend();
+        let b = started();
         applied_on_an_old_omp(&b);
         fake_fs(&b).put(
             b.paths().update_file(),
@@ -2850,20 +3277,30 @@ In `backend/update.rs`'s test module, the imports gain `use crate::backend::test
         assert!(b.update_needs_reapply(), "the next start tries again");
     }
 
-    /// Spec §6.2 step 3, at every start: a runtime folder nobody names goes; one state.json names
-    /// stays; a start with no theme prunes nothing it should not.
+    /// Spec §6.2 step 3 (Q17): at a normal start the prune runs in its one place, under the
+    /// lock: a runtime folder nobody names goes and is said; one state.json names stays, and
+    /// nothing is said; a held lock skips it and says so; update_after_start prunes nothing.
     #[test]
-    fn old_runtime_folders_are_pruned_at_every_start() {
-        let b = backend();
+    fn old_runtime_folders_are_pruned_at_a_normal_start_under_the_lock() {
+        let b = started();
         apply_terracotta(&b);
-        fake_fs(&b).put(b.paths().runtime_root().join("clink-1.9.0").join("clink_dll_x64.dll"), b"old");
+        let old = b.paths().runtime_root().join("clink-1.9.0");
+        fake_fs(&b).put(old.join("clink_dll_x64.dll"), b"old");
         b.update_after_start("0.1.0");
-        assert!(!b.sys().fs.exists(&b.paths().runtime_root().join("clink-1.9.0")));
+        assert!(b.sys().fs.exists(&old), "update_after_start prunes nothing");
+        assert_eq!(update_lines(&b), Vec::<String>::new());
+        let held = b.sys().fs.try_lock(&b.paths().lock_file()).unwrap().unwrap();
+        b.prune_at_start();
+        assert!(b.sys().fs.exists(&old), "a busy lock skips the prune");
+        assert_eq!(update_lines(&b), ["update pruned=busy"]);
+        drop(held);
+        b.prune_at_start();
+        assert!(!b.sys().fs.exists(&old));
         assert!(b.sys().fs.exists(&b.paths().clink_dir()));
-        assert_eq!(update_lines(&b), ["update pruned=1"]);
-        let b = backend();
+        assert_eq!(update_lines(&b), ["update pruned=busy", "update pruned=1"]);
+        let b = started();
         applied_on_an_old_omp(&b);
-        b.update_after_start("0.1.0");
+        b.prune_at_start();
         assert!(b.sys().fs.exists(&b.paths().runtime_root().join("omp-31.4.0")), "named: kept");
         assert_eq!(update_lines(&b), Vec::<String>::new(), "nothing pruned, nothing said");
     }
@@ -2874,11 +3311,12 @@ In `backend/update.rs`'s test module, the imports gain `use crate::backend::test
 In `lib.rs`'s test module:
 
 ```rust
-    /// Spec §6.2 steps 2-3 (phase 4b): the re-apply after an update runs on its own thread once
-    /// the window is up, marked busy before the thread exists (the first app_status waits for it)
-    /// and cleared by a guard, outside safe mode only; the prune follows inside it.
+    /// Spec §6.2 steps 2-3 (phase 4b, Q17): the re-apply after an update runs on its own thread
+    /// once the window is up, marked busy before the thread exists (the first app_status waits
+    /// for it) and cleared by a guard; outside safe mode only, and a normal start that needs no
+    /// re-apply prunes in the one place instead; the prune follows the re-apply inside it.
     #[test]
-    fn the_re_apply_is_marked_before_its_thread_and_runs_outside_safe_mode_only() {
+    fn the_re_apply_is_marked_before_its_thread_and_the_prune_has_one_place_outside_safe_mode() {
         let body = body_of("fn spawn_update_reapply(");
         let marked = body.find(".busy_mark(UPDATE_REAPPLY_BUSY)").unwrap();
         let spawned = body.find(".spawn(").unwrap();
@@ -2891,10 +3329,13 @@ In `lib.rs`'s test module:
         assert!(body.contains("update reapply=thread"));
         let text = production();
         let window = text.find("open_main_window(app, ").unwrap();
+        let safe = text.rfind("decided.safe_mode.is_none()").unwrap();
+        let needs = text.find("for_window.update_needs_reapply()").unwrap();
         let call = text.find("spawn_update_reapply(&for_window)").unwrap();
-        assert!(window < call, "after the window");
-        let before = text.get(..call).unwrap_or("");
-        assert!(before.trim_end().ends_with("if decided.safe_mode.is_none() && for_window.update_needs_reapply() {"), "outside safe mode, and only when needed");
+        let prune = text.find("for_window.prune_at_start()").unwrap();
+        assert!(window < safe && safe < needs && needs < call && call < prune, "after the window, outside safe mode: the re-apply when needed, else the prune");
+        assert_eq!(text.matches("prune_at_start()").count(), 1, "the prune's one call site at a start");
+        assert_eq!(text.matches("spawn_update_reapply(&for_window)").count(), 1);
     }
 ```
 
@@ -2902,10 +3343,18 @@ In `App.test.tsx`'s updater block:
 
 ```ts
   it("waits for the re-apply after an update with its own words, then shows the notice", async () => {
-    const { ipc } = await home({ update: "updated", busy: "update_reapply" });
-    expect(await screen.findByText("CMD Studio is still updating the theme for the new version…")).toBeTruthy();
-    ipc.state.busy = null;
-    expect(await screen.findByText("Updated to v0.2.0.", {}, { timeout: 5000 })).toBeTruthy();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const { ipc } = await mount({ update: "updated", busy: "update_reapply", settings: { wizardDone: true } });
+      expect(await screen.findByText("CMD Studio is still updating the theme for the new version…")).toBeTruthy();
+      expect(ipc.state.calls).not.toContain("settingsGet");
+      ipc.state.busy = null;
+      await vi.advanceTimersByTimeAsync(2100);
+      await screen.findByRole("heading", { name: "Home" });
+      expect(await screen.findByText("Updated to v0.2.0.")).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("says when the theme could not be applied again for the new version", async () => {
@@ -2915,10 +3364,10 @@ In `App.test.tsx`'s updater block:
   });
 ```
 
-(`home` with `busy` set: `App` polls `app_status` every 2 s (`APP_STATUS_POLL_MS`); the first test clears the mock's `busy` and waits up to 5 s, as "waits while a change still runs in this process" does.)
+(The first test mounts while `busy` is set, as "waits while a change still runs in this process" does: `home()` would wait for the Home heading that `StartWait` withholds; the fake timers move `App`'s 2 s poll of `app_status`.)
 
-Run: `cargo test -p cmdstudio-app --lib backend::update:: lib` and, in `app/`, `npm test -- App`.
-Expected: compile errors (`update_needs_reapply`, `update_reapply`, `reapply_failed`, `fake_process` not found); the two App tests fail.
+Run: `cargo test -p cmdstudio-app --lib backend::update::`, then `cargo test -p cmdstudio-app --lib tests::the_re_apply_is_marked`, and, in `app/`, `npm test -- App`.
+Expected: compile errors (`update_needs_reapply`, `update_reapply`, `prune_at_start`, `reapply_failed`, `fake_process` not found); the two App tests fail.
 
 - [ ] **Step 2: The backend**
 
@@ -2930,16 +3379,7 @@ In `backend/update.rs`, `Updated` gains, after `notes_url`:
     pub reapply_failed: Option<String>,
 ```
 
-(`update_after_start` fills `reapply_failed: None`.) The imports gain `use crate::backend::apply::{ApplyRequest, ApplyStatus, PlanOutcome};`, `use cmdstudio_core::cleanup::{prune_old_runtimes, runtime_dirs_named_by};`, `use cmdstudio_core::plan::runtime_changed;`, `use cmdstudio_core::state::State;`. At the end of `update_after_start` (after the `updated` is set, and on every return path before it: put it first, right after the `current` is set and `updates\` is emptied):
-
-```rust
-        let pruned = self.prune_runtimes();
-        if pruned > 0 {
-            self.note_line(&format!("update pruned={pruned}"));
-        }
-```
-
-And the methods, after `update_record_consumed`:
+(`update_after_start` fills `reapply_failed: None` and prunes nothing.) The imports gain `use crate::backend::apply::{ApplyRequest, ApplyStatus, PlanOutcome};`, `use cmdstudio_core::cleanup::{prune_old_runtimes, runtime_dirs_named_by};`, `use cmdstudio_core::plan::runtime_changed;`, `use cmdstudio_core::state::State;`. The methods, after `update_record_consumed`:
 
 ```rust
     /// Whether this start must apply the theme again (spec §6.2 step 2): a theme is applied and
@@ -2964,8 +3404,7 @@ And the methods, after `update_record_consumed`:
             "update reapply={}",
             failed.as_deref().unwrap_or("ok")
         ));
-        let pruned = self.prune_runtimes();
-        self.note_line(&format!("update pruned={pruned}"));
+        self.prune_and_say(true);
         if let Some(code) = failed {
             self.update.with(|u| {
                 if let Some(updated) = &mut u.updated {
@@ -3006,15 +3445,32 @@ And the methods, after `update_record_consumed`:
         }
     }
 
-    /// Spec §6.2 step 3: the runtime folders of other versions than this build's, except the
-    /// ones state.json names; how many went. state.json that cannot be read prunes nothing: what
-    /// AutoRun runs is not known then.
-    pub(crate) fn prune_runtimes(&self) -> usize {
+    /// Spec §6.2 step 3, the prune's one place (Q17): the runtime folders of other versions than
+    /// this build's, except the ones state.json names, under the lock of spec §5.5 (`None` when
+    /// another change holds it: the next start tries again). state.json that cannot be read
+    /// prunes nothing: what AutoRun runs is not known then.
+    pub(crate) fn prune_runtimes(&self) -> Option<usize> {
+        let _lock = self.sys().fs.try_lock(&self.paths().lock_file()).ok().flatten()?;
         let Ok(state) = State::load(self.sys().fs, &self.paths().state_file()) else {
-            return 0;
+            return Some(0);
         };
         let keep = runtime_dirs_named_by(&state, self.paths());
-        prune_old_runtimes(self.sys(), self.paths(), &keep).len()
+        Some(prune_old_runtimes(self.sys(), self.paths(), &keep).len())
+    }
+
+    /// The prune with its log line: always after a re-apply (`always`), else only when something
+    /// went or the lock was busy, so a quiet start writes nothing.
+    fn prune_and_say(&self, always: bool) {
+        match self.prune_runtimes() {
+            None => self.note_line("update pruned=busy"),
+            Some(n) if always || n > 0 => self.note_line(&format!("update pruned={n}")),
+            Some(_) => {}
+        }
+    }
+
+    /// A normal start that needs no re-apply (`lib.rs`, outside safe mode): the prune alone.
+    pub fn prune_at_start(&self) {
+        self.prune_and_say(false);
     }
 ```
 
@@ -3027,10 +3483,15 @@ After `start_crash_check`'s `if … else if` in `setup`:
 ```rust
             // Spec §6.2 steps 2-3 (phase 4b): after an update the theme applied on the old
             // runtime is applied again, on a thread of its own, under its own busy name, so the
-            // first app_status waits for it; then the old runtime folders go. Not in safe mode,
-            // which changes nothing on the machine by itself.
-            if decided.safe_mode.is_none() && for_window.update_needs_reapply() {
-                spawn_update_reapply(&for_window);
+            // first app_status waits for it, and the old runtime folders go after it; a start
+            // that needs no re-apply prunes them here, the prune's one other place. Not in safe
+            // mode, which changes nothing on the machine by itself.
+            if decided.safe_mode.is_none() {
+                if for_window.update_needs_reapply() {
+                    spawn_update_reapply(&for_window);
+                } else {
+                    for_window.prune_at_start();
+                }
             }
 ```
 
@@ -3094,11 +3555,11 @@ and `UpdatedNotice`'s `<p>` becomes
 - [ ] **Step 5: Run the tests**
 
 Run: `cargo test -p cmdstudio-app --lib`, and in `app/`: `npm run typecheck`, `npm test`, `TZ=UTC npm test`.
-Expected: the four backend tests, the text test and the two App tests pass; `git status --porcelain app/ui/src/bindings` lists `Updated.ts` only.
+Expected: the four backend tests, the text test and the two App tests pass (Task 3's `update_lines` expectations hold: no prune line comes from `update_after_start`); `git status --porcelain app/ui/src/bindings` lists `Updated.ts` only.
 
 - [ ] **Step 6: The checks, then commit**
 
-The four clippy runs, `cargo fmt --all`, `cargo fmt --all -- --check`, `cargo test --workspace`.
+The four clippy runs, `cargo fmt --all`, `cargo fmt --all -- --check`, `cargo test --workspace`. Expected: clippy prints no warning, `cargo fmt --all -- --check` prints nothing, every test passes.
 
 Write `.git/CMDSTUDIO_COMMIT_MSG`:
 
@@ -3111,10 +3572,11 @@ decides nothing) and update_reapply (the applied theme through
 plan_apply and apply like every apply, then prune_old_runtimes; the
 code of a re-apply that did not commit goes to the log and to the
 notice, and the old folder state.json still names stays). The prune
-runs at every start. lib.rs runs the re-apply on its own thread under
-busy = update_reapply, outside safe mode, marked before the thread
-exists. The UI waits with its own words and the notice says when the
-theme could not be applied again.
+has one place, under the lock (busy skips it): after the re-apply, or
+at a normal start that needs none; never in safe mode. lib.rs runs
+the re-apply on its own thread under busy = update_reapply, marked
+before the thread exists. The UI waits with its own words and the
+notice says when the theme could not be applied again.
 ```
 
 Then `git add -- app/src-tauri/src/backend/update.rs app/src-tauri/src/backend/mod.rs app/src-tauri/src/lib.rs app/ui/src/bindings/Updated.ts app/ui/src/App.tsx app/ui/src/ipc/mock.ts app/ui/src/i18n/en.ts app/ui/src/i18n/th.ts app/ui/src/App.test.tsx`, check `git diff --cached --name-only`, then `git commit -F .git/CMDSTUDIO_COMMIT_MSG`.
@@ -3123,28 +3585,29 @@ Then `git add -- app/src-tauri/src/backend/update.rs app/src-tauri/src/backend/m
 
 ### Task 6: The key-dependent wiring — **waits for the founder's key**
 
-Runs after Task 7 and Task 8's Steps 1–3; nothing before it needs the key. The founder's public key goes into `tauri.conf.json`, the bundle makes updater artifacts (so every CI installer is signed with the founder's key from the repository's secrets), and `release.yml` uploads the `.sig` and `latest.json` under the asset name of 4a's ruling, without `--prerelease`. The release notes say how to upgrade, in the words U6 recorded.
+Runs after Task 7 and Task 8's Steps 1–3; nothing before it needs the key. The founder's public key goes into `tauri.conf.json`; `release.yml` calls `ci.yml` with `sign: true` and the secrets, and `ci.yml`'s new `workflow_call` input merges `bundle.createUpdaterArtifacts: true` into the bundle config for that run alone and sets the signing env, so the release's installer is signed and its `.sig` travels in the artifact, while every push, pull-request and fork run builds unsigned without the secret (the ledger's ruling: `tauri.bundle.conf.json` never carries `createUpdaterArtifacts`, and `config_guard` keeps pinning its absence). `release.yml` uploads the `.sig` and `latest.json` under the asset name of 4a's ruling, without `--prerelease`. The release notes say how to upgrade, in the words U6 recorded.
 
 **The founder's exact steps, which the task's first step prints and waits on:**
 
 1. In a shell outside the repo: `npm --prefix app run tauri -- signer generate -w %USERPROFILE%\.tauri\cmdstudio.key` (it asks for a password; keep the file and the password outside the repo and never paste either into a chat).
 2. GitHub → the repo → Settings → Secrets and variables → Actions → New repository secret: `TAURI_SIGNING_PRIVATE_KEY` = the content of `cmdstudio.key`; `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` = the password.
 3. Give the agent the content of `cmdstudio.key.pub` (public; it goes into `tauri.conf.json`'s `plugins.updater.pubkey`).
-4. Decide the endpoint (Decisions, "The endpoint"): the fixed `releases/latest/download/latest.json` with releases not flagged pre-release (the default below), or the second release tagged `updater` (the alternative, two lines of `release.yml` below).
+4. Decide the endpoint (Decisions, "The endpoint"): the fixed `releases/latest/download/latest.json` with releases not flagged pre-release (the default below, the ledger's ruling), or the second release tagged `updater` (the alternative, two lines of `release.yml` below).
 
 Until step 3 the task does not start; Tasks 1–5, 7 and 8 do not depend on it.
 
 **Files:**
 - Modify: `app/src-tauri/tauri.conf.json` (`plugins.updater.pubkey`)
-- Modify: `app/src-tauri/tauri.bundle.conf.json` (`bundle.createUpdaterArtifacts: true`)
-- Modify: `app/src-tauri/src/config_guard.rs` (the pubkey's shape, `createUpdaterArtifacts`, the workflows' text)
-- Modify: `.github/workflows/ci.yml` (the signing env on the bundle step; the `.sig` in the listing and the artifact)
-- Modify: `.github/workflows/release.yml` (`secrets: inherit`; the `.sig` and `latest.json`; no `--prerelease`; the version grep, M6)
+- Modify: `app/src-tauri/src/config_guard.rs` (the pubkey's shape; the bundle guard's message; the workflows' text)
+- Modify: `.github/workflows/ci.yml` (`workflow_call: inputs: sign`; the bundle step's merged config and signing env under it; the `.sig` in the listing and the artifact under it)
+- Modify: `.github/workflows/release.yml` (`with: sign: true`, `secrets: inherit`; the `.sig` and `latest.json`; no `--prerelease`; the version grep, M6)
 - Modify: `.github/release-notes.md` (how to upgrade)
 
+(`tauri.bundle.conf.json` is not changed.)
+
 **Interfaces:**
-- Consumes: the public key (the founder), `CMD Studio_<v>_x64-setup.exe.sig` (the bundler, G-SIG), `ci.yml`'s artifact `cmdstudio-installer` (Task 1's listing step), U6's words (Task 1's `results.md`).
-- Produces: the draft release `v<version>` with the assets `CMD-Studio_<version>_x64-setup.exe`, `CMD-Studio_<version>_x64-setup.exe.sig`, `latest.json`, `SHA256SUMS.txt`; `latest.json` = `{"version":"<v>","notes":"<the first line of the notes>","pub_date":"<ISO 8601>","platforms":{"windows-x86_64":{"signature":"<the .sig's text>","url":"https://github.com/luraselenehalo/cmd-studio/releases/download/v<v>/CMD-Studio_<v>_x64-setup.exe"}}}`; the artifact `cmdstudio-installer` gains the `.sig`.
+- Consumes: the public key (the founder), `CMD Studio_<v>_x64-setup.exe.sig` (the bundler, G-SIG, when `inputs.sign` is on), `ci.yml`'s artifact `cmdstudio-installer`, U6's words (Task 1's `results.md`).
+- Produces: `ci.yml`'s `workflow_call` input `sign` (boolean, default false); the draft release `v<version>` with the assets `CMD-Studio_<version>_x64-setup.exe`, `CMD-Studio_<version>_x64-setup.exe.sig`, `latest.json`, `SHA256SUMS.txt`; `latest.json` = `{"version":"<v>","notes":"<the first line of the notes>","pub_date":"<ISO 8601>","platforms":{"windows-x86_64":{"signature":"<the .sig's text>","url":"https://github.com/luraselenehalo/cmd-studio/releases/download/v<v>/CMD-Studio_<v>_x64-setup.exe"}}}`; the artifact `cmdstudio-installer` gains the `.sig` on a signed run only.
 
 - [ ] **Step 1: Print the founder's steps and wait**
 
@@ -3152,7 +3615,7 @@ The implementer's first message is the four steps above, and the task stops unti
 
 - [ ] **Step 2: The failing guards**
 
-In `config_guard.rs`, `the_bundle_file_is_a_per_user_nsis_installer_and_the_committed_config_stays_buildable`: the assertion `bundle.get("createUpdaterArtifacts").is_none()` becomes `assert_eq!(bundle.get("createUpdaterArtifacts"), Some(&Value::Bool(true)), "the bundler signs the installer and writes its .sig (phase 4b)");` and its doc's "no updater artifacts until 4b" becomes "updater artifacts (the installer's .sig)". In `the_updater_config_is_the_one_endpoint_quiet_and_without_dangerous_switches`, after the `pubkey` character check:
+In `config_guard.rs`, `the_bundle_file_is_a_per_user_nsis_installer_and_the_committed_config_stays_buildable`: the assertion `bundle.get("createUpdaterArtifacts").is_none()` keeps its check and changes its message to `"createUpdaterArtifacts comes through ci.yml's sign input for a release run only (phase 4b): a pull request's CI needs no signing secret"`; its doc's "no updater artifacts until 4b" becomes "no updater artifacts in the committed file (release.yml turns them on through ci.yml's `sign` input)". In `the_updater_config_is_the_one_endpoint_quiet_and_without_dangerous_switches`, after the `pubkey` character check:
 
 ```rust
     assert!(pubkey.len() >= 64 && !pubkey.contains(char::is_whitespace), "the founder's minisign public key, one base64 line (Task 6): {pubkey:?}");
@@ -3161,16 +3624,19 @@ In `config_guard.rs`, `the_bundle_file_is_a_per_user_nsis_installer_and_the_comm
 Add:
 
 ```rust
-/// Spec §6.4 (phase 4b), 4a's rulings: the release workflow signs through ci.yml (the secrets
-/// are handed to the called workflow), uploads the installer under the hyphenated asset name
-/// with its .sig and latest.json (the updater's manifest, whose url is that asset under the
-/// release's tag), and makes a draft that is not flagged pre-release (GitHub's "latest"
-/// download skips flagged ones; the title and the notes keep the words). Both workflows read the
+/// Spec §6.4 (phase 4b), 4a's rulings and the ledger's: the release workflow signs through
+/// ci.yml's `sign` input (the secrets handed to the called workflow; a pull request's CI never
+/// needs them), uploads the installer under the hyphenated asset name with its .sig and
+/// latest.json (the updater's manifest, whose url is that asset under the release's tag), and
+/// makes a draft that is not flagged pre-release (GitHub's "latest" download skips flagged
+/// ones; the title and the notes keep the words). ci.yml merges createUpdaterArtifacts and sets
+/// the signing env only under the input, and copies the .sig only then. Both workflows read the
 /// version under [workspace.package] and nowhere else (4a's M6).
 #[test]
-fn the_release_workflow_signs_uploads_latest_json_and_is_not_a_prerelease() {
+fn the_release_workflow_signs_through_ci_yml_uploads_latest_json_and_is_not_a_prerelease() {
     let release = include_str!("../../../.github/workflows/release.yml");
     let ci = include_str!("../../../.github/workflows/ci.yml");
+    assert!(release.contains("    with:\n      sign: true\n"), "release.yml asks ci.yml to sign");
     assert!(release.contains("    secrets: inherit\n"), "the signing key reaches ci.yml");
     assert!(!release.contains("--prerelease"), "not flagged: the endpoint is releases/latest");
     assert!(release.contains("--draft"), "still a draft the founder publishes");
@@ -3182,8 +3648,11 @@ fn the_release_workflow_signs_uploads_latest_json_and_is_not_a_prerelease() {
     ] {
         assert!(release.contains(needle), "release.yml lacks {needle}");
     }
-    assert!(ci.contains("TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}"));
-    assert!(ci.contains("TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}"));
+    assert!(ci.contains("  workflow_call:\n    inputs:\n      sign:\n"), "the input");
+    assert!(ci.contains("TAURI_SIGNING_PRIVATE_KEY: ${{ inputs.sign && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}"));
+    assert!(ci.contains("TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ inputs.sign && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}"));
+    assert!(ci.contains("if [ \"${{ inputs.sign }}\" = \"true\" ]; then"), "the merge and the .sig are under the input");
+    assert!(ci.contains("'{\"bundle\":{\"createUpdaterArtifacts\":true}}'"), "merged for the signed run only");
     assert!(ci.contains("cp \"$installer.sig\" stage/installer/"), "the .sig travels with the installer");
     let awk = r#"awk '/^\[workspace\.package\]/{t=1;next} /^\[/{t=0} t && /^version = /{gsub(/^version = "|"$/,""); print; exit}' Cargo.toml"#;
     for (name, text) in [("ci.yml", ci), ("release.yml", release)] {
@@ -3194,28 +3663,68 @@ fn the_release_workflow_signs_uploads_latest_json_and_is_not_a_prerelease() {
 ```
 
 Run: `cargo test -p cmdstudio-app --lib config_guard`
-Expected: the three tests fail (`createUpdaterArtifacts` absent, the pubkey empty, the workflows' text).
+Expected: two tests fail (the pubkey is empty; the workflows' text); the bundle guard passes as before.
 
-- [ ] **Step 3: The configs**
+- [ ] **Step 3: The config**
 
-`tauri.conf.json`: `"pubkey": "<the founder's key, one line>"`. `tauri.bundle.conf.json`: after `"publisher"`, `"createUpdaterArtifacts": true,` (the v2 form: the bundler signs the NSIS installer itself and writes `<installer>.sig`; no `.nsis.zip`).
+`tauri.conf.json`: `"pubkey": "<the founder's key, one line>"`. Nothing else: `tauri.bundle.conf.json` stays as 4a shipped it.
 
 - [ ] **Step 4: `ci.yml`**
 
-The step "Tauri build (with the NSIS bundle)" gains, between `working-directory: app` and `run:`:
+`on:`'s `workflow_call:` (line 12) becomes:
 
 ```yaml
-        # The updater's signature (spec §6.2, §6.4, phase 4b): the founder's key from the
-        # repository's secrets, which GitHub hands to pushes and pull requests of this repository
-        # (never to a fork's: such a build fails here, which is right). createUpdaterArtifacts in
-        # tauri.bundle.conf.json makes the bundler refuse to build without the key, so every
-        # installer CI makes is signed, and its .sig goes with it. Never printed.
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+  # release.yml calls this workflow on a tag: the same gates and the same installer, never a copy
+  # (spec §6.4). With `sign` the installer is signed for the updater (phase 4b): the bundler gets
+  # createUpdaterArtifacts for that run and the founder's key from the secrets the caller hands
+  # over. A push, a pull request or a fork never signs: their CI needs no secret.
+  workflow_call:
+    inputs:
+      sign:
+        description: 'Sign the installer with the updater key and keep its .sig (release.yml only)'
+        type: boolean
+        default: false
 ```
 
-In the listing step, after `test -f "$installer"`: `test -f "$installer.sig"` and `ls -l "$installer.sig"`; after `cp "$installer" stage/installer/`: `cp "$installer.sig" stage/installer/`; the step's comment gains "and the updater's .sig (phase 4b)". (Task 1's spike step keeps its own `env`, which overrides these for that step.)
+The step "Tauri build (with the NSIS bundle)" becomes:
+
+```yaml
+      - name: Tauri build (with the NSIS bundle)
+        shell: bash
+        working-directory: app
+        # The updater's signature (spec §6.2, §6.4, phase 4b) on a signed run only: the founder's
+        # key from the repository's secrets, handed over by release.yml; empty otherwise, and the
+        # bundler then makes no updater artifact (createUpdaterArtifacts is merged in below only
+        # under the input, never committed). Never printed.
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ inputs.sign && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ inputs.sign && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+        run: |
+          config=src-tauri/tauri.bundle.conf.json
+          if [ "${{ inputs.sign }}" = "true" ]; then
+            printf '%s' '{"bundle":{"createUpdaterArtifacts":true}}' > "$RUNNER_TEMP/sign.override.json"
+            jq -s '.[0] * .[1]' "$config" "$RUNNER_TEMP/sign.override.json" > "$RUNNER_TEMP/sign.conf.json"
+            config="$RUNNER_TEMP/sign.conf.json"
+          fi
+          npm run tauri -- build --config "$config"
+```
+
+(The step's existing comment block above its `name` stays; its last sentence gains "A signed run (`inputs.sign`, release.yml) merges `createUpdaterArtifacts` into that config for the run.") In the listing step, after `test -f "$installer"` and after `cp "$installer" stage/installer/`, respectively:
+
+```bash
+          if [ "${{ inputs.sign }}" = "true" ]; then
+            test -f "$installer.sig"
+            ls -l "$installer.sig"
+          fi
+```
+
+```bash
+          if [ "${{ inputs.sign }}" = "true" ]; then
+            cp "$installer.sig" stage/installer/
+          fi
+```
+
+and the step's comment gains "and, on a signed run, the updater's .sig (phase 4b)". `inputs.sign` is empty on `push`, `pull_request` and `workflow_dispatch` (false in the expressions, the string `""` in bash, so the `if` is not taken). Task 1's spike step keeps its own `env` and its own merged config, so it signs with the ephemeral key whatever `inputs.sign` is.
 
 - [ ] **Step 5: `release.yml`**
 
@@ -3226,7 +3735,24 @@ The version step's grep becomes the `awk` of Task 1 Step 1 (M6):
           test -n "$version"
 ```
 
-The `ci:` job gains `secrets: inherit` after `uses:`. The draft job's two steps become:
+The `ci:` job becomes:
+
+```yaml
+  # ci.yml itself: fmt, the four clippy runs, the tests, the system tests with their SKIPPED
+  # grep, the UI's checks, the bindings, the console exe's checks, the bundle, the 7z listing,
+  # the cmdstudio-installer artifact. Called, not copied. `sign` makes it sign the installer for
+  # the updater with the key the secrets hold (phase 4b).
+  ci:
+    needs: version
+    uses: ./.github/workflows/ci.yml
+    with:
+      sign: true
+    secrets: inherit
+    permissions:
+      contents: read
+```
+
+The draft job's two steps become:
 
 ```yaml
       - name: The notes, the hash and the updater's manifest, with the version filled in
@@ -3265,7 +3791,7 @@ The `ci:` job gains `secrets: inherit` after `uses:`. The draft job's two steps 
           gh release create "v$version" --draft --title "CMD Studio v$version" --verify-tag --notes-file notes.md "release/CMD-Studio_${version}_x64-setup.exe" "release/CMD-Studio_${version}_x64-setup.exe.sig" release/latest.json release/SHA256SUMS.txt
 ```
 
-The header comment's "a DRAFT pre-release" becomes "a DRAFT release (named a pre-release for testers in its title and notes, not flagged: the updater's endpoint skips flagged ones)". **The alternative, if the founder chose it in step 4:** keep `--prerelease`, and after `gh release create` add `gh release upload updater release/latest.json --clobber` (the founder makes the fixed release tagged `updater` once, by hand, with that one asset), the endpoint in `tauri.conf.json` and `config_guard` becomes `https://github.com/luraselenehalo/cmd-studio/releases/download/updater/latest.json`, and the guard's `--prerelease` assertion flips.
+The header comment's "a DRAFT pre-release" becomes "a DRAFT release (named a pre-release for testers in its title and notes, not flagged: the updater's endpoint skips flagged ones), its installer signed through ci.yml's `sign` input". **The alternative, if the founder chose it in step 4:** keep `--prerelease`, and after `gh release create` add `gh release upload updater release/latest.json --clobber` (the founder makes the fixed release tagged `updater` once, by hand, with that one asset), the endpoint in `tauri.conf.json` and `config_guard` becomes `https://github.com/luraselenehalo/cmd-studio/releases/download/updater/latest.json`, and the guard's `--prerelease` assertion flips.
 
 - [ ] **Step 6: The notes**
 
@@ -3279,31 +3805,34 @@ The two quoted choices are U6's recorded words (`docs/spikes/phase4-update/resul
 
 - [ ] **Step 7: Parse, run the guards, then commit**
 
-Parse both YAML files; `cargo test -p cmdstudio-app --lib config_guard` (Expected: all pass, the three above included); `cargo test -p cmdstudio-app --lib` (the config with a real pubkey still builds the merged `Config`).
+Parse both YAML files; `cargo test -p cmdstudio-app --lib config_guard` (Expected: all pass, the two above included); `cargo test -p cmdstudio-app --lib` (the config with a real pubkey still builds the merged `Config`).
 
 Write `.git/CMDSTUDIO_COMMIT_MSG`:
 
 ```
-app, ci: the updater's public key, signed installers and latest.json (spec §6.2, §6.4, phase 4b)
+app, ci: the updater's public key, the signed release path and latest.json (spec §6.2, §6.4, phase 4b)
 
-tauri.conf.json carries the founder's minisign public key;
-tauri.bundle.conf.json turns createUpdaterArtifacts on, so the bundler
-signs every installer with the key the repository's secrets hold
-(ci.yml's bundle step; the .sig travels in the artifact). release.yml
-hands the secrets to ci.yml, uploads the installer and its .sig under
-the hyphenated asset name with latest.json (the updater's manifest,
-its url under the release's tag) and SHA256SUMS.txt, and makes a draft
-that is not flagged pre-release: the app's endpoint,
-releases/latest/download/latest.json, skips flagged ones. Both
-workflows read the version under [workspace.package] (4a's M6), pinned
-by config_guard. The release notes say how to upgrade by hand.
+tauri.conf.json carries the founder's minisign public key. ci.yml
+gains a workflow_call input `sign`: only then is createUpdaterArtifacts
+merged into the bundle config for the run, the key read from the
+secrets the caller hands over, and the installer's .sig kept in the
+artifact; a push, a pull request or a fork builds unsigned and needs
+no secret, and tauri.bundle.conf.json is unchanged. release.yml calls
+ci.yml with sign: true and secrets: inherit, uploads the installer and
+its .sig under the hyphenated asset name with latest.json (the
+updater's manifest, its url under the release's tag) and
+SHA256SUMS.txt, and makes a draft that is not flagged pre-release: the
+app's endpoint, releases/latest/download/latest.json, skips flagged
+ones. Both workflows read the version under [workspace.package] (4a's
+M6), pinned by config_guard. The release notes say how to upgrade by
+hand.
 ```
 
-Then `git add -- app/src-tauri/tauri.conf.json app/src-tauri/tauri.bundle.conf.json app/src-tauri/src/config_guard.rs .github/workflows/ci.yml .github/workflows/release.yml .github/release-notes.md`, check `git diff --cached --name-only`, then `git commit -F .git/CMDSTUDIO_COMMIT_MSG`.
+Then `git add -- app/src-tauri/tauri.conf.json app/src-tauri/src/config_guard.rs .github/workflows/ci.yml .github/workflows/release.yml .github/release-notes.md`, check `git diff --cached --name-only`, then `git commit -F .git/CMDSTUDIO_COMMIT_MSG`.
 
 - [ ] **Step 8: CI is the gate (after the controller's push)**
 
-The implementer reads the `app` job's log of the next run: the bundle step signs (no "no private key" error), the listing prints `CMD Studio_<v>_x64-setup.exe.sig`, the artifact holds three files. A `workflow_dispatch` of `release.yml` (the controller's dry run) proves the `version` and `ci` jobs with the secrets passed; the `draft` job runs only on the founder's tag.
+The next push's `ci.yml` run builds unsigned as before (no `.sig` in the listing, no secret used): the implementer reads its `app` job's log to see the bundle step pass with the plain config. The signed path is proved by the controller's `workflow_dispatch` of `release.yml` (its dry run: the `version` and `ci` jobs with `sign: true` and the secrets; the `draft` job runs only on the founder's tag): the bundle step signs (no "no private key" error), the listing prints `CMD Studio_<v>_x64-setup.exe.sig`, the artifact holds three files. The run id goes to Task 8.
 
 ---
 ### Task 7: The upstream-watch workflow — **PR creation prefers a founder token**
@@ -3318,17 +3847,18 @@ Runs after Task 5; needs no founder step (the token is optional). Spec §6.2 and
 
 **Interfaces:**
 - Consumes: `scripts/fetch-resources.ps1`'s three tables (`$Downloads` with `Name`/`Url`/`Sha256`, `$Pinned`, the `Manifest` function's `& $bundle '<version>' '<prefix>'` lines), its `$ClinkSource` line and its `.SYNOPSIS` versions; GitHub's `GET /repos/<owner>/<repo>/releases/latest` (`tag_name`, `assets[].name`, `assets[].browser_download_url`); `gh pr list`, `gh pr create`.
-- Produces: `upstream-watch.ps1 [-Script <file>] [-Fixture <dir>] [-WhatIf]` (prints `nothing newer upstream`, or `would change:`/`changed:` with one line per component `Oh My Posh 31.5.0 -> 31.6.0`); `upstream-watch.test.ps1 -Work <dir>` (prints `upstream-watch tests: N/N pass`, exit 1 on a failure); the workflow's PR titled `upstream: <versions>` on the branch `upstream/<yyyy-mm-dd>` with the body's checklist.
+- Produces: `upstream-watch.ps1 [-Script <file>] [-Fixture <dir>] [-Work <dir>] [-WhatIf]` (prints `nothing newer upstream`, or `would change:`/`changed:` with one line per component `Oh My Posh 31.5.0 -> 31.6.0`; its downloads and extractions go under `-Work`, which defaults to the process's temp folder for the workflow's runner and is always given on this PC); `upstream-watch.test.ps1 -Work <dir>` (prints `upstream-watch tests: N/N pass`, exit 1 on a failure; passes `<dir>\watch` to the script); the workflow's PR titled `upstream: <versions>` on the branch `upstream/<yyyy-mm-dd>` with the body's checklist.
 
 - [ ] **Step 1: The test, first**
 
 `scripts/upstream-watch.test.ps1`:
 
 ```powershell
-# Tests scripts/upstream-watch.ps1 without the network and without touching the repo: a fixture
-# folder stands in for GitHub (three release documents and the assets fetch-resources.ps1 pins,
-# with made-up bytes), and the script rewrites a copy of fetch-resources.ps1 under -Work. Runs on
-# the dev PC (-Work: the session's scratchpad) and in CI (-Work: $RUNNER_TEMP). Prints one line per
+# Tests scripts/upstream-watch.ps1 without the network and without touching the repo's own files:
+# a fixture folder stands in for GitHub (three release documents and the assets fetch-resources.ps1
+# pins, with made-up bytes), and the script rewrites a copy of fetch-resources.ps1 under -Work,
+# where its own downloads go too (-Work\watch). Runs on the dev PC (-Work: a folder under the
+# repo's gitignored target\, never %TEMP%) and in CI (-Work: $RUNNER_TEMP). Prints one line per
 # check and a total; exits 1 when one failed.
 param([Parameter(Mandatory = $true)] [string] $Work)
 $ErrorActionPreference = 'Stop'
@@ -3370,14 +3900,14 @@ Release 'ryanoasis/nerd-fonts' 'v3.6.0' @('CascadiaCode.zip')
 
 # 1. -WhatIf names the change and writes nothing.
 Copy-Item -LiteralPath $original -Destination $copy -Force
-$out = & $watch -Script $copy -Fixture $fixture -WhatIf | Out-String
+$out = & $watch -Script $copy -Fixture $fixture -Work (Join-Path $Work 'watch') -WhatIf | Out-String
 Expect '-WhatIf names the three versions' ($out -match 'Oh My Posh 31\.5\.0 -> 31\.6\.0' -and $out -match 'Clink 1\.9\.34 -> 1\.9\.35' -and $out -match 'Nerd Fonts 3\.5\.1 -> 3\.6\.0')
 Expect '-WhatIf shows the new download lines' ($out -match '\+ .*releases/download/v31\.6\.0/posh-windows-amd64\.exe')
 Expect '-WhatIf writes nothing' ([IO.File]::ReadAllText($copy) -eq $originalText)
 
 # 2. The rewrite: every pin of the three components, the manifest's versions, the Clink source
 # line, the synopsis; the rewritten script still parses; the repo's own script is untouched.
-$out = & $watch -Script $copy -Fixture $fixture | Out-String
+$out = & $watch -Script $copy -Fixture $fixture -Work (Join-Path $Work 'watch') | Out-String
 $new = [IO.File]::ReadAllText($copy)
 $exe = Hash (Join-Path $fixture 'posh-windows-amd64.exe')
 $cop = Hash (Join-Path $fixture 'COPYING')
@@ -3407,7 +3937,7 @@ Copy-Item -LiteralPath $original -Destination $copy -Force
 Release 'JanDeDobbeleer/oh-my-posh' 'v31.5.0' @('posh-windows-amd64.exe')
 Release 'chrisant996/clink' 'v1.9.34' @('clink.1.9.34.4e8ae4.zip')
 Release 'ryanoasis/nerd-fonts' 'v3.5.1' @('CascadiaCode.zip')
-$out = & $watch -Script $copy -Fixture $fixture | Out-String
+$out = & $watch -Script $copy -Fixture $fixture -Work (Join-Path $Work 'watch') | Out-String
 Expect 'nothing newer is said' ($out -match 'nothing newer upstream')
 Expect 'nothing newer changes nothing' ([IO.File]::ReadAllText($copy) -eq $originalText)
 
@@ -3417,8 +3947,8 @@ if ($fail) { exit 1 }
 
 - [ ] **Step 2: Run it to see it fail**
 
-Run (PowerShell 5.1, from the repo root): `.\scripts\upstream-watch.test.ps1 -Work '<scratchpad>\upstream-test'`
-Expected: it stops at the first `& $watch` with "The term '…upstream-watch.ps1' is not recognized" (the script does not exist). Nothing under the repo changed (`git status --porcelain` is empty).
+Run (PowerShell 5.1, from the repo root): `.\scripts\upstream-watch.test.ps1 -Work target\upstream-test` (`target\` is gitignored and inside the repo: the one scratch folder `pc-safety.md` allows besides the session's scratchpad)
+Expected: it stops at the first `& $watch` with "The term '…upstream-watch.ps1' is not recognized" (the script does not exist). Nothing tracked changed (`git status --porcelain` is empty).
 
 - [ ] **Step 3: The script**
 
@@ -3439,18 +3969,25 @@ Expected: it stops at the first `& $watch` with "The term '…upstream-watch.ps1
 .PARAMETER Fixture
   A folder that stands in for GitHub: <owner>-<repo>.json (the release document, as the API
   shapes it) and the assets under their names. No network is used then (upstream-watch.test.ps1).
+.PARAMETER Work
+  Where the downloads and the extracted files go, in a folder of their own made under it and
+  removed at the end. Default: the process's temp folder, for the workflow's runner; on the dev PC
+  it is always given (a folder under the repo's target\), never %TEMP%.
 .PARAMETER WhatIf
   Print the lines that would change; write nothing.
 #>
 param(
   [string] $Script = (Join-Path $PSScriptRoot 'fetch-resources.ps1'),
   [string] $Fixture = '',
+  [string] $Work = [IO.Path]::GetTempPath(),
   [switch] $WhatIf
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $Script = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Script)
+$Work = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Work)
+New-Item -ItemType Directory -Force -Path $Work | Out-Null
 $text = [IO.File]::ReadAllText($Script)
 
 function Hash([string] $Path) { (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
@@ -3497,7 +4034,7 @@ function ReplaceOnce([string] $Text, [string] $Pattern, [string] $Replacement, [
   [regex]::Replace($Text, $Pattern, $Replacement)
 }
 
-$work = NewDir ([IO.Path]::GetTempPath())
+$work = NewDir $Work
 $changes = @()
 try {
   $new = $text
@@ -3596,8 +4133,8 @@ Each `ReplaceOnce` names its pattern and the text it edits; a `fetch-resources.p
 
 - [ ] **Step 4: Run the test**
 
-Run: `.\scripts\upstream-watch.test.ps1 -Work '<scratchpad>\upstream-test'`
-Expected: `upstream-watch tests: 17/17 pass`, exit code 0; `git status --porcelain` is empty (the repo's `fetch-resources.ps1` is untouched). Parse-check both scripts with `ParseFile` (0 errors each).
+Run: `.\scripts\upstream-watch.test.ps1 -Work target\upstream-test`
+Expected: `upstream-watch tests: 18/18 pass`, exit code 0; `git status --porcelain` is empty (the repo's `fetch-resources.ps1` is untouched; `target\` is ignored). Parse-check both scripts with `ParseFile` (0 errors each).
 
 - [ ] **Step 5: The workflow, and CI's step**
 
@@ -3639,7 +4176,7 @@ jobs:
         run: ./scripts/upstream-watch.test.ps1 -Work "$env:RUNNER_TEMP/upstream-test"
       - name: Rewrite the pins when upstream is newer
         shell: pwsh
-        run: ./scripts/upstream-watch.ps1
+        run: ./scripts/upstream-watch.ps1 -Work "$env:RUNNER_TEMP/upstream-watch"
       - name: One pull request, unless one for these versions is open
         env:
           GH_TOKEN: ${{ secrets.UPSTREAM_WATCH_TOKEN || github.token }}
@@ -3703,8 +4240,10 @@ each newer one downloads what that file pins, computes every SHA-256
 the download lines, the pinned hashes, the manifest's versions, the
 Clink source line and the synopsis in place, each replacement exactly
 once or the script stops; -WhatIf prints, -Fixture stands in for
-GitHub. upstream-watch.test.ps1 runs it over a fixture under -Work,
-on this PC and in CI (windows, PowerShell 5.1). upstream-watch.yml
+GitHub, -Work is where its downloads go. upstream-watch.test.ps1 runs
+it over a fixture under -Work (the repo's target\ on this PC, the
+runner's temp in CI; never %TEMP%), on this PC and in CI (windows,
+PowerShell 5.1). upstream-watch.yml
 runs daily and on dispatch, opens one pull request per set of
 versions on upstream/<date> with the human steps listed, never
 merges, never tags; UPSTREAM_WATCH_TOKEN when the founder sets it,
@@ -3738,31 +4277,31 @@ In the `logs\` line (the one that lists the phase 3b-2 groups), before its final
 §5.7: after the `app_ready, app_status, …` bullet, a new bullet:
 
 ```
-- `update_status`, `update_install` (phase 4b, §6.2): `update_status` อ่านอย่างเดียว คืน `{ mode, state, checkedAtMs }` โดย `state` เป็น `off` · `idle` · `checking` · `available{version}` · `downloading{version}` · `ready{version}` · `installing{version}` · `postponed{version, reason}` · `update_install` คือ "อัปเดตตอนนี้" (การ์ดของโหมดแจ้งก่อนที่หน้าแรก และหน้าโหมดกู้คืน recovery spec §5.2): ดาวน์โหลดถ้ายังไม่ได้ ถือล็อก §5.5 (`E_BUSY` ถ้ามีคำสั่งที่เปลี่ยนเครื่องอยู่ ไม่มีอะไรรอคืน `E_INTERNAL`) เขียน `update.json` เรียก `end_run` แล้วให้ `Update::install` ของ plugin รันตัวติดตั้งแบบเงียบพร้อมเปิดแอปกลับ (`/S /R /UPDATE /ARGS`) ซึ่งจบโปรเซสนี้เอง คืนคำตอบเฉพาะเมื่อทำไม่ได้ (เหมือน `app_restart`) · `app_status` เพิ่ม `updated: { from, to, notesUrl, reapplyFailed } | null` เมื่อการเปิดครั้งนี้ตามหลังอัปเดตที่สำเร็จ · `app_ready` เริ่มการเช็กเวอร์ชันใหม่ใน thread ของตัวเอง (ครั้งเดียวต่อการเปิด หน้าต่างไม่รอเน็ต) และลบ `update.json` · `open_external` รับ `{ releaseNotes: { version } }` เปิด `https://github.com/luraselenehalo/cmd-studio/releases/tag/v<version>` เฉพาะเมื่อ `version` เป็น SemVer
+- `update_status`, `update_install` (phase 4b, §6.2): `update_status` อ่านอย่างเดียว คืน `{ mode, state, checkedAtMs }` โดย `state` เป็น `off` · `idle` · `checking` · `available{version}` · `downloading{version}` · `ready{version}` · `installing{version}` · `postponed{version, reason}` และ `checkedAtMs` เป็น null จนกว่าการเช็กของการเปิดครั้งนี้จะทำ (หน้าจอถามซ้ำทุก 2 วินาที ไม่เกินหนึ่งนาที เพราะการเช็กเริ่มหลัง `app_ready` ซึ่งมาหลังการอ่านครั้งแรกของหน้า) · `update_install` คือ "อัปเดตตอนนี้" (การ์ดของโหมดแจ้งก่อนที่หน้าแรก และหน้าโหมดกู้คืน recovery spec §5.2): ดาวน์โหลดและตรวจลายเซ็นถ้ายังไม่ได้ (ก่อนถือล็อก) ถือล็อก §5.5 (`E_BUSY` ถ้ามีคำสั่งที่เปลี่ยนเครื่องอยู่ ไม่มีอะไรรอคืน `E_INTERNAL`) ตรวจ SHA-256 ของไฟล์ เขียน `update.json` เรียก `end_run` แล้วแอปรันตัวติดตั้งเองด้วย `/S /R /UPDATE /ARGS` (ไม่มี argument ต่อท้าย ตัวติดตั้งจึงเปิดแอปกลับแบบปกติ ไม่ใช่ `--recovery` หรือ `--after-pid`) แล้วจบโปรเซสนี้ คืนคำตอบเฉพาะเมื่อทำไม่ได้ (เหมือน `app_restart`; รันตัวติดตั้งไม่ได้จะเขียน `run.json` กลับ) · `app_status` เพิ่ม `updated: { from, to, notesUrl, reapplyFailed } | null` เมื่อการเปิดครั้งนี้ตามหลังอัปเดตที่สำเร็จ · `app_ready` เริ่มการเช็กเวอร์ชันใหม่ใน thread ของตัวเอง (ครั้งเดียวต่อการเปิด หน้าต่างไม่รอเน็ต เฉพาะโปรเซสที่เขียน `run.json` ของตัวเอง) และลบ `update.json` · `app_restart` ทำเครื่องหมายไว้ การปิดที่มันสั่งจึงไม่ติดตั้ง (`update postponed=restart`) · `open_external` รับ `{ releaseNotes: { version } }` เปิด `https://github.com/luraselenehalo/cmd-studio/releases/tag/v<version>` เฉพาะเมื่อ `version` เป็น SemVer
 ```
 
 In the paragraph after the list, "ไฟล์ capability อนุญาตเฉพาะ 37 คำสั่งนี้" → "39 คำสั่งนี้", and append "· plugin updater ลงทะเบียนคำสั่ง JS ของมันเอง แต่ capability ไม่ให้สิทธิ์ `updater:` ใดๆ หน้าต่างจึงเรียกไม่ได้ (phase 4b)". In the `--cleanup --data-dir` sentence: the folder list gains `` `updates\` `` after `` `health\` ``; the file list gains `` `update.json` `` after `` `run.json` ``; the temp names gain `` `.update.json.<hex 32 ตัว>.cmdstudio-tmp` ``; the "at least one own file" list gains `` `update.json` ``; the phase note gains "· `update.json`, `updates\` และไฟล์ชั่วคราวของ `update.json` เพิ่มใน phase 4b".
 
-§5.10: "เปิด capability ของ Tauri เฉพาะ 30 คำสั่ง IPC ใน §5.7" → "เฉพาะ 39 คำสั่ง IPC ใน §5.7"; the last bullet gains: "· ข้อยกเว้นเดียว (phase 4b, §6.2): ตัวติดตั้งรุ่นใหม่ที่ plugin updater ตรวจลายเซ็น minisign กับ `pubkey` ใน `tauri.conf.json` แล้ว รันจาก `<data>\updates\` (แอปเทียบ SHA-256 ของไฟล์กับของไบต์ที่ตรวจแล้วก่อนรัน) ด้วย `/S /UPDATE` หรือจากไฟล์ชั่วคราวของ plugin ด้วย `/S /R /UPDATE` เท่านั้น ไม่มีสิ่งใดจาก `latest.json` ไปถึง command line นอกจากเวอร์ชัน (ตรวจเป็น SemVer) · `pubkey` ว่างถูกปฏิเสธก่อนส่งคำขอใดๆ".
+§5.10: "เปิด capability ของ Tauri เฉพาะ 30 คำสั่ง IPC ใน §5.7" → "เฉพาะ 39 คำสั่ง IPC ใน §5.7"; the last bullet gains: "· ข้อยกเว้นเดียว (phase 4b, §6.2): ตัวติดตั้งรุ่นใหม่ที่ plugin updater ตรวจลายเซ็น minisign กับ `pubkey` ใน `tauri.conf.json` แล้ว รันจาก `<data>\updates\` เท่านั้น (แอปเทียบ SHA-256 ของไฟล์กับของไบต์ที่ตรวจแล้วก่อนรัน) ด้วย `/S /UPDATE` ตอนปิด หรือ `/S /R /UPDATE /ARGS` ตอนกด "อัปเดตตอนนี้" แอปรันเองทั้งสองทาง ไม่ใช้ `install` ของ plugin (ซึ่งจะเปิดแอปกลับด้วย argument ของโปรเซสเดิม) ไม่มีสิ่งใดจาก `latest.json` ไปถึง command line นอกจากเวอร์ชัน (ตรวจเป็น SemVer) · `pubkey` ว่างถูกปฏิเสธก่อนส่งคำขอใดๆ".
 
 - [ ] **Step 2: §6.2 and §6.4**
 
 §6.2: replace the bullet that begins `  - ติดตั้งตอนไหน (ตอนเปิดก่อนขึ้นหน้าจอ, ตอนปิดโปรแกรม หรือขอให้เปิดใหม่) ให้ phase 4 เลือก` (the whole bullet, through `ภาคผนวก B 2026-11-04)`) with:
 
 ```
-  - ติดตั้งตอนไหน: ✅ phase 4b ตัดสินจาก spike บน VM (`docs/spikes/phase4-update/results.md`, <date>): **<the decision line of results.md: ตอนปิด เงียบ ไม่เปิดกลับ | ตอนเปิด เมื่อว่าง | ขอให้เปิดใหม่>** · โหมดอัตโนมัติ: ดาวน์โหลดเบื้องหลังหลัง `app_ready` แล้วตอนปิดโปรแกรม ถ้าล็อก §5.5 ว่าง (`try_lock` ไม่ว่างคือเลื่อนไปครั้งหน้า `update postponed=busy`) แอปรันตัวติดตั้งที่ตรวจแล้วเองด้วย `/S /UPDATE` โดยไม่เปิดแอปกลับ และคืนล็อกเมื่อโปรเซสจบ · "อัปเดตตอนนี้" (โหมดแจ้งก่อน และหน้าโหมดกู้คืน) ใช้ `Update::install` ของ plugin ซึ่งรัน `/S /R /UPDATE /ARGS` แล้วจบโปรเซส แอปเปิดกลับเอง · ทั้งสองทางไม่รันตัวถอนรุ่นเก่าเลย (template ของ Tauri: `/S` ข้ามหน้า reinstall และ `$UpdateMode = 1` ข้ามตัวถอน อ่านจาก template เมื่อ 2026-11-05) hook `$UpdateMode` ของ 4a จึงเป็นกันไว้เฉยๆ · ติดตั้งทับด้วยมือ: หน้า "already installed" ของตัวติดตั้งรุ่นใหม่ให้เลือก "<U6's second radio>" (ติดตั้งทับ เก็บธีมและการตั้งค่า) หรือ "<U6's first radio>" (ค่าเริ่มต้น: รันตัวถอนรุ่นเก่าโดยไม่มี `/UPDATE` ล้างเต็ม วิซาร์ดใหม่) release notes บอกไว้ · ทุกแบบเขียน `<data>\update.json` (`version`, `from`, `to`, `notesUrl`) ก่อนรันตัวติดตั้ง แล้วการเปิดครั้งถัดไปอ่านไฟล์นั้นเพื่อแสดง "อัปเดตเป็น vX แล้ว" พร้อมลิงก์ ใช้ธีมซ้ำถ้าเวอร์ชันของส่วนเสริมที่ pin เปลี่ยน แล้ว `app_ready` ลบไฟล์ · โหมด "ปิด" ไม่เช็กเลย (`update mode=off`) และทุกโหมดเมื่อเน็ตไม่มี manifest เสีย หรือลายเซ็นไม่ตรง เขียน log หนึ่งบรรทัดแล้วเงียบ (§5.3) · ตรวจสอบจาก `settings.json` ทุกครั้งที่เปิด ไฟล์เสียคือค่าเริ่มต้น (อัตโนมัติ) · เวลาที่วัดบน VM: ปิดถึงรุ่นใหม่ <n> วินาที คลิก "อัปเดตตอนนี้" ถึงหน้าต่างกลับ <n> วินาที (architect เลือก founder เปลี่ยนได้ ภาคผนวก B 2026-11-05)
+  - ติดตั้งตอนไหน: ✅ phase 4b ตัดสินจาก spike บน VM (`docs/spikes/phase4-update/results.md`, <date>): **<the decision line of results.md: ตอนปิด เงียบ ไม่เปิดกลับ | ตอนเปิด เมื่อว่าง | ขอให้เปิดใหม่>** · โหมดอัตโนมัติ: ดาวน์โหลดเบื้องหลังหลัง `app_ready` แล้วตอนปิดโปรแกรม หลังจบ `run.json` ถ้าล็อก §5.5 ว่าง (`try_lock` ไม่ว่างคือเลื่อนไปครั้งหน้า `update postponed=busy`) แอปรันตัวติดตั้งที่ตรวจแล้วเองด้วย `/S /UPDATE` โดยไม่เปิดแอปกลับ และคืนล็อกเมื่อขั้นนั้นจบ · "อัปเดตตอนนี้" (โหมดแจ้งก่อน และหน้าโหมดกู้คืน) แอปรันตัวติดตั้งเองด้วย `/S /R /UPDATE /ARGS` (ไม่มี argument ต่อท้าย) แล้วจบโปรเซส ตัวติดตั้งเปิดแอปกลับแบบปกติ ไม่ใช้ `install` ของ plugin ซึ่งจะส่ง argument ของโปรเซสเดิม (`--recovery`, `--after-pid`) ให้แอปที่เปิดกลับ · โปรเซสที่สอง (`run record=still-running`) และการปิดที่ `app_restart` สั่ง ไม่ติดตั้งเลย (`update postponed=restart`) · ทั้งสองทางไม่รันตัวถอนรุ่นเก่าเลย (template ของ Tauri: `/S` ข้ามหน้า reinstall และ `$UpdateMode = 1` ข้ามตัวถอน อ่านจาก template เมื่อ 2026-11-05) hook `$UpdateMode` ของ 4a จึงเป็นกันไว้เฉยๆ · ติดตั้งทับด้วยมือ: หน้า "already installed" ของตัวติดตั้งรุ่นใหม่ให้เลือก "<U6's second radio>" (ติดตั้งทับ เก็บธีมและการตั้งค่า) หรือ "<U6's first radio>" (ค่าเริ่มต้น: รันตัวถอนรุ่นเก่าโดยไม่มี `/UPDATE` ล้างเต็ม วิซาร์ดใหม่) release notes บอกไว้ · ทุกแบบเขียน `<data>\update.json` (`version`, `from`, `to`, `notesUrl`) ก่อนรันตัวติดตั้ง แล้วการเปิดครั้งถัดไปอ่านไฟล์นั้นเพื่อแสดง "อัปเดตเป็น vX แล้ว" พร้อมลิงก์ ใช้ธีมซ้ำถ้าเวอร์ชันของส่วนเสริมที่ pin เปลี่ยน แล้ว `app_ready` ลบไฟล์ · โหมด "ปิด" ไม่เช็กเลย (`update mode=off`) และทุกโหมดเมื่อเน็ตไม่มี manifest เสีย หรือลายเซ็นไม่ตรง เขียน log หนึ่งบรรทัดแล้วเงียบ (§5.3) · ตรวจสอบจาก `settings.json` ทุกครั้งที่เปิด ไฟล์เสียคือค่าเริ่มต้น (อัตโนมัติ) · เวลาที่วัดบน VM: ปิดถึงรุ่นใหม่ <n> วินาที คลิก "อัปเดตตอนนี้" ถึงหน้าต่างกลับ <n> วินาที (architect เลือก founder เปลี่ยนได้ ภาคผนวก B 2026-11-05)
 ```
 
 In the same §6.2, after the "หลังอัปเดต" list's item 3 (`ลบโฟลเดอร์ runtime เก่า…`), add:
 
 ```
-  · phase 4b: ข้อ 2 ทำที่การเปิดครั้งถัดไปแบบปกติ (ไม่ทำในโหมดกู้คืน) ใน thread ใต้ `busy = "update_reapply"` (หน้าจอรอด้วยข้อความของมันเอง recovery spec §6.3) เมื่อ `state.json` อ่านได้และบอกว่าธีมที่ใช้อยู่ใช้ OMP หรือ Clink คนละเวอร์ชันกับที่ build นี้ pin (`plan::runtime_changed` ติดตั้งทับด้วยมือก็เข้าข้อนี้) ผ่าน `plan_apply`/`apply` ตามปกติ (ล็อก จุดย้อนกลับ ขั้นตรวจผล) · ล้มเหลว (ย้อนกลับ Clink ตัวอื่นโผล่ `E_AUTORUN_FOREIGN_CLINK` หรือ `E_BUSY`) คงธีมบน runtime เดิมที่ `state.json` ยังระบุ ประกาศบอกรหัส (`updated.reapplyFailed`) และเปิดครั้งหน้าลองใหม่ · ข้อ 3 ทำทุกครั้งที่เปิดและหลังข้อ 2 (`cleanup::prune_old_runtimes`): `runtime\omp-*`, `runtime\clink-*` และ `clink-*` ใน ProgramData ของผู้ใช้ ที่ไม่ใช่เวอร์ชันที่ pin และไม่ใช่โฟลเดอร์ที่ `state.json` ระบุ โฟลเดอร์ที่ลบไม่ได้ (cmd ยังถือ DLL) รอครั้งหน้า `state.json` อ่านไม่ได้ไม่ลบอะไร (`update pruned=<n>`)
+  · phase 4b: ข้อ 2 ทำที่การเปิดครั้งถัดไปแบบปกติ (ไม่ทำในโหมดกู้คืน) ใน thread ใต้ `busy = "update_reapply"` (หน้าจอรอด้วยข้อความของมันเอง recovery spec §6.3) เมื่อ `state.json` อ่านได้และบอกว่าธีมที่ใช้อยู่ใช้ OMP หรือ Clink คนละเวอร์ชันกับที่ build นี้ pin (`plan::runtime_changed` ติดตั้งทับด้วยมือก็เข้าข้อนี้) ผ่าน `plan_apply`/`apply` ตามปกติ (ล็อก จุดย้อนกลับ ขั้นตรวจผล) · ล้มเหลว (ย้อนกลับ Clink ตัวอื่นโผล่ `E_AUTORUN_FOREIGN_CLINK` หรือ `E_BUSY`) คงธีมบน runtime เดิมที่ `state.json` ยังระบุ ประกาศบอกรหัส (`updated.reapplyFailed`) และเปิดครั้งหน้าลองใหม่ · ข้อ 3 มีที่เดียว (`Backend::prune_runtimes` ใต้ `try_lock` ล็อกไม่ว่างคือข้ามไปครั้งหน้า `update pruned=busy`): หลังข้อ 2 สำเร็จ และตอนเปิดแบบปกตินอกโหมดกู้คืนที่ไม่ต้องทำข้อ 2 (`cleanup::prune_old_runtimes`): `runtime\omp-*`, `runtime\clink-*` และ `clink-*` ใน ProgramData ของผู้ใช้ ที่ไม่ใช่เวอร์ชันที่ pin และไม่ใช่โฟลเดอร์ที่ `state.json` ระบุ (ระบุด้วย path ยาวเสมอ แม้ AutoRun ถือ path แบบ 8.3 ตาม §5.4) โฟลเดอร์ที่ลบไม่ได้ (cmd ยังถือ DLL) รอครั้งหน้า `state.json` อ่านไม่ได้ไม่ลบอะไร (`update pruned=<n>`)
 ```
 
 §6.4: after the phase 4a bullet, a new bullet:
 
 ```
-- **phase 4b (architect 2026-11-05 founder เปลี่ยนได้):** `release.yml` เซ็นตัวติดตั้งด้วยคีย์ minisign ของ founder (`TAURI_SIGNING_PRIVATE_KEY` และ `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` ใน secrets ส่งให้ `ci.yml` ด้วย `secrets: inherit`; `createUpdaterArtifacts` ใน `tauri.bundle.conf.json` ทำให้ตัวติดตั้งทุกตัวที่ CI สร้างถูกเซ็นและมี `.sig` ใน artifact) → อัปโหลด `CMD-Studio_<เวอร์ชัน>_x64-setup.exe`, `.sig` ของมัน, `latest.json` (`{version, notes, pub_date, platforms.windows-x86_64.{signature, url}}` โดย `url` ชี้ asset นั้นใต้ tag ของ release) และ `SHA256SUMS.txt` ลง draft ที่**ไม่ติดธง pre-release** เพราะ endpoint ของแอปคือ `releases/latest/download/latest.json` ซึ่ง GitHub ให้จาก release ล่าสุดที่เผยแพร่แล้วและไม่ติดธง ชื่อและข้อความยังบอกว่าเป็น pre-release สำหรับผู้ทดสอบ (ทางเลือกของ founder: release คงที่ tag `updater` ที่ workflow แทนที่ `latest.json` ด้วย `gh release upload --clobber` ทุกครั้ง และ endpoint `releases/download/updater/latest.json`) · plugin `tauri-plugin-updater` =2.13.3 ใช้จาก Rust เท่านั้น ไม่มีแพ็กเกจ npm · workflow เฝ้ารุ่นใหม่ (`upstream-watch.yml` ทุกวัน 03:17 UTC และ `workflow_dispatch`): `scripts/upstream-watch.ps1` ถาม `releases/latest` ของ OMP, Clink และ Nerd Fonts เจอรุ่นใหม่กว่าจะดาวน์โหลด คำนวณ SHA-256 ทุกไฟล์ แล้วเขียน pin ใน `scripts/fetch-resources.ps1` เท่านั้น (แต่ละจุดแทนที่ต้องตรงหนึ่งครั้ง ไม่เช่นนั้นหยุด) เปิด PR หนึ่งอันต่อชุดเวอร์ชันบน branch `upstream/<วันที่>` (ไม่ซ้ำถ้ามี PR ชื่อเดียวกันเปิดอยู่) ซึ่ง CI ต้องล้มจนกว่าคนจะแก้เวอร์ชันใน core, `credits.ts`, `docs/credits.md`, release notes, README และ parity test ตามรายการใน PR · ใช้ `UPSTREAM_WATCH_TOKEN` ของ founder เพื่อให้ CI ของ PR รัน ไม่มีก็เปิด PR ได้แต่ founder ต้องปิด-เปิด PR · มี `upstream-watch.test.ps1` โหมด fixture ไม่ใช้เน็ต รันใน CI · เลขเวอร์ชันใน workflow อ่านจากบรรทัดใต้ `[workspace.package]` เท่านั้น (4a M6)
+- **phase 4b (architect 2026-11-05 founder เปลี่ยนได้):** `release.yml` เซ็นตัวติดตั้งด้วยคีย์ minisign ของ founder โดยเรียก `ci.yml` ด้วย input `sign: true` และ `secrets: inherit` (`TAURI_SIGNING_PRIVATE_KEY` และ `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` ใน secrets): เฉพาะการรันนั้น `ci.yml` รวม `createUpdaterArtifacts: true` เข้า config ตอน build และเก็บ `.sig` ไว้ใน artifact ส่วน push, pull request และ fork build แบบไม่เซ็นโดยไม่ต้องใช้ secret (`tauri.bundle.conf.json` ไม่มี `createUpdaterArtifacts` และ `config_guard` ตรวจว่าไม่มี) → อัปโหลด `CMD-Studio_<เวอร์ชัน>_x64-setup.exe`, `.sig` ของมัน, `latest.json` (`{version, notes, pub_date, platforms.windows-x86_64.{signature, url}}` โดย `url` ชี้ asset นั้นใต้ tag ของ release) และ `SHA256SUMS.txt` ลง draft ที่**ไม่ติดธง pre-release** เพราะ endpoint ของแอปคือ `releases/latest/download/latest.json` ซึ่ง GitHub ให้จาก release ล่าสุดที่เผยแพร่แล้วและไม่ติดธง ชื่อและข้อความยังบอกว่าเป็น pre-release สำหรับผู้ทดสอบ (ทางเลือกของ founder: release คงที่ tag `updater` ที่ workflow แทนที่ `latest.json` ด้วย `gh release upload --clobber` ทุกครั้ง และ endpoint `releases/download/updater/latest.json`) · plugin `tauri-plugin-updater` =2.13.3 ใช้จาก Rust เท่านั้น ไม่มีแพ็กเกจ npm · workflow เฝ้ารุ่นใหม่ (`upstream-watch.yml` ทุกวัน 03:17 UTC และ `workflow_dispatch`): `scripts/upstream-watch.ps1` ถาม `releases/latest` ของ OMP, Clink และ Nerd Fonts เจอรุ่นใหม่กว่าจะดาวน์โหลด คำนวณ SHA-256 ทุกไฟล์ แล้วเขียน pin ใน `scripts/fetch-resources.ps1` เท่านั้น (แต่ละจุดแทนที่ต้องตรงหนึ่งครั้ง ไม่เช่นนั้นหยุด) เปิด PR หนึ่งอันต่อชุดเวอร์ชันบน branch `upstream/<วันที่>` (ไม่ซ้ำถ้ามี PR ชื่อเดียวกันเปิดอยู่) ซึ่ง CI ต้องล้มจนกว่าคนจะแก้เวอร์ชันใน core, `credits.ts`, `docs/credits.md`, release notes, README และ parity test ตามรายการใน PR · ใช้ `UPSTREAM_WATCH_TOKEN` ของ founder เพื่อให้ CI ของ PR รัน ไม่มีก็เปิด PR ได้แต่ founder ต้องปิด-เปิด PR · มี `upstream-watch.test.ps1` โหมด fixture ไม่ใช้เน็ต รันใน CI · เลขเวอร์ชันใน workflow อ่านจากบรรทัดใต้ `[workspace.package]` เท่านั้น (4a M6)
 ```
 
 - [ ] **Step 3: Appendix B, then commit**
@@ -3770,26 +4309,28 @@ In the same §6.2, after the "หลังอัปเดต" list's item 3 (`�
 A new last row:
 
 ```
-| 2026-11-05 | Phase 4b ตัวอัปเดตและ upstream watch (architect เลือก founder เปลี่ยนได้ แผนอยู่ใน `docs/superpowers/plans/2026-11-04-phase4b-updater-upstream.md` ผลอ่านซอร์สใน "What the sources settled" ของแผน):<br>• ช่วงเวลาติดตั้งตามผล spike (§6.2): อัตโนมัติ = ตอนปิด เงียบ ไม่เปิดกลับ ด้วยการรันตัวติดตั้งเองด้วย `/S /UPDATE`; "อัปเดตตอนนี้" = `Update::install` ของ plugin (`/S /R /UPDATE /ARGS` แอปเปิดกลับเอง) ทั้งสองเป็นโค้ดจริง ไม่มี dead code<br>• endpoint คงที่ `releases/latest/download/latest.json` และ release ไม่ติดธง pre-release ตั้งแต่ release แรกที่มี updater assets (ชื่อยังบอกว่า pre-release สำหรับผู้ทดสอบ)<br>• `pubkey` ว่างถูก `TauriUpdater::check` ปฏิเสธก่อนส่งคำขอ (plugin เองไม่อ่าน pubkey ตอน check)<br>• `update.json` ในโฟลเดอร์ข้อมูล เขียนก่อนรันตัวติดตั้ง `app_ready` ลบ; `updates\` ถูกลบทุกครั้งที่เปิดก่อนเช็ก และไฟล์ที่ดาวน์โหลดต้องตรง SHA-256 ของไบต์ที่ตรวจแล้วก่อนรัน<br>• การใช้ธีมซ้ำหลังอัปเดตทำใต้ชื่อ busy ของตัวเอง `update_reapply` (ไม่อยู่ใน `CHANGES_MACHINE` ซึ่งเป็นรายการคำสั่ง IPC) และตัดสินจาก `state.json` อย่างเดียว ติดตั้งทับด้วยมือจึงได้ด้วย<br>• ลบ runtime เก่าแบบ best effort ทุกครั้งที่เปิด ยกเว้นที่ `state.json` ระบุ<br>• PR ของ upstream watch แก้ `scripts/fetch-resources.ps1` อย่างเดียว ที่เหลือเป็นของคนตามรายการใน PR; token ของ founder เป็นทางเลือก<br>• ไม่มีแพ็กเกจ npm ของ plugin (หน้าต่างไม่เรียก plugin)<br>• minor ของ 4a ที่พับเข้า: M6 (grep เวอร์ชันใต้ `[workspace.package]`) ส่วน M9 และ M10 คงไว้ (ไฟล์ไม่ถูกแก้ใน 4b)<br>• `tauri-plugin-updater` =2.13.3 (ใหม่สุดของ 2.13.x ใน index 2026-11-05, tauri ^2.12) |
+| 2026-11-05 | Phase 4b ตัวอัปเดตและ upstream watch (architect เลือก founder เปลี่ยนได้ แผนอยู่ใน `docs/superpowers/plans/2026-11-04-phase4b-updater-upstream.md` ผลอ่านซอร์สใน "What the sources settled" ของแผน คำตัดสินก่อนเริ่ม Q1–Q20 ใน `.superpowers/sdd/2026-11-04-phase4b-updater-upstream/preflight-rulings.md`):<br>• ช่วงเวลาติดตั้งตามผล spike (§6.2): อัตโนมัติ = ตอนปิด เงียบ ไม่เปิดกลับ หลังจบ `run.json` ด้วยการรันตัวติดตั้งเองด้วย `/S /UPDATE`; "อัปเดตตอนนี้" = แอปรันตัวติดตั้งเองด้วย `/S /R /UPDATE /ARGS` แล้วจบโปรเซส (เปิดกลับแบบปกติ) plugin ใช้เฉพาะเช็กและดาวน์โหลด ไม่ใช้ `install` ของมันซึ่งส่ง argument ของโปรเซสเดิมไปให้แอปที่เปิดกลับ; ทั้งสองเป็นโค้ดจริง ไม่มี dead code<br>• โปรเซสที่สอง (single-instance กำลังจะปิด) ไม่อ่าน `update.json` ไม่เช็ก ไม่ติดตั้ง; การปิดที่ `app_restart` สั่งไม่ติดตั้ง<br>• หน้าจอถาม `update_status` ซ้ำทุก 2 วินาทีจนการเช็กของการเปิดนั้นทำแล้ว (ไม่มี event ใหม่)<br>• การเซ็น: `createUpdaterArtifacts` ไม่อยู่ในไฟล์ที่ commit แต่มาจาก input `sign` ของ `ci.yml` ที่ `release.yml` ส่ง CI ของ PR ไม่ต้องใช้ secret<br>• spike เสิร์ฟ `latest.json` จากใน guest (`update-server.ps1` บน 127.0.0.1:8765) ไม่มีอะไรฟังบน host ไม่แตะ firewall<br>• endpoint คงที่ `releases/latest/download/latest.json` และ release ไม่ติดธง pre-release ตั้งแต่ release แรกที่มี updater assets (ชื่อยังบอกว่า pre-release สำหรับผู้ทดสอบ)<br>• `pubkey` ว่างถูก `TauriUpdater::check` ปฏิเสธก่อนส่งคำขอ (plugin เองไม่อ่าน pubkey ตอน check)<br>• `update.json` ในโฟลเดอร์ข้อมูล เขียนก่อนรันตัวติดตั้ง `app_ready` ลบ; `updates\` ถูกลบทุกครั้งที่เปิดก่อนเช็ก และไฟล์ที่ดาวน์โหลดต้องตรง SHA-256 ของไบต์ที่ตรวจแล้วก่อนรัน<br>• การใช้ธีมซ้ำหลังอัปเดตทำใต้ชื่อ busy ของตัวเอง `update_reapply` (ไม่อยู่ใน `CHANGES_MACHINE` ซึ่งเป็นรายการคำสั่ง IPC) และตัดสินจาก `state.json` อย่างเดียว ติดตั้งทับด้วยมือจึงได้ด้วย<br>• ลบ runtime เก่าแบบ best effort ที่เดียว (`Backend::prune_runtimes` ใต้ `try_lock`) หลังใช้ธีมซ้ำสำเร็จ หรือตอนเปิดแบบปกตินอกโหมดกู้คืน ยกเว้นที่ `state.json` ระบุ (เทียบด้วย path ยาว)<br>• PR ของ upstream watch แก้ `scripts/fetch-resources.ps1` อย่างเดียว ที่เหลือเป็นของคนตามรายการใน PR; token ของ founder เป็นทางเลือก<br>• ไม่มีแพ็กเกจ npm ของ plugin (หน้าต่างไม่เรียก plugin)<br>• minor ของ 4a ที่พับเข้า: M6 (grep เวอร์ชันใต้ `[workspace.package]`) ส่วน M9 และ M10 คงไว้ (ไฟล์ไม่ถูกแก้ใน 4b)<br>• `tauri-plugin-updater` =2.13.3 (ใหม่สุดของ 2.13.x ใน index 2026-11-05, tauri ^2.12) |
 ```
 
-Run `cargo test -p cmdstudio-core --test error_codes` and `cargo test -p cmdstudio-app --lib error::` (Expected: pass; §5.9 is untouched). `git diff docs/superpowers/specs/2026-10-10-cmd-studio-design.md` touches §5.3, §5.7, §5.10, §6.2, §6.4 and appendix B only. `git add -- docs/superpowers/specs/2026-10-10-cmd-studio-design.md`.
+Run `cargo test -p cmdstudio-core --test error_codes` and `cargo test -p cmdstudio-app --lib error::` (Expected: pass; §5.9 is untouched). `git diff docs/superpowers/specs/2026-10-10-cmd-studio-design.md` touches §5.3, §5.7, §5.10, §6.2, §6.4 and appendix B only. Read `.git/CMDSTUDIO_COMMIT_MSG` if it exists, then write it with the Write tool:
 
 ```
 spec: phase 4b as designed and spiked in §5.3, §5.7, §5.10, §6.2, §6.4 and appendix B
 ```
 
+Then `git add -- docs/superpowers/specs/2026-10-10-cmd-studio-design.md`, check `git diff --cached --name-only` (that one file), then, in a separate call, `git commit -F .git/CMDSTUDIO_COMMIT_MSG`.
+
 - [ ] **Step 4: The VM facts (after Task 9)**
 
-Append to the 2026-11-05 row, before its closing ` |`: `<br>• VM check ของ phase 4b (<date>, from-build <sha> CI run <id> 0.1.0, to-release v0.1.1): <verdict per VM, one clause each: B1–B5 บน VM-B, B6 (cleanup ที่ทำไม่จบ ย้ายมาจาก 4a ขั้น 6) บน <VM-A|VM-C>, B7 บน VM-C>; รายละเอียดใน \`docs/spikes/phase4-update/protocol.md\` § Results` and fill the two `<n> วินาที` of §6.2 from `results.md` if Step 2 left them as the spike measured them. Commit: `spec: the phase 4b VM check in appendix B`.
+Append to the 2026-11-05 row, before its closing ` |`: `<br>• VM check ของ phase 4b (<date>, from-build <sha> CI run <id> 0.1.0, to-release v0.1.1): <verdict per VM, one clause each: B1–B5 บน VM-B, B6 (cleanup ที่ทำไม่จบ ย้ายมาจาก 4a ขั้น 6) บน <VM-A|VM-C>, B7 บน VM-C>; รายละเอียดใน \`docs/spikes/phase4-update/protocol.md\` § Results` and fill the two `<n> วินาที` of §6.2 from `results.md` if Step 2 left them as the spike measured them. Write the message `spec: the phase 4b VM check in appendix B` to `.git/CMDSTUDIO_COMMIT_MSG`, `git add -- docs/superpowers/specs/2026-10-10-cmd-studio-design.md`, then `git commit -F .git/CMDSTUDIO_COMMIT_MSG` in a separate call.
 
 ---
 
 ### Task 9: The update VM check — **waits for a published release with updater assets**
 
-Spec §8's phase 4 criterion, the half 4a left: update passes on every tier. The real pubkey and the real endpoint are in the build from Task 6 on, and a draft's assets are not reachable through `releases/latest`, so the check runs against **the first published release with updater assets**. The "from" build is CI's `cmdstudio-installer` of this branch at version 0.1.0 (any run after Task 6: signed with the founder's key, the real endpoint, the updater code), the "to" release is `v0.1.1`, which the controller's version bump (Step 0) and the founder's tag and publish make. 4a's VM step 6 (a cleanup that cannot finish, its box, the kept data folder) runs here, on a VM with Windows Terminal. The protocol and the guest script are Task 1's; this task adds part B.
+Spec §8's phase 4 criterion, the half 4a left: update passes on every tier. The real pubkey and the real endpoint are in the build from Task 6 on, and a draft's assets are not reachable through `releases/latest`, so the check runs against **the first published release with updater assets**. The "from" build is CI's `cmdstudio-installer` of a run of this branch **after Task 6 and before the controller's version bump** (version 0.1.0, the real pubkey and endpoint, the updater code; unsigned, as every push's build is: the from-build needs no signature, only the to-release does); the "to" release is `v0.1.1`, which the controller's bump (Step 0, the last commit of this PR, made only once that from-run exists and its run id is noted, since artifacts expire) and the founder's tag and publish make. 4a's VM step 6 (a cleanup that cannot finish, its box, the kept data folder) runs here, on a VM with Windows Terminal. The protocol and the guest scripts are Task 1's; this task adds part B.
 
-**PC safety, for this whole task:** every script here is for the VMs and is parse-checked only on this PC. The controller runs the protocol after the final review, with one download of the from-build with the founder's explicit yes.
+**PC safety, for this whole task:** every script here is for the VMs and is parse-checked only on this PC. The controller runs the protocol after the merge and the founder's publish, with one download of the from-build with the founder's explicit yes.
 
 **Files:**
 - Modify: `docs/spikes/phase4-update/protocol.md` (part B)
@@ -3800,7 +4341,7 @@ Spec §8's phase 4 criterion, the half 4a left: update passes on every tier. The
 - Consumes: Task 1's `update-check.ps1`, `helpers.ps1`, Task 6's release assets, 4a's `docs/spikes/phase4-install/helpers.ps1` and `install-check.ps1` (`-HoldFont`, `-Uninstall`, `-CleanupAll`), `config_guard::the_version_has_one_source`.
 - Produces: part B's steps with PASS lines; the Results section; the 4a protocol's step-6 result.
 
-- [ ] **Step 0: The version bump (controller, after the final review)**
+- [ ] **Step 0: The version bump (controller, the last commit of this PR, after the final review and after the from-build's CI run id is noted; never pushed before that run exists)**
 
 In the scratch worktree: `Cargo.toml` `version = "0.1.0"` → `"0.1.1"` under `[workspace.package]`; `cargo update -w` (the three `cmdstudio-*` entries of `Cargo.lock` follow; nothing else changes: check `git diff Cargo.lock` shows only those three `version =` lines); `app/package.json` `"version": "0.1.1"`; `app/package-lock.json`: the root `"version"` and `packages[""].version` (two places; `npm install --package-lock-only --ignore-scripts` in `app/` does it and must change nothing else). `cargo test -p cmdstudio-app --lib config_guard::the_version_has_one_source` passes. Commit (`git add -- Cargo.toml Cargo.lock app/package.json app/package-lock.json`):
 
@@ -3819,17 +4360,18 @@ Append to `docs/spikes/phase4-update/protocol.md`:
 ## Part B: the update check (Task 9)
 
 - **What it checks:** spec §8's phase 4 criterion, the update half: on every tier the app installed at 0.1.0 finds v0.1.1 on GitHub, installs it at close (automatic) or on "Update now" (notify), keeps AutoRun, the theme, the Path entry and the shortcuts, says "Updated to v0.1.1" with a working link, and is silent in Off mode and offline; and 4a's open step 6: an uninstall whose cleanup cannot finish keeps the data folder and says so.
-- **The builds:** the from-build is CI's `cmdstudio-installer` artifact of a run of this branch at version 0.1.0 after Task 6 (`gh run list --workflow ci.yml --branch phase4b --limit 10 --json databaseId,headSha,status,conclusion`; the run's `app` job log shows the `.sig`). **One download, with the founder's explicit yes:** `gh run download <run id> --name cmdstudio-installer --dir <scratchpad>\p4b-from`. The to-release is **v0.1.1 published** by the founder (founder step 3 below): `gh release view v0.1.1 --json assets --jq '.assets[].name'` lists `CMD-Studio_0.1.1_x64-setup.exe`, its `.sig`, `latest.json` and `SHA256SUMS.txt`, and `curl -sL https://github.com/luraselenehalo/cmd-studio/releases/latest/download/latest.json | jq .version` prints `"0.1.1"`. Record the run id and the release in Results.
+- **The builds:** the from-build is CI's `cmdstudio-installer` artifact of a run of this branch at version 0.1.0, after Task 6's commit and before the bump commit (`gh run list --workflow ci.yml --branch phase4b --limit 10 --json databaseId,headSha,status,conclusion`; its `headSha` is a commit with Task 6 in and the bump not; the artifact holds no `.sig`, which the from-build does not need). **One download, with the founder's explicit yes:** `gh run download <run id> --name cmdstudio-installer --dir <scratchpad>\p4b-from`. The to-release is **v0.1.1 published** by the founder (founder step 5 below): `gh release view v0.1.1 --json assets --jq '.assets[].name'` lists `CMD-Studio_0.1.1_x64-setup.exe`, its `.sig`, `latest.json` and `SHA256SUMS.txt`, and `curl -sL https://github.com/luraselenehalo/cmd-studio/releases/latest/download/latest.json | jq .version` prints `"0.1.1"`. Record the run id and the release in Results.
 - **VMs:** B1–B5 and B7 need no Windows Terminal: VM-B runs them when VM-A does not start; B6 needs Windows Terminal (the font): VM-A or VM-C from a powered-off `clean` (the founder's VM step). B7 is VM-C's.
-- **Setup:** as part A, with `$from = '<scratchpad>\p4b-from'`, `Install-Phase4bSetup $vm $u $from` (one installer), `$P4.Setup = $P4B.Setup`; no host server. The VM's NAT must reach GitHub (`Invoke-GuestPs $vm "(Invoke-WebRequest -UseBasicParsing https://github.com/luraselenehalo/cmd-studio/releases/latest/download/latest.json).StatusCode" $u 60` prints 200).
+- **Setup:** as part A, with `$from = '<scratchpad>\p4b-from'`, `Install-Phase4bSetup $vm $u $from` (one installer, no manifests); no server of any kind (part B goes to GitHub). The VM's NAT must reach GitHub (`Invoke-GuestPs $vm "(Invoke-WebRequest -UseBasicParsing https://github.com/luraselenehalo/cmd-studio/releases/latest/download/latest.json).StatusCode" $u 60` prints 200).
+- **The modes:** as part A: the first start after an install would download and its close install before the step that tests it, so B1 installs silently, sets **notify** before the first start, and B2 switches to automatic for the close it tests.
 
 | # | Do | PASS when | Result |
 |---|---|---|---|
-| B1 | **The from-build installed, Terracotta applied.** `Start-Phase4Install $vm $u` (interactive, as 4a's step 2: SmartScreen or the Open File warning, the pages, "Run CMD Studio" ticked), the wizard to Terracotta applied, "Go to the home page"; `Close-Phase4App $vm $u`; `Get-Phase4bSnapshot $vm b1 $u`; `Get-GuestAutoRun $vm 'b1' $u`. | `installed: DisplayVersion=0.1.0`; AutoRun holds CMD Studio's part; `log:` has `update available=0.1.1` and `update downloaded=0.1.1` (automatic mode, the real endpoint); `updates:` lists `cmdstudio-0.1.1-setup.exe`. | |
-| B2 | **The automatic install at close.** `Start-Phase4bApp $vm $u`; wait 60 s (the download from GitHub); `Get-Phase4bLog $vm $u`; `Close-Phase4App $vm $u`; at once `Wait-Phase4bVersion $vm 0.1.1 $u`; after 3 s `Save-Shot $vm 'p4b-b2-after-close'`; `Get-Phase4bSnapshot $vm b2 $u`; `Get-GuestAutoRun $vm 'b2' $u`. | `version 0.1.1 after <n> s`; the shot shows no window; `processes:` empty; `updateJson:` the record with `"to":"0.1.1"`; `log:` ends with `update installing=0.1.1 how=exit`; AutoRun unchanged; `path:` `1 entry(ies)`; `shortcuts:` the two; `install:` has `cmdstudio.com`, no `cmdstudio-cli.exe`. | |
+| B1 | **The from-build installed silently, notify mode, Terracotta applied.** `Start-Phase4Install $vm $u -Silent` (no app starts); `Set-Phase4bMode $vm notify $u`; `Start-Phase4bApp $vm $u`; the wizard to Terracotta applied, "Go to the home page"; wait 60 s (the check against GitHub); `Save-Shot $vm 'p4b-b1-card'`; `Close-Phase4App $vm $u`; `Get-Phase4bSnapshot $vm b1 $u`; `Get-GuestAutoRun $vm 'b1' $u`. | `installed: DisplayVersion=0.1.0`; AutoRun holds CMD Studio's part; `log:` has `update available=0.1.1` (the real endpoint) and no `update downloaded=`; `updates: ABSENT`; the shot shows the card "CMD Studio v0.1.1 is available." with "Update now" and "Later". | |
+| B2 | **The automatic install at close.** `Set-Phase4bMode $vm auto $u`; `Start-Phase4bApp $vm $u`; wait 90 s (the download from GitHub); `Get-Phase4bLog $vm $u` (`update downloaded=0.1.1`); `Close-Phase4App $vm $u`; at once `Wait-Phase4bVersion $vm 0.1.1 $u`; after 3 s `Save-Shot $vm 'p4b-b2-after-close'`; `Get-Phase4bSnapshot $vm b2 $u`; `Get-GuestAutoRun $vm 'b2' $u`. | `version 0.1.1 after <n> s`; the shot shows no window; `processes:` empty; `runJson: ABSENT`; `updateJson:` the record with `"to":"0.1.1"`; `log:` ends with `update installing=0.1.1 how=exit`; AutoRun unchanged; `path:` `1 entry(ies)`; `shortcuts:` the two; `install:` has `cmdstudio.com`, no `cmdstudio-cli.exe`. | |
 | B3 | **The notice, the link, the CLI still on the Path.** `Start-Phase4bApp $vm $u`; wait 15 s; `Save-Shot $vm 'p4b-b3-notice'`; `Invoke-GuestButton $vm 'What changed' $u`; wait 8 s; `Save-Shot $vm 'p4b-b3-release-page'`; `Invoke-GuestButton $vm 'Close' $u`; `Get-Phase4bSnapshot $vm b3 $u`; `Close-Phase4App $vm $u`; `Get-Phase4Cli $vm $u`. | "Updated to v0.1.1." with its two buttons; the browser shows the v0.1.1 release page; `log:` has `update installed to=0.1.1` and no `update reapply=` (the pins did not change between 0.1.0 and 0.1.1); `updateJson: ABSENT`; `updates: ABSENT`; the `-Cli` output has the doctor's lines before `EXIT=` and `PROMPT-RETURNED` (the Path entry survived the update). | |
-| B4 | **Notify and "Update now".** Fresh `Start-CleanVm`, Setup, B1 (closed); `Set-Phase4bMode $vm notify $u`; `Start-Phase4bApp $vm $u`; wait 30 s; `Save-Shot $vm 'p4b-b4-card'`; `Invoke-GuestButton $vm 'Update now' $u`; at once `Wait-Phase4bVersion $vm 0.1.1 $u`; wait 20 s; `Save-Shot $vm 'p4b-b4-back'`; `Get-Phase4bSnapshot $vm b4 $u`; `Get-GuestAutoRun $vm 'b4' $u`. | The card "CMD Studio v0.1.1 is available." with "Update now" and "Later", and `updates: ABSENT` before the click (notify downloads nothing); after the click the window goes, the version arrives in `<n> s`, the app is back by itself with "Updated to v0.1.1."; `log:` has `update installing=0.1.1 how=now` then `update installed to=0.1.1`; AutoRun unchanged. | |
-| B5 | **Off, and offline.** From B4's state, close the app; `Set-Phase4bMode $vm off $u`; `Start-Phase4bApp $vm $u`; wait 20 s; `Get-Phase4bLog $vm $u`; `Close-Phase4App $vm $u`. Then `Set-Phase4bMode $vm auto $u`; `Set-Phase4bNic <vm name> off`; `Start-Phase4bApp $vm $u`; wait 30 s; `Save-Shot $vm 'p4b-b5-offline'`; `Get-Phase4bLog $vm $u`; `Close-Phase4App $vm $u`; `Set-Phase4bNic <vm name> on`. | `update mode=off`, then `update check=offline`; the shot shows the home page with no card and no box. | |
+| B4 | **Notify and "Update now".** Fresh `Start-CleanVm`, Setup, B1 (closed, notify); `Start-Phase4bApp $vm $u`; wait 60 s; `Save-Shot $vm 'p4b-b4-card'`; `Invoke-GuestButton $vm 'Update now' $u`; at once `Wait-Phase4bVersion $vm 0.1.1 $u`; wait 20 s; `Save-Shot $vm 'p4b-b4-back'`; `Get-Phase4bSnapshot $vm b4 $u`; `Get-GuestAutoRun $vm 'b4' $u`. | The card "CMD Studio v0.1.1 is available." with "Update now" and "Later", and `updates: ABSENT` before the click (notify downloads nothing); after the click the window goes, the version arrives in `<n> s`, the app is back by itself on its home page (a normal start) with "Updated to v0.1.1."; `log:` has `update downloaded=0.1.1`, `update installing=0.1.1 how=now` then `update installed to=0.1.1`; AutoRun unchanged. | |
+| B5 | **Off, and offline.** From B4's state, close the app; `Set-Phase4bMode $vm off $u`; `Start-Phase4bApp $vm $u`; wait 20 s; `Get-Phase4bLog $vm $u`; `Close-Phase4App $vm $u`. Then `Set-Phase4bMode $vm auto $u`; `Set-Phase4bNic <vm name> off` (the controller's host command: the guest's cable, since GitHub is the server here); `Start-Phase4bApp $vm $u`; wait 45 s; `Save-Shot $vm 'p4b-b5-offline'`; `Get-Phase4bLog $vm $u`; `Close-Phase4App $vm $u`; `Set-Phase4bNic <vm name> on`. | `update mode=off` (no request can be seen against GitHub: the line is the evidence), then `update check=offline`; the shot shows the home page with no card and no box; the close installs nothing. | |
 | B6 | **A cleanup that cannot finish (VM-A or VM-C; 4a's step 6 and 6b).** From a powered-off `clean`: 4a's Setup, 1, 2 (interactive) and 5 with **Tokyo Night** (the theme that installs the font), then 4a's steps 6 and 6b exactly as `docs/spikes/phase4-install/protocol.md` writes them (`Start-Phase4FontHold`, the ticked uninstall, the box, the kept data folder, the font hold ended, the silent reinstall, `Invoke-Phase4CleanupAll`, the second uninstall, `Compare-Phase4 … ThemesGone`). | 4a's PASS lines for 6 and 6b: the box "CMD Studio could not put everything back (cleanup result: 3)…" naming the font, `install folder: ABSENT`, the data folder kept with `state.json` and `snapshots`; then 6b's `EXIT=0`, no box, `VERDICT: PASS` with `DATA FOLDER GONE`. | |
 | B7 | **Thai (VM-C).** B1 with the wizard in Thai, then B4. | The card and the notice in `th.ts`'s words (`มี CMD Studio v0.1.1 ให้อัปเดต`, `อัปเดตตอนนี้`, `อัปเดตเป็น v0.1.1 แล้ว`); the cmd window's welcome box English under the Thai user folder, as before. | |
 
@@ -3845,7 +4387,7 @@ Written by the controller: the date, the from-build's commit and run id, the rel
 ```
 docs: the update VM check's protocol, part B (phase 4b Task 9)
 
-The from-build (this branch at 0.1.0, signed) and the to-release
+The from-build (this branch at 0.1.0, unsigned) and the to-release
 (v0.1.1 published): the automatic install at close, the notice and its
 link, notify's Update now, Off and offline, 4a's open step 6 (a
 cleanup that cannot finish) on a VM with Windows Terminal, and Thai.
@@ -3853,7 +4395,7 @@ cleanup that cannot finish) on a VM with Windows Terminal, and Thai.
 
 - [ ] **Step 3: The run (controller)**
 
-After the final review and the merge, the version bump (Step 0) and the founder's steps 2 and 3: the download with the founder's yes, the VMs, the Results sections (part B here, step 6 in 4a's protocol), committed by the controller (`docs: the update VM check's results (phase 4b Task 9)`), then Task 8 Step 4. A FAIL goes back to its task; a release that a FAIL makes wrong is the founder's to unpublish or supersede.
+In this order: the from-build's CI run exists and its run id is noted; the bump (Step 0) is committed and pushed as the PR's last commit; the merge; the founder tags and pushes `v0.1.1`, the draft appears, the founder publishes it (founder steps 4 and 5). Then: the download with the founder's yes, the VMs, the Results sections (part B here, step 6 in 4a's protocol), committed by the controller (`docs: the update VM check's results (phase 4b Task 9)`), then Task 8 Step 4. A FAIL goes back to its task; a release that a FAIL makes wrong is the founder's to unpublish or supersede.
 
 - [ ] **Step 4: 4a's protocol**
 
@@ -3865,21 +4407,21 @@ In `docs/spikes/phase4-install/protocol.md`, the Result cells of rows 6 and 6b g
 
 ## Founder steps, in order, with what waits
 
-1. **The updater key pair** (Task 6's steps 1–3) — Task 6 waits; Tasks 1–5, 7, 8 do not.
-2. **The endpoint choice** (Task 6's step 4; the default needs no act) — Task 6's `release.yml` shape.
+1. **The updater key pair** (Task 6's founder steps 1–3) — Task 6 waits; Tasks 1–5, 7, 8 do not.
+2. **The endpoint choice** (Task 6's founder step 4; the default, the ledger's ruling, needs no act) — Task 6's `release.yml` shape.
 3. **Tag and push `v0.1.0`** after 4a merged, if wanted — nothing in 4b waits on it; a published v0.1.0 (no updater code) is upgraded by hand, as its notes will not say but v0.1.1's say.
-4. **Merge 4b, then tag and push `v0.1.1`** (the controller's bump is in the PR) — the draft with updater assets.
+4. **Merge 4b, then tag and push `v0.1.1`** (the controller's bump is the PR's last commit, made after the from-build's CI run is noted) — the draft with updater assets.
 5. **Publish the draft** (the first public release with `latest.json`; not flagged pre-release, titled "pre-release for testers") — Task 9 waits.
-6. **A powered-off `clean` for VM-A or VM-C** — Task 9's B6 (and part A, if VM-A is wanted for the spike) waits; VM-B carries the rest.
-7. **The firewall allow for `python3` on 8765** when Windows asks during Task 1's part A — the spike waits.
-8. **`UPSTREAM_WATCH_TOKEN`** (optional) — Task 7's PRs run CI by themselves.
-9. **SignPath** (apply after the first release; the commented step in `release.yml`) — not in 4b's tasks.
-10. **winget** (after a signed release) — not in 4b's tasks.
+6. **A powered-off `clean` for VM-A or VM-C** — Task 9's B6 (and part A, if VM-A is wanted for the spike) waits; VM-B carries the rest. Nothing of either VM run listens on the founder's PC or asks for a firewall change.
+7. **`UPSTREAM_WATCH_TOKEN`** (optional) — Task 7's PRs run CI by themselves.
+8. **SignPath** (apply after the first release; the commented step in `release.yml`) — not in 4b's tasks.
+9. **winget** (after a signed release) — not in 4b's tasks.
 
 ## Self-review (done while writing; the executor need not repeat it)
 
-- **Spec coverage.** §2.1 (no silent change: the notice once, with a link): Task 3's `update_json_makes_the_notice_once_and_goes_with_app_ready`, Task 4's card. §5.3 (`update.json`, `updates\`, the log lines): Tasks 2, 3, 8. §5.5 (the lock): Task 3's `a_busy_lock_postpones_the_install_and_tries_next_launch`, `update_lock`. §5.7 (the two commands, `--cleanup`'s list): Tasks 2, 4, 8. §5.9: no new row (E_BUSY, E_INTERNAL). §5.10 (the one outside program; the capability): Task 3's `install_quiet` and the hash check, Task 4's capability, Task 8. §6.2: every bullet: the check at every launch in the mode of `settings.json` (Task 3), the three modes (Task 3), no interruption (Task 3), no focus (Task 3's own spawn, Task 4's cards), the notice (Tasks 3, 4), the moment ⬜ → the spike (Task 1) and Task 8, offline silent (Task 3), the key as a secret (Task 6), add-ons with the app only (no download path anywhere; Task 7's PR), the upstream workflow (Task 7), "after an update" 1–3 (Task 5 with Task 2's `runtime_changed`, `prune_old_runtimes`), old theme files converted (phase 2's, unchanged). §6.4 (the manifest, the signing, the upstream watch, the version source): Tasks 6, 7, 8. §8 (update on every tier): Task 9. Recovery spec §5.2 ("Update now" line): Task 4's `UpdateOffer` on the Recovery page; §6.3 (the busy wait after a reload; the journal rule): Task 5's `update_reapply` under `UPDATE_REAPPLY_BUSY`, the "now" path through `end_run` like `app_restart`. 4a's carries: the asset name (Task 6's `latest.json` url and `.sig`), the by-hand upgrade (U6, the notes in Task 6), step 6 (Task 9's B6), M6 (folded), M9/M10 (left, said).
+- **Spec coverage.** §2.1 (no silent change: the notice once, with a link): Task 3's `update_json_makes_the_notice_once_and_goes_with_app_ready`, Task 4's card. §5.3 (`update.json`, `updates\`, the log lines): Tasks 2, 3, 8. §5.5 (the lock): Task 3's `a_busy_lock_postpones_the_install_and_tries_next_launch`, `update_lock`. §5.7 (the two commands, `--cleanup`'s list): Tasks 2, 4, 8. §5.9: no new row (E_BUSY, E_INTERNAL). §5.10 (the one outside program; the capability): Task 3's `start_installer` and the hash check, Task 4's capability, Task 8. §6.2: every bullet: the check at every launch in the mode of `settings.json` (Task 3), the three modes (Task 3), no interruption (Task 3), no focus (Task 3's own spawn, Task 4's cards), the notice (Tasks 3, 4), the moment ⬜ → the spike (Task 1) and Task 8, offline silent (Task 3), the key as a secret (Task 6), add-ons with the app only (no download path anywhere; Task 7's PR), the upstream workflow (Task 7), "after an update" 1–3 (Task 5 with Task 2's `runtime_changed`, `prune_old_runtimes`), old theme files converted (phase 2's, unchanged). §6.4 (the manifest, the signing, the upstream watch, the version source): Tasks 6, 7, 8. §8 (update on every tier): Task 9. Recovery spec §5.2 ("Update now" line): Task 4's `UpdateOffer` on the Recovery page; §6.3 (the busy wait after a reload; the journal rule): Task 5's `update_reapply` under `UPDATE_REAPPLY_BUSY`, the "now" path through `end_run` like `app_restart`. 4a's carries: the asset name (Task 6's `latest.json` url and `.sig`), the by-hand upgrade (U6, the notes in Task 6), step 6 (Task 9's B6), M6 (folded), M9/M10 (left, said).
 - **Placeholders.** `<date>`, `<sha>`, `<id>`, `<n>`, `<l>`, `<the founder's key, one line>`, `<U6's … radio>`, `<the decision line of results.md>` stand for values the implementer or the controller measures or the founder gives, and are named as such; no "TBD", no "similar to Task N", no step without its code.
-- **Types.** `Updater::{check, download, install_now}` (Task 3) are what `Backend::{update_check_and_download, update_install}` call; `FakeUpdater::{offering, none, failing, calls}` are what the tests use; `Backend::updated()` feeds `AppStatus.updated` (Task 4) and `Updated.reapply_failed` (Task 5); `update_at_exit(&dyn Fn(&Path) -> Result<(), String>)` takes `update::install_quiet` (Task 3's `lib.rs`); `Paths::{update_file, updates_dir}` (Task 2) are what Task 3 reads and the CLI knows; `runtime_changed`, `runtime_dirs_named_by`, `prune_old_runtimes` (Task 2) are what Task 5 calls; `ExternalTarget::ReleaseNotes { version }` is `{ releaseNotes: { version } }` on the wire (Task 4's UI and mock); `UpdateState`'s `kind` tags match the mock's `updateState`; `UPDATE_REAPPLY_BUSY = "update_reapply"` is the string `StartWait` compares; `release_url` is used by `TauriUpdater::check`, `update_after_start` and `external_places`.
-- **Review Focus.** 1 in Task 3's `a_download_that_changed_on_disk_is_not_installed`; 2 in Task 3's `a_busy_lock_postpones_the_install_and_tries_next_launch`; 3 in Task 3's `a_failed_install_is_logged_and_the_file_goes`; 4 in Task 3's `the_release_url_takes_semver_only` and `a_damaged_update_record_is_logged_and_removed`; 5 in Task 5's `a_failed_re_apply_keeps_the_old_runtime_and_says_so` and Task 2's `old_runtime_folders_go_and_held_ones_stay`.
-- **The sources against the outline.** F1 withdrawn (the plugin's quiet install relaunches: `/S /R`); U2 reworded (no uninstaller runs in update mode or under `/S`: the template); the "both branches, one dead" of the outline replaced by two production paths; an empty pubkey refused by the app, not by the plugin; `update_reapply` a busy name of its own, not a `CHANGES_MACHINE` entry; no npm package; the plugin pinned at 2.13.3 (the index), not 2.13.2 (G10's table); `latest.json`'s url and `.sig` on the hyphenated asset name (4a's carry); `--prerelease` named at `release.yml:78`; the `from` version of the record from the built config, not `CARGO_PKG_VERSION` (the spike's `--config` version).
+- **Types.** `Updater::{check, download}` (Task 3) are what `Backend::{update_check_and_download, update_install}` call; `FakeUpdater::{offering, none, failing, calls}` are what the tests use; `Backend::updated()` feeds `AppStatus.updated` (Task 4) and `Updated.reapply_failed` (Task 5); `update_at_exit(&dyn Fn(&Path, bool) -> Result<(), String>)` and `update_install(&dyn Updater, &dyn Fn(&Path, bool) -> Result<(), String>)` take `update::start_installer` (Task 3's `lib.rs`, Task 4's `ipc.rs`); `Paths::{update_file, updates_dir}` (Task 2) are what Task 3 reads and the CLI knows; `runtime_changed`, `runtime_dirs_named_by`, `prune_old_runtimes` (Task 2) are what Task 5 calls; `ExternalTarget::ReleaseNotes { version }` is `{ releaseNotes: { version } }` on the wire (Task 4's UI and mock); `UpdateState`'s `kind` tags match the mock's `updateState`; `UPDATE_REAPPLY_BUSY = "update_reapply"` is the string `StartWait` compares; `release_url` is used by `TauriUpdater::check`, `update_after_start` and `external_places`.
+- **Review Focus.** 1 in Task 3's `a_download_that_changed_on_disk_is_not_installed`; 2 in Task 3's `a_busy_lock_postpones_the_install_and_tries_next_launch`; 3 in Task 3's `a_failed_install_is_logged_and_the_file_goes`; 4 in Task 3's `the_release_url_takes_semver_only` and `a_damaged_update_record_is_logged_and_removed`; 5 in Task 5's `a_failed_re_apply_keeps_the_old_runtime_and_says_so` and Task 2's `old_runtime_folders_go_and_held_ones_stay` and `a_short_path_launch_keeps_its_long_folder`.
+- **The sources against the outline.** F1 withdrawn (the plugin's quiet install relaunches: `/S /R`, with this process's arguments); the plugin's `install` not used at all: both paths are the app's own spawn (`/S /UPDATE`; `/S /R /UPDATE /ARGS`); U2 reworded (no uninstaller runs in update mode or under `/S`: the template); the "both branches, one dead" of the outline replaced by two production paths; an empty pubkey refused by the app, not by the plugin; `update_reapply` a busy name of its own, not a `CHANGES_MACHINE` entry; no npm package; the plugin pinned at 2.13.3 (the index), not 2.13.2 (G10's table); `latest.json`'s url and `.sig` on the hyphenated asset name (4a's carry); `--prerelease` named at `release.yml:78`; the `from` version of the record from the built config, not `CARGO_PKG_VERSION` (the spike's `--config` version).
+- **The pre-flight rulings Q1–Q20** (`.superpowers/sdd/2026-11-04-phase4b-updater-upstream/preflight-rulings.md`), each where it landed: Q1 Task 6 (the `sign` input), Task 1 (the spike's own override), Task 8 (§6.4), Task 9 (the unsigned from-build); Q2–Q3 Task 1 (`update-server.ps1`, the guest helpers, U7 as the stopped listener), G-VBOX; Q4 Task 9 Step 0 and Step 3, the header's order; Q5 Task 4 (`UpdateOffer`'s poll, the `pending` mock, two App tests); Q6 Task 2 (`runtime_dirs_named_by` by long paths, the `ShortPath` tests); Q7 Task 3 (`end_run` before `update_at_exit`, the lock's doc, the text test); Q8 Task 3 (`run_is_ours`, `a_second_instance_reads_checks_and_installs_nothing`); Q9 Task 3 and 4 (`mark_restarting`, `a_restart_exit_installs_nothing`); Q10 Task 1 (A1 silent and notify) and Task 9 (B1); Q11 Task 1 (`Install-Phase4bSetup` copies `read-autorun.vbs`); Q12 every `cargo test` with one filter, `tests::…` for `lib.rs`; Q13 Task 5 (the App test with `mount` and fake timers); Q14 Task 7 (`-Work`, `target\upstream-test`, 18/18); Q15–Q16 Task 3 (the "now" path is the app's own `/S /R /UPDATE /ARGS` with nothing after; `end_run` after the verified download, `rewrite_run_record` on a failed start); Q17 Task 5 (`prune_runtimes` under `try_lock`, `prune_at_start`, not in `update_after_start`, not in safe mode); Q18 Task 3 (`classify` names every 2.10.1 variant that `check`/`download` can raise, the rest `Other` as offline with its text); Q19 the text items (open.rs's four changed tests, `{target:?}` before the move, `Start-Phase4bApp` in Produces, `PathBuf` and `cleanup.rs:1556`, `crate::exec::same_path`, no `AppStatus` literal instruction, `Settings.tsx` out of Files, the three stale comments, Task 6's "two tests fail", Task 8's commit steps, `try_state`); Q20 the header's order (part A after Task 5).
