@@ -15,8 +15,16 @@ on:
         description: 'Also build the updater spike (two versions, an ephemeral key, latest.json)'
         type: boolean
         default: false
-  # release.yml calls this workflow on a tag: the same gates and the same installer, never a copy (spec §6.4)
+  # release.yml calls this workflow on a tag: the same gates and the same installer, never a copy
+  # (spec §6.4). With `sign` the installer is signed for the updater (phase 4b): the bundler gets
+  # createUpdaterArtifacts for that run and the founder's key from the secrets the caller hands
+  # over. A push, a pull request or a fork never signs: their CI needs no secret.
   workflow_call:
+    inputs:
+      sign:
+        description: 'Sign the installer with the updater key and keep its .sig (release.yml only)'
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -211,11 +219,26 @@ jobs:
       # `npm run tauri --` runs the Tauri CLI that package-lock.json locks (node_modules/.bin) and
       # nothing else: npm run never downloads a package, while `npx` fetches a missing one (a try
       # with npm 11: `npx --no-install <unknown package>` still asked the registry). bash, so
-      # that the `--` reaches npm as written.
+      # that the `--` reaches npm as written. A signed run (`inputs.sign`, release.yml) merges
+      # `createUpdaterArtifacts` into that config for the run.
       - name: Tauri build (with the NSIS bundle)
         shell: bash
         working-directory: app
-        run: npm run tauri -- build --config src-tauri/tauri.bundle.conf.json
+        # The updater's signature (spec §6.2, §6.4, phase 4b) on a signed run only: the founder's
+        # key from the repository's secrets, handed over by release.yml; empty otherwise, and the
+        # bundler then makes no updater artifact (createUpdaterArtifacts is merged in below only
+        # under the input, never committed). Never printed.
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ inputs.sign && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ inputs.sign && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+        run: |
+          config=src-tauri/tauri.bundle.conf.json
+          if [ "${{ inputs.sign }}" = "true" ]; then
+            printf '%s' '{"bundle":{"createUpdaterArtifacts":true}}' > "$RUNNER_TEMP/sign.override.json"
+            jq -s '.[0] * .[1]' "$config" "$RUNNER_TEMP/sign.override.json" > "$RUNNER_TEMP/sign.conf.json"
+            config="$RUNNER_TEMP/sign.conf.json"
+          fi
+          npm run tauri -- build --config "$config"
       # The same search again, now that `tauri build` has built the UI once more: the exe embeds
       # the dist as this build left it, so this is the gate on what ships.
       - name: The UI the exe embeds holds no mock data and no preset file
@@ -226,7 +249,8 @@ jobs:
       # files inside are checked here without running it: both binaries (the console one under
       # its cargo name; the installer's hook renames it to cmdstudio.com, G-BIN), the runtimes'
       # manifest, the three licenses and Clink's source notice, the app's LICENSE. Its size is
-      # printed for the spec's §6.1 (20–30 MB estimated). SHA256SUMS.txt goes with it.
+      # printed for the spec's §6.1 (20–30 MB estimated). SHA256SUMS.txt goes with it, and, on a
+      # signed run, the updater's .sig (phase 4b).
       - name: The installer holds both exes, the resources and the licenses
         shell: bash
         run: |
@@ -236,12 +260,19 @@ jobs:
           installer="target/release/bundle/nsis/CMD Studio_${version}_x64-setup.exe"
           test -f "$installer"
           ls -l "$installer"
+          if [ "${{ inputs.sign }}" = "true" ]; then
+            test -f "$installer.sig"
+            ls -l "$installer.sig"
+          fi
           7z l "$installer" > installer-files.txt
           for f in cmdstudio.exe cmdstudio-cli.exe 'resources\manifest.json' 'resources\omp\oh-my-posh.exe' 'resources\clink\clink_x64.exe' 'resources\clink\clink_dll_x64.dll' 'resources\fonts\CaskaydiaCoveNerdFont-Regular.ttf' 'resources\LICENSES\oh-my-posh-MIT.txt' 'resources\LICENSES\clink-GPL-3.0.txt' 'resources\LICENSES\clink-SOURCE.txt' 'resources\LICENSES\CaskaydiaCove-NF-OFL-1.1.txt' LICENSE.txt; do
             grep -q -F -- "$f" installer-files.txt || { echo "::error::$f is not in the installer"; exit 1; }
           done
           mkdir -p stage/installer
           cp "$installer" stage/installer/
+          if [ "${{ inputs.sign }}" = "true" ]; then
+            cp "$installer.sig" stage/installer/
+          fi
           (cd stage/installer && sha256sum -- *.exe > SHA256SUMS.txt && cat SHA256SUMS.txt)
       # For the VM check of phase 4a (install, uninstall; docs/spikes/phase4-install/protocol.md).
       - uses: actions/upload-artifact@v4

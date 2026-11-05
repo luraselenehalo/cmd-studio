@@ -28,8 +28,9 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEUxMjEyQ0UwRDlFRTc2M0MKUldROGR1N1o0Q3doNFVvWGh1M0x5MjFTdzZpbFBhNVMrNmpXaEN2bWN4bVcvRnNXT3dZOUMxVGUK",
       "endpoints": ["https://github.com/luraselenehalo/cmd-studio/releases/latest/download/latest.json"],
+      "requireSignedVersion": true,
       "windows": { "installMode": "quiet" }
     }
   },
