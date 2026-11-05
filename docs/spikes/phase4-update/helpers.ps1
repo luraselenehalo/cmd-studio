@@ -47,14 +47,25 @@ function Get-Phase4bSnapshot($Vm, [string] $Which, [string] $User = 'tester') { 
 function Set-Phase4bMode($Vm, [ValidateSet('auto', 'notify', 'off')] [string] $Mode, [string] $User = 'tester') { Invoke-GuestDesktop $Vm "$($P4B.Guest)\update-check.ps1" "-SetMode $Mode" $User 60 }
 function Wait-Phase4bVersion($Vm, [string] $Version, [string] $User = 'tester', [int] $Seconds = 180) { Invoke-GuestDesktop $Vm "$($P4B.Guest)\update-check.ps1" "-WaitForVersion $Version -WaitSeconds $Seconds" $User ($Seconds + 60) }
 function Get-Phase4bLog($Vm, [string] $User = 'tester') { Invoke-GuestDesktop $Vm "$($P4B.Guest)\update-check.ps1" '-Log' $User 60 }
+# Every log line matching $Pattern (a regex of letters, digits, `_ |=.-` only), with its time, in
+# order: the lines -Log leaves out (A5b: `recovery_entry`, `pause `).
+function Get-Phase4bLogLines($Vm, [string] $Pattern, [string] $User = 'tester') { Invoke-GuestDesktop $Vm "$($P4B.Guest)\update-check.ps1" "-LogLines '$Pattern'" $User 60 }
 # (Not `$args`: that name is PowerShell's automatic variable inside a function.)
 function Start-Phase4bApp($Vm, [string] $User = 'tester', [switch] $Recovery) {
   $how = if ($Recovery) { '-StartApp -Recovery' } else { '-StartApp' }
   Invoke-GuestDesktop $Vm "$($P4B.Guest)\update-check.ps1" $how $User 120
 }
-# The guest's web server over $P4B.Setup (update-server.ps1), started on the desktop as a hidden
-# process of its own; its request log is read for U7's "no request in Off mode".
+# The guest's web server over $P4B.Setup (update-server.ps1), started from the desktop as a
+# hidden process of its own, created through WMI so that it is not the desktop task's child; its request log is read for U7's "no request in Off mode".
 function Start-Phase4bServer($Vm, [string] $User = 'tester') { Invoke-GuestDesktop $Vm "$($P4B.Guest)\update-server.ps1" "-Start -Root '$($P4B.Setup)'" $User 60 }
+# Whether the server outlived the desktop task that started it: a separate guestcontrol call
+# (Invoke-GuestPs, not on the desktop), made after Start-Phase4bServer has returned, so the task
+# is gone, waits 5 s, connects to the port and reads server.pid. Prints `server up: True` and
+# `server pid <n> running: True` when it did.
+function Test-Phase4bServer($Vm, [string] $User = 'tester') {
+  $code = 'Start-Sleep -Seconds 5; $up = try { $c = New-Object Net.Sockets.TcpClient -ArgumentList ''127.0.0.1'', 8765; $c.Close(); $true } catch { $false }; ''server up: '' + $up; $f = ''__PID__''; if (Test-Path -LiteralPath $f) { $id = [int](Get-Content -LiteralPath $f); ''server pid '' + $id + '' running: '' + [bool](Get-Process -Id $id -ErrorAction SilentlyContinue) } else { ''no server.pid'' }'
+  Invoke-GuestPs $Vm $code.Replace('__PID__', "$($P4B.Setup)\server.pid") $User 60
+}
 function Stop-Phase4bServer($Vm, [string] $User = 'tester') { Invoke-GuestDesktop $Vm "$($P4B.Guest)\update-server.ps1" "-Stop -Root '$($P4B.Setup)'" $User 60 }
 function Get-Phase4bServerLog($Vm, [string] $User = 'tester') {
   Invoke-GuestPs $Vm "if (Test-Path -LiteralPath '$($P4B.Setup)\server.log') { Get-Content -LiteralPath '$($P4B.Setup)\server.log' } else { 'no server.log' }" $User 60

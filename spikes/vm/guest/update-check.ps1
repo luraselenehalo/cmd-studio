@@ -7,7 +7,9 @@
 # lines of logs\cmdstudio.log, and the cmdstudio processes. -SetMode auto|notify|off edits
 # settings.json's "updates" field (the app must be closed; a missing file is made with that field
 # alone, the rest being the app's defaults). -WaitForVersion <v> polls DisplayVersion up to
-# -WaitSeconds and prints the seconds it took, or TIMEOUT. -Log prints the log's `update ` lines.
+# -WaitSeconds and prints the seconds it took, or TIMEOUT. -Log prints the log's `update ` lines;
+# -LogLines <regex> prints every line of the log that matches it, in order, with its time (for
+# lines that are not the updater's: `recovery_entry`, `pause `, `crash_check`, `cmd=`).
 # -StartApp opens the Start-menu shortcut "CMD Studio.lnk" as a click does; with -Recovery the
 # "CMD Studio Recovery.lnk" one. Run on the user's desktop (Invoke-GuestDesktop): HKCU and the
 # environment are the signed-in user's only there.
@@ -15,7 +17,7 @@ param(
   [ValidatePattern('^[a-z0-9]*$')] [string] $Snapshot = '',
   [ValidateSet('', 'auto', 'notify', 'off')] [string] $SetMode = '',
   [string] $WaitForVersion = '', [int] $WaitSeconds = 180,
-  [switch] $Log, [switch] $StartApp, [switch] $Recovery,
+  [switch] $Log, [ValidatePattern('^[A-Za-z0-9_ |=.-]*$')] [string] $LogLines = '', [switch] $StartApp, [switch] $Recovery,
   [string] $Out = 'C:\cmdstudio\out\phase4b'
 )
 $ErrorActionPreference = 'Stop'
@@ -118,6 +120,14 @@ if ($WaitForVersion) {
   "TIMEOUT after $WaitSeconds s; $(Installed)"
 }
 if ($Log) { UpdateLines }
+if ($LogLines) {
+  $file = Join-Path $data 'logs\cmdstudio.log'
+  if (-not (Test-Path -LiteralPath $file)) { 'LOG ABSENT' } else {
+    $hits = @(Get-Content -LiteralPath $file | Where-Object { $_ -match $LogLines })
+    "$($hits.Count) line(s) match '$LogLines'"
+    $hits
+  }
+}
 if ($StartApp) {
   $lnk = Join-Path $sm $(if ($Recovery) { 'CMD Studio Recovery.lnk' } else { 'CMD Studio.lnk' })
   if (-not (Test-Path -LiteralPath $lnk)) { throw "no shortcut at $lnk" }
