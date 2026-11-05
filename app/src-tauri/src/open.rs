@@ -2,13 +2,13 @@
 //! Terminal's Store page (spec §4.2 page 2), GitHub Issues (spec §4.3), the data and log folders
 //! (spec §2.1). This module only does what it is told: which cmd window to open is decided by
 //! `Backend::cmd_launch`, and every external target is fixed here. Nothing from the UI or a theme
-//! is ever run or opened (spec §5.10): the UI names one of four targets and nothing else.
+//! is ever run or opened (spec §5.10): the UI names one of five targets and nothing else.
 use cmdstudio_core::generate::wt::CMD_PROFILE_GUID;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use ts_rs::TS;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub enum ExternalTarget {
@@ -17,11 +17,25 @@ pub enum ExternalTarget {
     GitHubIssues,
     DataFolder,
     LogsFolder,
+    /// The release page of a version (spec §6.2's "what changed"): `releases/tag/v<version>`,
+    /// for a `version` that parses as SemVer and nothing else (`release_url`).
+    ReleaseNotes {
+        version: String,
+    },
 }
 
 pub const STORE_URL: &str = "ms-windows-store://pdp/?ProductId=9N0DX20HK701";
 pub const TERMINAL_URL: &str = "https://aka.ms/terminal";
 pub const ISSUES_URL: &str = "https://github.com/luraselenehalo/cmd-studio/issues";
+pub const RELEASES_URL: &str = "https://github.com/luraselenehalo/cmd-studio/releases";
+
+/// The release page of `version`: only a string `semver` parses (no `v`, no path, no query, no
+/// leading zero), so that nothing from a manifest or a record reaches the shell but a version.
+pub fn release_url(version: &str) -> Option<String> {
+    semver::Version::parse(version)
+        .ok()
+        .map(|_| format!("{RELEASES_URL}/tag/v{version}"))
+}
 
 /// How "Open cmd" opens a window, as `Backend::cmd_launch` decides it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,7 +79,7 @@ pub fn command_line(launch: &CmdLaunch) -> (&'static str, Vec<String>) {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Place {
     /// A link: opened by whatever handles it (the browser, the Store).
-    Url(&'static str),
+    Url(String),
     /// A folder of CMD Studio's: opened in Explorer.
     Folder(PathBuf),
 }
@@ -76,11 +90,17 @@ pub enum Place {
 pub fn external_places(target: ExternalTarget, data: &Path, logs: &Path) -> Vec<Place> {
     match target {
         ExternalTarget::WindowsTerminalStore => {
-            vec![Place::Url(STORE_URL), Place::Url(TERMINAL_URL)]
+            vec![
+                Place::Url(STORE_URL.to_string()),
+                Place::Url(TERMINAL_URL.to_string()),
+            ]
         }
-        ExternalTarget::GitHubIssues => vec![Place::Url(ISSUES_URL)],
+        ExternalTarget::GitHubIssues => vec![Place::Url(ISSUES_URL.to_string())],
         ExternalTarget::DataFolder => vec![Place::Folder(data.to_path_buf())],
         ExternalTarget::LogsFolder => vec![Place::Folder(logs.to_path_buf())],
+        ExternalTarget::ReleaseNotes { version } => {
+            release_url(&version).map(Place::Url).into_iter().collect()
+        }
     }
 }
 
@@ -115,7 +135,12 @@ pub fn open_cmd(launch: &CmdLaunch) -> Result<(), String> {
 /// none is lost: the caller puts the whole text in the error's details.
 #[cfg(windows)]
 pub fn open_external(target: ExternalTarget, data: &Path, logs: &Path) -> Result<(), String> {
-    open_first(&external_places(target, data, logs), shell_open)
+    let what = format!("{target:?}");
+    let places = external_places(target, data, logs);
+    if places.is_empty() {
+        return Err(format!("{what} names nothing that can be opened"));
+    }
+    open_first(&places, shell_open)
 }
 
 /// Tries `places` in order with `open`; the first that opens ends it. When none does, the error
@@ -268,14 +293,14 @@ mod tests {
         assert_eq!(
             external_places(ExternalTarget::WindowsTerminalStore, &data, &logs),
             [
-                Place::Url("ms-windows-store://pdp/?ProductId=9N0DX20HK701"),
-                Place::Url("https://aka.ms/terminal"),
+                Place::Url("ms-windows-store://pdp/?ProductId=9N0DX20HK701".to_string()),
+                Place::Url("https://aka.ms/terminal".to_string()),
             ]
         );
         assert_eq!(
             external_places(ExternalTarget::GitHubIssues, &data, &logs),
             [Place::Url(
-                "https://github.com/luraselenehalo/cmd-studio/issues"
+                "https://github.com/luraselenehalo/cmd-studio/issues".to_string()
             )]
         );
         assert_eq!(
@@ -308,19 +333,25 @@ mod tests {
             Ok(())
         });
         assert_eq!(result, Ok(()));
-        assert_eq!(asked, [Place::Url(STORE_URL)]);
+        assert_eq!(asked, [Place::Url(STORE_URL.to_string())]);
 
         // The Store cannot open it: the web page is the way out, and its success is the result.
         let mut asked = Vec::new();
         let result = open_first(&places, |p| {
             asked.push(p.clone());
             match p {
-                Place::Url(url) if *url == STORE_URL => failing("the Store said no"),
+                Place::Url(url) if url == STORE_URL => failing("the Store said no"),
                 _ => Ok(()),
             }
         });
         assert_eq!(result, Ok(()));
-        assert_eq!(asked, [Place::Url(STORE_URL), Place::Url(TERMINAL_URL)]);
+        assert_eq!(
+            asked,
+            [
+                Place::Url(STORE_URL.to_string()),
+                Place::Url(TERMINAL_URL.to_string())
+            ]
+        );
     }
 
     /// When nothing opens, the error is the first failure's, with the later ones after it: the
@@ -333,7 +364,7 @@ mod tests {
             Path::new("logs"),
         );
         let result = open_first(&places, |p| match p {
-            Place::Url(url) if *url == STORE_URL => failing("store: no handler"),
+            Place::Url(url) if url == STORE_URL => failing("store: no handler"),
             _ => failing("web: no browser"),
         });
         assert_eq!(
@@ -341,7 +372,7 @@ mod tests {
             Err("store: no handler; then web: no browser".to_string())
         );
         // One place: its own error, as it was.
-        let one = [Place::Url(ISSUES_URL)];
+        let one = [Place::Url(ISSUES_URL.to_string())];
         assert_eq!(
             open_first(&one, |_| failing("no browser")),
             Err("no browser".to_string())
@@ -352,7 +383,7 @@ mod tests {
         );
     }
 
-    /// The UI names a target; it never sends a link or a path (spec §5.10). The four names are
+    /// The UI names a target; it never sends a link or a path (spec §5.10). The five names are
     /// the whole wire format, and anything else is refused before it reaches the shell.
     #[test]
     fn the_ui_can_only_name_a_target() {
@@ -369,17 +400,80 @@ mod tests {
                 target
             );
         }
+        let notes = ExternalTarget::ReleaseNotes {
+            version: "0.2.0".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&notes).unwrap(),
+            r#"{"releaseNotes":{"version":"0.2.0"}}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<ExternalTarget>(r#"{"releaseNotes":{"version":"0.2.0"}}"#)
+                .unwrap(),
+            notes
+        );
         for free in [
             "\"https://example.com\"",
             r#""C:\\Windows\\System32\\cmd.exe""#,
             "\"windowsterminalstore\"",
             "{\"url\":\"https://example.com\"}",
             "42",
+            r#"{"releaseNotes":"0.2.0"}"#,
+            "\"releaseNotes\"",
         ] {
             assert!(
                 serde_json::from_str::<ExternalTarget>(free).is_err(),
                 "{free}"
             );
         }
+    }
+
+    /// Review Focus 4, spec §5.10: the release page is opened for a SemVer version and nothing
+    /// else; the text of the link is written out here.
+    #[test]
+    fn the_release_url_takes_semver_only() {
+        assert_eq!(
+            release_url("0.2.0").as_deref(),
+            Some("https://github.com/luraselenehalo/cmd-studio/releases/tag/v0.2.0")
+        );
+        assert_eq!(
+            release_url("0.1.0-spike.2").as_deref(),
+            Some("https://github.com/luraselenehalo/cmd-studio/releases/tag/v0.1.0-spike.2")
+        );
+        for bad in [
+            "",
+            "v0.2.0",
+            "0.2",
+            "../x",
+            "0.2.0/../../issues",
+            "0.2.0 ",
+            "01.2.0",
+            "0.2.0?x=1",
+        ] {
+            assert_eq!(release_url(bad), None, "{bad:?}");
+            assert_eq!(
+                external_places(
+                    ExternalTarget::ReleaseNotes {
+                        version: bad.to_string()
+                    },
+                    Path::new("d"),
+                    Path::new("l")
+                ),
+                Vec::<Place>::new(),
+                "{bad:?}"
+            );
+        }
+        assert_eq!(
+            external_places(
+                ExternalTarget::ReleaseNotes {
+                    version: "0.2.0".into()
+                },
+                Path::new("d"),
+                Path::new("l")
+            ),
+            [Place::Url(
+                "https://github.com/luraselenehalo/cmd-studio/releases/tag/v0.2.0".to_string()
+            )]
+        );
     }
 }

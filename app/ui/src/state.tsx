@@ -95,6 +95,9 @@ export interface AppState {
   appStatus: AppStatus | null;
   /** What one read of settings.json gives, held as the app's settings at once: the Recovery page's reset (recovery spec §5.2). */
   adoptSettings: (loaded: SettingsLoad) => void;
+  /** "Later" on the notify card: the offer is hidden for the rest of this run (spec §6.2). */
+  updateLater: boolean;
+  markUpdateLater: () => void;
 }
 
 export const AppStateContext = createContext<AppState | null>(null);

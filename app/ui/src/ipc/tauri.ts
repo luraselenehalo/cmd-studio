@@ -83,4 +83,6 @@ export const tauriIpc: Ipc = {
   settingsReset: () => call("settings_reset"),
   logUiError: (message, place) => call("log_ui_error", { message, place }),
   appRestart: () => call("app_restart"),
+  updateStatus: () => call("update_status"),
+  updateInstall: () => call("update_install"),
 };

@@ -6,16 +6,18 @@
 import { useEffect, useState } from "react";
 import type { AdvancedInfo } from "../bindings/AdvancedInfo";
 import type { ExternalTarget } from "../bindings/ExternalTarget";
+import type { UpdateStatus } from "../bindings/UpdateStatus";
 import { ErrorNotice } from "../components/Notices";
-import { useI18n } from "../i18n";
+import { formatTime, useI18n } from "../i18n";
 import { useIpc } from "../ipc/context";
 import { useAppState } from "../state";
 
 export function Advanced() {
   const ipc = useIpc();
-  const { t } = useI18n();
+  const { t, language } = useI18n();
   const { version } = useAppState();
   const [info, setInfo] = useState<AdvancedInfo | null>(null);
+  const [update, setUpdate] = useState<UpdateStatus | null>(null);
   const [loadError, setLoadError] = useState<unknown>(null);
   const [openError, setOpenError] = useState<unknown>(null);
   const [tick, setTick] = useState(0);
@@ -31,6 +33,13 @@ export function Advanced() {
       (e: unknown) => {
         if (alive) setLoadError(e);
       },
+    );
+    // When the updater last checked (spec §6.2); a read that fails says nothing.
+    ipc.updateStatus().then(
+      (u) => {
+        if (alive) setUpdate(u);
+      },
+      () => {},
     );
     return () => {
       alive = false;
@@ -74,6 +83,11 @@ export function Advanced() {
               </tr>
             </tbody>
           </table>
+          <p>
+            {update?.checkedAtMs != null
+              ? t("advanced.update.checked", { time: formatTime(update.checkedAtMs, language) })
+              : t("advanced.update.notChecked")}
+          </p>
         </>
       )}
       <h2>{t("advanced.dataDir")}</h2>
