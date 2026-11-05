@@ -42,6 +42,12 @@ jobs:
           cargo --version
       - name: Format
         run: cargo fmt --all -- --check
+      # The upstream watch's script (phase 4b) in fixture mode: no network, nothing of the repo
+      # written, under Windows PowerShell 5.1 as on the dev PC (upstream-watch.yml runs it under
+      # PowerShell 7 on Linux too).
+      - name: Upstream watch script (fixture mode)
+        shell: powershell
+        run: ./scripts/upstream-watch.test.ps1 -Work "$env:RUNNER_TEMP\upstream-test"
       # The fake adapters sit behind the core's `fake` feature, which only the CLI's
       # dev-dependency turns on. So the first run below lints the core WITH the fakes (a
       # workspace build unifies the feature), the second WITHOUT them, as a release build
