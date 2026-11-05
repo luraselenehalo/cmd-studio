@@ -56,6 +56,16 @@ impl Paths {
     pub fn settings_reset_file(&self, ms: u64) -> PathBuf {
         self.data.join(format!("settings.json.reset-{ms}"))
     }
+    /// `<data>\update.json`: the updater's record, written before the new installer starts and
+    /// read at the next start to say "Updated to vX" (spec §5.3, §6.2, phase 4b).
+    pub fn update_file(&self) -> PathBuf {
+        self.data.join("update.json")
+    }
+    /// `<data>\updates`: the verified installer the updater downloaded, until the next start
+    /// empties the folder (phase 4b).
+    pub fn updates_dir(&self) -> PathBuf {
+        self.data.join("updates")
+    }
 }
 
 /// Why the theme is paused (recovery spec §3.1), as `paused.json` names it.
@@ -594,5 +604,17 @@ mod tests {
                 r"C:\Users\tester\AppData\Local\ai.resincore.cmdstudio\settings.json.reset-1791694709000"
             )
         );
+    }
+
+    /// Spec §5.3, §6.2 (phase 4b): the updater's record and its download folder live directly in
+    /// the data folder, under names `--cleanup` knows (the CLI's own-file lists).
+    #[test]
+    fn update_json_and_updates_dir_are_under_the_data_folder() {
+        let p = Paths {
+            data: PathBuf::from(r"C:\d"),
+        };
+        assert_eq!(p.update_file(), PathBuf::from(r"C:\d\update.json"));
+        assert_eq!(p.updates_dir(), PathBuf::from(r"C:\d\updates"));
+        assert_eq!(p.update_file().parent(), Some(p.data.as_path()));
     }
 }

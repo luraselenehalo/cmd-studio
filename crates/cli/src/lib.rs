@@ -1027,14 +1027,14 @@ fn same_name(a: &Path, b: &Path) -> bool {
 /// - the folders `generated\`, `clink-profile\`, `runtime\`, `snapshots\`, `themes\`, and the
 ///   app's `drafts\` (autosaved drafts), `logs\` (its log), `webview\` (WebView2's own data,
 ///   put there by the app on purpose; spec §5.3), and `health\` (init.lua's start tags and the
-///   theme's pause, recovery spec §7);
+///   theme's pause, recovery spec §7), and `updates\` (the updater's verified download, phase 4b);
 /// - the files `state.json`, `settings.json` (the app's settings) and `cmdstudio.lock` (made by
 ///   `Fs::try_lock`);
 /// - `state.json.damaged-<ms>` and `settings.json.damaged-<ms>`: a damaged file that Revert
 ///   everything, `--cleanup` or the app set aside (`cleanup::load_state`, the app's settings);
-/// - `.state.json.<32 hex digits>.cmdstudio-tmp`, and the same for `settings.json` and
-///   `run.json`: the temp file `WinFs::write_atomic` writes beside the file, left behind when a
-///   run is cut off in that write. state.json, settings.json and run.json are the only files
+/// - `.state.json.<32 hex digits>.cmdstudio-tmp`, and the same for `settings.json`, `run.json` and
+///   `update.json`: the temp file `WinFs::write_atomic` writes beside the file, left behind when a
+///   run is cut off in that write. state.json, settings.json, run.json and update.json are the only files
 ///   CMD Studio writes directly in the data folder: the generated files, Clink's profile, the
 ///   runtimes, the restore points, the drafts, the log and the pause, with their own temp
 ///   files, are in the folders above.
@@ -1056,6 +1056,7 @@ fn put_there_by_cmd_studio(paths: &Paths, entry: &DirEntry) -> bool {
             paths.logs(),
             paths.webview(),
             paths.health(),
+            paths.updates_dir(),
         ]
         .into_iter()
         .any(named);
@@ -1064,14 +1065,19 @@ fn put_there_by_cmd_studio(paths: &Paths, entry: &DirEntry) -> bool {
         return true;
     }
     let name = name.to_ascii_lowercase();
-    [paths.state_file(), paths.settings_file(), paths.run_file()]
-        .iter()
-        .filter_map(|file| file.file_name().and_then(|n| n.to_str()))
-        .any(|file| {
-            name.strip_prefix(&format!(".{}.", file.to_ascii_lowercase()))
-                .and_then(|rest| rest.strip_suffix(".cmdstudio-tmp"))
-                .is_some_and(|hex| hex.len() == 32 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
-        })
+    [
+        paths.state_file(),
+        paths.settings_file(),
+        paths.run_file(),
+        paths.update_file(),
+    ]
+    .iter()
+    .filter_map(|file| file.file_name().and_then(|n| n.to_str()))
+    .any(|file| {
+        name.strip_prefix(&format!(".{}.", file.to_ascii_lowercase()))
+            .and_then(|rest| rest.strip_suffix(".cmdstudio-tmp"))
+            .is_some_and(|hex| hex.len() == 32 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
+    })
 }
 
 /// Whether an entry directly in the data folder is one of the files that only CMD Studio
@@ -1080,7 +1086,8 @@ fn put_there_by_cmd_studio(paths: &Paths, entry: &DirEntry) -> bool {
 /// and left when the lock is let go), `state.json`, `settings.json` (the app writes it the first
 /// time a setting changes), or a damaged copy of the last two set aside as `<name>.damaged-<ms>`,
 /// or the settings the Recovery page set aside as `settings.json.reset-<ms>` (recovery spec
-/// §5.2); and `run.json`, the app's record of its run (recovery spec §5.1).
+/// §5.2); `run.json`, the app's record of its run (recovery spec §5.1); and `update.json`, the
+/// updater's record of an update in progress (spec §6.2, phase 4b).
 /// Names compare without regard to ASCII letter case. The kind is the caller's to check.
 fn cmd_studios_own_file(paths: &Paths, entry: &DirEntry) -> bool {
     let own = [
@@ -1088,6 +1095,7 @@ fn cmd_studios_own_file(paths: &Paths, entry: &DirEntry) -> bool {
         paths.settings_file(),
         paths.lock_file(),
         paths.run_file(),
+        paths.update_file(),
     ];
     if own.iter().any(|ours| same_name(ours, &entry.path)) {
         return true;
@@ -2689,6 +2697,8 @@ mod tests {
         let (m, d) = machine();
         for (i, odd) in [
             "run.json.bak",
+            "update.json.old",
+            "updates.zip",
             "settings.json.reset-",
             "settings.json.reset-abc",
         ]
@@ -2732,6 +2742,9 @@ mod tests {
             ".settings.json.0123456789abcdef0123456789abcdef.cmdstudio-tmp",
             ".state.json.0123456789abcdef0123456789abcdef.cmdstudio-tmp",
             ".run.json.0123456789abcdef0123456789abcdef.cmdstudio-tmp",
+            "update.json",
+            r"updates\cmdstudio-0.2.0-setup.exe",
+            ".update.json.0123456789abcdef0123456789abcdef.cmdstudio-tmp",
         ] {
             m.fs.put(format!(r"{other}\{file}"), b"x");
         }
