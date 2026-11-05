@@ -1032,9 +1032,10 @@ fn same_name(a: &Path, b: &Path) -> bool {
 ///   `Fs::try_lock`);
 /// - `state.json.damaged-<ms>` and `settings.json.damaged-<ms>`: a damaged file that Revert
 ///   everything, `--cleanup` or the app set aside (`cleanup::load_state`, the app's settings);
-/// - `.state.json.<32 hex digits>.cmdstudio-tmp`, and the same for `settings.json`, `run.json` and
-///   `update.json`: the temp file `WinFs::write_atomic` writes beside the file, left behind when a
-///   run is cut off in that write. state.json, settings.json, run.json and update.json are the only files
+/// - `.state.json.<32 hex digits>.cmdstudio-tmp`, and the same for `settings.json`, `run.json`,
+///   `update.json` and `update-reapply.json`: the temp file `WinFs::write_atomic` writes beside
+///   the file, left behind when a run is cut off in that write. state.json, settings.json,
+///   run.json, update.json and update-reapply.json are the only files
 ///   CMD Studio writes directly in the data folder: the generated files, Clink's profile, the
 ///   runtimes, the restore points, the drafts, the log and the pause, with their own temp
 ///   files, are in the folders above.
@@ -1070,6 +1071,7 @@ fn put_there_by_cmd_studio(paths: &Paths, entry: &DirEntry) -> bool {
         paths.settings_file(),
         paths.run_file(),
         paths.update_file(),
+        paths.update_reapply_file(),
     ]
     .iter()
     .filter_map(|file| file.file_name().and_then(|n| n.to_str()))
@@ -1086,8 +1088,9 @@ fn put_there_by_cmd_studio(paths: &Paths, entry: &DirEntry) -> bool {
 /// and left when the lock is let go), `state.json`, `settings.json` (the app writes it the first
 /// time a setting changes), or a damaged copy of the last two set aside as `<name>.damaged-<ms>`,
 /// or the settings the Recovery page set aside as `settings.json.reset-<ms>` (recovery spec
-/// §5.2); `run.json`, the app's record of its run (recovery spec §5.1); and `update.json`, the
-/// updater's record of an update in progress (spec §6.2, phase 4b).
+/// §5.2); `run.json`, the app's record of its run (recovery spec §5.1); `update.json`, the
+/// updater's record of an update in progress (spec §6.2, phase 4b); and `update-reapply.json`,
+/// the pins an automatic re-apply after an update did not commit for (phase 4b).
 /// Names compare without regard to ASCII letter case. The kind is the caller's to check.
 fn cmd_studios_own_file(paths: &Paths, entry: &DirEntry) -> bool {
     let own = [
@@ -1096,6 +1099,7 @@ fn cmd_studios_own_file(paths: &Paths, entry: &DirEntry) -> bool {
         paths.lock_file(),
         paths.run_file(),
         paths.update_file(),
+        paths.update_reapply_file(),
     ];
     if own.iter().any(|ours| same_name(ours, &entry.path)) {
         return true;
@@ -2698,6 +2702,7 @@ mod tests {
         for (i, odd) in [
             "run.json.bak",
             "update.json.old",
+            "update-reapply.json.old",
             "updates.zip",
             "settings.json.reset-",
             "settings.json.reset-abc",
@@ -2745,6 +2750,8 @@ mod tests {
             "update.json",
             r"updates\cmdstudio-0.2.0-setup.exe",
             ".update.json.0123456789abcdef0123456789abcdef.cmdstudio-tmp",
+            "update-reapply.json",
+            ".update-reapply.json.0123456789abcdef0123456789abcdef.cmdstudio-tmp",
         ] {
             m.fs.put(format!(r"{other}\{file}"), b"x");
         }

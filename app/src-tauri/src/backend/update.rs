@@ -14,7 +14,7 @@ use crate::settings::UpdateMode;
 use crate::update::{Available, Updater};
 use cmdstudio_core::adapters::FsLock;
 use cmdstudio_core::cleanup::{prune_old_runtimes, runtime_dirs_named_by};
-use cmdstudio_core::plan::runtime_changed;
+use cmdstudio_core::plan::{runtime_changed, CLINK_VERSION, OMP_VERSION};
 use cmdstudio_core::recovery::read_pause;
 use cmdstudio_core::resources::sha256_hex;
 use cmdstudio_core::state::State;
@@ -28,6 +28,30 @@ pub const UPDATE_RECORD_VERSION: u32 = 1;
 /// The name `app_status.busy` carries while the re-apply after an update runs (Task 5; recovery
 /// spec §6.3). A name of its own, like `recovery_entry`: it is no IPC command.
 pub const UPDATE_REAPPLY_BUSY: &str = "update_reapply";
+/// The version of `update-reapply.json` this build writes and reads.
+pub const REAPPLY_RECORD_VERSION: u32 = 1;
+
+/// `<data>\update-reapply.json` (`Paths::update_reapply_file`): the runtime pins an automatic
+/// re-apply was tried for and did not commit, so it is tried once per pin set and never as a
+/// silent apply and rollback at every start (the controller's ruling on concern 4). Any apply
+/// that commits deletes it (`actions::run_apply_with`, the one commit point).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReapplyRecord {
+    pub version: u32,
+    pub omp: String,
+    pub clink: String,
+}
+
+impl ReapplyRecord {
+    /// The record of this build's pins.
+    fn of_this_build() -> Self {
+        ReapplyRecord {
+            version: REAPPLY_RECORD_VERSION,
+            omp: OMP_VERSION.to_string(),
+            clink: CLINK_VERSION.to_string(),
+        }
+    }
+}
 
 /// `<data>\update.json` (spec §5.3, §6.2): written before the installer starts.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -600,7 +624,39 @@ impl<M: Machine> Backend<M> {
             self.note_line("update reapply=paused");
             return false;
         }
+        if self.reapply_tried_for_these_pins() {
+            self.note_line("update reapply=skipped");
+            return false;
+        }
         true
+    }
+
+    /// Whether update-reapply.json names this build's pins: an automatic re-apply for them was
+    /// tried and did not commit. A file that is not there, cannot be read, is damaged or of
+    /// another version does not match, so the re-apply is tried (once: a failure writes it anew).
+    fn reapply_tried_for_these_pins(&self) -> bool {
+        let Ok(Some(bytes)) = self.sys().fs.read(&self.paths().update_reapply_file()) else {
+            return false;
+        };
+        serde_json::from_slice::<ReapplyRecord>(&bytes)
+            .is_ok_and(|r| r == ReapplyRecord::of_this_build())
+    }
+
+    /// Writes update-reapply.json for this build's pins, in one step; one that cannot be written
+    /// is one log line (the next start then tries once more).
+    fn write_reapply_record(&self) {
+        let written = serde_json::to_vec(&ReapplyRecord::of_this_build())
+            .ok()
+            .is_some_and(|mut bytes| {
+                bytes.push(b'\n');
+                self.sys()
+                    .fs
+                    .write_atomic(&self.paths().update_reapply_file(), &bytes)
+                    .is_ok()
+            });
+        if !written {
+            self.note_line("update reapply-record=unwritten");
+        }
     }
 
     /// The re-apply (spec §6.2 steps 2-3), on its own thread under `UPDATE_REAPPLY_BUSY`
@@ -608,13 +664,17 @@ impl<M: Machine> Backend<M> {
     /// like every apply (the lock, a restore point, the verify), then the old runtime folders.
     /// The outcome goes to the log (`update reapply=ok|<code>`) and, when the notice is there, to
     /// it. A re-apply that does not commit rolls back to the old runtime, which state.json still
-    /// names, so the prune keeps that folder and the next start tries again.
+    /// names, so the prune keeps that folder; update-reapply.json then holds this build's pins,
+    /// so later starts do not try again until the pins move or an apply commits.
     pub fn update_reapply(&self) {
         let failed = self.reapply_once();
         self.note_line(&format!(
             "update reapply={}",
             failed.as_deref().unwrap_or("ok")
         ));
+        if failed.is_some() {
+            self.write_reapply_record();
+        }
         self.prune_and_say(true);
         if let Some(code) = failed {
             self.update.with(|u| {
@@ -1473,7 +1533,12 @@ mod tests {
             b.updated().unwrap().reapply_failed.as_deref(),
             Some("E_VERIFY_OMP")
         );
-        assert!(b.update_needs_reapply(), "the next start tries again");
+        // Pre-review fix 2 (the ruling on concern 4): tried once for these pins, so the next
+        // start does not try again (`a_failed_re_apply_is_tried_once_per_pin_set`).
+        assert!(
+            !b.update_needs_reapply(),
+            "the next start does not try these pins again"
+        );
     }
 
     /// Spec §6.2 step 3 (Q17): at a normal start the prune runs in its one place, under the
@@ -1574,5 +1639,84 @@ mod tests {
         fake_fs(&b).put(&paused, IN_CMD);
         fake_fs(&b).fail_reads_of(&paused);
         assert!(!b.update_needs_reapply(), "an unreadable pause is a pause");
+    }
+
+    fn reapply_record(b: &Backend<FakeMachine>) -> Option<serde_json::Value> {
+        let bytes = b.sys().fs.read(&b.paths().update_reapply_file()).unwrap()?;
+        Some(serde_json::from_slice(&bytes).unwrap())
+    }
+
+    /// The controller's ruling on concern 4: the automatic re-apply is tried once per pin set. A
+    /// failure writes update-reapply.json with this build's pins; the next start skips the
+    /// re-apply (no apply, no restore point, one log line) and the prune keeps the runtime
+    /// state.json names; the user's own apply that commits deletes the file.
+    #[test]
+    fn a_failed_re_apply_is_tried_once_per_pin_set() {
+        let b = started();
+        applied_on_an_old_omp(&b);
+        fake_process(&b).answer("oh-my-posh.exe", "print", 1, "bad config");
+        b.update_reapply();
+        assert_eq!(
+            reapply_record(&b),
+            Some(serde_json::json!({
+                "version": 1,
+                "omp": OMP_VERSION,
+                "clink": cmdstudio_core::plan::CLINK_VERSION,
+            }))
+        );
+        // The next start: the failure persists, and nothing is tried.
+        let points = b.snapshots_list().unwrap().points.len();
+        assert!(!b.update_needs_reapply(), "tried once for these pins");
+        b.prune_at_start();
+        assert_eq!(
+            b.snapshots_list().unwrap().points.len(),
+            points,
+            "no restore point"
+        );
+        assert_eq!(omp_version_applied(&b), "31.4.0", "no apply");
+        let old = b.paths().runtime_root().join("omp-31.4.0");
+        assert!(b.sys().fs.exists(&old), "named by state.json: kept");
+        assert_eq!(
+            update_lines(&b).last().map(String::as_str),
+            Some("update reapply=skipped")
+        );
+        // The user applies a theme themselves, and it commits: the file goes.
+        fake_process(&b).answer("oh-my-posh.exe", "print", 0, "> ");
+        assert_eq!(apply_terracotta(&b).0.status, ApplyStatus::Committed);
+        assert_eq!(
+            reapply_record(&b),
+            None,
+            "an apply that commits deletes the file"
+        );
+    }
+
+    /// The pins moved again in a newer update, or the file is damaged: it does not match, so the
+    /// re-apply is tried once more.
+    #[test]
+    fn other_pins_or_a_damaged_record_try_the_re_apply_again() {
+        let b = started();
+        applied_on_an_old_omp(&b);
+        let file = b.paths().update_reapply_file();
+        let clink = cmdstudio_core::plan::CLINK_VERSION;
+        fake_fs(&b).put(
+            &file,
+            format!(r#"{{"version":1,"omp":"{OMP_VERSION}","clink":"{clink}"}}"#),
+        );
+        assert!(!b.update_needs_reapply(), "these pins were tried");
+        fake_fs(&b).put(
+            &file,
+            format!(r#"{{"version":1,"omp":"31.4.9","clink":"{clink}"}}"#),
+        );
+        assert!(b.update_needs_reapply(), "new pins: tried again");
+        fake_fs(&b).put(&file, "{ not json");
+        assert!(b.update_needs_reapply(), "a damaged file does not match");
+        fake_fs(&b).put(
+            &file,
+            format!(r#"{{"version":2,"omp":"{OMP_VERSION}","clink":"{clink}"}}"#),
+        );
+        assert!(
+            b.update_needs_reapply(),
+            "another version of the file does not match"
+        );
     }
 }

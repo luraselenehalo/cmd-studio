@@ -61,6 +61,12 @@ impl Paths {
     pub fn update_file(&self) -> PathBuf {
         self.data.join("update.json")
     }
+    /// `<data>\update-reapply.json`: the runtime pins an automatic re-apply after an update was
+    /// tried for and did not commit, so that it is tried once per pin set; any apply that
+    /// commits deletes it (spec §6.2, phase 4b).
+    pub fn update_reapply_file(&self) -> PathBuf {
+        self.data.join("update-reapply.json")
+    }
     /// `<data>\updates`: the verified installer the updater downloaded, until the next start
     /// empties the folder (phase 4b).
     pub fn updates_dir(&self) -> PathBuf {

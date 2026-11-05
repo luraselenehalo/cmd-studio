@@ -530,6 +530,13 @@ pub fn run_apply_with(
     if outcome == Outcome::Committed {
         // Failing to prune costs disk space only.
         let _ = store.prune(KEEP);
+        // The one commit point of every apply (the user's, a Help fix, the CLI's, the
+        // automatic re-apply after an update): the record of a re-apply that did not commit
+        // goes, so a later update that needs one tries it again (phase 4b). A file that
+        // cannot be deleted costs one skipped re-apply for these pins only.
+        if sys.fs.exists(&ctx.paths.update_reapply_file()) {
+            let _ = sys.fs.remove_file(&ctx.paths.update_reapply_file());
+        }
     }
     outcome
 }
