@@ -305,6 +305,21 @@ impl<M: Machine> Backend<M> {
         self.run.with(|r| r.mine.as_ref().map(|m| m.started_at))
     }
 
+    /// Whether this process wrote the run's record (`start_run` found no live earlier run): only
+    /// then does it read the updater's record, check, or install. An instance that
+    /// single-instance is about to end does none of it (Q8).
+    pub(crate) fn run_is_ours(&self) -> bool {
+        self.run.with(|r| r.mine.is_some())
+    }
+
+    /// Writes this run's record again after `end_run` took it away for an install that then did
+    /// not start (Q16): the run goes on and must be noticed if it ends abnormally.
+    pub(crate) fn rewrite_run_record(&self) {
+        if let Some(mine) = self.run.with(|r| r.mine.clone()) {
+            self.write_record(&mine);
+        }
+    }
+
     /// The newest crash note, for the Report tab (recovery spec §5.3): its file name, its time,
     /// and its text (written redacted; redacted once more here, in case the hook had no name to
     /// take out).
@@ -441,6 +456,7 @@ impl<M: Machine> Backend<M> {
         if let Some(mine) = mine {
             self.write_record(&mine);
         }
+        self.update_record_consumed();
         Ok(())
     }
 

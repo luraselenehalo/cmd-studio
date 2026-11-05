@@ -17,6 +17,7 @@ pub mod logs;
 pub mod machine;
 pub mod open;
 pub mod settings;
+pub mod update;
 #[cfg(windows)]
 pub mod webview_watch;
 
@@ -44,9 +45,17 @@ pub fn run_gui(how: backend::run::GuiStart) {
             std::process::exit(1);
         }
     };
+    // The built config, read once: the version the updater compares and records is this one
+    // (Cargo's, or a --config override's in the spike), never a second constant.
+    let context = tauri::generate_context!();
+    let app_version = context.package_info().version.to_string();
     // The run's record, before the window (recovery spec §5.1); `--recovery`'s own steps run on
     // a thread once the window is up, so a slow rollback never delays the window.
     let decided = backend.start_run(how);
+    // The record of an update (spec §6.2, phase 4b), before the window: the first app_status has
+    // the notice. The last run's download goes here too. Nothing for an instance whose record is
+    // another process's (start_run's "still-running").
+    backend.update_after_start(&app_version);
     if how == GuiStart::Restarted {
         // The change `app_restart` cut off is put back now, as its dialog promised (recovery
         // spec §6.3): under the lock, one log line, bounded by the core's timeouts.
@@ -70,9 +79,14 @@ pub fn run_gui(how: backend::run::GuiStart) {
                 }
             },
         ))
+        // The updater (spec §6.2, phase 4b), used from Rust only (update.rs) for the check and
+        // the download; the window gets none of its commands.
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(backend)
         .invoke_handler(ipc::handler())
         .setup(move |app| {
+            let updater = update::TauriUpdater::new(app.handle().clone());
+            app.manage(std::sync::Arc::new(updater));
             // Said and ended here, not returned: Tauri would turn the error into a panic.
             if let Err(why) = open_main_window(app, for_window.paths().webview()) {
                 // Recovery spec §5.4: Yes undoes everything through the backend, under the lock
@@ -128,11 +142,15 @@ pub fn run_gui(how: backend::run::GuiStart) {
             }
             Ok(())
         })
-        .build(tauri::generate_context!());
+        .build(context);
     match built {
         Ok(app) => app.run(move |_, event| {
             if let tauri::RunEvent::Exit = event {
+                // The run's record ends first (Q7: the installer's Restart Manager may end this
+                // process before the exit code runs on), then the automatic install when a
+                // verified download waits and the lock is free (spec §6.2's primary).
                 for_exit.end_run();
+                for_exit.update_at_exit(&update::start_installer);
             }
         }),
         Err(e) => {
@@ -780,6 +798,65 @@ mod tests {
             "on the restarted start only"
         );
         assert_eq!(text.matches(".restart_rollback()").count(), 1);
+    }
+
+    /// Spec §6.2 (phase 4b): the record of an update is read right after the run record and
+    /// before the window (so the first app_status has the notice), with the version the built
+    /// config says; the plugin is registered after single-instance and the updater is Tauri
+    /// state; at exit the run record ends first and the automatic install follows (Q7: the
+    /// installer's Restart Manager may end this process before the exit code runs on).
+    #[test]
+    fn the_update_record_is_read_after_the_run_record_and_the_install_follows_the_runs_end() {
+        let text = production();
+        let context = text
+            .find("let context = tauri::generate_context!()")
+            .unwrap();
+        let version = text
+            .find("context.package_info().version.to_string()")
+            .unwrap();
+        let record = text.find("backend.start_run(how)").unwrap();
+        let read = text
+            .find("backend.update_after_start(&app_version)")
+            .unwrap();
+        let window = text.find("open_main_window(app, ").unwrap();
+        assert!(
+            context < version && version < record,
+            "the version comes from the context"
+        );
+        assert!(
+            record < read && read < window,
+            "after the run record, before the window"
+        );
+        let single = text.find("tauri_plugin_single_instance::init(").unwrap();
+        let updater = text
+            .find("tauri_plugin_updater::Builder::new().build()")
+            .unwrap();
+        assert!(
+            single < updater,
+            "single-instance first, as its plugin asks"
+        );
+        // Two lines: on one, rustfmt would break the call over three.
+        let made = text
+            .find("let updater = update::TauriUpdater::new(app.handle().clone());")
+            .unwrap();
+        let managed = text
+            .find("app.manage(std::sync::Arc::new(updater));")
+            .unwrap();
+        let setup = text.find(".setup(move |app| {").unwrap();
+        assert!(
+            setup < made && made < managed && managed < window,
+            "the updater is Tauri state from the first lines of setup, before the window"
+        );
+        let exit = text.find("tauri::RunEvent::Exit").unwrap();
+        let ended = text.find("for_exit.end_run()").unwrap();
+        let install = text
+            .find("for_exit.update_at_exit(&update::start_installer)")
+            .unwrap();
+        assert!(
+            exit < ended && ended < install,
+            "the record's end, then the install"
+        );
+        assert_eq!(text.matches(".build(context)").count(), 1);
     }
 }
 

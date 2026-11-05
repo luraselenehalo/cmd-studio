@@ -44,6 +44,14 @@ tauri-plugin-single-instance = "=2.5.4"
 # The native Open and Save dialogs for .cmdtheme files, shown from the main thread with the
 # window as parent. Its default features are Linux portals; on Windows it needs none.
 rfd = { version = "=0.17.2", default-features = false }
+# The updater (spec §6.2, phase 4b): GitHub Releases through latest.json, minisign-verified; used
+# from Rust only (update.rs), for the check and the download: the window gets none of its
+# commands (capabilities/default.json, pinned by ipc.rs), and the app starts the installer itself.
+# G10's table lists 2.13.2; 2.13.3 is the newest 2.13.x on the index (tauri ^2.12, so Tauri stays
+# at 2.12.4). Default features: rustls-tls, system-proxy, zip.
+tauri-plugin-updater = "=2.13.3"
+# open.rs: a version from latest.json or update.json must parse as SemVer before it reaches a URL.
+semver = "=1.0.28"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4", "serde"] }

@@ -511,3 +511,51 @@ fn the_main_binary_is_the_default_run_of_the_app_crate() {
     let config: Value = serde_json::from_str(CONFIG).unwrap();
     assert_eq!(config["mainBinaryName"], "cmdstudio");
 }
+
+/// Spec §6.2, §5.10 (phase 4b): the updater's config, exactly: the one endpoint (GitHub's
+/// "latest" download, which serves the newest published release), a quiet install, the public
+/// key (empty until Task 6 fills it; TauriUpdater refuses to check with an empty one), and no
+/// dangerous switch (the spike sets `dangerousInsecureTransportProtocol` through --config only).
+#[test]
+fn the_updater_config_is_the_one_endpoint_quiet_and_without_dangerous_switches() {
+    let config: Value = serde_json::from_str(CONFIG).unwrap();
+    let updater = config
+        .pointer("/plugins/updater")
+        .and_then(Value::as_object)
+        .unwrap();
+    // serde_json's map is ordered by key, not by the file: sorted names, exactly these three.
+    let mut keys: Vec<&str> = updater.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["endpoints", "pubkey", "windows"]);
+    assert_eq!(
+        updater.get("endpoints"),
+        Some(&serde_json::json!([
+            "https://github.com/luraselenehalo/cmd-studio/releases/latest/download/latest.json"
+        ]))
+    );
+    assert_eq!(
+        updater.get("windows"),
+        Some(&serde_json::json!({ "installMode": "quiet" }))
+    );
+    let pubkey = updater.get("pubkey").and_then(Value::as_str).unwrap();
+    assert!(
+        pubkey
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '='),
+        "base64 or empty: {pubkey:?}"
+    );
+    assert_eq!(
+        config
+            .pointer("/plugins")
+            .and_then(Value::as_object)
+            .map(|p| p.len()),
+        Some(1),
+        "the updater is the only plugin with a config"
+    );
+    assert!(
+        !CONFIG.contains("dangerous"),
+        "no dangerous switch in the committed config"
+    );
+    let merged: tauri::utils::config::Config = serde_json::from_value(config).unwrap();
+    assert!(merged.plugins.0.contains_key("updater"));
+}
