@@ -34,6 +34,7 @@
 use serde_json::Value;
 use std::path::Path;
 use std::sync::{Mutex, PoisonError};
+use std::time::Duration;
 use tauri::{AppHandle, Manager};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
@@ -74,11 +75,15 @@ impl UpdateError {
     }
 
     /// What the log line carries after `check=`/`download=`: the kind, and for an unclassified
-    /// error its text, folded onto one line and cut at 160 characters.
+    /// error its text without any path or URL (`<path>` from the first one on), folded onto one
+    /// line and cut at 160 characters.
     pub fn log_text(&self) -> String {
         match self {
             UpdateError::Other(text) => {
-                let folded: String = text.replace(['\r', '\n'], " ").chars().take(160).collect();
+                let folded: String = without_paths(&text.replace(['\r', '\n'], " "))
+                    .chars()
+                    .take(160)
+                    .collect();
                 format!("{} other={folded}", self.kind())
             }
             _ => self.kind().to_string(),
@@ -105,6 +110,48 @@ impl std::fmt::Display for UpdateError {
 pub trait Updater {
     fn check(&self) -> Result<Option<Available>, UpdateError>;
     fn download(&self, available: &Available) -> Result<Vec<u8>, UpdateError>;
+}
+
+/// How long the check of `latest.json` may take, from the connection to the last byte (review
+/// Minor 3): a network that hangs ends as an offline check, one log line, `Idle`.
+pub const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long the download of the installer may take, from the connection to the last byte: an
+/// installer of some tens of MB on a slow line, with room.
+pub const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
+/// Runs `request` only when `pubkey` is not empty: without the founder's key nothing could be
+/// verified, so nothing is asked of the network (the committed config holds none until Task 6).
+fn with_pubkey<T>(
+    pubkey: &str,
+    request: impl FnOnce() -> Result<T, UpdateError>,
+) -> Result<T, UpdateError> {
+    if pubkey.trim().is_empty() {
+        return Err(UpdateError::Manifest(
+            "tauri.conf.json has no updater public key".to_string(),
+        ));
+    }
+    request()
+}
+
+/// `text` with everything from its first path-like word on replaced by `<path>`: a word that
+/// holds `\` or `/` (a Windows or UNC path, a Unix path, a URL) and all that follows it, since a
+/// path may hold spaces and the user's name (review Minor 7). Text without one is as it was.
+fn without_paths(text: &str) -> String {
+    let Some(slash) = text.find(['\\', '/']) else {
+        return text.to_string();
+    };
+    let before = text.get(..slash).unwrap_or("");
+    let word_start = before
+        .char_indices()
+        .rev()
+        .find(|(_, c)| c.is_whitespace())
+        .map_or(0, |(i, c)| i + c.len_utf8());
+    let kept = text.get(..word_start).unwrap_or("").trim_end();
+    if kept.is_empty() {
+        "<path>".to_string()
+    } else {
+        format!("{kept} <path>")
+    }
 }
 
 /// U5's rule, set explicitly on the plugin's builder: only a strictly higher version is an update.
@@ -193,19 +240,17 @@ pub fn classify(e: tauri_plugin_updater::Error) -> UpdateError {
 
 impl Updater for TauriUpdater {
     fn check(&self) -> Result<Option<Available>, UpdateError> {
-        if self.pubkey().is_empty() {
-            return Err(UpdateError::Manifest(
-                "tauri.conf.json has no updater public key".to_string(),
-            ));
-        }
-        let updater = self
-            .app
-            .updater_builder()
-            .version_comparator(|current, release| is_newer(&current, &release.version))
-            .build()
-            .map_err(classify)?;
-        let Some(update) = tauri::async_runtime::block_on(updater.check()).map_err(classify)?
-        else {
+        let found = with_pubkey(&self.pubkey(), || {
+            let updater = self
+                .app
+                .updater_builder()
+                .version_comparator(|current, release| is_newer(&current, &release.version))
+                .timeout(CHECK_TIMEOUT)
+                .build()
+                .map_err(classify)?;
+            tauri::async_runtime::block_on(updater.check()).map_err(classify)
+        })?;
+        let Some(update) = found else {
             return Ok(None);
         };
         let notes_url = crate::open::release_url(&update.version).ok_or_else(|| {
@@ -223,13 +268,19 @@ impl Updater for TauriUpdater {
     }
 
     fn download(&self, available: &Available) -> Result<Vec<u8>, UpdateError> {
-        let found = self.found.lock().unwrap_or_else(PoisonError::into_inner);
-        let update = found
+        // A copy, so the slot is not held for the whole download; `check` sets no timeout on the
+        // `Update` it makes (plugin `src/updater.rs`, `timeout: None`), so the download's is set here.
+        let mut update = self
+            .found
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
             .as_ref()
             .filter(|u| u.version == available.version)
+            .cloned()
             .ok_or_else(|| {
                 UpdateError::Manifest(format!("no check offered version {}", available.version))
             })?;
+        update.timeout = Some(DOWNLOAD_TIMEOUT);
         tauri::async_runtime::block_on(update.download(|_, _| {}, || {})).map_err(classify)
     }
 }
@@ -291,14 +342,16 @@ pub fn start_check(
 
 /// The tests' updater: answers what the test scripted and records what was asked, in order.
 #[cfg(test)]
-pub(crate) struct FakeUpdater {
+pub(crate) struct FakeUpdater<'a> {
     pub check: std::cell::RefCell<Result<Option<Available>, UpdateError>>,
     pub bytes: std::cell::RefCell<Result<Vec<u8>, UpdateError>>,
     calls: std::cell::RefCell<Vec<String>>,
+    /// Runs inside `download`, before it answers: what happens while a download is in flight.
+    during_download: Option<Box<dyn Fn() + 'a>>,
 }
 
 #[cfg(test)]
-impl FakeUpdater {
+impl<'a> FakeUpdater<'a> {
     /// Offers `version` and the bytes `MZ-the-installer` (16 bytes) for it.
     pub fn offering(version: &str) -> Self {
         let notes_url = crate::open::release_url(version).unwrap_or_default();
@@ -309,6 +362,7 @@ impl FakeUpdater {
             }))),
             bytes: std::cell::RefCell::new(Ok(b"MZ-the-installer".to_vec())),
             calls: std::cell::RefCell::new(Vec::new()),
+            during_download: None,
         }
     }
     /// Up to date: the check offers nothing.
@@ -323,13 +377,18 @@ impl FakeUpdater {
         *fake.check.borrow_mut() = Err(e);
         fake
     }
+    /// Runs `f` inside every `download`, before it answers.
+    pub fn during_download(mut self, f: impl Fn() + 'a) -> Self {
+        self.during_download = Some(Box::new(f));
+        self
+    }
     pub fn calls(&self) -> Vec<String> {
         self.calls.borrow().clone()
     }
 }
 
 #[cfg(test)]
-impl Updater for FakeUpdater {
+impl Updater for FakeUpdater<'_> {
     fn check(&self) -> Result<Option<Available>, UpdateError> {
         self.calls.borrow_mut().push("check".to_string());
         self.check.borrow().clone()
@@ -338,6 +397,9 @@ impl Updater for FakeUpdater {
         self.calls
             .borrow_mut()
             .push(format!("download {}", available.version));
+        if let Some(during) = &self.during_download {
+            during();
+        }
         self.bytes.borrow().clone()
     }
 }
@@ -444,5 +506,142 @@ mod tests {
                 .kind(),
             "offline"
         );
+    }
+
+    /// Review Minor 1: every plugin error a test can build lands on the kind its meaning says
+    /// (the others need a value of reqwest, http, minisign, base64, url, zip or tauri).
+    #[test]
+    fn classify_gives_each_plugin_error_its_kind() {
+        use tauri_plugin_updater::Error;
+        let kind = |e: Error| classify(e).kind();
+        assert_eq!(
+            kind(Error::Network("503 Service Unavailable".into())),
+            "offline"
+        );
+        assert_eq!(kind(Error::Io(std::io::Error::other("reset"))), "offline");
+        assert_eq!(
+            kind(Error::SignedVersionMismatch {
+                signed: "0.1.0".into(),
+                announced: "0.2.0".into()
+            }),
+            "signature"
+        );
+        assert_eq!(kind(Error::MissingSignedVersion), "signature");
+        assert_eq!(kind(Error::SignatureUtf8("x".into())), "signature");
+        for manifest in [
+            Error::EmptyEndpoints,
+            Error::ReleaseNotFound,
+            Error::TargetNotFound("windows-x86_64".into()),
+            Error::TargetsNotFound(vec![]),
+            Error::Serialization(serde_json::from_str::<u8>("x").unwrap_err()),
+            Error::Semver(semver::Version::parse("x").unwrap_err()),
+            Error::UnsupportedOs,
+            Error::UnsupportedArch,
+            Error::InsecureTransportProtocol,
+            Error::FormatDate,
+            Error::InvalidUpdaterFormat,
+        ] {
+            let text = manifest.to_string();
+            assert_eq!(kind(manifest), "manifest", "{text}");
+        }
+        for other in [
+            Error::FailedToDetermineExtractPath,
+            Error::TempDirNotOnSameMountPoint,
+            Error::PreviousAppNotRestored(std::path::PathBuf::from("old")),
+            Error::BinaryNotFoundInArchive,
+            Error::TempDirNotFound,
+            Error::AuthenticationFailed,
+            Error::DebInstallFailed,
+            Error::PackageInstallFailed,
+        ] {
+            let text = other.to_string();
+            assert!(matches!(classify(other), UpdateError::Other(_)), "{text}");
+        }
+    }
+
+    /// Review Minor 1: without a public key the request is never made, and the refusal is a
+    /// manifest error (one `update check=manifest` line); with a key it is made. TauriUpdater's
+    /// check goes through this gate before it builds the plugin's updater.
+    #[test]
+    fn an_empty_pubkey_makes_no_request() {
+        for empty in ["", "   "] {
+            let asked = std::cell::Cell::new(false);
+            let refused = with_pubkey(empty, || {
+                asked.set(true);
+                Ok(())
+            });
+            assert!(!asked.get(), "{empty:?}: no request");
+            assert_eq!(refused.unwrap_err().kind(), "manifest");
+        }
+        let asked = std::cell::Cell::new(false);
+        with_pubkey("RWQ8dmbZ4CwhEQ", || {
+            asked.set(true);
+            Ok(())
+        })
+        .unwrap();
+        assert!(asked.get());
+        let source = include_str!("update.rs");
+        let check = source
+            .get(source.find("impl Updater for TauriUpdater {").unwrap()..)
+            .unwrap()
+            .split_once("\n}\n")
+            .unwrap()
+            .0;
+        let gate = check.find("with_pubkey(&self.pubkey(), ||").unwrap();
+        let builder = check.find(".updater_builder()").unwrap();
+        assert!(gate < builder, "the gate comes before the plugin's updater");
+    }
+
+    /// Review Minor 3: the check and the download each have a timeout, so a hung network ends as
+    /// an offline error (the backend's tests show the one line and `Idle`).
+    #[test]
+    fn the_check_and_the_download_have_timeouts() {
+        assert_eq!(CHECK_TIMEOUT, Duration::from_secs(30));
+        assert!(DOWNLOAD_TIMEOUT >= Duration::from_secs(5 * 60));
+        let source = include_str!("update.rs");
+        let tauri = source
+            .get(source.find("impl Updater for TauriUpdater {").unwrap()..)
+            .unwrap()
+            .split_once("\n}\n")
+            .unwrap()
+            .0;
+        assert!(tauri.contains(".timeout(CHECK_TIMEOUT)"), "{tauri}");
+        assert!(
+            tauri.contains("update.timeout = Some(DOWNLOAD_TIMEOUT);"),
+            "{tauri}"
+        );
+    }
+
+    /// Review Minor 7: the text an unclassified error puts on the log line never holds a path
+    /// (paths hold the user's name) or a URL: from the first path-like word on, it is `<path>`.
+    #[test]
+    fn an_unclassified_error_never_puts_a_path_on_the_log_line() {
+        let e = classify(tauri_plugin_updater::Error::PreviousAppNotRestored(
+            std::path::PathBuf::from(r"C:\Users\tester\AppData\Local\CMD Studio.old"),
+        ));
+        assert_eq!(
+            e.log_text(),
+            "offline other=failed to install the update and to restore the previous app, which \
+             was left at <path>"
+        );
+        assert!(!e.log_text().contains("tester"));
+        for (text, line) in [
+            (
+                r"in use: C:\Users\Mary Ann\app.exe by pid 4",
+                "offline other=in use: <path>",
+            ),
+            (r"\\server\share\tester\f", "offline other=<path>"),
+            (
+                "error sending request for url (https://example.com/a)",
+                "offline other=error sending request for url <path>",
+            ),
+            (
+                "opening /home/tester/x failed",
+                "offline other=opening <path>",
+            ),
+            ("no path here", "offline other=no path here"),
+        ] {
+            assert_eq!(UpdateError::Other(text.into()).log_text(), line, "{text}");
+        }
     }
 }

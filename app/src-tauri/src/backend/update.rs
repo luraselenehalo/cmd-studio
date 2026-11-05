@@ -116,6 +116,12 @@ struct UpdateInner {
     updated: Option<Updated>,
     /// `app_restart` spawned its child: the exit that follows installs nothing (Q9).
     restarting: bool,
+    /// A download or an install runs now (the check's download, "Update now", the close's
+    /// install): claimed and let go under this lock, so two never run at once (review I1).
+    busy: bool,
+    /// An installer was started in this run: nothing installs again, and the exit installs
+    /// nothing (review I1: one install per run).
+    spawned: bool,
 }
 
 /// The updater's state of this run, behind one lock (a poisoned lock is used as it is).
@@ -184,27 +190,44 @@ impl<M: Machine> Backend<M> {
             Ok(Some(available)) => available,
         };
         self.note_line(&format!("update available={}", available.version));
-        self.update.with(|u| u.available = Some(available.clone()));
-        if mode == UpdateMode::Notify {
-            return self.set_update_state(UpdateState::Available {
-                version: available.version,
-            });
-        }
-        self.set_update_state(UpdateState::Downloading {
-            version: available.version.clone(),
+        // What was offered and what comes next, in one step, so "Update now" (which needs
+        // `available`) never runs between the two; the download is claimed (review I1).
+        let download = self.update.with(|u| {
+            u.available = Some(available.clone());
+            if u.busy || u.spawned {
+                return false;
+            }
+            let version = available.version.clone();
+            if mode == UpdateMode::Notify {
+                u.state = UpdateState::Available { version };
+                return false;
+            }
+            u.busy = true;
+            u.state = UpdateState::Downloading { version };
+            true
         });
-        match self.update_download(updater, &available) {
-            Ok(()) => {
-                self.note_line(&format!("update downloaded={}", available.version));
-                self.set_update_state(UpdateState::Ready {
-                    version: available.version,
-                })
-            }
-            Err(why) => {
-                self.note_line(&format!("update download={why}"));
-                self.set_update_state(UpdateState::Idle)
-            }
+        if !download {
+            return self.update.with(|u| u.state.clone());
         }
+        let downloaded = self.update_download(updater, &available);
+        match &downloaded {
+            Ok(()) => self.note_line(&format!("update downloaded={}", available.version)),
+            Err(why) => self.note_line(&format!("update download={why}")),
+        }
+        // The claim's end and the outcome in one step; a state another step set meanwhile
+        // (Installing above all) is never written over.
+        self.update.with(|u| {
+            u.busy = false;
+            if matches!(u.state, UpdateState::Downloading { .. }) {
+                u.state = match downloaded {
+                    Ok(()) => UpdateState::Ready {
+                        version: available.version,
+                    },
+                    Err(_) => UpdateState::Idle,
+                };
+            }
+            u.state.clone()
+        })
     }
 
     /// Downloads and verifies through the updater, writes the bytes to `updates\` in one step and
@@ -310,16 +333,49 @@ impl<M: Machine> Backend<M> {
     /// the lock is taken (E_BUSY while a change runs), the file is checked against its hash, the
     /// record is written, the run ended, and the installer started by `spawn` with a relaunch
     /// (`update::start_installer`); the caller then ends the process (`app.exit(0)`, whose exit
-    /// hook installs nothing more: the state is `Installing`). Answers only on a failure: the
+    /// hook installs nothing more: an installer was started). Answers only on a failure: the
     /// record is taken back, the run record written again (Q16), and the state is as before.
+    /// One install per run (review I1): while a download or an install runs, or once an
+    /// installer was started, it is refused with E_BUSY and one log line, and does nothing.
     pub fn update_install(
         &self,
         updater: &dyn Updater,
         spawn: &dyn Fn(&Path, bool) -> Result<(), String>,
     ) -> Result<(), AppError> {
-        let Some(available) = self.update.with(|u| u.available.clone()) else {
-            return Err(AppError::internal("no update is available to install"));
+        let claim = self.update.with(|u| {
+            if u.busy || u.spawned {
+                return Err(true);
+            }
+            let available = u.available.clone().ok_or(false)?;
+            u.busy = true;
+            Ok(available)
+        });
+        let available = match claim {
+            Ok(available) => available,
+            Err(true) => {
+                self.note_line("update install=already");
+                return Err(AppError::coded(
+                    "E_BUSY",
+                    "the update is already being downloaded or installed",
+                ));
+            }
+            Err(false) => return Err(AppError::internal("no update is available to install")),
         };
+        let result = self.update_install_claimed(updater, spawn, available);
+        self.update.with(|u| {
+            u.busy = false;
+            u.spawned |= result.is_ok();
+        });
+        result
+    }
+
+    /// `update_install`'s steps, with the claim held by the caller.
+    fn update_install_claimed(
+        &self,
+        updater: &dyn Updater,
+        spawn: &dyn Fn(&Path, bool) -> Result<(), String>,
+        available: Available,
+    ) -> Result<(), AppError> {
         let ready = UpdateState::Ready {
             version: available.version.clone(),
         };
@@ -372,35 +428,60 @@ impl<M: Machine> Backend<M> {
     }
 
     /// At close (spec §6.2's primary; `lib.rs` on `RunEvent::Exit`, after `end_run`): when a
-    /// verified download is ready, this run is its own, the exit is not `app_restart`'s and the
-    /// state is not already `Installing`, and the lock is free, the record is written and the file
-    /// started with `spawn` (no relaunch); the lock is let go when this returns, which is after the
-    /// start. Busy, a lock file that cannot be opened, a record that cannot be written, or a
-    /// restart postpone the install to the next launch or close, each with one log line; a file
-    /// that changed is never started.
+    /// verified download is ready, this run is its own, the exit is not `app_restart`'s, no
+    /// installer was started in this run yet (review I1), and the lock is free, the record is
+    /// written and the file started with `spawn` (no relaunch); the lock is let go when this
+    /// returns, which is after the start. Busy (the lock, or an "Update now" that still runs), a
+    /// lock file that cannot be opened, a record that cannot be written, or a restart postpone
+    /// the install to the next launch or close, each with one log line; a file that changed is
+    /// never started.
     pub fn update_at_exit(&self, spawn: &dyn Fn(&Path, bool) -> Result<(), String>) {
         if !self.run_is_ours() {
             return;
         }
-        let (available, restarting, installing) = self.update.with(|u| {
-            (
-                u.ready.as_ref().map(|r| r.available.clone()),
-                u.restarting,
-                matches!(u.state, UpdateState::Installing { .. }),
-            )
+        // Claimed in one step (review I1): nothing after an installer was started in this run;
+        // an "Update now" that still runs postpones this one.
+        let claim = self.update.with(|u| {
+            if u.spawned {
+                return None;
+            }
+            let available = u.ready.as_ref().map(|r| r.available.clone())?;
+            if u.busy {
+                return Some(Err(available));
+            }
+            u.busy = true;
+            Some(Ok((available, u.restarting)))
         });
-        let Some(available) = available else {
-            return;
+        let (available, restarting) = match claim {
+            None => return,
+            Some(Err(available)) => return self.update_postponed(&available, "busy"),
+            Some(Ok(claimed)) => claimed,
         };
-        if installing {
-            return;
-        }
+        let started = self.update_at_exit_claimed(spawn, &available, restarting);
+        self.update.with(|u| {
+            u.busy = false;
+            u.spawned |= started;
+        });
+    }
+
+    fn update_postponed(&self, available: &Available, reason: &str) {
+        self.note_line(&format!("update postponed={reason}"));
+        self.set_update_state(UpdateState::Postponed {
+            version: available.version.clone(),
+            reason: reason.to_string(),
+        });
+    }
+
+    /// `update_at_exit`'s steps, with the claim held by the caller: whether the installer started.
+    fn update_at_exit_claimed(
+        &self,
+        spawn: &dyn Fn(&Path, bool) -> Result<(), String>,
+        available: &Available,
+        restarting: bool,
+    ) -> bool {
         let postponed = |reason: &str| {
-            self.note_line(&format!("update postponed={reason}"));
-            self.set_update_state(UpdateState::Postponed {
-                version: available.version.clone(),
-                reason: reason.to_string(),
-            });
+            self.update_postponed(available, reason);
+            false
         };
         if restarting {
             return postponed("restart");
@@ -411,21 +492,23 @@ impl<M: Machine> Backend<M> {
             Err(_) => return postponed("lock"),
         };
         let Some(file) = self.update_ready_file() else {
-            return;
+            return false;
         };
-        if !self.write_update_record(&self.update_record_for(&available)) {
+        if !self.write_update_record(&self.update_record_for(available)) {
             return postponed("record");
         }
         match spawn(&file, false) {
             Ok(()) => {
                 self.note_line(&format!("update installing={} how=exit", available.version));
                 self.set_update_state(UpdateState::Installing {
-                    version: available.version,
+                    version: available.version.clone(),
                 });
+                true
             }
             Err(_) => {
                 let _ = self.sys().fs.remove_file(&self.paths().update_file());
                 self.note_line("update install=spawn");
+                false
             }
         }
     }
@@ -1015,5 +1098,138 @@ mod tests {
             }
         );
         assert_eq!(fake.calls(), ["check", "download 0.2.0"]);
+    }
+
+    /// Review I1 (one install per run): a second "Update now" while the first one's download
+    /// runs is refused (E_BUSY, one log line, nothing downloaded or started); after the first one
+    /// started the installer, another click is refused too, and the exit installs nothing.
+    #[test]
+    fn a_double_update_now_spawns_once() {
+        let b = started();
+        b.update_after_start("0.1.0");
+        set_mode(&b, UpdateMode::Notify);
+        assert_eq!(
+            b.update_check_and_download(&FakeUpdater::offering("0.2.0")),
+            UpdateState::Available {
+                version: "0.2.0".into()
+            }
+        );
+        let spawned = RefCell::new(Vec::new());
+        let spawn = |f: &Path, relaunch: bool| {
+            spawned.borrow_mut().push((f.to_path_buf(), relaunch));
+            Ok(())
+        };
+        let second = RefCell::new(None);
+        let plain = FakeUpdater::offering("0.2.0");
+        let first = FakeUpdater::offering("0.2.0").during_download(|| {
+            *second.borrow_mut() = Some(b.update_install(&plain, &spawn).map_err(|e| e.code));
+        });
+        b.update_install(&first, &spawn).unwrap();
+        assert_eq!(*second.borrow(), Some(Err("E_BUSY".to_string())));
+        assert_eq!(
+            plain.calls(),
+            Vec::<String>::new(),
+            "the second click downloads nothing"
+        );
+        let file = b.paths().updates_dir().join("cmdstudio-0.2.0-setup.exe");
+        assert_eq!(*spawned.borrow(), [(file.clone(), true)]);
+        assert_eq!(
+            b.update_install(&plain, &spawn).unwrap_err().code,
+            "E_BUSY",
+            "an installer was started: no second one"
+        );
+        b.update_at_exit(&spawn);
+        assert_eq!(
+            *spawned.borrow(),
+            [(file, true)],
+            "the exit installs nothing"
+        );
+        let lines = update_lines(&b);
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|l| *l == "update install=already")
+                .count(),
+            2
+        );
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|l| l.starts_with("update installing="))
+                .count(),
+            1
+        );
+        assert_eq!(
+            b.update_status().unwrap().state,
+            UpdateState::Installing {
+                version: "0.2.0".into()
+            }
+        );
+    }
+
+    /// Review I1, automatic mode: "Update now" (the Recovery page) while the background download
+    /// runs is refused and starts nothing; once the download is ready, "Update now" uses it and
+    /// starts the installer once, and the exit that follows installs nothing more.
+    #[test]
+    fn update_now_during_the_background_download_spawns_once() {
+        let b = started();
+        b.update_after_start("0.1.0");
+        let spawned = RefCell::new(Vec::new());
+        let spawn = |f: &Path, relaunch: bool| {
+            spawned.borrow_mut().push((f.to_path_buf(), relaunch));
+            Ok(())
+        };
+        let during = RefCell::new(None);
+        let now = FakeUpdater::offering("0.2.0");
+        let background = FakeUpdater::offering("0.2.0").during_download(|| {
+            *during.borrow_mut() = Some(b.update_install(&now, &spawn).map_err(|e| e.code));
+        });
+        assert_eq!(
+            b.update_check_and_download(&background),
+            UpdateState::Ready {
+                version: "0.2.0".into()
+            }
+        );
+        assert_eq!(*during.borrow(), Some(Err("E_BUSY".to_string())));
+        assert!(
+            spawned.borrow().is_empty(),
+            "nothing started during the download"
+        );
+        b.update_install(&now, &spawn).unwrap();
+        assert_eq!(
+            now.calls(),
+            Vec::<String>::new(),
+            "the background download is used"
+        );
+        let file = b.paths().updates_dir().join("cmdstudio-0.2.0-setup.exe");
+        assert_eq!(*spawned.borrow(), [(file.clone(), true)]);
+        b.update_at_exit(&spawn);
+        assert_eq!(
+            *spawned.borrow(),
+            [(file, true)],
+            "the exit installs nothing"
+        );
+        assert_eq!(
+            b.update_status().unwrap().state,
+            UpdateState::Installing {
+                version: "0.2.0".into()
+            }
+        );
+    }
+
+    /// Review Minor 3: a download that hangs ends at the updater's timeout as an offline error:
+    /// one log line, `Idle`, nothing written.
+    #[test]
+    fn a_download_that_times_out_is_one_line_and_idle() {
+        let b = started();
+        b.update_after_start("0.1.0");
+        let fake = FakeUpdater::offering("0.2.0");
+        *fake.bytes.borrow_mut() = Err(UpdateError::Offline("operation timed out".into()));
+        assert_eq!(b.update_check_and_download(&fake), UpdateState::Idle);
+        assert_eq!(
+            update_lines(&b),
+            ["update available=0.2.0", "update download=offline"]
+        );
+        assert!(!b.sys().fs.exists(&b.paths().updates_dir()));
     }
 }
