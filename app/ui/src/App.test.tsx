@@ -376,6 +376,27 @@ describe("the updater (spec §6.2, phase 4b)", () => {
     expect(ipc.state.calls.filter((c) => c === "crashDismiss")).toEqual([]);
   });
 
+  it("waits for the re-apply after an update with its own words, then shows the notice", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const { ipc } = await mount({ update: "updated", busy: "update_reapply", settings: { wizardDone: true } });
+      expect(await screen.findByText("CMD Studio is still updating the theme for the new version…")).toBeTruthy();
+      expect(ipc.state.calls).not.toContain("settingsGet");
+      ipc.state.busy = null;
+      await vi.advanceTimersByTimeAsync(2100);
+      await screen.findByRole("heading", { name: "Home" });
+      expect(await screen.findByText("Updated to v0.2.0.")).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("says when the theme could not be applied again for the new version", async () => {
+    await home({ update: "updated", updateReapplyFailed: "E_VERIFY_OMP" });
+    expect(await screen.findByText(/^Updated to v0\.2\.0\. The theme could not be applied again for the new version \(E_VERIFY_OMP\)/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "What changed" })).toBeTruthy();
+  });
+
   it("shows the offer once the check of this run has run, polling until then (Q5)", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {

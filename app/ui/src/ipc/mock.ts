@@ -359,6 +359,8 @@ export interface MockOptions {
   update?: "off" | "pending" | "idle" | "available" | "ready" | "updated";
   /** The version the updater offers or brought; 0.2.0 when not given. */
   updateVersion?: string;
+  /** The re-apply after the update did not commit with this code (spec §6.2); `updated` only. */
+  updateReapplyFailed?: string;
 }
 
 /** The mock's own state, open to the tests. */
@@ -461,7 +463,7 @@ export function createMockIpc(options: MockOptions = {}): Ipc & { state: MockSta
     },
     updated:
       options.update === "updated"
-        ? { from: "0.1.0", to: options.updateVersion ?? "0.2.0", notesUrl: `https://github.com/luraselenehalo/cmd-studio/releases/tag/v${options.updateVersion ?? "0.2.0"}` }
+        ? { from: "0.1.0", to: options.updateVersion ?? "0.2.0", notesUrl: `https://github.com/luraselenehalo/cmd-studio/releases/tag/v${options.updateVersion ?? "0.2.0"}`, reapplyFailed: options.updateReapplyFailed ?? null }
         : null,
     updateInstalls: 0,
   };

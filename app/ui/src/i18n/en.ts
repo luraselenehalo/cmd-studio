@@ -196,6 +196,8 @@ export const en = {
   "start.crashed": "CMD Studio closed unexpectedly at {time}. A crash note was kept for the problem report.",
   "start.crashedNoReport": "CMD Studio closed unexpectedly after starting at {time}.",
   "start.updated": "Updated to v{version}.",
+  "start.updateReapply": "CMD Studio is still updating the theme for the new version…",
+  "start.updatedReapplyFailed": "Updated to v{version}. The theme could not be applied again for the new version ({code}): run the health check on the Help page, or apply the theme again from the Themes page.",
   "start.whatChanged": "What changed",
   "recovery.title": "Recovery mode",
   "recovery.why.failedStarts": "CMD Studio failed to start {n} times in a row, so it opened in recovery mode. Nothing of your themes was loaded.",

@@ -8,11 +8,15 @@
 //! record does any of it (`run_is_ours`): an instance that single-instance is about to end reads,
 //! checks and installs nothing.
 use super::{Backend, Machine};
+use crate::backend::apply::{ApplyRequest, ApplyStatus, PlanOutcome};
 use crate::error::AppError;
 use crate::settings::UpdateMode;
 use crate::update::{Available, Updater};
 use cmdstudio_core::adapters::FsLock;
+use cmdstudio_core::cleanup::{prune_old_runtimes, runtime_dirs_named_by};
+use cmdstudio_core::plan::runtime_changed;
 use cmdstudio_core::resources::sha256_hex;
+use cmdstudio_core::state::State;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
@@ -93,6 +97,9 @@ pub struct Updated {
     pub from: String,
     pub to: String,
     pub notes_url: String,
+    /// The code of a re-apply that did not commit (spec §6.2 step 2): the theme stays as it was
+    /// on the old runtime, and the notice says so.
+    pub reapply_failed: Option<String>,
 }
 
 /// A verified download: the file and the hash of the bytes the plugin verified, which the file
@@ -519,8 +526,8 @@ impl<M: Machine> Backend<M> {
     /// (`update installed to=…`); else the installer did not finish (`update failed to=…`), and
     /// the record goes. A record that cannot be read stays and is said; one that is not this
     /// version's, not JSON, or names a version that is not SemVer is damaged: said and deleted.
-    /// The prune of old runtime folders is not here (Task 5: one place, under the lock, never in
-    /// safe mode).
+    /// The prune of old runtime folders is not here: it has one place, `prune_runtimes`, under
+    /// the lock, never in safe mode (Q17). `reapply_failed` is `None` until `update_reapply`.
     pub fn update_after_start(&self, current_version: &str) {
         if !self.run_is_ours() {
             return;
@@ -559,6 +566,7 @@ impl<M: Machine> Backend<M> {
                 from: record.from,
                 to: record.to,
                 notes_url,
+                reapply_failed: None,
             })
         });
     }
@@ -570,16 +578,117 @@ impl<M: Machine> Backend<M> {
             let _ = self.sys().fs.remove_file(&self.paths().update_file());
         }
     }
+
+    /// Whether this start must apply the theme again (spec §6.2 step 2): a theme is applied and
+    /// its runtime versions are not this build's pins, as an update that moved a pin leaves
+    /// state.json, a by-hand upgrade included (no record then). state.json that cannot be read
+    /// decides nothing: doctor says what is wrong with it.
+    pub fn update_needs_reapply(&self) -> bool {
+        State::load(self.sys().fs, &self.paths().state_file())
+            .map(|state| runtime_changed(&state))
+            .unwrap_or(false)
+    }
+
+    /// The re-apply (spec §6.2 steps 2-3), on its own thread under `UPDATE_REAPPLY_BUSY`
+    /// (`lib.rs`): the applied theme as state.json names it, through `plan_apply` and `apply`
+    /// like every apply (the lock, a restore point, the verify), then the old runtime folders.
+    /// The outcome goes to the log (`update reapply=ok|<code>`) and, when the notice is there, to
+    /// it. A re-apply that does not commit rolls back to the old runtime, which state.json still
+    /// names, so the prune keeps that folder and the next start tries again.
+    pub fn update_reapply(&self) {
+        let failed = self.reapply_once();
+        self.note_line(&format!(
+            "update reapply={}",
+            failed.as_deref().unwrap_or("ok")
+        ));
+        self.prune_and_say(true);
+        if let Some(code) = failed {
+            self.update.with(|u| {
+                if let Some(updated) = &mut u.updated {
+                    updated.reapply_failed = Some(code);
+                }
+            });
+        }
+    }
+
+    /// One apply of the theme state.json names; `None` when it committed, else the code.
+    fn reapply_once(&self) -> Option<String> {
+        let state = match State::load(self.sys().fs, &self.paths().state_file()) {
+            Ok(state) => state,
+            Err(e) => return Some(e.code().to_string()),
+        };
+        let applied = state.applied?;
+        let req = ApplyRequest {
+            theme_id: applied.theme_id,
+            target: applied.target,
+            set_wt_default_profile: applied.set_default,
+            replace_other_clink: false,
+        };
+        let plan = match self.plan_apply(req.clone()) {
+            Ok(PlanOutcome::Ready { plan }) => plan,
+            // Another Clink appeared in AutoRun: the user decides on the home page, not a thread.
+            Ok(PlanOutcome::OtherClink { .. }) => {
+                return Some("E_AUTORUN_FOREIGN_CLINK".to_string())
+            }
+            Err(e) => return Some(e.code),
+        };
+        match self.apply(req, &plan.digest, &mut |_| {}) {
+            Ok(outcome) if outcome.status == ApplyStatus::Committed => None,
+            Ok(outcome) => Some(
+                outcome
+                    .error
+                    .map(|e| e.code)
+                    .unwrap_or_else(|| crate::error::INTERNAL.to_string()),
+            ),
+            Err(e) => Some(e.code),
+        }
+    }
+
+    /// Spec §6.2 step 3, the prune's one place (Q17): the runtime folders of other versions than
+    /// this build's, except the ones state.json names, under the lock of spec §5.5 (`None` when
+    /// another change holds it: the next start tries again). state.json that cannot be read
+    /// prunes nothing: what AutoRun runs is not known then.
+    pub(crate) fn prune_runtimes(&self) -> Option<usize> {
+        let _lock = self
+            .sys()
+            .fs
+            .try_lock(&self.paths().lock_file())
+            .ok()
+            .flatten()?;
+        let Ok(state) = State::load(self.sys().fs, &self.paths().state_file()) else {
+            return Some(0);
+        };
+        let keep = runtime_dirs_named_by(&state, self.paths());
+        Some(prune_old_runtimes(self.sys(), self.paths(), &keep).len())
+    }
+
+    /// The prune with its log line: always after a re-apply (`always`), else only when something
+    /// went or the lock was busy, so a quiet start writes nothing.
+    fn prune_and_say(&self, always: bool) {
+        match self.prune_runtimes() {
+            None => self.note_line("update pruned=busy"),
+            Some(n) if always || n > 0 => self.note_line(&format!("update pruned={n}")),
+            Some(_) => {}
+        }
+    }
+
+    /// A normal start that needs no re-apply (`lib.rs`, outside safe mode): the prune alone.
+    pub fn prune_at_start(&self) {
+        self.prune_and_say(false);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::backend::run::GuiStart;
+    use crate::backend::testing::{apply_terracotta, fake_process};
     use crate::backend::testing::{backend, fake_fs, fake_host};
     use crate::settings::AppSettings;
     use crate::update::{FakeUpdater, UpdateError};
     use cmdstudio_core::adapters::fake::FakeMachine;
+    use cmdstudio_core::plan::OMP_VERSION;
+    use cmdstudio_core::state::State;
     use std::cell::RefCell;
 
     /// A backend whose run is its own: `start_run` wrote the record, as `run_gui` does first.
@@ -873,6 +982,7 @@ mod tests {
                 to: "0.2.0".into(),
                 notes_url: "https://github.com/luraselenehalo/cmd-studio/releases/tag/v0.2.0"
                     .into(),
+                reapply_failed: None,
             })
         );
         assert_eq!(update_lines(&b), ["update installed to=0.2.0"]);
@@ -1231,5 +1341,166 @@ mod tests {
             ["update available=0.2.0", "update download=offline"]
         );
         assert!(!b.sys().fs.exists(&b.paths().updates_dir()));
+    }
+
+    /// state.json as the last run left it, but with the applied theme's OMP version an older one,
+    /// as an update that moved the pin leaves it; the old runtime folder is there too.
+    fn applied_on_an_old_omp(b: &Backend<FakeMachine>) {
+        apply_terracotta(b);
+        let file = b.paths().state_file();
+        let mut state = State::load(b.sys().fs, &file).unwrap();
+        state.applied.as_mut().unwrap().omp_version = "31.4.0".into();
+        b.sys()
+            .fs
+            .write_atomic(&file, &state.to_bytes().unwrap())
+            .unwrap();
+        fake_fs(b).put(
+            b.paths()
+                .runtime_root()
+                .join("omp-31.4.0")
+                .join("oh-my-posh.exe"),
+            b"old",
+        );
+    }
+
+    fn omp_version_applied(b: &Backend<FakeMachine>) -> String {
+        State::load(b.sys().fs, &b.paths().state_file())
+            .unwrap()
+            .applied
+            .unwrap()
+            .omp_version
+    }
+
+    /// Spec §6.2 steps 2-3: the theme on an old runtime is applied again, once, through a
+    /// transaction; state.json then names this build's pins, the old folder goes, and the notice
+    /// carries no failure.
+    #[test]
+    fn a_changed_runtime_pin_re_applies_the_theme_once() {
+        let b = started();
+        applied_on_an_old_omp(&b);
+        fake_fs(&b).put(
+            b.paths().update_file(),
+            br#"{"version":1,"from":"0.1.0","to":"0.2.0","notesUrl":"https://github.com/luraselenehalo/cmd-studio/releases/tag/v0.2.0"}"#,
+        );
+        b.update_after_start("0.2.0");
+        assert!(b.update_needs_reapply());
+        b.update_reapply();
+        assert_eq!(omp_version_applied(&b), OMP_VERSION);
+        assert!(!b
+            .sys()
+            .fs
+            .exists(&b.paths().runtime_root().join("omp-31.4.0")));
+        assert!(b.sys().fs.exists(&b.paths().omp_dir()));
+        let lines = update_lines(&b);
+        assert!(
+            lines.contains(&"update reapply=ok".to_string()),
+            "{lines:?}"
+        );
+        assert!(lines.contains(&"update pruned=1".to_string()), "{lines:?}");
+        assert_eq!(b.updated().unwrap().reapply_failed, None);
+        assert!(!b.update_needs_reapply(), "once");
+        // A restore point was taken, as for every apply (spec §5.5).
+        assert!(b.snapshots_list().unwrap().points.len() >= 2);
+    }
+
+    /// Equal pins, or no theme, or state.json that cannot be read: nothing to re-apply; a by-hand
+    /// upgrade (no record) re-applies all the same, since state.json says the runtime changed.
+    #[test]
+    fn equal_pins_re_apply_nothing() {
+        let b = backend();
+        assert!(!b.update_needs_reapply(), "no theme");
+        apply_terracotta(&b);
+        assert!(!b.update_needs_reapply(), "the pins are this build's");
+        let b = backend();
+        applied_on_an_old_omp(&b);
+        assert!(
+            b.update_needs_reapply(),
+            "a by-hand upgrade: no record, the runtime changed"
+        );
+        fake_fs(&b).fail_reads_of(b.paths().state_file());
+        assert!(
+            !b.update_needs_reapply(),
+            "state.json unreadable: nothing is decided from it"
+        );
+    }
+
+    /// Review Focus 5: a re-apply that rolls back (Oh My Posh cannot render the new config)
+    /// leaves the theme on the old runtime, keeps that folder, says the code in the log and in
+    /// the notice.
+    #[test]
+    fn a_failed_re_apply_keeps_the_old_runtime_and_says_so() {
+        let b = started();
+        applied_on_an_old_omp(&b);
+        fake_fs(&b).put(
+            b.paths().update_file(),
+            br#"{"version":1,"from":"0.1.0","to":"0.2.0","notesUrl":"https://github.com/luraselenehalo/cmd-studio/releases/tag/v0.2.0"}"#,
+        );
+        b.update_after_start("0.2.0");
+        fake_process(&b).answer("oh-my-posh.exe", "print", 1, "bad config");
+        b.update_reapply();
+        assert_eq!(
+            omp_version_applied(&b),
+            "31.4.0",
+            "rolled back: state.json as before"
+        );
+        assert!(
+            b.sys()
+                .fs
+                .exists(&b.paths().runtime_root().join("omp-31.4.0")),
+            "named by state.json: kept"
+        );
+        let lines = update_lines(&b);
+        assert!(
+            lines.contains(&"update reapply=E_VERIFY_OMP".to_string()),
+            "{lines:?}"
+        );
+        assert!(lines.contains(&"update pruned=0".to_string()), "{lines:?}");
+        assert_eq!(
+            b.updated().unwrap().reapply_failed.as_deref(),
+            Some("E_VERIFY_OMP")
+        );
+        assert!(b.update_needs_reapply(), "the next start tries again");
+    }
+
+    /// Spec §6.2 step 3 (Q17): at a normal start the prune runs in its one place, under the
+    /// lock: a runtime folder nobody names goes and is said; one state.json names stays, and
+    /// nothing is said; a held lock skips it and says so; update_after_start prunes nothing.
+    #[test]
+    fn old_runtime_folders_are_pruned_at_a_normal_start_under_the_lock() {
+        let b = started();
+        apply_terracotta(&b);
+        let old = b.paths().runtime_root().join("clink-1.9.0");
+        fake_fs(&b).put(old.join("clink_dll_x64.dll"), b"old");
+        b.update_after_start("0.1.0");
+        assert!(b.sys().fs.exists(&old), "update_after_start prunes nothing");
+        assert_eq!(update_lines(&b), Vec::<String>::new());
+        let held = b
+            .sys()
+            .fs
+            .try_lock(&b.paths().lock_file())
+            .unwrap()
+            .unwrap();
+        b.prune_at_start();
+        assert!(b.sys().fs.exists(&old), "a busy lock skips the prune");
+        assert_eq!(update_lines(&b), ["update pruned=busy"]);
+        drop(held);
+        b.prune_at_start();
+        assert!(!b.sys().fs.exists(&old));
+        assert!(b.sys().fs.exists(&b.paths().clink_dir()));
+        assert_eq!(update_lines(&b), ["update pruned=busy", "update pruned=1"]);
+        let b = started();
+        applied_on_an_old_omp(&b);
+        b.prune_at_start();
+        assert!(
+            b.sys()
+                .fs
+                .exists(&b.paths().runtime_root().join("omp-31.4.0")),
+            "named: kept"
+        );
+        assert_eq!(
+            update_lines(&b),
+            Vec::<String>::new(),
+            "nothing pruned, nothing said"
+        );
     }
 }

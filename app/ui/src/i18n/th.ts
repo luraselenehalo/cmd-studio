@@ -200,6 +200,8 @@ export const th: Dictionary = {
   "start.crashed": "CMD Studio ปิดไปแบบไม่ปกติเมื่อ {time} มีบันทึกแครชเก็บไว้สำหรับการแจ้งปัญหา",
   "start.crashedNoReport": "CMD Studio ปิดไปแบบไม่ปกติ หลังจากเปิดเมื่อ {time}",
   "start.updated": "อัปเดตเป็น v{version} แล้ว",
+  "start.updateReapply": "CMD Studio กำลังใช้ธีมซ้ำสำหรับเวอร์ชันใหม่อยู่…",
+  "start.updatedReapplyFailed": "อัปเดตเป็น v{version} แล้ว แต่ใช้ธีมซ้ำสำหรับเวอร์ชันใหม่ไม่สำเร็จ ({code}) ให้ตรวจสุขภาพที่หน้าช่วยเหลือ หรือใช้ธีมอีกครั้งจากหน้าธีม",
   "start.whatChanged": "ดูว่ามีอะไรเปลี่ยน",
   "recovery.title": "โหมดกู้คืน",
   "recovery.why.failedStarts": "CMD Studio เปิดไม่สำเร็จ {n} ครั้งติดกัน จึงเปิดในโหมดกู้คืน ยังไม่ได้โหลดธีมของคุณ",

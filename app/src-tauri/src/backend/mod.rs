@@ -551,6 +551,13 @@ pub(crate) mod testing {
         &b.machine.event_log
     }
 
+    /// The fake programs under the backend (see [`fake_fs`]): a test makes Oh My Posh fail.
+    pub(crate) fn fake_process(
+        b: &Backend<FakeMachine>,
+    ) -> &cmdstudio_core::adapters::fake::FakeProcess {
+        &b.machine.process
+    }
+
     /// The id of the Terracotta preset.
     pub(crate) fn terracotta_id() -> uuid::Uuid {
         cmdstudio_core::presets::builtin()

@@ -3,4 +3,9 @@
 /**
  * The notice of the next start (spec §2.1): `app_status.updated`.
  */
-export type Updated = { from: string, to: string, notesUrl: string, };
+export type Updated = { from: string, to: string, notesUrl: string, 
+/**
+ * The code of a re-apply that did not commit (spec §6.2 step 2): the theme stays as it was
+ * on the old runtime, and the notice says so.
+ */
+reapplyFailed: string | null, };

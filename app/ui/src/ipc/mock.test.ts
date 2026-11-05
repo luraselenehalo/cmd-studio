@@ -681,7 +681,9 @@ describe("the mock IPC", () => {
     expect(available.state.updateInstalls).toBe(1);
     expect((await available.updateStatus()).state).toEqual({ kind: "installing", version: "0.2.0" });
     const updated = createMockIpc({ update: "updated" });
-    expect((await updated.appStatus()).updated).toEqual({ from: "0.1.0", to: "0.2.0", notesUrl: "https://github.com/luraselenehalo/cmd-studio/releases/tag/v0.2.0" });
+    expect((await updated.appStatus()).updated).toEqual({ from: "0.1.0", to: "0.2.0", notesUrl: "https://github.com/luraselenehalo/cmd-studio/releases/tag/v0.2.0", reapplyFailed: null });
+    const failed = createMockIpc({ update: "updated", updateReapplyFailed: "E_VERIFY_OMP" });
+    expect((await failed.appStatus()).updated?.reapplyFailed).toBe("E_VERIFY_OMP");
     await updated.openExternal({ releaseNotes: { version: "0.2.0" } });
     expect(updated.state.calls).toContain('openExternal:{"releaseNotes":{"version":"0.2.0"}}');
   });

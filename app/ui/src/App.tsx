@@ -45,12 +45,13 @@ export const APP_STATUS_POLL_MS = 2000;
 
 /** Recovery spec §6.3: a change of this process still runs; the start waits for it and names it
  * by the bar's task of that change (`taskOf`: the backend's snake_case name mapped once).
- * `recovery_entry` is RECOVERY_ENTRY_BUSY of backend/run.rs: the `--recovery` entry's own name. */
+ * `recovery_entry` is RECOVERY_ENTRY_BUSY of backend/run.rs: the `--recovery` entry's own name;
+ * `update_reapply` is UPDATE_REAPPLY_BUSY of backend/update.rs: the re-apply after an update (spec §6.2). */
 function StartWait({ busy }: { busy: string }) {
   const { t } = useI18n();
   return (
     <p role="status" style={{ padding: "2rem" }}>
-      {busy === "recovery_entry" ? t("start.recovering") : t("start.busyWith", { task: t(taskOf(busy)) })}
+      {busy === "recovery_entry" ? t("start.recovering") : busy === "update_reapply" ? t("start.updateReapply") : t("start.busyWith", { task: t(taskOf(busy)) })}
     </p>
   );
 }
@@ -387,7 +388,11 @@ function UpdatedNotice({ updated, onClosed }: { updated: Updated; onClosed: () =
   const [openError, setOpenError] = useState<unknown>(null);
   return (
     <Notice kind="ok">
-      <p>{t("start.updated", { version: updated.to })}</p>
+      <p>
+        {updated.reapplyFailed
+          ? t("start.updatedReapplyFailed", { version: updated.to, code: updated.reapplyFailed })
+          : t("start.updated", { version: updated.to })}
+      </p>
       <div className="row-actions">
         <button
           type="button"

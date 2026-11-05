@@ -140,6 +140,18 @@ pub fn run_gui(how: backend::run::GuiStart) {
                 // Recovery mode starts no crash check (recovery spec §4.3).
                 start_crash_check(&for_window);
             }
+            // Spec §6.2 steps 2-3 (phase 4b): after an update the theme applied on the old
+            // runtime is applied again, on a thread of its own, under its own busy name, so the
+            // first app_status waits for it, and the old runtime folders go after it; a start
+            // that needs no re-apply prunes them here, the prune's one other place. Not in safe
+            // mode, which changes nothing on the machine by itself.
+            if decided.safe_mode.is_none() {
+                if for_window.update_needs_reapply() {
+                    spawn_update_reapply(&for_window);
+                } else {
+                    for_window.prune_at_start();
+                }
+            }
             Ok(())
         })
         .build(context);
@@ -231,6 +243,27 @@ fn run_recovery_entry<M: backend::Machine>(
 #[cfg(windows)]
 fn start_recovery_entry(backend: &std::sync::Arc<backend::Backend<machine::RealMachine>>) {
     spawn_recovery_entry(backend, || {});
+}
+
+/// The re-apply after an update (spec §6.2) on a thread of its own, marked busy before the
+/// thread exists (a UI that asks in between does not find it idle) and cleared by the guard on
+/// every exit of the work, a panic included; a thread that cannot start clears the mark and is
+/// one log line, and the next start tries again.
+#[cfg(windows)]
+fn spawn_update_reapply(backend: &std::sync::Arc<backend::Backend<machine::RealMachine>>) {
+    use backend::update::UPDATE_REAPPLY_BUSY;
+    let b = backend.clone();
+    backend.busy_mark(UPDATE_REAPPLY_BUSY);
+    let spawned = std::thread::Builder::new()
+        .name("update-reapply".to_string())
+        .spawn(move || {
+            let _busy = b.busy_until_dropped(UPDATE_REAPPLY_BUSY);
+            b.update_reapply();
+        });
+    if let Err(e) = spawned {
+        backend.busy_clear(UPDATE_REAPPLY_BUSY);
+        backend.note_line(&format!("update reapply=thread {e}"));
+    }
 }
 
 /// A second start with `--recovery` while this one runs (recovery spec §4.4): the entry, then
@@ -857,6 +890,48 @@ mod tests {
             "the record's end, then the install"
         );
         assert_eq!(text.matches(".build(context)").count(), 1);
+    }
+
+    /// Spec §6.2 steps 2-3 (phase 4b, Q17): the re-apply after an update runs on its own thread
+    /// once the window is up, marked busy before the thread exists (the first app_status waits
+    /// for it) and cleared by a guard; outside safe mode only, and a normal start that needs no
+    /// re-apply prunes in the one place instead; the prune follows the re-apply inside it.
+    #[test]
+    fn the_re_apply_is_marked_before_its_thread_and_the_prune_has_one_place_outside_safe_mode() {
+        let body = body_of("fn spawn_update_reapply(");
+        let marked = body.find(".busy_mark(UPDATE_REAPPLY_BUSY)").unwrap();
+        let spawned = body.find(".spawn(").unwrap();
+        let guard = body
+            .find(".busy_until_dropped(UPDATE_REAPPLY_BUSY)")
+            .unwrap();
+        let work = body.find(".update_reapply()").unwrap();
+        let failed = body.find("if let Err(e) = spawned").unwrap();
+        let cleared = body.find(".busy_clear(UPDATE_REAPPLY_BUSY)").unwrap();
+        assert!(
+            marked < spawned && spawned < guard && guard < work,
+            "marked, then the guarded work"
+        );
+        assert!(
+            failed < cleared,
+            "cleared only when the thread could not start"
+        );
+        assert!(body.contains("update reapply=thread"));
+        let text = production();
+        let window = text.find("open_main_window(app, ").unwrap();
+        let safe = text.rfind("decided.safe_mode.is_none()").unwrap();
+        let needs = text.find("for_window.update_needs_reapply()").unwrap();
+        let call = text.find("spawn_update_reapply(&for_window)").unwrap();
+        let prune = text.find("for_window.prune_at_start()").unwrap();
+        assert!(
+            window < safe && safe < needs && needs < call && call < prune,
+            "after the window, outside safe mode: the re-apply when needed, else the prune"
+        );
+        assert_eq!(
+            text.matches("prune_at_start()").count(),
+            1,
+            "the prune's one call site at a start"
+        );
+        assert_eq!(text.matches("spawn_update_reapply(&for_window)").count(), 1);
     }
 }
 
