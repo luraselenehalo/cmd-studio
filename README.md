@@ -13,7 +13,7 @@ Status: pre-release (unsigned builds for testers). The design is in `docs/superp
 ## Install
 
 1. Download `CMD-Studio_<version>_x64-setup.exe` from [Releases](https://github.com/luraselenehalo/cmd-studio/releases).
-2. Run it. **Windows SmartScreen will warn** ("Windows protected your PC"): choose *More info*, then *Run anyway*. The build is not code-signed yet; signing through SignPath Foundation is planned once the project qualifies, and even a signed program earns SmartScreen's trust only over time (since 2024 an EV certificate no longer skips the warning either). Check the SHA-256 in `SHA256SUMS.txt` on the release page if you want to be sure of the file.
+2. Run it. **Windows SmartScreen will warn** ("Windows protected your PC"): choose *More info*, then *Run anyway*; or Windows shows the "Open File - Security Warning" box (Publisher: Unknown Publisher): choose *Run*. The build is not code-signed yet; signing through SignPath Foundation is planned once the project qualifies, and even a signed program earns SmartScreen's trust only over time (since 2024 an EV certificate no longer skips the warning either). Check the SHA-256 in `SHA256SUMS.txt` on the release page if you want to be sure of the file.
 3. The installer puts CMD Studio in `%LOCALAPPDATA%\CMD Studio` for your user only, adds that folder to your Path (cmd windows that were already open do not see it; open a new one), makes two Start-menu entries, "CMD Studio" and "CMD Studio Recovery", and starts the app. The first run is a short wizard: pick a theme, choose where it goes, apply.
 
 ## What it changes on your PC, and how to undo it
@@ -23,7 +23,7 @@ Every change is listed before it is made, and a restore point is taken first. CM
 - *Undo*, the button that appears after an apply, returns to the restore point of that apply.
 - *Undo everything* in Help puts back everything CMD Studio ever changed.
 - Uninstalling (Settings > Apps, or `uninstall.exe` in the install folder) puts everything back like *Undo everything*, then removes the program, takes the install folder off your Path and deletes the app's data. Your themes stay unless you tick the box to delete them too. If the uninstaller says it could not put everything back (a font file still open in Windows Terminal is the usual cause), it keeps the data folder on purpose: install CMD Studio again, press *Undo everything* in Help once every cmd and Terminal window is closed, then uninstall.
-- Installing a newer version by hand over an older one runs the older version's uninstaller first, with its full cleanup: your applied theme is undone and the app's data is cleared (your themes are kept), and the first-run wizard starts again. It is safe, just not smooth; keeping your setup across versions is for the updater, which comes later.
+- Installing a newer version by hand over an older one offers to run the older version's uninstaller first (the default choice), and that uninstall does its full cleanup: your applied theme is undone and the app's data is cleared (your themes are kept), and the first-run wizard starts again. It is safe, just not smooth; keeping your setup across versions is for the updater, which comes later.
 - If cmd will not open: Start menu > *CMD Studio Recovery* puts back any cut-off change, pauses the theme, and opens CMD Studio in recovery mode.
 
 ## Theme files

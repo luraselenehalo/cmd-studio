@@ -88,7 +88,13 @@
     ; stopped) before the cleanup, so the app cannot write its state back over the cleanup. If
     ; the user cancels, nothing has run yet. The same macro and arguments as Tauri's
     ; (template :27482, utils.nsh's !macro CheckIfAppIsRunning executablePath productName).
+    ; The console exe as well: a `cmdstudio apply` still running in a cmd window would make the
+    ; cleanup answer E_BUSY and keep POSTUNINSTALL from deleting cmdstudio.com (and so $INSTDIR).
+    ; The macro makes its labels from !define UniqueID ${__LINE__} and !undef's it at its end
+    ; (template :27837, :27886), so it can be inserted more than once in one section; Tauri's
+    ; own insert at :27482 is already a second one in Section Uninstall.
     !insertmacro CheckIfAppIsRunning "$INSTDIR\${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
+    !insertmacro CheckIfAppIsRunning "$INSTDIR\cmdstudio.com" "${PRODUCTNAME}"
     ; --cleanup puts the machine back, with --remove-themes when the "delete app data" box is
     ; ticked (then NSIS deletes the data folder itself).
     ${If} $DeleteAppDataCheckboxState = 1

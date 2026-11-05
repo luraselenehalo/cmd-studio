@@ -760,14 +760,6 @@ impl<'s, 'a> Say<'s, 'a> {
             Err(e) => return self.refused(sys, ctx, &e),
         };
         self.start(&report.start);
-        // The AutoRun and settings.json transaction has no step of its own; it committed only
-        // after reading back what it wrote.
-        if report.outcome == Some(Outcome::Committed) {
-            self.out(
-                "done   AutoRun and Windows Terminal's settings: CMD Studio's part is taken out, \
-                 and read back to check",
-            );
-        }
         self.steps(&report);
         match &report.outcome {
             Some(Outcome::RolledBack { code, reason }) => {
@@ -801,13 +793,10 @@ impl<'s, 'a> Say<'s, 'a> {
 
     /// One line per step of a clean-up: what went well on stdout, what failed on stderr with
     /// its code (the step's detail starts with it) and how to finish it by hand. Step texts are
-    /// the core's English.
+    /// the core's English. The FAILED steps come first: the uninstaller's box shows only the
+    /// first 1024 characters of the output (nsExec's string), and those are the lines it needs.
     fn steps(&mut self, report: &Report) {
-        for step in &report.steps {
-            if step.ok {
-                self.out(format!("done   {}: {}", step.what, step.detail));
-                continue;
-            }
+        for step in report.steps.iter().filter(|s| !s.ok) {
             // The detail starts with the code.
             let detail = match step.code {
                 Some(code) => {
@@ -824,6 +813,17 @@ impl<'s, 'a> Say<'s, 'a> {
             if let Some(how) = &step.fix {
                 self.err(format!("    fix: {}", how.en));
             }
+        }
+        // The AutoRun and settings.json transaction has no step of its own; it committed only
+        // after reading back what it wrote.
+        if report.outcome == Some(Outcome::Committed) {
+            self.out(
+                "done   AutoRun and Windows Terminal's settings: CMD Studio's part is taken out, \
+                 and read back to check",
+            );
+        }
+        for step in report.steps.iter().filter(|s| s.ok) {
+            self.out(format!("done   {}: {}", step.what, step.detail));
         }
     }
     /// `--add-to-path` and `--remove-from-path` (spec §5.7): the install folder on or off the
@@ -873,7 +873,8 @@ impl<'s, 'a> Say<'s, 'a> {
             Err(e) => {
                 let text = self.coded(e.code(), &e.to_string());
                 self.err(text);
-                if !matches!(e, PathError::Read(_)) {
+                // A folder with `;` in it names its own fix (in quotes); this one would mislead.
+                if !matches!(e, PathError::Read(_) | PathError::Unjoinable { .. }) {
                     let verb = if add { "add" } else { "remove" };
                     self.err(format!(
                         "    fix: {verb} {shown} by hand in Settings > System > About > Advanced \
@@ -1321,6 +1322,29 @@ mod tests {
         assert!(err.contains("fix: add "), "{err}");
         assert_eq!(thai(&err), "");
         assert_eq!(cli(&m, &d, &["--add-to-path", "doctor"]).0, EXIT_INVALID);
+
+        // A `;` in the install folder's name is refused by the core, with its own hand fix.
+        m.user_path.set(None);
+        for args in [["--add-to-path"], ["--remove-from-path"]] {
+            let d = Defaults {
+                exe_dir: PathBuf::from(r"D:\tools;misc\CMD Studio"),
+                ..d.clone()
+            };
+            let (code, out, err) = cli(&m, &d, &args);
+            assert_eq!((code, out.as_str()), (EXIT_FAILED, ""), "{args:?}");
+            assert!(
+                err.starts_with(
+                    r#"E_PATH_WRITE: the folder D:\tools;misc\CMD Studio has a ";" in its name"#
+                ),
+                "{err}"
+            );
+            assert!(
+                !err.contains("fix: "),
+                "the message has its own hand fix: {err}"
+            );
+            assert_eq!(m.user_path.value(), None);
+            assert_eq!(thai(&err), "");
+        }
 
         // An exe folder that could not be read (empty) or is relative is refused before anything.
         m.user_path.set(None);
@@ -1830,6 +1854,56 @@ mod tests {
         let (code, out, err) = cli(&m, &later(&d, 2), &["--cleanup"]);
         assert_eq!(code, EXIT_OK, "{out}{err}");
         assert!(!m.fs.exists(&d.data_dir));
+    }
+
+    /// stdout and stderr into one buffer, in the order they were written: what the uninstaller's
+    /// nsExec reads (one pipe for both, capped at 1024 characters).
+    #[derive(Clone, Default)]
+    struct Merged(std::rc::Rc<std::cell::RefCell<Vec<u8>>>);
+
+    impl Write for Merged {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Final review Minor 3: the uninstaller's box shows the first 1024 characters of the
+    /// output, so the FAILED steps (and their fixes) come before every done step.
+    #[test]
+    fn a_cleanup_says_its_failed_steps_before_its_done_steps() {
+        let (m, d) = machine();
+        assert_eq!(cli(&m, &d, &["apply", THEME]).0, EXIT_OK);
+        let generated = d.data_dir.join("generated");
+        m.fs.fail_removes_of(&generated);
+        let merged = Merged::default();
+        let (mut out, mut err) = (merged.clone(), merged.clone());
+        let args: Vec<OsString> = ["--cleanup"].iter().map(OsString::from).collect();
+        let code = run_with(
+            &args,
+            &mut Io {
+                out: &mut out,
+                err: &mut err,
+            },
+            m.system(),
+            &later(&d, 1),
+        );
+        let text = String::from_utf8_lossy(&merged.0.borrow()).into_owned();
+        assert_eq!(code, EXIT_INCOMPLETE, "{text}");
+        let lines: Vec<&str> = text.lines().collect();
+        let first_done = lines.iter().position(|l| l.starts_with("done   "));
+        let last_failed = lines.iter().rposition(|l| l.starts_with("FAILED "));
+        let (Some(first_done), Some(last_failed)) = (first_done, last_failed) else {
+            panic!("a done and a FAILED step: {text}");
+        };
+        assert!(last_failed < first_done, "{text}");
+        assert!(
+            lines[last_failed + 1].starts_with("    fix: "),
+            "the fix stays under its step: {text}"
+        );
     }
 
     #[test]

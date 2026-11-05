@@ -259,6 +259,17 @@ fn the_path_and_the_cleanup_run_only_outside_update_mode() {
         Some("!insertmacro CheckIfAppIsRunning \"$INSTDIR\\${MAINBINARYNAME}.exe\" \"${PRODUCTNAME}\""),
         "the app-running check comes first"
     );
+    // Final review Minor 2: the console exe is checked too, inside the guard, before the first
+    // nsExec (a `cmdstudio apply` still running would make the cleanup busy and keep the .com).
+    let com_check =
+        "!insertmacro CheckIfAppIsRunning \"$INSTDIR\\cmdstudio.com\" \"${PRODUCTNAME}\"";
+    assert_eq!(
+        inside.lines().nth(1),
+        Some(com_check),
+        "the console exe's check follows the app's"
+    );
+    assert_eq!(pre.matches(com_check).count(), 1);
+    before(&inside, com_check, "nsExec::ExecToStack");
     before(
         &inside,
         "!insertmacro CheckIfAppIsRunning",

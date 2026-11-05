@@ -73,6 +73,9 @@ pub enum PathError {
     /// The value is there but is not plain text (registry type `kind`): it is left alone.
     #[error("the Path value of HKEY_CURRENT_USER\\Environment is not plain text (registry type {kind}), so CMD Studio did not change it")]
     NotText { kind: u32 },
+    /// The folder has a `;` in its name: as a Path entry it would read as two (spec §5.7).
+    #[error("the folder {dir} has a \";\" in its name, and \";\" separates the entries of the Path, so CMD Studio did not change your Path; fix it by hand in Environment Variables, with the folder in quotes (\"{dir}\"), or install CMD Studio into a folder without \";\"")]
+    Unjoinable { dir: String },
     #[error("{0}")]
     Read(AdapterError),
     #[error("{0}")]
@@ -81,13 +84,27 @@ pub enum PathError {
 
 impl PathError {
     /// Stable code (spec §5.9): a registry that cannot be read is `E_MACHINE_READ`; a value that
-    /// cannot be edited or written is `E_PATH_WRITE`.
+    /// cannot be edited or written, or a folder that cannot be one entry, is `E_PATH_WRITE`.
     pub fn code(&self) -> &'static str {
         match self {
             PathError::Read(_) => "E_MACHINE_READ",
-            PathError::NotText { .. } | PathError::Write(_) => "E_PATH_WRITE",
+            PathError::NotText { .. } | PathError::Unjoinable { .. } | PathError::Write(_) => {
+                "E_PATH_WRITE"
+            }
         }
     }
+}
+
+/// Refuses a folder that cannot be one Path entry: a `;` in its name would split it in two
+/// (two stray entries on add, none found on remove). Checked before the value is read.
+fn joinable(dir: &Path) -> Result<(), PathError> {
+    let shown = dir.to_string_lossy();
+    if shown.contains(';') {
+        return Err(PathError::Unjoinable {
+            dir: shown.into_owned(),
+        });
+    }
+    Ok(())
 }
 
 /// The value's text, or the error for a value that is not text.
@@ -103,6 +120,7 @@ fn current(user_path: &dyn UserPath) -> Result<(Option<RegValue>, RegText), Path
 /// Puts `dir` on the user's Path, keeping the value's kind (a missing value is made as
 /// `REG_EXPAND_SZ`), and broadcasts the change when something was written.
 pub fn add(user_path: &dyn UserPath, dir: &Path) -> Result<PathChange, PathError> {
+    joinable(dir)?;
     let (value, text) = current(user_path)?;
     let (kind, old) = match (&value, &text) {
         (Some(v), RegText::Text(t)) => (v.kind, Some(t.as_str())),
@@ -121,6 +139,7 @@ pub fn add(user_path: &dyn UserPath, dir: &Path) -> Result<PathChange, PathError
 /// Takes `dir` off the user's Path; a value left empty is deleted. Broadcasts when something
 /// was written or deleted.
 pub fn remove(user_path: &dyn UserPath, dir: &Path) -> Result<PathChange, PathError> {
+    joinable(dir)?;
     let (value, text) = current(user_path)?;
     let (Some(v), RegText::Text(old)) = (&value, &text) else {
         return Ok(PathChange::NotThere);
@@ -278,6 +297,39 @@ mod tests {
         );
         assert_eq!(p.broadcasts(), 0);
         assert_eq!(PathError::NotText { kind: 3 }.code(), "E_PATH_WRITE");
+    }
+
+    /// Final review Important 1: `;` is legal in a folder name but separates the Path's
+    /// entries, so a folder with one in it would go on as two stray entries and never come off.
+    /// Both `add` and `remove` refuse it before reading: nothing written, nothing broadcast, the
+    /// code `E_PATH_WRITE`, the folder and the hand fix named.
+    #[test]
+    fn a_folder_with_a_separator_in_its_name_is_refused() {
+        let bad = PathBuf::from(r"D:\tools;misc\CMD Studio");
+        let p = FakeUserPath::new();
+        p.set(Some(RegValue::from_text(REG_SZ, "C:\\a;")));
+        for change in [add(&p, &bad), remove(&p, &bad)] {
+            let e = change.unwrap_err();
+            assert_eq!(
+                e,
+                PathError::Unjoinable {
+                    dir: bad.display().to_string()
+                }
+            );
+            assert_eq!(e.code(), "E_PATH_WRITE");
+            let text = e.to_string();
+            assert!(text.contains(r"D:\tools;misc\CMD Studio"), "{text}");
+            assert!(text.contains("Environment Variables"), "{text}");
+            assert!(
+                text.contains(r#"in quotes ("D:\tools;misc\CMD Studio")"#),
+                "{text}"
+            );
+        }
+        assert_eq!(p.value(), Some(RegValue::from_text(REG_SZ, "C:\\a;")));
+        assert_eq!(p.broadcasts(), 0);
+        // Refused before the value is read: a registry that cannot be read is not reached.
+        p.fail_reads.set(true);
+        assert_eq!(add(&p, &bad).unwrap_err().code(), "E_PATH_WRITE");
     }
 
     /// A registry that cannot be read is `E_MACHINE_READ`; one that cannot be written is

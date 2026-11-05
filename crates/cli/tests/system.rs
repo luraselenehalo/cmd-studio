@@ -614,9 +614,29 @@ fn apply_doctor_undo(
     }
 }
 
-/// `--add-to-path` and `--remove-from-path` against this runner's real HKCU, at a throwaway
-/// subkey (never the real `Environment`): the value, its kind and its bytes come back as they
-/// were, including a trailing `;` and a REG_SZ kind. Runs only where the first test runs.
+/// The throwaway `HKCU\Software\CMD Studio tests\<ms>` key of one run, deleted when the test
+/// ends, a failed assertion included; then the `CMD Studio tests` key itself, only if no other
+/// run's key is in it. A key that is already gone is fine.
+struct Throwaway(String);
+
+impl Drop for Throwaway {
+    fn drop(&mut self) {
+        let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
+        let ours = hkcu.delete_subkey_all(&self.0);
+        // Not recursive: it fails, and the key stays, while a sibling run's key is in it.
+        let _ = hkcu.delete_subkey(r"Software\CMD Studio tests");
+        if let Err(e) = ours {
+            if e.kind() != std::io::ErrorKind::NotFound && !std::thread::panicking() {
+                panic!("the throwaway key {} could not be deleted: {e}", self.0);
+            }
+        }
+    }
+}
+
+/// Calls `user_path::{add, remove}` directly over `WinUserPath` at a throwaway key of this
+/// runner's real HKCU (never the real `Environment`); the CLI's wiring of them is the VM
+/// check's. The value, its kind and its bytes come back as they were, including a trailing `;`
+/// and a REG_SZ kind. Runs only where the first test runs.
 #[test]
 fn system_user_path_add_and_remove_round_trip() {
     if !enabled("system_user_path_add_and_remove_round_trip") {
@@ -625,7 +645,9 @@ fn system_user_path_add_and_remove_round_trip() {
     use cmdstudio_core::adapters::windows::registry::{RegLocation, WinUserPath};
     use cmdstudio_core::adapters::{RegValue, UserPath, REG_EXPAND_SZ, REG_SZ};
     use cmdstudio_core::user_path::{add, remove, PathChange};
-    let subkey = format!(r"Software\CMD Studio tests\{}\Environment", now_ms());
+    let run = format!(r"Software\CMD Studio tests\{}", now_ms());
+    let subkey = format!(r"{run}\Environment");
+    let _throwaway = Throwaway(run);
     let key = RegLocation::user(&subkey);
     let path = WinUserPath::at(key.clone());
     let dir = Path::new(r"C:\Users\tester\AppData\Local\CMD Studio");
@@ -656,9 +678,6 @@ fn system_user_path_add_and_remove_round_trip() {
             "byte-equal after the round trip"
         );
     }
-    // The throwaway key goes, with the whole `CMD Studio tests` subtree this test made.
+    // The value goes here; the throwaway key and its parent go when `_throwaway` is dropped.
     path.delete().unwrap();
-    winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
-        .delete_subkey_all(r"Software\CMD Studio tests")
-        .unwrap();
 }
