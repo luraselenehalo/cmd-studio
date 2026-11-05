@@ -15,6 +15,7 @@ use crate::update::{Available, Updater};
 use cmdstudio_core::adapters::FsLock;
 use cmdstudio_core::cleanup::{prune_old_runtimes, runtime_dirs_named_by};
 use cmdstudio_core::plan::runtime_changed;
+use cmdstudio_core::recovery::read_pause;
 use cmdstudio_core::resources::sha256_hex;
 use cmdstudio_core::state::State;
 use serde::{Deserialize, Serialize};
@@ -582,11 +583,24 @@ impl<M: Machine> Backend<M> {
     /// Whether this start must apply the theme again (spec §6.2 step 2): a theme is applied and
     /// its runtime versions are not this build's pins, as an update that moved a pin leaves
     /// state.json, a by-hand upgrade included (no record then). state.json that cannot be read
-    /// decides nothing: doctor says what is wrong with it.
+    /// decides nothing: doctor says what is wrong with it. A paused theme is never turned back
+    /// on by an update (the controller's ruling; spec §2.1, recovery spec §4.1: the pause is the
+    /// user's or recovery's): while `paused.json` is there, as `read_pause` reads it (one that
+    /// cannot be read is a pause all the same), nothing is re-applied and the log says
+    /// `update reapply=paused`; the prune keeps the old runtime, which state.json still names,
+    /// and turning the theme back on lifts the pause on it, so the next start re-applies.
     pub fn update_needs_reapply(&self) -> bool {
-        State::load(self.sys().fs, &self.paths().state_file())
+        let changed = State::load(self.sys().fs, &self.paths().state_file())
             .map(|state| runtime_changed(&state))
-            .unwrap_or(false)
+            .unwrap_or(false);
+        if !changed {
+            return false;
+        }
+        if !matches!(read_pause(self.sys().fs, self.paths()), Ok(None)) {
+            self.note_line("update reapply=paused");
+            return false;
+        }
+        true
     }
 
     /// The re-apply (spec §6.2 steps 2-3), on its own thread under `UPDATE_REAPPLY_BUSY`
@@ -1502,5 +1516,63 @@ mod tests {
             Vec::<String>::new(),
             "nothing pruned, nothing said"
         );
+    }
+
+    /// The controller's ruling (spec §2.1, recovery spec): an update never turns a paused theme
+    /// back on. With paused.json there, the theme on the old runtime is not applied again (no
+    /// apply, no restore point, the pause as it was), one log line says why, the old runtime
+    /// state.json names stays through the prune, and the notice carries no failure. Turning the
+    /// theme back on afterwards lifts the pause on that old runtime, which is still there, and
+    /// the next start then applies it again on this build's pins. A paused.json that cannot be
+    /// read is a pause all the same (`read_pause`: never "not paused").
+    #[test]
+    fn a_paused_theme_is_not_re_applied_after_an_update() {
+        const IN_CMD: &[u8] =
+            br#"{"version":1,"reason":"cmdStarts","at":1791694709000,"count":3,"by":"clink"}"#;
+        let b = started();
+        applied_on_an_old_omp(&b);
+        let paused = b.paths().paused_file();
+        fake_fs(&b).put(&paused, IN_CMD);
+        fake_fs(&b).put(b.paths().update_file(), RECORD_0_2_0);
+        b.update_after_start("0.2.0");
+        let points = b.snapshots_list().unwrap().points.len();
+        assert!(
+            !b.update_needs_reapply(),
+            "paused: the update turns nothing on"
+        );
+        b.prune_at_start();
+        assert_eq!(omp_version_applied(&b), "31.4.0", "no apply");
+        assert_eq!(
+            b.snapshots_list().unwrap().points.len(),
+            points,
+            "no restore point"
+        );
+        assert_eq!(
+            b.sys().fs.read(&paused).unwrap().as_deref(),
+            Some(IN_CMD),
+            "the pause stays"
+        );
+        let old = b.paths().runtime_root().join("omp-31.4.0");
+        assert!(b.sys().fs.exists(&old), "named by state.json: kept");
+        assert_eq!(
+            update_lines(&b),
+            ["update installed to=0.2.0", "update reapply=paused"]
+        );
+        assert_eq!(b.updated().unwrap().reapply_failed, None);
+        // The resume lifts the pause in cmd; the theme runs on the old runtime, still there,
+        // and the next start applies it again.
+        assert!(matches!(
+            b.theme_resume().unwrap(),
+            crate::backend::recovery::ResumeOutcome::Resumed
+        ));
+        assert!(b.sys().fs.exists(&old));
+        assert!(
+            b.update_needs_reapply(),
+            "resumed: the next start re-applies"
+        );
+        // A pause record that cannot be read is a pause all the same.
+        fake_fs(&b).put(&paused, IN_CMD);
+        fake_fs(&b).fail_reads_of(&paused);
+        assert!(!b.update_needs_reapply(), "an unreadable pause is a pause");
     }
 }
