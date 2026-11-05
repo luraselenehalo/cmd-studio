@@ -1573,6 +1573,57 @@ pub fn runtime_dirs_named_by(state: &State, paths: &Paths) -> Vec<PathBuf> {
     vec![root.join(format!("omp-{}", applied.omp_version)), clink]
 }
 
+/// The roots a runtime folder may be in, each with the prefixes it may hold: `runtime\` of the
+/// data folder (`omp-`, `clink-`), then the user's own ProgramData folder (`clink-` only), when
+/// it can be worked out.
+fn runtime_roots(sys: System<'_>, paths: &Paths) -> Vec<(PathBuf, Vec<&'static str>)> {
+    let mut roots = vec![(paths.runtime_root(), vec!["omp-", "clink-"])];
+    if let (Ok(pd), Ok(sid)) = (sys.host.program_data(), sys.host.user_sid()) {
+        roots.push((program_data_dir(&pd, &sid), vec!["clink-"]));
+    }
+    roots
+}
+
+/// The runtime folders (as [`prune_old_runtimes`] meets them) that one of `texts` (the AutoRun
+/// values) names, by the folder's long path or by its 8.3 path (`Host::short_path`: AutoRun
+/// may run Clink by it, spec §5.4 and G19), without regard to ASCII case, as a whole path (what
+/// follows it in the text is a separator, a quote, a space, `&`, `;`, `|` or the end). A prune
+/// keeps these whatever state.json says (phase 4b Task 5, review I2): cmd runs what AutoRun
+/// says.
+pub fn runtime_dirs_named_in(sys: System<'_>, paths: &Paths, texts: &[String]) -> Vec<PathBuf> {
+    let texts: Vec<String> = texts.iter().map(|t| t.to_ascii_lowercase()).collect();
+    let named = |p: &Path| {
+        let p = p.display().to_string().to_ascii_lowercase();
+        texts.iter().any(|t| {
+            t.match_indices(&p).any(|(at, _)| {
+                t.get(at + p.len()..)
+                    .and_then(|rest| rest.chars().next())
+                    .is_none_or(|c| matches!(c, '\\' | '/' | '"' | '\'' | ' ' | '&' | ';' | '|'))
+            })
+        })
+    };
+    let mut found = Vec::new();
+    for (root, prefixes) in runtime_roots(sys, paths) {
+        let Ok(entries) = sys.fs.list_dir(&root) else {
+            continue;
+        };
+        for entry in entries {
+            let Some(name) = entry.path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let lower = name.to_ascii_lowercase();
+            if !entry.is_dir || !prefixes.iter().any(|p| lower.starts_with(p)) {
+                continue;
+            }
+            let short = sys.host.short_path(&entry.path).ok();
+            if named(&entry.path) || short.as_deref().is_some_and(named) {
+                found.push(entry.path);
+            }
+        }
+    }
+    found
+}
+
 /// Deletes the runtime folders of other versions than this build pins (spec §6.2 step 3, phase
 /// 4b), best effort: every folder directly in `runtime\` named `omp-*` or `clink-*`, and every
 /// `clink-*` (only) directly in the user's own ProgramData folder, that is neither the pinned one
@@ -1586,12 +1637,9 @@ pub fn runtime_dirs_named_by(state: &State, paths: &Paths) -> Vec<PathBuf> {
 /// without ASCII case, as Windows does. Returns the folders removed, in the order met.
 pub fn prune_old_runtimes(sys: System<'_>, paths: &Paths, keep: &[PathBuf]) -> Vec<PathBuf> {
     let mut pinned = vec![paths.omp_dir(), paths.clink_dir()];
-    // Each root with the prefixes it may hold: ProgramData holds Clink only.
-    let mut roots = vec![(paths.runtime_root(), vec!["omp-", "clink-"])];
-    if let (Ok(pd), Ok(sid)) = (sys.host.program_data(), sys.host.user_sid()) {
-        let own = program_data_dir(&pd, &sid);
+    let roots = runtime_roots(sys, paths);
+    if let Some((own, _)) = roots.get(1) {
         pinned.push(own.join(format!("clink-{CLINK_VERSION}")));
-        roots.push((own, vec!["clink-"]));
     }
     let mut removed = Vec::new();
     for (root, prefixes) in roots {

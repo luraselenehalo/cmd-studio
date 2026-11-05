@@ -267,6 +267,11 @@ impl<M: Machine> Backend<M> {
         self.note_line(&format!("run start rollback={did}"));
     }
 
+    /// Whether this run is in safe mode now: from its start, or entered since (`enter_safe_mode`).
+    pub(crate) fn in_safe_mode(&self) -> bool {
+        self.run.with(|r| r.safe_mode.is_some())
+    }
+
     /// Safe mode from now on, for a `--recovery` that reached a running app (recovery spec §4.4).
     pub fn enter_safe_mode(&self, reason: SafeModeReason) {
         let mine = self.run.with(|r| {

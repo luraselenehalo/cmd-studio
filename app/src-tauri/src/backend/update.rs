@@ -8,12 +8,12 @@
 //! record does any of it (`run_is_ours`): an instance that single-instance is about to end reads,
 //! checks and installs nothing.
 use super::{Backend, Machine};
-use crate::backend::apply::{ApplyRequest, ApplyStatus, PlanOutcome};
+use crate::backend::apply::{ApplyRequest, ApplyStatus, Guarded, PlanOutcome};
 use crate::error::AppError;
 use crate::settings::UpdateMode;
 use crate::update::{Available, Updater};
 use cmdstudio_core::adapters::FsLock;
-use cmdstudio_core::cleanup::{prune_old_runtimes, runtime_dirs_named_by};
+use cmdstudio_core::cleanup::{prune_old_runtimes, runtime_dirs_named_by, runtime_dirs_named_in};
 use cmdstudio_core::plan::{runtime_changed, CLINK_VERSION, OMP_VERSION};
 use cmdstudio_core::recovery::read_pause;
 use cmdstudio_core::resources::sha256_hex;
@@ -40,6 +40,16 @@ pub struct ReapplyRecord {
     pub version: u32,
     pub omp: String,
     pub clink: String,
+}
+
+/// How one re-apply ended (`Backend::reapply_once`).
+enum Reapplied {
+    Committed,
+    /// It did not commit: the code, for the log, update-reapply.json and the notice.
+    Failed(String),
+    /// It did not run, which is no failure: the log's word (`busy`, `paused`, `safemode`,
+    /// `none`); the next start decides again.
+    Stopped(&'static str),
 }
 
 impl ReapplyRecord {
@@ -666,32 +676,64 @@ impl<M: Machine> Backend<M> {
     /// it. A re-apply that does not commit rolls back to the old runtime, which state.json still
     /// names, so the prune keeps that folder; update-reapply.json then holds this build's pins,
     /// so later starts do not try again until the pins move or an apply commits.
+    ///
+    /// Review I1 (fix round 1): the pause and safe mode are read again with the lock held, just
+    /// before the transaction (`apply_guarded`), and the re-apply never lifts a pause; so a pause
+    /// the crash check or Recovery writes is either seen there (`reapply=paused|safemode`: no
+    /// apply, no prune) or written after and kept. A lock held by another job
+    /// (`reapply=busy`) is no failure: no update-reapply.json, no prune, the next start tries.
     pub fn update_reapply(&self) {
-        let failed = self.reapply_once();
-        self.note_line(&format!(
-            "update reapply={}",
-            failed.as_deref().unwrap_or("ok")
-        ));
-        if failed.is_some() {
-            self.write_reapply_record();
-        }
-        self.prune_and_say(true);
-        if let Some(code) = failed {
-            self.update.with(|u| {
-                if let Some(updated) = &mut u.updated {
-                    updated.reapply_failed = Some(code);
-                }
-            });
+        let done = self.reapply_once();
+        let word = match &done {
+            Reapplied::Committed => "ok",
+            Reapplied::Failed(code) => code.as_str(),
+            Reapplied::Stopped(word) => word,
+        };
+        self.note_line(&format!("update reapply={word}"));
+        match done {
+            Reapplied::Committed => self.prune_and_say(true),
+            Reapplied::Failed(code) => {
+                self.write_reapply_record();
+                self.prune_and_say(true);
+                self.update.with(|u| {
+                    if let Some(updated) = &mut u.updated {
+                        updated.reapply_failed = Some(code);
+                    }
+                });
+            }
+            Reapplied::Stopped(_) => {}
         }
     }
 
-    /// One apply of the theme state.json names; `None` when it committed, else the code.
-    fn reapply_once(&self) -> Option<String> {
+    /// What stops an apply nobody clicked, read with the lock held (`apply_guarded`): safe mode
+    /// entered in this run, or a pause (paused.json there or unreadable, as `read_pause` says).
+    fn reapply_stop(&self) -> Option<&'static str> {
+        if self.in_safe_mode() {
+            return Some("safemode");
+        }
+        if !matches!(read_pause(self.sys().fs, self.paths()), Ok(None)) {
+            return Some("paused");
+        }
+        None
+    }
+
+    /// One apply of the theme state.json names, under [`Backend::reapply_stop`]'s guard.
+    fn reapply_once(&self) -> Reapplied {
+        let failed = |e: AppError| {
+            if e.code == "E_BUSY" {
+                Reapplied::Stopped("busy")
+            } else {
+                Reapplied::Failed(e.code)
+            }
+        };
         let state = match State::load(self.sys().fs, &self.paths().state_file()) {
             Ok(state) => state,
-            Err(e) => return Some(e.code().to_string()),
+            Err(e) => return Reapplied::Failed(e.code().to_string()),
         };
-        let applied = state.applied?;
+        // The theme went between the start's decision and this thread: nothing to apply.
+        let Some(applied) = state.applied else {
+            return Reapplied::Stopped("none");
+        };
         let req = ApplyRequest {
             theme_id: applied.theme_id,
             target: applied.target,
@@ -702,47 +744,67 @@ impl<M: Machine> Backend<M> {
             Ok(PlanOutcome::Ready { plan }) => plan,
             // Another Clink appeared in AutoRun: the user decides on the home page, not a thread.
             Ok(PlanOutcome::OtherClink { .. }) => {
-                return Some("E_AUTORUN_FOREIGN_CLINK".to_string())
+                return Reapplied::Failed("E_AUTORUN_FOREIGN_CLINK".to_string())
             }
-            Err(e) => return Some(e.code),
+            Err(e) => return failed(e),
         };
-        match self.apply(req, &plan.digest, &mut |_| {}) {
-            Ok(outcome) if outcome.status == ApplyStatus::Committed => None,
-            Ok(outcome) => Some(
+        let stop = || self.reapply_stop();
+        match self.apply_guarded(req, &plan.digest, &mut |_| {}, Some(&stop)) {
+            Ok(Guarded::Stopped(word)) => Reapplied::Stopped(word),
+            Ok(Guarded::Ran(outcome)) if outcome.status == ApplyStatus::Committed => {
+                Reapplied::Committed
+            }
+            Ok(Guarded::Ran(outcome)) => Reapplied::Failed(
                 outcome
                     .error
                     .map(|e| e.code)
                     .unwrap_or_else(|| crate::error::INTERNAL.to_string()),
             ),
-            Err(e) => Some(e.code),
+            Err(e) => failed(e),
         }
     }
 
     /// Spec §6.2 step 3, the prune's one place (Q17): the runtime folders of other versions than
-    /// this build's, except the ones state.json names, under the lock of spec §5.5 (`None` when
-    /// another change holds it: the next start tries again). state.json that cannot be read
-    /// prunes nothing: what AutoRun runs is not known then.
-    pub(crate) fn prune_runtimes(&self) -> Option<usize> {
-        let _lock = self
-            .sys()
-            .fs
-            .try_lock(&self.paths().lock_file())
-            .ok()
-            .flatten()?;
-        let Ok(state) = State::load(self.sys().fs, &self.paths().state_file()) else {
-            return Some(0);
+    /// this build's, except the ones state.json names and the ones the user's or the machine's
+    /// AutoRun names (review I2: cmd runs what AutoRun says), under the lock of spec §5.5. `Err`
+    /// is the log's word, and nothing is pruned: `busy` (another change holds the lock, or the
+    /// lock file cannot be opened: the next start tries again), `safemode` (entered in this run,
+    /// Q17), `nostate` (state.json is not there or cannot be read: what AutoRun runs is not known
+    /// then), `noautorun` (an AutoRun value that cannot be read, or is not text).
+    pub(crate) fn prune_runtimes(&self) -> Result<usize, &'static str> {
+        let Ok(Some(_lock)) = self.sys().fs.try_lock(&self.paths().lock_file()) else {
+            return Err("busy");
         };
-        let keep = runtime_dirs_named_by(&state, self.paths());
-        Some(prune_old_runtimes(self.sys(), self.paths(), &keep).len())
+        if self.in_safe_mode() {
+            return Err("safemode");
+        }
+        let fs = self.sys().fs;
+        let file = self.paths().state_file();
+        if !matches!(fs.read(&file), Ok(Some(_))) {
+            return Err("nostate");
+        }
+        let state = State::load(fs, &file).map_err(|_| "nostate")?;
+        let autorun = self.sys().autorun;
+        let mut texts = Vec::new();
+        for value in [autorun.read_user(), autorun.read_machine()] {
+            match value {
+                Ok(None) => {}
+                Ok(Some(value)) => texts.push(value.text().ok_or("noautorun")?),
+                Err(_) => return Err("noautorun"),
+            }
+        }
+        let mut keep = runtime_dirs_named_by(&state, self.paths());
+        keep.extend(runtime_dirs_named_in(self.sys(), self.paths(), &texts));
+        Ok(prune_old_runtimes(self.sys(), self.paths(), &keep).len())
     }
 
     /// The prune with its log line: always after a re-apply (`always`), else only when something
-    /// went or the lock was busy, so a quiet start writes nothing.
+    /// went or the prune could not run, so a quiet start writes nothing.
     fn prune_and_say(&self, always: bool) {
         match self.prune_runtimes() {
-            None => self.note_line("update pruned=busy"),
-            Some(n) if always || n > 0 => self.note_line(&format!("update pruned={n}")),
-            Some(_) => {}
+            Err(word) => self.note_line(&format!("update pruned={word}")),
+            Ok(n) if always || n > 0 => self.note_line(&format!("update pruned={n}")),
+            Ok(_) => {}
         }
     }
 
@@ -1718,5 +1780,209 @@ mod tests {
             b.update_needs_reapply(),
             "another version of the file does not match"
         );
+    }
+
+    /// A theme on an old OMP pin, the notice of 0.2.0, and the start's decision made: the
+    /// re-apply is needed. What happens next comes from the test.
+    fn decided_to_re_apply() -> Backend<FakeMachine> {
+        let b = started();
+        applied_on_an_old_omp(&b);
+        fake_fs(&b).put(b.paths().update_file(), RECORD_0_2_0);
+        b.update_after_start("0.2.0");
+        assert!(b.update_needs_reapply());
+        b
+    }
+
+    /// Review I1: the pause is read again with the lock held, just before the transaction. One
+    /// written after the start's decision (by the crash check, or Recovery) stops the re-apply:
+    /// no apply, no restore point, the pause as it was, no update-reapply.json (it was not a
+    /// failure), no failure in the notice.
+    #[test]
+    fn a_pause_that_appears_before_the_lock_stops_the_re_apply() {
+        const BY_APP: &[u8] =
+            br#"{"version":1,"reason":"clinkCrash","at":1791694709000,"count":3,"by":"app"}"#;
+        let b = decided_to_re_apply();
+        let paused = b.paths().paused_file();
+        fake_fs(&b).put(&paused, BY_APP);
+        let points = b.snapshots_list().unwrap().points.len();
+        b.update_reapply();
+        assert_eq!(omp_version_applied(&b), "31.4.0", "no apply");
+        assert_eq!(
+            b.snapshots_list().unwrap().points.len(),
+            points,
+            "no restore point"
+        );
+        assert_eq!(
+            b.sys().fs.read(&paused).unwrap().as_deref(),
+            Some(BY_APP),
+            "the pause stays"
+        );
+        assert!(b
+            .sys()
+            .fs
+            .exists(&b.paths().runtime_root().join("omp-31.4.0")));
+        let lines = update_lines(&b);
+        assert!(
+            lines.contains(&"update reapply=paused".to_string()),
+            "{lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|l| l.starts_with("update reapply=E_")),
+            "{lines:?}"
+        );
+        assert!(!b.sys().fs.exists(&b.paths().update_reapply_file()));
+        assert_eq!(b.updated().unwrap().reapply_failed, None);
+    }
+
+    /// Review I1: safe mode entered while the re-apply waited (the Recovery shortcut) stops it
+    /// under the lock, and the prune never runs once safe mode is on in this run.
+    #[test]
+    fn safe_mode_entered_in_the_run_stops_the_re_apply_and_the_prune() {
+        let b = decided_to_re_apply();
+        let unnamed = b.paths().runtime_root().join("clink-1.9.0");
+        fake_fs(&b).put(unnamed.join("clink_dll_x64.dll"), b"old");
+        b.enter_safe_mode(crate::backend::run::SafeModeReason::Recovery);
+        b.update_reapply();
+        assert_eq!(omp_version_applied(&b), "31.4.0", "no apply");
+        assert!(b.sys().fs.exists(&unnamed), "no prune in safe mode");
+        b.prune_at_start();
+        assert!(b.sys().fs.exists(&unnamed), "no prune in safe mode");
+        assert_eq!(
+            update_lines(&b),
+            [
+                "update installed to=0.2.0",
+                "update reapply=safemode",
+                "update pruned=safemode",
+            ]
+        );
+        assert!(!b.sys().fs.exists(&b.paths().update_reapply_file()));
+    }
+
+    /// Review I1: a lock held by another job (the crash check's pause, say) is no failed
+    /// re-apply: one line, no update-reapply.json, no failure in the notice, no prune; the next
+    /// start tries again.
+    #[test]
+    fn a_busy_lock_is_not_a_failed_re_apply_and_the_next_start_tries() {
+        let b = decided_to_re_apply();
+        let held = b
+            .sys()
+            .fs
+            .try_lock(&b.paths().lock_file())
+            .unwrap()
+            .unwrap();
+        b.update_reapply();
+        drop(held);
+        assert_eq!(omp_version_applied(&b), "31.4.0");
+        assert_eq!(
+            update_lines(&b),
+            ["update installed to=0.2.0", "update reapply=busy"]
+        );
+        assert!(!b.sys().fs.exists(&b.paths().update_reapply_file()));
+        assert_eq!(b.updated().unwrap().reapply_failed, None);
+        assert!(b.update_needs_reapply(), "the next start tries");
+        b.update_reapply();
+        assert_eq!(omp_version_applied(&b), OMP_VERSION);
+    }
+
+    /// Review I2: a state.json that is not there, or cannot be read, prunes nothing: what
+    /// AutoRun runs is not known then.
+    #[test]
+    fn a_missing_or_unreadable_state_json_prunes_nothing() {
+        let b = started();
+        let old = b.paths().runtime_root().join("clink-1.9.0");
+        fake_fs(&b).put(old.join("clink_dll_x64.dll"), b"old");
+        b.prune_at_start();
+        assert!(b.sys().fs.exists(&old), "no state.json: kept");
+        let b = started();
+        apply_terracotta(&b);
+        let old = b.paths().runtime_root().join("clink-1.9.0");
+        fake_fs(&b).put(old.join("clink_dll_x64.dll"), b"old");
+        fake_fs(&b).fail_reads_of(b.paths().state_file());
+        b.prune_at_start();
+        assert!(b.sys().fs.exists(&old), "unreadable state.json: kept");
+        assert_eq!(update_lines(&b), ["update pruned=nostate"]);
+    }
+
+    /// Review I2: a runtime folder the user's AutoRun names, by its long path or its 8.3 one, is
+    /// kept, whatever state.json says; one nothing names goes.
+    #[test]
+    fn a_runtime_folder_autorun_names_is_kept() {
+        use cmdstudio_core::adapters::{RegValue, REG_SZ};
+        let root = std::path::PathBuf::from(crate::backend::testing::DATA).join("runtime");
+        let by_long = root.join("clink-1.9.0");
+        let by_short = root.join("clink-1.9.1");
+        let unnamed = root.join("omp-31.0.0");
+        let short = std::path::PathBuf::from(
+            r"C:\Users\tester\AppData\Local\AI2B1~1.CMD\runtime\CLINK-~1.1",
+        );
+        let b = crate::backend::testing::backend_on(|mut m| {
+            m.host.short.insert(by_short.clone(), short.clone());
+            m
+        });
+        b.start_run(GuiStart::Normal);
+        apply_terracotta(&b);
+        for dir in [&by_long, &by_short, &unnamed] {
+            fake_fs(&b).put(dir.join("x.dll"), b"old");
+        }
+        let ours = b
+            .sys()
+            .autorun
+            .read_user()
+            .unwrap()
+            .unwrap()
+            .text()
+            .unwrap();
+        let text = format!(
+            "{ours} & \"{}\\clink_x64.exe\" inject & \"{}\\clink_x64.exe\" inject",
+            by_long.display().to_string().to_uppercase(),
+            short.display()
+        );
+        b.sys()
+            .autorun
+            .write_user(&RegValue::from_text(REG_SZ, &text))
+            .unwrap();
+        b.prune_at_start();
+        assert!(
+            b.sys().fs.exists(&by_long),
+            "named by AutoRun (long path, any case): kept"
+        );
+        assert!(
+            b.sys().fs.exists(&by_short),
+            "named by AutoRun (8.3 path): kept"
+        );
+        assert!(!b.sys().fs.exists(&unnamed), "named by nothing: gone");
+        assert_eq!(update_lines(&b), ["update pruned=1"]);
+    }
+
+    /// Review I1: an apply under a guard (the re-apply's) never lifts the theme's pause, so one
+    /// written after the guard read none (between the guard and the commit) stays; the user's
+    /// own apply lifts it, as before.
+    #[test]
+    fn an_apply_under_a_guard_never_lifts_a_pause() {
+        const BY_APP: &[u8] =
+            br#"{"version":1,"reason":"clinkCrash","at":1791694709000,"count":3,"by":"app"}"#;
+        let b = decided_to_re_apply();
+        let req = crate::backend::testing::terracotta_request();
+        let plan = match b.plan_apply(req.clone()).unwrap() {
+            PlanOutcome::Ready { plan } => plan,
+            other => panic!("{other:?}"),
+        };
+        let paused = b.paths().paused_file();
+        fake_fs(&b).put(&paused, BY_APP);
+        let pass = || None;
+        match b
+            .apply_guarded(req, &plan.digest, &mut |_| {}, Some(&pass))
+            .unwrap()
+        {
+            Guarded::Ran(outcome) => assert_eq!(outcome.status, ApplyStatus::Committed),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            b.sys().fs.read(&paused).unwrap().as_deref(),
+            Some(BY_APP),
+            "kept"
+        );
+        apply_terracotta(&b);
+        assert!(!b.sys().fs.exists(&paused), "the user's apply lifts it");
     }
 }

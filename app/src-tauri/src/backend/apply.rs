@@ -45,6 +45,14 @@ impl ApplyRequest {
     }
 }
 
+/// What [`Backend::apply_guarded`] did: the apply ran (its outcome), or its guard stopped it
+/// before the transaction, with nothing changed, for the guard's word.
+#[derive(Debug)]
+pub(crate) enum Guarded {
+    Ran(Box<ApplyOutcome>),
+    Stopped(&'static str),
+}
+
 /// What one step of the plan does, for the UI's words (spec §4.5: no technical terms).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -538,13 +546,35 @@ impl<M: Machine> Backend<M> {
         digest: &str,
         on_progress: &mut dyn FnMut(ApplyProgress),
     ) -> Result<ApplyOutcome, AppError> {
+        match self.apply_guarded(req, digest, on_progress, None)? {
+            Guarded::Ran(outcome) => Ok(*outcome),
+            Guarded::Stopped(word) => Err(AppError::internal(format!(
+                "the apply stopped without a guard ({word})"
+            ))),
+        }
+    }
+
+    /// [`Backend::apply`], with `stop` for an apply nobody clicked (the re-apply after an
+    /// update, phase 4b Task 5 fix round 1): it runs with the lock of spec §5.5 held, after the
+    /// plan was checked and before the transaction, and `Some(word)` ends the apply there with
+    /// nothing changed (`Guarded::Stopped`). So what it reads (the pause, safe mode) cannot
+    /// change before the commit by any writer that takes the lock. Such an apply never lifts the
+    /// theme's pause: a pause written after `stop` read none is the user's or recovery's, and
+    /// stays. Every other apply passes `None` and lifts it, as before.
+    pub(crate) fn apply_guarded(
+        &self,
+        req: ApplyRequest,
+        digest: &str,
+        on_progress: &mut dyn FnMut(ApplyProgress),
+        stop: Option<&dyn Fn() -> Option<&'static str>>,
+    ) -> Result<Guarded, AppError> {
         let (theme, _, _) = self.find_theme(req.theme_id)?;
         let ctx = self.ctx();
         let prepared = prepare_apply(self.sys(), &ctx, &theme, &req.request())?;
         let newest = self.newest_point()?;
         let plan = plan_of(&theme, &req, &prepared, &ctx.paths, newest.as_deref())?;
         if plan.digest != digest {
-            return Ok(ApplyOutcome {
+            return Ok(Guarded::Ran(Box::new(ApplyOutcome {
                 status: ApplyStatus::PlanChanged,
                 theme_name: theme.name.clone(),
                 snapshot_id: None,
@@ -552,8 +582,13 @@ impl<M: Machine> Backend<M> {
                 unrestored: Vec::new(),
                 notes: plan.notes.clone(),
                 plan: Some(plan),
-            });
+            })));
         }
+        // The lock is held from prepare_apply to the end of run_apply_with.
+        if let Some(word) = stop.and_then(|stop| stop()) {
+            return Ok(Guarded::Stopped(word));
+        }
+        let lift_pause = stop.is_none();
         let snapshot_id = prepared.manifest.id.clone();
         let mut notes = plan.notes.clone();
         let mut unrestored = plan.unrestored.clone();
@@ -580,7 +615,7 @@ impl<M: Machine> Backend<M> {
         // can fail at a tag it cannot delete (the pause then stays on purpose), at the listing,
         // at paused.json or at making the folder, and there may be no pause at all, so the note
         // speaks of the start records, as the CLI's line does; `{e}` names the file.
-        if result.status == TxnStatus::Committed {
+        if result.status == TxnStatus::Committed && lift_pause {
             if let Err(e) = clear_pause(self.sys().fs, &ctx.paths) {
                 notes.push(note(
                     "E_DATA_WRITE",
@@ -593,7 +628,7 @@ impl<M: Machine> Backend<M> {
                 ));
             }
         }
-        Ok(ApplyOutcome {
+        Ok(Guarded::Ran(Box::new(ApplyOutcome {
             status: match result.status {
                 TxnStatus::Committed => ApplyStatus::Committed,
                 TxnStatus::RolledBack => ApplyStatus::RolledBack,
@@ -605,7 +640,7 @@ impl<M: Machine> Backend<M> {
             unrestored,
             notes,
             plan: None,
-        })
+        })))
     }
 
     /// How a transaction ended: its error, and for a rollback that did not finish the steps
