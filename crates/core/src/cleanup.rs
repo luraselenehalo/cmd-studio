@@ -22,7 +22,8 @@ use crate::actions::{
 };
 use crate::adapters::{program_data_dir, DirEntry, DirState, RegText, RegValue, System};
 use crate::exec::{
-    font_target, same_path, same_state, FixByHand, SystemExecutor, COMMAND_PROCESSOR_KEY, FONTS_KEY,
+    font_target, same_path, same_state, sibling, FixByHand, SystemExecutor, COMMAND_PROCESSOR_KEY,
+    FONTS_KEY,
 };
 use crate::generate::wt::CMD_PROFILE_GUID;
 use crate::plan::autorun::{is_foreign, remove_ours, scan};
@@ -1574,21 +1575,26 @@ pub fn runtime_dirs_named_by(state: &State, paths: &Paths) -> Vec<PathBuf> {
 
 /// Deletes the runtime folders of other versions than this build pins (spec §6.2 step 3, phase
 /// 4b), best effort: every folder directly in `runtime\` named `omp-*` or `clink-*`, and every
-/// `clink-*` directly in the user's own ProgramData folder, that is neither the pinned one nor in
-/// `keep` (what state.json names, [`runtime_dirs_named_by`]). A folder that cannot be removed
-/// (a cmd window still holds its DLL) is skipped and met again at the next start; a root that
-/// cannot be listed, or is not there, is skipped; nothing is created. Names compare without
-/// ASCII case, as Windows does. Returns the folders removed, in the order met.
+/// `clink-*` (only) directly in the user's own ProgramData folder, that is neither the pinned one
+/// nor in `keep` (what state.json names, [`runtime_dirs_named_by`]; the caller runs the prune
+/// with a loaded state, after a successful re-apply). A folder is renamed to its `.removing`
+/// form first, as `restore_runtime` does: the rename fails cleanly while a cmd window holds a
+/// file inside, and then the folder is skipped, whole, and met again at the next start; only a
+/// successful rename is followed by the (best effort) delete, and counts as removed. Leftover
+/// `.<name>.removing-…` folders of earlier runs are deleted best effort and not counted. A root
+/// that cannot be listed, or is not there, is skipped; nothing is created. Names compare
+/// without ASCII case, as Windows does. Returns the folders removed, in the order met.
 pub fn prune_old_runtimes(sys: System<'_>, paths: &Paths, keep: &[PathBuf]) -> Vec<PathBuf> {
     let mut pinned = vec![paths.omp_dir(), paths.clink_dir()];
-    let mut roots = vec![paths.runtime_root()];
+    // Each root with the prefixes it may hold: ProgramData holds Clink only.
+    let mut roots = vec![(paths.runtime_root(), vec!["omp-", "clink-"])];
     if let (Ok(pd), Ok(sid)) = (sys.host.program_data(), sys.host.user_sid()) {
         let own = program_data_dir(&pd, &sid);
         pinned.push(own.join(format!("clink-{CLINK_VERSION}")));
-        roots.push(own);
+        roots.push((own, vec!["clink-"]));
     }
     let mut removed = Vec::new();
-    for root in roots {
+    for (root, prefixes) in roots {
         let Ok(entries) = sys.fs.list_dir(&root) else {
             continue;
         };
@@ -1597,10 +1603,18 @@ pub fn prune_old_runtimes(sys: System<'_>, paths: &Paths, keep: &[PathBuf]) -> V
                 continue;
             };
             let lower = name.to_ascii_lowercase();
-            let runtime =
-                entry.is_dir && (lower.starts_with("omp-") || lower.starts_with("clink-"));
+            if entry.is_dir && lower.starts_with('.') && lower.contains(".removing-") {
+                let _ = sys.fs.remove_dir_all(&entry.path);
+                continue;
+            }
+            let runtime = entry.is_dir && prefixes.iter().any(|p| lower.starts_with(p));
             let kept = pinned.iter().chain(keep).any(|k| same_path(k, &entry.path));
-            if runtime && !kept && sys.fs.remove_dir_all(&entry.path).is_ok() {
+            if !runtime || kept {
+                continue;
+            }
+            let tomb = sibling(&entry.path, "removing");
+            if sys.fs.rename(&entry.path, &tomb).is_ok() {
+                let _ = sys.fs.remove_dir_all(&tomb);
                 removed.push(entry.path);
             }
         }
@@ -4593,5 +4607,58 @@ mod tests {
             Vec::<PathBuf>::new()
         );
         assert!(m.fs.exists(&old) && m.fs.exists(&paths.runtime_root().join("omp-31.4.0")));
+        // The premise: state.json names the folder only by its 8.3 form, so a keep taken from the
+        // launch exe (what a Direct launch allows) would not protect it and the prune would
+        // delete the folder AutoRun runs. This is what the test pins.
+        let Some(Launch::ShortPath { exe }) = state.applied.as_ref().map(|a| a.launch.clone())
+        else {
+            unreachable!("the state above has a ShortPath launch");
+        };
+        let naive: Vec<PathBuf> = exe.parent().map(Path::to_path_buf).into_iter().collect();
+        assert!(prune_old_runtimes(m.system(), &paths, &naive).contains(&old));
+    }
+
+    /// A cmd window holds a file of an old runtime open: on Windows a delete would remove the
+    /// other files first and fail, leaving a runtime a running window needs half gone. The prune
+    /// renames first, so the held folder stays whole, with every file, and is met again later.
+    /// Tombstones left by an earlier run go, best effort; ProgramData holds `clink-*` only.
+    #[test]
+    fn a_held_old_runtime_stays_whole_and_tombstones_go() {
+        use crate::adapters::Fs;
+        let m = FakeMachine::new();
+        let paths = Paths {
+            data: PathBuf::from(r"C:\d"),
+        };
+        let pd = program_data_dir(&m.host.program_data, &m.host.sid);
+        let held = PathBuf::from(r"C:\d\runtime\clink-1.8.9");
+        for f in ["a.lua", "clink_dll_x64.dll", "z.lua"] {
+            m.fs.put(held.join(f), b"x");
+        }
+        m.fs.put(r"C:\d\runtime\omp-31.4.0\oh-my-posh.exe", b"x");
+        m.fs.put(r"C:\d\runtime\.omp-31.3.0.removing-deadbeef\x", b"x");
+        m.fs.put(pd.join("omp-1.0.0").join("x"), b"x");
+        let lock =
+            m.fs.try_lock(&held.join("clink_dll_x64.dll"))
+                .unwrap()
+                .unwrap();
+        let removed = prune_old_runtimes(m.system(), &paths, &[]);
+        assert_eq!(removed, [PathBuf::from(r"C:\d\runtime\omp-31.4.0")]);
+        for f in ["a.lua", "clink_dll_x64.dll", "z.lua"] {
+            assert!(m.fs.exists(&held.join(f)), "{f} must still be there");
+        }
+        assert!(!m
+            .fs
+            .exists(Path::new(r"C:\d\runtime\.omp-31.3.0.removing-deadbeef")));
+        assert!(
+            m.fs.exists(&pd.join("omp-1.0.0")),
+            "only clink-* is pruned in ProgramData"
+        );
+        // Let go of the file: the next prune removes it.
+        drop(lock);
+        assert_eq!(
+            prune_old_runtimes(m.system(), &paths, &[]),
+            std::slice::from_ref(&held)
+        );
+        assert!(!m.fs.exists(&held));
     }
 }
