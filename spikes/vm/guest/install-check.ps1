@@ -166,7 +166,7 @@ if ($Cli) {
   # here on purpose: AutoRun is under test in these VMs.
   $cmdOut = Join-Path $Out 'cli-cmd.txt'
   $bat = Join-Path $Out 'cli.cmd'
-  @('@echo off', "where cmdstudio > `"$cmdOut`" 2>&1", "cmdstudio doctor >> `"$cmdOut`" 2>&1", "echo EXIT=%errorlevel%>> `"$cmdOut`"", "echo PROMPT-RETURNED>> `"$cmdOut`"") | Set-Content -LiteralPath $bat -Encoding ASCII
+  @('@echo off', "where cmdstudio > `"$cmdOut`" 2>&1", "cmdstudio doctor >> `"$cmdOut`" 2>&1", ">> `"$cmdOut`" echo EXIT=%errorlevel%", "echo PROMPT-RETURNED>> `"$cmdOut`"") | Set-Content -LiteralPath $bat -Encoding ASCII
   & "$env:SystemRoot\System32\cmd.exe" /c $bat
   '--- cmd:'; Get-Content -LiteralPath $cmdOut -Encoding UTF8
   '--- powershell:'
