@@ -100,6 +100,8 @@ pub struct AppStatus {
     pub safe_mode_reason: Option<SafeModeReason>,
     pub crash_notice: Option<CrashNotice>,
     pub recovery_entry: Option<RecoveryEntry>,
+    /// The last run's update went through (spec §2.1): the notice, until closed.
+    pub updated: Option<super::update::Updated>,
 }
 
 /// The newest crash note, for the Report tab (recovery spec §5.3).
@@ -489,12 +491,14 @@ impl<M: Machine> Backend<M> {
     }
 
     pub fn app_status(&self) -> Result<AppStatus, AppError> {
+        let updated = self.updated();
         Ok(self.run.with(|r| AppStatus {
             busy: r.busy.last().map(|n| (*n).to_string()),
             safe_mode: r.safe_mode.is_some(),
             safe_mode_reason: r.safe_mode,
             crash_notice: r.crash_notice,
             recovery_entry: r.recovery_entry.clone(),
+            updated,
         }))
     }
 
@@ -970,6 +974,18 @@ mod tests {
             let _: Result<(), AppError> = b.logged(APPLY, |_| panic!("a bug"));
         }));
         assert_eq!(b.app_status().unwrap().busy, None);
+        // The notice of an update rides on the same status (spec §2.1); only a run that is this
+        // process's own reads update.json.
+        b.start_run(GuiStart::Normal);
+        fake_fs(&b).put(
+            b.paths().update_file(),
+            br#"{"version":1,"from":"0.1.0","to":"0.2.0","notesUrl":"https://github.com/luraselenehalo/cmd-studio/releases/tag/v0.2.0"}"#,
+        );
+        b.update_after_start("0.2.0");
+        assert_eq!(
+            b.app_status().unwrap().updated.map(|u| u.to),
+            Some("0.2.0".to_string())
+        );
     }
 
     /// K12: the `--recovery` entry is busy under its own name for its whole duration, so the

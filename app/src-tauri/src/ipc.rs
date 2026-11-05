@@ -5,8 +5,8 @@
 //! `command_names::COMMANDS`, to what Tauri registers and to what `capabilities/default.json`
 //! allows (spec §5.10), and check which commands log.
 //!
-//! Every command that reads or changes the machine, the data folder or the settings (33 of
-//! the 37) writes exactly one log line through [`Backend::logged`]: its name (a constant of
+//! Every command that reads or changes the machine, the data folder or the settings (35 of
+//! the 39) writes exactly one log line through [`Backend::logged`]: its name (a constant of
 //! `command_names`, never text built at run time), how long it took, and `ok` or the error's
 //! code. The two that ask the user for a file (`theme_import_preview`, `theme_export`) log once
 //! for the whole command: the time includes the user's time in the dialog, and a cancel is
@@ -28,6 +28,7 @@ use crate::backend::preview::{self, ContrastIssue, PreviewResult};
 use crate::backend::recovery::{PauseOutcome, RecoveryStatus, ResumeOutcome};
 use crate::backend::run::{AppStatus, CrashReport};
 use crate::backend::system::SystemReport;
+use crate::backend::update::UpdateStatus;
 use crate::backend::{AdvancedInfo, Backend};
 use crate::command_names as names;
 use crate::error::AppError;
@@ -35,6 +36,7 @@ use crate::library::{ImportPreview, Library, ThemeDetail, ThemeSummary, THEME_EX
 use crate::machine::RealMachine;
 use crate::open::{self, ExternalTarget};
 use crate::settings::{AppSettings, SettingsLoad};
+use crate::update::TauriUpdater;
 use cmdstudio_core::model::Theme;
 use cmdstudio_core::palette::{Colors, Tone};
 use cmdstudio_core::preview::PreviewContext;
@@ -337,7 +339,7 @@ pub async fn open_cmd(state: TauriState<'_, Shared>) -> Result<(), AppError> {
     .await
 }
 
-/// Opens one of the four fixed places (`ExternalTarget`) outside the window.
+/// Opens one of the five fixed places (`ExternalTarget`) outside the window.
 #[tauri::command]
 pub async fn open_external(
     state: TauriState<'_, Shared>,
@@ -388,11 +390,14 @@ pub async fn theme_resume(state: TauriState<'_, Shared>) -> Result<ResumeOutcome
     blocking(move || b.logged(names::THEME_RESUME, |b| b.theme_resume())).await
 }
 
-/// The UI drew its first page (recovery spec §5.1).
+/// The UI drew its first page (recovery spec §5.1); then the check for a new version starts
+/// (spec §6.2, phase 4b), on a thread of its own, once per run.
 #[tauri::command]
-pub async fn app_ready(state: TauriState<'_, Shared>) -> Result<(), AppError> {
+pub async fn app_ready(app: AppHandle, state: TauriState<'_, Shared>) -> Result<(), AppError> {
     let b = state.inner().clone();
-    blocking(move || b.logged(names::APP_READY, |b| b.app_ready())).await
+    let ready = blocking(move || b.logged(names::APP_READY, |b| b.app_ready())).await;
+    crate::update::start_check(&app, state.inner().clone());
+    ready
 }
 
 /// What runs now, safe mode and why, the crash notice, what `--recovery` did (recovery spec
@@ -457,6 +462,8 @@ pub async fn app_restart(app: AppHandle, state: TauriState<'_, Shared>) -> Resul
         });
         if spawned.is_ok() {
             b.end_run();
+            // Q9: the exit asked for below installs nothing (the child is starting).
+            b.mark_restarting();
         }
         spawned
     })
@@ -465,6 +472,39 @@ pub async fn app_restart(app: AppHandle, state: TauriState<'_, Shared>) -> Resul
         app.exit(0);
     }
     spawned
+}
+
+/// Where the updater is and when it last checked (spec §6.2): read only.
+#[tauri::command]
+pub async fn update_status(state: TauriState<'_, Shared>) -> Result<UpdateStatus, AppError> {
+    let b = state.inner().clone();
+    blocking(move || b.logged(names::UPDATE_STATUS, |b| b.update_status())).await
+}
+
+/// "Update now" (the notify card, the Recovery page; spec §6.2): the backend downloads the
+/// offered version if it is not yet, takes the lock, writes the record, ends the run and starts
+/// the installer itself with a relaunch (`update::start_installer`: the app comes back as a
+/// normal start); then this process ends. The exit raises the exit hook, which installs nothing
+/// more (the state is `Installing`). Answers only when it could not: E_BUSY while a change
+/// runs, E_INTERNAL otherwise; the run goes on then, its record written back.
+#[tauri::command]
+pub async fn update_install(
+    app: AppHandle,
+    state: TauriState<'_, Shared>,
+    updater: TauriState<'_, Arc<TauriUpdater>>,
+) -> Result<(), AppError> {
+    let b = state.inner().clone();
+    let u = updater.inner().clone();
+    let started = blocking(move || {
+        b.logged(names::UPDATE_INSTALL, |b| {
+            b.update_install(u.as_ref(), &crate::update::start_installer)
+        })
+    })
+    .await;
+    if started.is_ok() {
+        app.exit(0);
+    }
+    started
 }
 
 /// Every command, for `tauri::Builder::invoke_handler`.
@@ -507,6 +547,8 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         settings_reset,
         log_ui_error,
         app_restart,
+        update_status,
+        update_install,
     ]
 }
 
@@ -540,7 +582,7 @@ mod tests {
                 "{name} has no #[tauri::command] function"
             );
         }
-        assert_eq!(COMMANDS.len(), 37);
+        assert_eq!(COMMANDS.len(), 39);
     }
 
     #[test]
@@ -631,7 +673,7 @@ mod tests {
                 "{name} logs under {constant}"
             );
         }
-        assert_eq!(logging, 33);
+        assert_eq!(logging, 35);
     }
 
     /// The final review's re-graded carry: `app_restart` ends this process's run record itself,
@@ -652,6 +694,39 @@ mod tests {
         assert!(
             body.contains("if spawned.is_ok() {\n            b.end_run();"),
             "only after a spawn that went through: {body}"
+        );
+    }
+
+    /// Spec §6.2 (phase 4b): the check for a new version starts from app_ready, after the run is
+    /// noted ready and off the window's thread; the install-now command hands the plugin's
+    /// updater and the app's own installer start to the backend and ends the process only after
+    /// the backend answered Ok; the restart marks the backend first, so its exit installs nothing.
+    #[test]
+    fn the_check_starts_after_app_ready_and_the_install_now_ends_the_process() {
+        let start = SOURCE.find("pub async fn app_ready(").unwrap();
+        let body = SOURCE.get(start..).unwrap().split_once("\n}\n").unwrap().0;
+        let logged = body.find(".logged(names::APP_READY").unwrap();
+        let check = body.find("crate::update::start_check(&app, ").unwrap();
+        assert!(logged < check, "the record first, then the check");
+        let start = SOURCE.find("pub async fn update_install(").unwrap();
+        let body = SOURCE.get(start..).unwrap().split_once("\n}\n").unwrap().0;
+        assert!(body.contains("TauriState<'_, Arc<TauriUpdater>>"));
+        let installed = body
+            .find("b.update_install(u.as_ref(), &crate::update::start_installer)")
+            .unwrap();
+        let exit = body.find("app.exit(0)").unwrap();
+        assert!(installed < exit, "the exit comes after the backend's Ok");
+        assert!(
+            body.contains("if started.is_ok() {\n        app.exit(0);"),
+            "{body}"
+        );
+        let start = SOURCE.find("pub async fn app_restart(").unwrap();
+        let body = SOURCE.get(start..).unwrap().split_once("\n}\n").unwrap().0;
+        let ended = body.find("b.end_run()").unwrap();
+        let marked = body.find("b.mark_restarting()").unwrap();
+        assert!(
+            ended < marked,
+            "the record's end, then the mark, inside the spawned-ok block"
         );
     }
 

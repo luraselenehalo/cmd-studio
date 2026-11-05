@@ -1,7 +1,7 @@
 // The home page (spec §4.3): the status from the real checks with the time they ran, the theme in
 // use with its preview and Customize / Change theme / Open cmd, a quick switch to the five themes
-// used most recently (through the plan, as every apply), and the latest restore point. A line is
-// kept for Phase 4's "Updated to vX" notice (`home.update.placeholder`). Each part loads on its
+// used most recently (through the plan, as every apply), and the latest restore point. The
+// updater's offer sits under the status (`UpdateOffer`). Each part loads on its
 // own, so one that fails is said and the others still show; a state.json that could not be read
 // is said as such, never as "no theme is applied" (spec §5.8 D9). While the theme is paused a
 // banner says why, since when and how far it reaches, with "Turn the theme back on"; under the
@@ -18,6 +18,7 @@ import { ApplyFlow } from "../components/ApplyFlow";
 import { Dialog } from "../components/Dialog";
 import { ErrorNotice } from "../components/Notices";
 import { PausedBanner, PauseResult, usePause, useResume } from "../components/Pause";
+import { UpdateOffer } from "../components/UpdateOffer";
 import { TerminalPreview } from "../components/TerminalPreview";
 import { formatTime, useI18n } from "../i18n";
 import { useIpc } from "../ipc/context";
@@ -240,8 +241,7 @@ export function Home() {
         <button type="button" onClick={() => go({ name: "help", tab: "doctor" })}>
           {t("home.status.open")}
         </button>
-        {/* Phase 4's updater puts its "Updated to vX" notice here. */}
-        <div data-slot="update-notice">{t("home.update.placeholder")}</div>
+        <UpdateOffer where="home" />
       </div>
       <div className="card">
         <h2 style={{ marginTop: 0 }}>{t("home.active.title")}</h2>

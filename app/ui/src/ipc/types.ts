@@ -35,6 +35,7 @@ import type { ThemeDetail } from "../bindings/ThemeDetail";
 import type { ThemeSummary } from "../bindings/ThemeSummary";
 import type { Tone } from "../bindings/Tone";
 import type { UndoOutcome } from "../bindings/UndoOutcome";
+import type { UpdateStatus } from "../bindings/UpdateStatus";
 
 export interface Ipc {
   systemDetect(): Promise<SystemReport>;
@@ -98,6 +99,13 @@ export interface Ipc {
    * an Ok answer also means it is restarting (the process may stay alive a moment after the
    * exit is asked for); only a rejection (the spawn failed) is an error. */
   appRestart(): Promise<void>;
+  /** Where the updater is and when it last checked (spec §6.2): read only. */
+  updateStatus(): Promise<UpdateStatus>;
+  /** "Update now": downloads the offered version if it is not yet and installs it through the
+   * plugin, which ends this process; the app comes back by itself. Like `appRestart`, an Ok
+   * answer also means it is on its way; only a rejection (E_BUSY while a change runs, E_INTERNAL)
+   * is an error. */
+  updateInstall(): Promise<void>;
 }
 
 /** A command failed: the Rust side's `AppError` (spec §5.9), as a JavaScript error. */

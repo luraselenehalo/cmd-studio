@@ -44,6 +44,9 @@ import type { ThemeSource } from "../bindings/ThemeSource";
 import type { ThemeSummary } from "../bindings/ThemeSummary";
 import type { Tone } from "../bindings/Tone";
 import type { UndoOutcome } from "../bindings/UndoOutcome";
+import type { Updated } from "../bindings/Updated";
+import type { UpdateState } from "../bindings/UpdateState";
+import type { UpdateStatus } from "../bindings/UpdateStatus";
 import { IpcError, type Ipc } from "./types";
 import { PRESETS } from "./presets";
 
@@ -349,6 +352,13 @@ export interface MockOptions {
    * `revert.ok && saved` has it).
    */
   failPause?: "refused" | "rolledBack" | "notSaved" | "partial";
+  /** Where the updater is when the mock starts (spec §6.2), as `update_status` says it; `pending`
+   * is a check that has not run yet (`checkedAtMs` null: the UI polls); `updated` is the notice of
+   * a start after an update (`app_status.updated`) with the state idle. Not given: idle, as after a
+   * check that found nothing. `off` with `settings: { updates: "off" }`. */
+  update?: "off" | "pending" | "idle" | "available" | "ready" | "updated";
+  /** The version the updater offers or brought; 0.2.0 when not given. */
+  updateVersion?: string;
 }
 
 /** The mock's own state, open to the tests. */
@@ -372,6 +382,12 @@ export interface MockState {
   uiErrors: string[];
   /** `app_restart` was called. */
   restarted: boolean;
+  /** `update_status` as it answers now; a test may change it (the check ran meanwhile). */
+  update: UpdateStatus;
+  /** `app_status.updated`: the last run's update went through. */
+  updated: Updated | null;
+  /** How many times "Update now" went through. */
+  updateInstalls: number;
 }
 
 /**
@@ -399,6 +415,20 @@ function fakeLines(theme: Theme): PreviewResult {
   return { banner, prompt };
 }
 
+/** The updater's state for an option: fixed data, as the backend's state machine would leave it. */
+function updateState(option: NonNullable<MockOptions["update"]>, version: string): UpdateState {
+  switch (option) {
+    case "off":
+      return { kind: "off" };
+    case "available":
+      return { kind: "available", version };
+    case "ready":
+      return { kind: "ready", version };
+    default:
+      return { kind: "idle" };
+  }
+}
+
 export function createMockIpc(options: MockOptions = {}): Ipc & { state: MockState } {
   const presets: Theme[] = PRESETS.map((t) => structuredClone(t));
   const byTone = (tone: Tone) => presets.find((p) => p.tone === tone) ?? presets[0]!;
@@ -424,6 +454,16 @@ export function createMockIpc(options: MockOptions = {}): Ipc & { state: MockSta
     ready: false,
     uiErrors: [],
     restarted: false,
+    update: {
+      mode: options.settings?.updates ?? "auto",
+      state: updateState(options.update ?? "idle", options.updateVersion ?? "0.2.0"),
+      checkedAtMs: options.update === "off" || options.update === "pending" ? null : 1791694709000,
+    },
+    updated:
+      options.update === "updated"
+        ? { from: "0.1.0", to: options.updateVersion ?? "0.2.0", notesUrl: `https://github.com/luraselenehalo/cmd-studio/releases/tag/v${options.updateVersion ?? "0.2.0"}` }
+        : null,
+    updateInstalls: 0,
   };
   let nextMs = 1791694709000;
   const now = () => nextMs++;
@@ -1021,7 +1061,7 @@ export function createMockIpc(options: MockOptions = {}): Ipc & { state: MockSta
       state.calls.push("openCmd");
     },
     async openExternal(target): Promise<void> {
-      state.calls.push(`openExternal:${target}`);
+      state.calls.push(`openExternal:${typeof target === "string" ? target : JSON.stringify(target)}`);
     },
     async diagnosticsCopy(): Promise<string> {
       state.calls.push("diagnosticsCopy");
@@ -1089,6 +1129,7 @@ export function createMockIpc(options: MockOptions = {}): Ipc & { state: MockSta
         safeModeReason: state.safeMode,
         crashNotice: state.crashNotice,
         recoveryEntry: options.recoveryEntry ?? null,
+        updated: state.updated,
       };
     },
     async crashDismiss(): Promise<void> {
@@ -1111,6 +1152,19 @@ export function createMockIpc(options: MockOptions = {}): Ipc & { state: MockSta
     async appRestart(): Promise<void> {
       state.calls.push("appRestart");
       state.restarted = true;
+    },
+    async updateStatus(): Promise<UpdateStatus> {
+      state.calls.push("updateStatus");
+      return structuredClone(state.update);
+    },
+    async updateInstall(): Promise<void> {
+      state.calls.push("updateInstall");
+      const s = state.update.state;
+      if (s.kind !== "available" && s.kind !== "ready") {
+        throw new IpcError({ code: "E_INTERNAL", messageTh: "(E_INTERNAL)", messageEn: "(E_INTERNAL)", details: "no update is available to install" });
+      }
+      state.updateInstalls += 1;
+      state.update = { ...state.update, state: { kind: "installing", version: s.version } };
     },
   };
   return ipc;

@@ -10,6 +10,7 @@ import type { AppSettings } from "./bindings/AppSettings";
 import type { AppStatus } from "./bindings/AppStatus";
 import type { CrashNotice } from "./bindings/CrashNotice";
 import type { SettingsLoad } from "./bindings/SettingsLoad";
+import type { Updated } from "./bindings/Updated";
 import { AfterApplyBar } from "./components/AfterApplyBar";
 import { DraftProblemNotice } from "./components/DraftProblemNotice";
 import { ErrorNotice, Notice } from "./components/Notices";
@@ -72,6 +73,10 @@ export function App() {
   const [resetFrom, setResetFrom] = useState<string | null>(null);
   /** The crash notice was closed: it stays closed whatever screen draws the notices next. */
   const [crashClosed, setCrashClosed] = useState(false);
+  /** "Later" on the update offer: hidden for the rest of this run (spec §6.2). */
+  const [updateLater, setUpdateLater] = useState(false);
+  /** The "Updated to vX" notice was closed: it stays closed for the run. */
+  const [updateClosed, setUpdateClosed] = useState(false);
   /** Why the wizard's settings could not be saved as it went home: they are kept in memory, the
    * next save that goes through writes them, and the shell says so until then (fix I1). */
   const [unsaved, setUnsaved] = useState<unknown>(null);
@@ -208,9 +213,24 @@ export function App() {
 
   const bump = useCallback(() => setVersion((v) => v + 1), []);
   const markRecoveryActed = useCallback(() => setRecoveryActed(true), []);
+  const markUpdateLater = useCallback(() => setUpdateLater(true), []);
   const appState = useMemo<AppState>(
-    () => ({ settings, saveSettings, lastApply, setLastApply, draftProblems, version, bump, recoveryActed, markRecoveryActed, appStatus: crashClosed && status ? { ...status, crashNotice: null } : status, adoptSettings: adoptReset }),
-    [settings, saveSettings, lastApply, draftProblems, version, bump, recoveryActed, markRecoveryActed, status, crashClosed, adoptReset],
+    () => ({
+      settings,
+      saveSettings,
+      lastApply,
+      setLastApply,
+      draftProblems,
+      version,
+      bump,
+      recoveryActed,
+      markRecoveryActed,
+      appStatus: status ? { ...status, crashNotice: crashClosed ? null : status.crashNotice, updated: updateClosed ? null : status.updated } : null,
+      adoptSettings: adoptReset,
+      updateLater,
+      markUpdateLater,
+    }),
+    [settings, saveSettings, lastApply, draftProblems, version, bump, recoveryActed, markRecoveryActed, status, crashClosed, adoptReset, updateLater, updateClosed, markUpdateLater],
   );
   const nav = useMemo<Nav>(() => ({ route: route ?? { name: "home" }, go: (r: Route) => setRoute(r) }), [route]);
 
@@ -233,6 +253,7 @@ export function App() {
                 resetFrom={resetFrom}
                 unsaved={unsaved}
                 onCrashClosed={() => setCrashClosed(true)}
+                onUpdateClosed={() => setUpdateClosed(true)}
                 onUnsaved={keepUnsaved}
               />
             )}
@@ -256,6 +277,8 @@ interface StartProblems {
   unsaved: unknown;
   /** The crash notice was closed. */
   onCrashClosed: () => void;
+  /** The "Updated to vX" notice was closed. */
+  onUpdateClosed: () => void;
 }
 
 /**
@@ -288,7 +311,7 @@ function Screens({ onUnsaved, ...problems }: StartProblems & { onUnsaved: (setti
 
 /** The settings could not be read as the app started, were reset, or could not be saved by the
  * wizard: then the wizard shows again at the next start, as the notice says. */
-function StartNotices({ startError, onRetry, resetFrom, unsaved, onCrashClosed }: StartProblems) {
+function StartNotices({ startError, onRetry, resetFrom, unsaved, onCrashClosed, onUpdateClosed }: StartProblems) {
   const { t } = useI18n();
   const [reading, setReading] = useState(false);
   const retry = async () => {
@@ -303,6 +326,7 @@ function StartNotices({ startError, onRetry, resetFrom, unsaved, onCrashClosed }
   return (
     <>
       {appStatus?.crashNotice && <CrashClosed notice={appStatus.crashNotice} onClosed={onCrashClosed} />}
+      {appStatus?.updated && <UpdatedNotice updated={appStatus.updated} onClosed={onUpdateClosed} />}
       {startError !== null && (
         <>
           <ErrorNotice error={startError} title={t("settings.startFailed")} />
@@ -350,6 +374,36 @@ function CrashClosed({ notice, onClosed }: { notice: CrashNotice; onClosed: () =
           {t("common.close")}
         </button>
       </div>
+    </Notice>
+  );
+}
+
+/** The last run's update went through (spec §2.1, §6.2): which version this is now, and one click
+ * to the release page, which the backend opens for a SemVer version only. Close hides it for the
+ * run; the backend forgot the record when the first screen drew (app_ready). */
+function UpdatedNotice({ updated, onClosed }: { updated: Updated; onClosed: () => void }) {
+  const { t } = useI18n();
+  const ipc = useIpc();
+  const [openError, setOpenError] = useState<unknown>(null);
+  return (
+    <Notice kind="ok">
+      <p>{t("start.updated", { version: updated.to })}</p>
+      <div className="row-actions">
+        <button
+          type="button"
+          className="primary"
+          onClick={() => {
+            setOpenError(null);
+            ipc.openExternal({ releaseNotes: { version: updated.to } }).catch(setOpenError);
+          }}
+        >
+          {t("start.whatChanged")}
+        </button>
+        <button type="button" onClick={onClosed}>
+          {t("common.close")}
+        </button>
+      </div>
+      {openError !== null && <ErrorNotice error={openError} />}
     </Notice>
   );
 }

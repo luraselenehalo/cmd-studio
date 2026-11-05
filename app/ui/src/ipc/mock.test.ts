@@ -624,7 +624,7 @@ describe("the mock IPC", () => {
 
   it("answers the app's status as fixed data from its options, notes ready and dismiss, and counts the UI's errors", async () => {
     const plain = createMockIpc();
-    expect(await plain.appStatus()).toEqual({ busy: null, safeMode: false, safeModeReason: null, crashNotice: null, recoveryEntry: null });
+    expect(await plain.appStatus()).toEqual({ busy: null, safeMode: false, safeModeReason: null, crashNotice: null, recoveryEntry: null, updated: null });
     await plain.appReady();
     expect(plain.state.ready).toBe(true);
     const ipc = createMockIpc({
@@ -663,5 +663,26 @@ describe("the mock IPC", () => {
     expect((await ipc.appStatus()).recoveryEntry).toEqual(entry);
     const unknown = createMockIpc({ paused: { by: "app", level: "computerUnknown", reason: "user", atMs: 1, count: 0, resume: null } });
     expect(await unknown.themeResume()).toEqual({ kind: "notKnown" });
+  });
+
+  it("answers the updater from its option, installs on Update now, and says updated (phase 4b)", async () => {
+    const plain = createMockIpc();
+    expect(await plain.updateStatus()).toEqual({ mode: "auto", state: { kind: "idle" }, checkedAtMs: 1791694709000 });
+    const pending = createMockIpc({ update: "pending" });
+    expect(await pending.updateStatus()).toEqual({ mode: "auto", state: { kind: "idle" }, checkedAtMs: null });
+    await expect(plain.updateInstall()).rejects.toMatchObject({ code: "E_INTERNAL" });
+    const off = createMockIpc({ update: "off", settings: { updates: "off" } });
+    expect((await off.updateStatus()).state).toEqual({ kind: "off" });
+    const ready = createMockIpc({ update: "ready", updateVersion: "0.3.0" });
+    expect((await ready.updateStatus()).state).toEqual({ kind: "ready", version: "0.3.0" });
+    const available = createMockIpc({ update: "available" });
+    expect((await available.updateStatus()).state).toEqual({ kind: "available", version: "0.2.0" });
+    await available.updateInstall();
+    expect(available.state.updateInstalls).toBe(1);
+    expect((await available.updateStatus()).state).toEqual({ kind: "installing", version: "0.2.0" });
+    const updated = createMockIpc({ update: "updated" });
+    expect((await updated.appStatus()).updated).toEqual({ from: "0.1.0", to: "0.2.0", notesUrl: "https://github.com/luraselenehalo/cmd-studio/releases/tag/v0.2.0" });
+    await updated.openExternal({ releaseNotes: { version: "0.2.0" } });
+    expect(updated.state.calls).toContain('openExternal:{"releaseNotes":{"version":"0.2.0"}}');
   });
 });

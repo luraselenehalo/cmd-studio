@@ -3,11 +3,13 @@
 // already has (Undo everything, Restore points, Health check, Report a problem), plus the log
 // folder, "Reset the app's settings" (settings.json set aside) and "Start normally" (a restart:
 // the first screen of this run said ready, so the next start is a normal one). No library, no
-// drafts, no preview, no quick switch are read here. A line is kept for phase 4's "Update now".
+// drafts, no preview, no quick switch are read here. The updater's line (`UpdateOffer`) offers
+// "Update now" when a version waits, and says so when none does.
 import { useEffect, useRef, useState } from "react";
 import { Dialog } from "../components/Dialog";
 import { ErrorNotice, NotesList, UnrestoredList } from "../components/Notices";
 import { PausedBanner, PauseResult, useResume } from "../components/Pause";
+import { UpdateOffer } from "../components/UpdateOffer";
 import { useI18n } from "../i18n";
 import { useIpc } from "../ipc/context";
 import type { Ipc } from "../ipc/types";
@@ -63,8 +65,8 @@ export function Recovery() {
         {reason?.kind === "failedStarts" && t("recovery.why.failedStarts", { n: reason.count })}
         {reason?.kind === "recovery" && t("recovery.why.shortcut")}
       </p>
-      {/* Phase 4's "Update now" goes here (recovery spec §5.2). */}
-      <p className="update-line">{t("recovery.update.placeholder")}</p>
+      {/* "Update now" when a version waits, else that none waits (recovery spec §5.2). */}
+      <UpdateOffer where="recovery" />
       {entry && (
         <div className="card">
           {/* M3: one sentence, by whether the entry paused the theme or said why it did not. */}

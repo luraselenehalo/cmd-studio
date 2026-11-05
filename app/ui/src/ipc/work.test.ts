@@ -41,6 +41,9 @@ describe("the one list of commands", () => {
     expect(KINDS.themeImportPreview).toBe("user");
     expect(KINDS.themeExport).toBe("user");
     expect(KINDS.appRestart).toBe("exit");
+    expect(KINDS.updateStatus).toBe("read");
+    expect(KINDS.updateInstall).toBe("exit");
+    expect(Object.values(KINDS).filter((k) => k === "exit")).toHaveLength(2);
     expect(Object.values(KINDS).filter((k) => k === "changes")).toHaveLength(5);
     for (const key of Object.values(TASK)) expect(key in en, key).toBe(true);
   });

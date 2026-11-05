@@ -362,6 +362,122 @@ it("stays on the Recovery page when the crash notice's Report is pressed in safe
   });
 });
 
+describe("the updater (spec §6.2, phase 4b)", () => {
+  it("says Updated to vX above the home page, opens what changed, and stays closed once closed", async () => {
+    const { ipc, user } = await home({ update: "updated" });
+    expect(await screen.findByText("Updated to v0.2.0.")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "What changed" }));
+    await waitFor(() => expect(ipc.state.calls).toContain('openExternal:{"releaseNotes":{"version":"0.2.0"}}'));
+    await user.click(screen.getByRole("button", { name: "Close" }));
+    expect(screen.queryByText("Updated to v0.2.0.")).toBeNull();
+    await open(user, "Settings");
+    await open(user, "Home");
+    expect(screen.queryByText("Updated to v0.2.0.")).toBeNull();
+    expect(ipc.state.calls.filter((c) => c === "crashDismiss")).toEqual([]);
+  });
+
+  it("shows the offer once the check of this run has run, polling until then (Q5)", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const { ipc } = await home({ update: "pending", settings: { updates: "notify" } });
+      expect(screen.queryByText("CMD Studio v0.2.0 is available.")).toBeNull();
+      // The backend's check ran meanwhile (after app_ready): the next poll finds it.
+      ipc.state.update = { mode: "notify", state: { kind: "available", version: "0.2.0" }, checkedAtMs: 1791694709000 };
+      await vi.advanceTimersByTimeAsync(2100);
+      expect(await screen.findByText("CMD Studio v0.2.0 is available.")).toBeTruthy();
+      expect(ipc.state.calls.filter((c) => c === "updateStatus").length).toBeGreaterThanOrEqual(2);
+      // Settled: no more polls.
+      const polls = ipc.state.calls.filter((c) => c === "updateStatus").length;
+      await vi.advanceTimersByTimeAsync(6000);
+      expect(ipc.state.calls.filter((c) => c === "updateStatus").length).toBe(polls);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reads the updater once when the check has run already, and never when Off", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const { ipc } = await home({ update: "idle" });
+      await vi.advanceTimersByTimeAsync(6000);
+      expect(ipc.state.calls.filter((c) => c === "updateStatus")).toHaveLength(1);
+      const off = await home({ update: "off", settings: { updates: "off" } });
+      await vi.advanceTimersByTimeAsync(6000);
+      expect(off.ipc.state.calls.filter((c) => c === "updateStatus")).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("offers the available version on the home page with Update now and Later, and Later holds for the run", async () => {
+    const { ipc, user } = await home({ update: "available", settings: { updates: "notify" } });
+    expect(await screen.findByText("CMD Studio v0.2.0 is available.")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Later" }));
+    expect(screen.queryByText("CMD Studio v0.2.0 is available.")).toBeNull();
+    await open(user, "Themes");
+    await open(user, "Home");
+    await screen.findByRole("heading", { name: "Home" });
+    expect(screen.queryByText("CMD Studio v0.2.0 is available.")).toBeNull();
+    expect(ipc.state.updateInstalls).toBe(0);
+  });
+
+  it("Update now installs through the backend and says the app comes back by itself", async () => {
+    const { ipc, user } = await home({ update: "available", settings: { updates: "notify" } });
+    await user.click(await screen.findByRole("button", { name: "Update now" }));
+    await waitFor(() => expect(ipc.state.updateInstalls).toBe(1));
+    expect(await screen.findByText(/Downloading and installing v0\.2\.0/)).toBeTruthy();
+  });
+
+  it("a downloaded version says it installs at close, and a failed Update now is said", async () => {
+    const { ipc, user } = await home({ update: "ready" });
+    expect(await screen.findByText(/v0\.2\.0 is downloaded and will be installed when you close CMD Studio/)).toBeTruthy();
+    vi.spyOn(ipc, "updateInstall").mockRejectedValueOnce(ipcError("E_BUSY", "cmdstudio.lock is held"));
+    await user.click(screen.getByRole("button", { name: "Update now" }));
+    expect(await screen.findByText("(E_BUSY)")).toBeTruthy();
+  });
+
+  // Task 3's review carry: a second Update now while one is under way answers E_BUSY; the
+  // updater then says it downloads or installs, and the card says "already", not an error.
+  it("an Update now refused because the update is already under way says so, not as an error", async () => {
+    const { ipc, user } = await home({ update: "available", settings: { updates: "notify" } });
+    vi.spyOn(ipc, "updateInstall").mockImplementationOnce(async () => {
+      ipc.state.update = { ...ipc.state.update, state: { kind: "installing", version: "0.2.0" } };
+      throw ipcError("E_BUSY", "the update is already being downloaded or installed");
+    });
+    await user.click(await screen.findByRole("button", { name: "Update now" }));
+    expect(await screen.findByText("The update is already being downloaded or installed.")).toBeTruthy();
+    expect(screen.queryByText("(E_BUSY)")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Update now" })).toBeNull();
+  });
+
+  it("the Recovery page offers Update now when a version waits (recovery spec §5.2)", async () => {
+    await mount({ safeMode: { kind: "recovery" }, update: "available", settings: { wizardDone: true } });
+    await screen.findByRole("heading", { name: "Recovery mode" });
+    expect(await screen.findByText(/CMD Studio v0\.2\.0 is available; a new version may fix/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Update now" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Later" })).toBeNull();
+  });
+
+  it("the Recovery page says that no update waits when none does", async () => {
+    await mount({ safeMode: { kind: "recovery" }, settings: { wizardDone: true } });
+    await screen.findByRole("heading", { name: "Recovery mode" });
+    expect(await screen.findByText("No update is waiting.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Update now" })).toBeNull();
+  });
+
+  it("the Advanced page says when updates were last checked", async () => {
+    const { user } = await home({ update: "idle" });
+    await open(user, "Advanced");
+    expect(await screen.findByText(/^Updates last checked at /)).toBeTruthy();
+  });
+
+  it("every new button has a name in Thai too", async () => {
+    await home({ update: "available", settings: { language: "th", updates: "notify" } });
+    expect(await screen.findByRole("button", { name: th["home.update.now"] })).toBeTruthy();
+    expect(screen.getByRole("button", { name: th["home.update.later"] })).toBeTruthy();
+  });
+});
+
 describe("the first run", () => {
   it("opens in English and applies Terracotta in five clicks with nothing typed (criterion 1)", async () => {
     const { ipc, user, view } = await mount();
@@ -926,7 +1042,7 @@ describe("Settings", () => {
     expect((screen.getByLabelText(/^Every cmd window/) as HTMLInputElement).checked).toBe(true);
     expect((screen.getByLabelText("Make Windows Terminal open cmd by default") as HTMLInputElement).checked).toBe(true);
     expect((screen.getByLabelText("Automatic (recommended)") as HTMLInputElement).checked).toBe(true);
-    expect(screen.getByText(/checked each time it starts/)).toBeTruthy();
+    expect(screen.getByText(/checks for a new version each time it starts/)).toBeTruthy();
     // "Saved." comes in a status region that was there before (2c item 10).
     const status = within(screen.getByRole("main")).getAllByRole("status").find((el) => el.textContent === "");
     expect(status).toBeTruthy();

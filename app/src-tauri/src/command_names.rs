@@ -2,7 +2,8 @@
 // `open_external` and `advanced_read` (Phase 2b; spec §5.7 records them), and
 // `recovery_status`, `theme_pause` and `theme_resume` (phase 3b, recovery spec §8), and `app_ready`,
 // `app_status`, `crash_dismiss`, `crash_report_read`, `settings_reset`, `log_ui_error` and
-// `app_restart` (phase 3b-2, recovery spec §8). One list,
+// `app_restart` (phase 3b-2, recovery spec §8), and `update_status`, `update_install` (phase 4b,
+// spec §6.2). One list,
 // read by `build.rs`, which turns each into the permissions `allow-<command>` and `deny-<command>`
 // (underscores become hyphens), and by `ipc.rs`, whose test checks that every name here is
 // registered with Tauri and allowed by `capabilities/default.json`, and nothing else is.
@@ -49,8 +50,10 @@ pub const CRASH_REPORT_READ: &str = "crash_report_read";
 pub const SETTINGS_RESET: &str = "settings_reset";
 pub const LOG_UI_ERROR: &str = "log_ui_error";
 pub const APP_RESTART: &str = "app_restart";
+pub const UPDATE_STATUS: &str = "update_status";
+pub const UPDATE_INSTALL: &str = "update_install";
 
-/// The 37 IPC command names, in the order of spec §5.7.
+/// The 39 IPC command names, in the order of spec §5.7.
 pub const COMMANDS: &[&str] = &[
     SYSTEM_DETECT,
     THEMES_LIST,
@@ -89,6 +92,8 @@ pub const COMMANDS: &[&str] = &[
     SETTINGS_RESET,
     LOG_UI_ERROR,
     APP_RESTART,
+    UPDATE_STATUS,
+    UPDATE_INSTALL,
 ];
 
 /// The commands that change the machine (recovery spec §6.3): each runs one of the core's
