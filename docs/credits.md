@@ -8,7 +8,7 @@ CMD Studio is MIT-licensed. It bundles or derives from the components below, eac
 |---|---|---|---|---|
 | Clink | 1.9.34 (bundled unmodified) | GPL-3.0 | Martin Ridgers and contributors (notices in the source headers) | https://github.com/chrisant996/clink/tree/v1.9.34 |
 | Oh My Posh | 31.5.0 (bundled unmodified) | MIT | Copyright 2022 Jan De Dobbeleer | https://github.com/JanDeDobbeleer/oh-my-posh |
-| CaskaydiaCove Nerd Font | pinned when bundled; the G12 probe used v3.5.1 | SIL OFL 1.1 | Copyright (c) 2019 - Present, Microsoft Corporation (Cascadia Code); Copyright (c) 2014 Ryan L McIntyre (Nerd Fonts) | https://github.com/ryanoasis/nerd-fonts |
+| CaskaydiaCove Nerd Font | 3.5.1 (Nerd Fonts release; bundled unmodified, the G12 probe used the same) | SIL OFL 1.1 | Copyright (c) 2019 - Present, Microsoft Corporation (Cascadia Code); Copyright (c) 2014 Ryan L McIntyre (Nerd Fonts) | https://github.com/ryanoasis/nerd-fonts |
 
 CaskaydiaCove is Nerd Fonts' patched build of Cascadia Code. Cascadia Code's license reserves the font name "Cascadia Code", which is why the patched font has another name. Windows (GDI+) reports its family as `CaskaydiaCove NF`. The installer must include the OFL text.
 

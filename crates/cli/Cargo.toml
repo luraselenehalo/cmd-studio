@@ -21,3 +21,7 @@ thiserror = "2"
 # release build never contains the fakes.
 cmdstudio-core = { path = "../core", features = ["fake"] }
 tempfile = "3"
+
+# The gated real-registry test cleans up its throwaway key with winreg (the core's pin).
+[target.'cfg(windows)'.dev-dependencies]
+winreg = "=0.56.0"

@@ -1315,7 +1315,7 @@ mod tests {
             fs::WinFs,
             host::WinHost,
             process::WinProcess,
-            registry::{RegLocation, WinAutoRun},
+            registry::{RegLocation, WinAutoRun, WinUserPath},
             wt::WinWt,
         };
         use cmdstudio_core::adapters::System;
@@ -1348,6 +1348,7 @@ mod tests {
             process: WinProcess,
             host: WinHost,
             event_log: WinEventLog,
+            user_path: WinUserPath,
         }
 
         impl DiskMachine {
@@ -1361,6 +1362,7 @@ mod tests {
                     process: WinProcess::new(Vec::new(), Duration::from_secs(1)),
                     host: WinHost,
                     event_log: WinEventLog::real(),
+                    user_path: WinUserPath::at(unused()),
                 }
             }
         }
@@ -1375,6 +1377,7 @@ mod tests {
                     process: &self.process,
                     host: &self.host,
                     event_log: &self.event_log,
+                    user_path: &self.user_path,
                 }
             }
         }

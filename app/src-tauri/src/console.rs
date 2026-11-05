@@ -117,6 +117,49 @@ pub fn ask_yes_no(message: &str) -> bool {
     false
 }
 
+/// The app's exe, which the Start-menu shortcuts and the uninstaller name.
+pub const APP_EXE: &str = "cmdstudio.exe";
+/// The console exe beside it (spec §5.7): the same CLI as a console-subsystem program, which cmd
+/// waits for and gets an exit code from. `cmdstudio` typed in cmd or PowerShell is this one, as
+/// PATHEXT tries `.COM` before `.EXE`.
+pub const CONSOLE_EXE: &str = "cmdstudio.com";
+
+/// What `cmdstudio.com` does with its arguments.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConsoleStart {
+    /// `--recovery` alone: the window in recovery mode is the app's job (recovery spec §4.4);
+    /// the console exe starts `cmdstudio.exe --recovery` beside itself and ends.
+    OpenRecovery,
+    /// Everything else is `cmdstudio_cli::run`'s. `--after-pid <pid>` included: it is
+    /// `app_restart`'s own and never typed, and the CLI refuses it as it refuses any unknown
+    /// option (exit code 2).
+    Cli,
+}
+
+pub fn console_start(args: &[std::ffi::OsString]) -> ConsoleStart {
+    match args {
+        [one] if one == crate::RECOVERY_ARG => ConsoleStart::OpenRecovery,
+        _ => ConsoleStart::Cli,
+    }
+}
+
+/// Starts [`APP_EXE`] from this program's own folder with `args`, without waiting: the window
+/// outlives the console program. `Err` says what failed, in English.
+#[cfg(windows)]
+pub fn start_app_beside(args: &[std::ffi::OsString]) -> Result<(), String> {
+    let me = std::env::current_exe()
+        .map_err(|e| format!("this program's own path could not be read: {e}"))?;
+    let folder = me
+        .parent()
+        .ok_or_else(|| "this program has no folder".to_string())?;
+    let app = folder.join(APP_EXE);
+    std::process::Command::new(&app)
+        .args(args)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("{} could not be started: {e}", app.display()))
+}
+
 #[cfg(all(test, windows))]
 mod tests {
     use super::Stdout;
@@ -148,5 +191,43 @@ mod tests {
         assert!(Stdout::Missing.needs_parent_console());
         assert!(Stdout::Unknown.needs_parent_console());
         assert!(!Stdout::Usable.needs_parent_console());
+    }
+}
+
+#[cfg(test)]
+mod start_tests {
+    use super::{console_start, ConsoleStart, APP_EXE, CONSOLE_EXE};
+    use std::ffi::OsString;
+
+    fn args(list: &[&str]) -> Vec<OsString> {
+        list.iter().map(OsString::from).collect()
+    }
+
+    /// `cmdstudio.com --recovery` opens the window (the app's job): it is handed to
+    /// `cmdstudio.exe`. Everything else, `--after-pid` and a `--recovery` with company
+    /// included, is the CLI's, which refuses what it does not know with exit code 2.
+    #[test]
+    fn only_a_lone_recovery_flag_is_handed_to_the_app() {
+        assert_eq!(
+            console_start(&args(&["--recovery"])),
+            ConsoleStart::OpenRecovery
+        );
+        for other in [
+            vec![],
+            vec!["doctor"],
+            vec!["--recovery", "--data-dir", r"C:\d"],
+            vec!["--after-pid", "1234"],
+            vec!["--cleanup"],
+        ] {
+            assert_eq!(console_start(&args(&other)), ConsoleStart::Cli, "{other:?}");
+        }
+    }
+
+    /// The two names, in one place each; the hooks file's `Rename` spells them too (Task 3's
+    /// `config_guard` pins that side).
+    #[test]
+    fn the_two_programs_have_their_names() {
+        assert_eq!(APP_EXE, "cmdstudio.exe");
+        assert_eq!(CONSOLE_EXE, "cmdstudio.com");
     }
 }

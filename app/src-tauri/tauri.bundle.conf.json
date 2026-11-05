@@ -1,0 +1,19 @@
+{
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": ["icons/icon.ico"],
+    "publisher": "CMD Studio contributors",
+    "resources": {
+      "../../resources": "resources",
+      "../../LICENSE": "LICENSE.txt"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "installerHooks": "windows/hooks.nsh",
+        "startMenuFolder": "CMD Studio"
+      }
+    }
+  }
+}

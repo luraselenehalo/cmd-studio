@@ -23,6 +23,7 @@ pub mod snapshot;
 pub mod state;
 pub mod text;
 pub mod txn;
+pub mod user_path;
 pub mod utc;
 pub mod verify;
 pub mod wt_edit;

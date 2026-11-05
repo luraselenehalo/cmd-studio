@@ -16,6 +16,7 @@ $changers = [ordered]@{
   'recovery-hang.ps1' = @('-Swap'); 'recovery-fakecrash.ps1' = @(); 'recovery-filters.ps1' = @('-Install')
   'recovery-ping.ps1' = @('-Open'); 'recovery-events.ps1' = @()
   'recovery-renderer.ps1' = @(); 'recovery-run.ps1' = @('-Show')
+  'install-check.ps1' = @('-Snapshot', 'before')
 }
 
 function Run-Guest($script, [string[]] $argv, $computer, $localAppData) {

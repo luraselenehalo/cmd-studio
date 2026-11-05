@@ -22,6 +22,14 @@ Options for every command:
   --resources <dir>   use these bundled files instead of <exe folder>\\resources
   Both take a full path, such as C:\\folder.
 
+Two programs:
+  cmdstudio.com   this console program: type `cmdstudio`, cmd waits and gets the exit code
+  cmdstudio.exe   the app's window; `cmdstudio.exe doctor` prints after the prompt returns
+
+For the installer (it calls these; they take no other argument):
+  cmdstudio --add-to-path         put this program's folder on your Path (HKCU\\Environment)
+  cmdstudio --remove-from-path    take it off again; other entries are never touched
+
 Exit codes:
   0  done
   1  failed and rolled back, or refused before your settings were changed
@@ -43,6 +51,9 @@ pub enum Command {
     Cleanup {
         remove_themes: bool,
     },
+    /// `--add-to-path` / `--remove-from-path` (spec §5.7): the installer's and the uninstaller's.
+    AddToPath,
+    RemoveFromPath,
     /// Sets aside a restore point that cannot be read (doctor's R1 names it), so that commands
     /// that change the machine are no longer refused because of it.
     SetAside {
@@ -126,8 +137,25 @@ pub fn parse(args: &[OsString]) -> Result<Args, UsageError> {
         flags.retain(|f| f != name);
         flags.len() != before
     };
-    let command = if take_flag(&mut flags, "--help") | take_flag(&mut flags, "-h") {
+    let help = take_flag(&mut flags, "--help") | take_flag(&mut flags, "-h");
+    // Both taken, so that giving both is "takes no other argument" below, not "unknown option".
+    let (add_to_path, remove_from_path) = (
+        take_flag(&mut flags, "--add-to-path"),
+        take_flag(&mut flags, "--remove-from-path"),
+    );
+    let command = if help {
         Command::Help
+    } else if add_to_path || remove_from_path {
+        if (add_to_path && remove_from_path) || !words.is_empty() || !values.is_empty() {
+            return Err(bad(
+                "--add-to-path and --remove-from-path take no other argument",
+            ));
+        }
+        if add_to_path {
+            Command::AddToPath
+        } else {
+            Command::RemoveFromPath
+        }
     } else if take_flag(&mut flags, "--cleanup") {
         if !words.is_empty() {
             return Err(bad("--cleanup takes no command"));
@@ -264,6 +292,31 @@ mod tests {
         assert_eq!(p(&["--help"]).unwrap().command, Command::Help);
     }
 
+    /// The installer's and the uninstaller's two commands take no other argument.
+    #[test]
+    fn the_path_commands_parse_and_take_nothing_else() {
+        assert_eq!(p(&["--add-to-path"]).unwrap().command, Command::AddToPath);
+        assert_eq!(
+            p(&["--remove-from-path"]).unwrap().command,
+            Command::RemoveFromPath
+        );
+        assert_eq!(
+            p(&["--data-dir", r"C:\d", "--add-to-path"])
+                .unwrap()
+                .command,
+            Command::AddToPath
+        );
+        for bad in [
+            vec!["--add-to-path", "doctor"],
+            vec!["--add-to-path", "--remove-from-path"],
+            vec!["--remove-from-path", "--target", "wt"],
+            vec!["--add-to-path", "--json"],
+        ] {
+            assert!(p(&bad).is_err(), "{bad:?}");
+        }
+        let e = p(&["--add-to-path", "--json"]).unwrap_err().to_string();
+        assert!(e.contains("unknown option --json"), "{e}");
+    }
     #[test]
     fn global_options_go_anywhere() {
         let a = p(&["--data-dir", r"C:\d", "doctor", "--resources", r"C:\r"]).unwrap();
@@ -399,6 +452,10 @@ mod tests {
             "cmdstudio undo",
             "cmdstudio --cleanup [--remove-themes]",
             "cmdstudio set-aside <",
+            "cmdstudio.com",
+            "cmdstudio.exe",
+            "--add-to-path",
+            "--remove-from-path",
             "--data-dir <dir>",
             "--resources <dir>",
         ] {

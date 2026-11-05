@@ -1,0 +1,101 @@
+# The release (spec §6.4, phase 4a): on a pushed tag v<version> (the founder's push; nothing here
+# tags), the tag is checked against Cargo.toml's version, then ci.yml runs as a reusable
+# workflow (every gate it has, the NSIS installer, the listing, the artifact), then a DRAFT
+# pre-release with the installer and SHA256SUMS.txt. Publishing is the founder's click (a public
+# post). workflow_dispatch is a dry run: the same checks and build, the artifact, no release.
+name: release
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  # The one version (Task 5): Cargo.toml's. A tag that is not v<version> stops here, before
+  # anything is built: the release page must never say one number and the installer another.
+  version:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: The version, and the tag that must match it
+        id: version
+        shell: bash
+        run: |
+          version="$(grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Cargo.toml version: $version"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            test "$GITHUB_REF_NAME" = "v$version" || { echo "::error::tag $GITHUB_REF_NAME is not v$version"; exit 1; }
+          fi
+  # ci.yml itself: fmt, the four clippy runs, the tests, the system tests with their SKIPPED
+  # grep, the UI's checks, the bindings, the console exe's checks, the bundle, the 7z listing,
+  # the cmdstudio-installer artifact. Called, not copied.
+  ci:
+    needs: version
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+  # The draft, on a tag only. GitHub shows a draft to collaborators alone; the founder reads it,
+  # downloads the installer once more if wanted, and presses Publish (spec §6.4: a public post).
+  draft:
+    needs: [version, ci]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: cmdstudio-installer
+          path: installer
+      - name: The notes, with the version and the hash filled in
+        shell: bash
+        run: |
+          version="${{ needs.version.outputs.version }}"
+          # The asset name has a hyphen, no space: GitHub may rename an uploaded file whose name has
+          # a space, and SHA256SUMS.txt must name the file the user downloads. ci.yml's artifact
+          # (with the space) is left as it is for the VM check.
+          mkdir release
+          cp installer/*.exe "release/CMD-Studio_${version}_x64-setup.exe"
+          (cd release && sha256sum -- "CMD-Studio_${version}_x64-setup.exe" > SHA256SUMS.txt && cat SHA256SUMS.txt)
+          sha="$(cut -d' ' -f1 release/SHA256SUMS.txt | head -1)"
+          sed -e "s/@VERSION@/v$version/g" -e "s/@SHA256@/$sha/g" .github/release-notes.md > notes.md
+          cat notes.md
+      - name: Create the draft pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          version="${{ needs.version.outputs.version }}"
+          gh release create "v$version" --draft --prerelease --title "CMD Studio v$version" --verify-tag --notes-file notes.md "release/CMD-Studio_${version}_x64-setup.exe" release/SHA256SUMS.txt
+      # SignPath Foundation (spec §6.5): applied for after the first release exists and the
+      # project has "reputation" (G15); every release then needs the founder's approval on
+      # SignPath's side. Until the application is accepted this step stays commented out. When it
+      # is: the organization id, project slug and signing policy slug come from SignPath, the
+      # API token is the secret SIGNPATH_API_TOKEN (the founder's; never read here), the artifact
+      # id is the one ci.yml's upload step would then output (give that step an `id` and pass
+      # `jobs.ci.outputs`), the signed installer replaces the unsigned asset, and the credits
+      # page shows "Free code signing provided by SignPath.io, certificate by SignPath
+      # Foundation" (docs/credits.md).
+      # - name: Sign the installer through SignPath
+      #   uses: signpath/github-action-submit-signing-request@v1
+      #   with:
+      #     api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+      #     organization-id: <from SignPath>
+      #     project-slug: cmd-studio
+      #     signing-policy-slug: release-signing
+      #     github-artifact-id: <the upload step's artifact-id output, through the ci job's outputs>
+      #     wait-for-completion: true
+      #     output-artifact-directory: signed
+      # winget (spec §6.4): a pull request to microsoft/winget-pkgs is a public post and a
+      # founder step, after a signed release: `wingetcreate new <installer url>` or the
+      # winget-releaser action, with the manifest's publisher and identifier chosen by the
+      # founder. Not a job here.

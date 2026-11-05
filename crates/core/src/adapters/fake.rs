@@ -2,10 +2,10 @@
 //! feature, crates/cli's). They never touch the machine.
 use super::{
     AdapterError, AppCrash, Arch, AutoRun, Created, DefaultTerminal, DirEntry, DirState, EventLog,
-    Fonts, Fs, FsLock, Host, Output, Process, ProcessStamp, RegValue, System, SystemInfo,
+    Fonts, Fs, FsLock, Host, Output, Process, ProcessStamp, RegValue, System, SystemInfo, UserPath,
     WtLocation, WtSettings,
 };
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -434,6 +434,57 @@ impl AutoRun for FakeAutoRun {
     }
 }
 
+/// The user's Path in memory (phase 4a).
+#[derive(Default)]
+pub struct FakeUserPath {
+    value: RefCell<Option<RegValue>>,
+    broadcasts: Cell<u32>,
+    pub fail_reads: Cell<bool>,
+    pub fail_writes: Cell<bool>,
+}
+
+impl FakeUserPath {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn value(&self) -> Option<RegValue> {
+        self.value.borrow().clone()
+    }
+    pub fn set(&self, value: Option<RegValue>) {
+        *self.value.borrow_mut() = value;
+    }
+    /// How many times the change was broadcast.
+    pub fn broadcasts(&self) -> u32 {
+        self.broadcasts.get()
+    }
+}
+
+impl UserPath for FakeUserPath {
+    fn read(&self) -> Result<Option<RegValue>, AdapterError> {
+        if self.fail_reads.get() {
+            return Err(AdapterError::new("read Path", "access denied (injected)"));
+        }
+        Ok(self.value())
+    }
+    fn write(&self, value: &RegValue) -> Result<(), AdapterError> {
+        if self.fail_writes.get() {
+            return Err(AdapterError::new("write Path", "access denied (injected)"));
+        }
+        self.set(Some(value.clone()));
+        Ok(())
+    }
+    fn delete(&self) -> Result<(), AdapterError> {
+        if self.fail_writes.get() {
+            return Err(AdapterError::new("delete Path", "access denied (injected)"));
+        }
+        self.set(None);
+        Ok(())
+    }
+    fn broadcast_change(&self) {
+        self.broadcasts.set(self.broadcasts.get() + 1);
+    }
+}
+
 #[derive(Default)]
 struct FontsState {
     families: BTreeSet<String>,
@@ -842,6 +893,7 @@ pub struct FakeMachine {
     pub process: FakeProcess,
     pub host: FakeHost,
     pub event_log: FakeEventLog,
+    pub user_path: FakeUserPath,
 }
 
 impl FakeMachine {
@@ -857,6 +909,7 @@ impl FakeMachine {
             process: FakeProcess::new(),
             host: FakeHost::default(),
             event_log: FakeEventLog::new(),
+            user_path: FakeUserPath::new(),
         }
     }
 
@@ -869,6 +922,7 @@ impl FakeMachine {
             process: &self.process,
             host: &self.host,
             event_log: &self.event_log,
+            user_path: &self.user_path,
         }
     }
 }
