@@ -1,12 +1,31 @@
 # Phase 4b — the updater spike's results (Task 1)
 
-- **Run:** <date>, commit <sha>, CI run <id> (the `cmdstudio-updater-spike` artifact), VM <A or B>.
-- **U1 (download, verified, written):** <PASS and the log lines, or the finding>.
-- **U2 ("Update now": silent, no uninstaller, the app back by itself as a normal start, from the home page and from the Recovery page):** <PASS, the seconds from the click to the new version and to the window, or the finding>.
-- **U3 (the own spawn at close: silent, no relaunch, the exe replaced, the run record ended first):** <PASS, the seconds from the close to the new version, or the finding>.
-- **U4 (the notice, its link, no re-apply with equal pins, no false crash notice, the record gone):** <…>.
-- **U5 (a manifest that is not JSON, and one with the same version):** <…; the kind the bad manifest logged (`offline` or `manifest`)>.
-- **U6 (a by-hand upgrade keeps the theme through "Do not uninstall"; the page's words):** <the two radios' exact texts>.
-- **U7 (Off makes no request; a refused connection is silent):** <…>.
-- **Decision:** the install moment is **<primary | F2 | F3>** and the "now" path is **<as planned | F-NOW>**, because <one sentence>. Task 3's last step and Task 8 read this line.
-- **Screenshots** (`spikes\vm\tmp\<vm>-p4b-*.png`): <labels>.
+- **Run:** 2026-11-10, commit 22d9104, CI run 42092540484 (the `cmdstudio-updater-spike` artifact: spike.1 11,941,528 bytes, spike.2 11,933,407 bytes, each with a 460-byte `.sig`), VM-B (`cmdstudio-win10`, Windows 10, no Windows Terminal; VM-A and VM-C's saved-state `clean` does not start, HGCM `VERR_ACCESS_DENIED`). The spike build carries 22d9104's code: Tasks 2–4 and Task 5 before its review fixes (`update-reapply.json`, the pause read under the lock, the AutoRun keep list came later); nothing in part A depends on those. Setup each time: `same file in the VM: True` twice, `guest guards: 49/49 checks pass`, and the WMI-started server outlived its task (`server up: True`, `server pid <n> running: True`, checked by a separate guestcontrol call) on all four restores.
+- **U1 (download, verified, written): PASS.** A3: `update available=0.1.0-spike.2`, then `update downloaded=0.1.0-spike.2` 8 s later; `updates: cmdstudio-0.1.0-spike.2-setup.exe 11933407` (the same bytes as the served file); the server log has `GET /CMD%20Studio_0.1.0-spike.2_x64-setup.exe HTTP/1.1 -> 200 OK`.
+- **U2 ("Update now": silent, no uninstaller, the app back by itself as a normal start, from the home page and from the Recovery page): PASS.**
+  - A5 (home page): the card "CMD Studio v0.1.0-spike.2 is available." with "Update now" and "Later" (`p4b-a5-card`). After the click, the log reads `update downloaded=0.1.0-spike.2` (the download took about 33 s), `update installing=0.1.0-spike.2 how=now`, then `update installed to=0.1.0-spike.2` 13 s later. `Wait-Phase4bVersion` printed `after 12 s`, about 38 s from the click by the host clock. The app came back by itself on its home page with "Updated to v0.1.0-spike.2." (`p4b-a5-back`), `processes:` one pid, a fresh `runJson`, AutoRun unchanged, and `install:` as in A3.
+  - A5b (Recovery page): "CMD Studio v0.1.0-spike.2 is available; a new version may fix what went wrong." with "Update now" (`p4b-a5b-recovery`). `version 0.1.0-spike.2 after 8 s`. The app came back on its home page, not in recovery mode, with "Updated to v0.1.0-spike.2." (`p4b-a5b-back`). In `Get-Phase4bLogLines`, the only `pause` line (`pause reason=recovery`, 11:32:31) comes before `update installed to=0.1.0-spike.2` (11:33:39). Nothing after it except `cmd=recovery_status`, so no second recovery entry happened. The pause from the Recovery start stays in place, and the home page shows "The theme is paused": the update did not lift it.
+- **U3 (the own spawn at close: silent, no relaunch, the exe replaced, the run record ended first): PASS.** A3: `Close-Phase4App` printed `closed with CloseMainWindow: 1`, then `Wait-Phase4bVersion` printed `version 0.1.0-spike.2 after 0 s`. The new exe was in place within `Close-Phase4App`'s own 10 s wait, so the close-to-new-exe time is 10 s or less. The shot 3 s later shows the bare desktop: no window, no installer page (`p4b-a3-after-close`). Also:
+  - `processes:` empty (no relaunch);
+  - `runJson: ABSENT`;
+  - `updateJson:` pretty-printed with `"version": 1`, `"from": "0.1.0-spike.1"`, `"to": "0.1.0-spike.2"` and `"notesUrl": "https://github.com/luraselenehalo/cmd-studio/releases/tag/v0.1.0-spike.2"`;
+  - the log ends with `update installing=0.1.0-spike.2 how=exit`;
+  - AutoRun unchanged from A1;
+  - `install:` lists `cmdstudio.com` and no `cmdstudio-cli.exe`;
+  - both shortcuts are there.
+- **U4 (the notice, its link, no re-apply with equal pins, no false crash notice, the record gone): PASS.** A4: "Updated to v0.1.0-spike.2." with "What changed" and "Close", and no "closed unexpectedly" notice (`p4b-a4-notice`). "What changed" started Edge with `--single-argument https://github.com/luraselenehalo/cmd-studio/releases/tag/v0.1.0-spike.2`, read from the process's command line. Edge showed its first-run page (`p4b-a4-browser`). The log has `update installed to=0.1.0-spike.2` then `update check=none`, and no `update reapply=` line (the pins are equal). `updateJson: ABSENT`, `updates: ABSENT`.
+- **U5 (a manifest that is not JSON, and one with the same version): PASS.** A2: the bad manifest logged `update check=offline` (the kind is `offline`, not `manifest`: the plugin's `res.json()` gives `Error::Reqwest`). The same-version manifest logged `update check=none`. Both shots show the home page with no card and no box (`p4b-a2-bad`, `p4b-a2-same`). `updates: ABSENT`.
+- **U6 (a by-hand upgrade keeps the theme through "Do not uninstall"; the page's words): PASS** (`p4b-a6-page`, `p4b-a6-choice`).
+  - The page title is "Already Installed", with the subtitle "Choose how you want to install CMD Studio."
+  - The body reads: "An older version of CMD Studio is installed on your system. It's recommended that you uninstall the current version before installing. Select the operation you want to perform and click Next to continue."
+  - The radios are "Uninstall before installing" (checked by default) and "Do not uninstall".
+  - With "Do not uninstall", the next pages were Choose Install Location, Choose Start Menu Folder, Installation Complete, then Finish with "Run CMD Studio" and "Create desktop shortcut" ticked.
+  - Afterwards: `installed: DisplayVersion=0.1.0-spike.2`; AutoRun unchanged; the home page shows Terracotta in use, with no "Updated to" card (`p4b-a6-home`); the log has `update check=none`; `updateJson: ABSENT`.
+  - UI Automation saw the radio only as a Pane, so it was selected with keys.
+- **U7 (Off makes no request; a refused connection is silent): PASS.** A7: in Off mode the log's new line is `update mode=off`, and the server's request count stayed at 2. In automatic mode with the server stopped (`answers: False`), the log reads `update check=offline`, the shot shows the home page with no card and no box (`p4b-a7-offline`), and the close installed nothing (`installed:` still spike.2, no `update installing=`).
+- **Decision:** the install moment is **primary** (automatic: the app's own spawn of the verified installer at close, `/S /UPDATE`, no relaunch), and the "now" path is **as planned** (`/S /UPDATE /R /ARGS`: back as a normal start, from the home page and from recovery mode). U1–U7 all passed on a real Windows install with no window and no uninstaller run. Task 3's last step and Task 8 read this line.
+- **Observed, not failures:**
+  - Every start before the wizard logs `update pruned=nostate` (no `state.json` yet).
+  - Each server start writes two `error: … connection was aborted` lines from its own self-probes (a deferred minor of Task 1).
+  - "What changed" opens the default browser, which on a fresh VM is Edge's first-run page.
+- **Screenshots** (`spikes\vm\tmp\cmdstudio-win10-p4b-*.png`): `a1-w1`, `a1-w5`, `a1-home`, `a2-bad`, `a2-same`, `a3-after-close`, `a4-notice`, `a4-browser`, `a4-closed`, `reset-home`, `a5-card`, `a5-back`, `a5b-recovery`, `a5b-back`, `a6-start`, `a6-page`, `a6-focus`, `a6-choice`, `a6-p2`, `a6-p3`, `a6-p4`, `a6-finish`, `a6-home`, `a7-offline`.
