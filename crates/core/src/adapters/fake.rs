@@ -703,6 +703,10 @@ pub struct FakeHost {
     pub unreadable_processes: RefCell<BTreeSet<u32>>,
     /// `short_path` answers an error (the 8.3 alias cannot be read).
     pub short_path_fails: std::cell::Cell<bool>,
+    /// What `cmd_running` answers: a cmd window is open in this session.
+    pub cmd_running: std::cell::Cell<bool>,
+    /// `cmd_running` answers an error (the process list cannot be read).
+    pub process_list_fails: std::cell::Cell<bool>,
     private: RefCell<BTreeMap<PathBuf, DirState>>,
 }
 
@@ -727,6 +731,8 @@ impl Default for FakeHost {
             processes: RefCell::new(BTreeMap::new()),
             unreadable_processes: RefCell::new(BTreeSet::new()),
             short_path_fails: std::cell::Cell::new(false),
+            cmd_running: std::cell::Cell::new(false),
+            process_list_fails: std::cell::Cell::new(false),
             private: RefCell::new(BTreeMap::new()),
         }
     }
@@ -799,6 +805,15 @@ impl Host for FakeHost {
             ));
         }
         Ok(self.processes.borrow().get(&pid).copied())
+    }
+    fn cmd_running(&self) -> Result<bool, AdapterError> {
+        if self.process_list_fails.get() {
+            return Err(AdapterError::new(
+                "CreateToolhelp32Snapshot",
+                "failed (injected)",
+            ));
+        }
+        Ok(self.cmd_running.get())
     }
 }
 

@@ -20,7 +20,7 @@ use crate::actions::{
     begin, delete_pending, delete_pending_and_save, latest_record, latest_record_or_why, next_id,
     rebuilt_incomplete, record_incomplete, ActionError, Ctx, StartReport,
 };
-use crate::adapters::{program_data_dir, DirEntry, DirState, RegText, RegValue, System};
+use crate::adapters::{program_data_dir, DirEntry, DirState, Fs, RegText, RegValue, System};
 use crate::exec::{
     font_target, same_path, same_state, sibling, FixByHand, SystemExecutor, COMMAND_PROCESSOR_KEY,
     FONTS_KEY,
@@ -1573,6 +1573,51 @@ pub fn runtime_dirs_named_by(state: &State, paths: &Paths) -> Vec<PathBuf> {
     vec![root.join(format!("omp-{}", applied.omp_version)), clink]
 }
 
+/// The runtime folders a stored restore point names (phase 4b final review I2), by their long
+/// paths: an Undo or a Restore puts state.json and AutoRun back byte for byte, and a folder
+/// either of them names must then still be there. For each restore point: the folders its ops
+/// install (`InstallRuntime`), and the folders ([`runtime_dirs_named_by`]) of the state.json it
+/// wrote and of the state.json it holds as the prior state, the one an undo puts back. A
+/// restore point that cannot be read names nothing: it cannot be undone or restored (an undo
+/// stops at it until it is set aside). A store that cannot be listed names nothing either: no
+/// undo can find a restore point in it then.
+pub fn runtime_dirs_named_by_restore_points(fs: &dyn Fs, paths: &Paths) -> Vec<PathBuf> {
+    let root = paths.snapshots();
+    let store = SnapshotStore::new(fs, &root);
+    let state_file = paths.state_file();
+    let mut named = Vec::new();
+    let add_state = |bytes: &[u8], named: &mut Vec<PathBuf>| {
+        if let Ok(state) = serde_json::from_slice::<State>(bytes) {
+            named.extend(runtime_dirs_named_by(&state, paths));
+        }
+    };
+    for id in store.ids().unwrap_or_default() {
+        let Ok(journal) = store.journal(&id) else {
+            continue;
+        };
+        for (index, op) in journal.ops.iter().enumerate() {
+            match op {
+                Op::InstallRuntime { dir, .. } => named.push(dir.clone()),
+                Op::WriteFile { path, contents } if same_path(path, &state_file) => {
+                    add_state(contents.as_bytes(), &mut named);
+                    let prior = journal
+                        .snapshots
+                        .iter()
+                        .find(|s| s.op_index == index)
+                        .and_then(|s| s.prior.as_deref());
+                    if let Some(prior) = prior {
+                        add_state(prior, &mut named);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    named.sort();
+    named.dedup();
+    named
+}
+
 /// The roots a runtime folder may be in, each with the prefixes it may hold: `runtime\` of the
 /// data folder (`omp-`, `clink-`), then the user's own ProgramData folder (`clink-` only), when
 /// it can be worked out.
@@ -1627,7 +1672,8 @@ pub fn runtime_dirs_named_in(sys: System<'_>, paths: &Paths, texts: &[String]) -
 /// Deletes the runtime folders of other versions than this build pins (spec §6.2 step 3, phase
 /// 4b), best effort: every folder directly in `runtime\` named `omp-*` or `clink-*`, and every
 /// `clink-*` (only) directly in the user's own ProgramData folder, that is neither the pinned one
-/// nor in `keep` (what state.json names, [`runtime_dirs_named_by`]; the caller runs the prune
+/// nor in `keep` (what state.json, AutoRun and the restore points name: [`runtime_dirs_named_by`],
+/// [`runtime_dirs_named_in`], [`runtime_dirs_named_by_restore_points`]; the caller runs the prune
 /// with a loaded state, after a successful re-apply). A folder is renamed to its `.removing`
 /// form first, as `restore_runtime` does: the rename fails cleanly while a cmd window holds a
 /// file inside, and then the folder is skipped, whole, and met again at the next start; only a
@@ -1635,7 +1681,23 @@ pub fn runtime_dirs_named_in(sys: System<'_>, paths: &Paths, texts: &[String]) -
 /// `.<name>.removing-…` folders of earlier runs are deleted best effort and not counted. A root
 /// that cannot be listed, or is not there, is skipped; nothing is created. Names compare
 /// without ASCII case, as Windows does. Returns the folders removed, in the order met.
-pub fn prune_old_runtimes(sys: System<'_>, paths: &Paths, keep: &[PathBuf]) -> Vec<PathBuf> {
+///
+/// Phase 4b final review I1: an open cmd window runs Oh My Posh from its runtime folder at every
+/// prompt (`init.lua` names the exe by its full path), and nothing holds that folder between
+/// prompts, so the rename above would succeed under it. So nothing at all is pruned while a
+/// `cmd.exe` runs in this session (`Host::cmd_running`): `Err("cmd-open")`, or
+/// `Err("noprocesses")` when the process list cannot be read; the next start without cmd
+/// windows prunes.
+pub fn prune_old_runtimes(
+    sys: System<'_>,
+    paths: &Paths,
+    keep: &[PathBuf],
+) -> Result<Vec<PathBuf>, &'static str> {
+    match sys.host.cmd_running() {
+        Ok(false) => {}
+        Ok(true) => return Err("cmd-open"),
+        Err(_) => return Err("noprocesses"),
+    }
     let mut pinned = vec![paths.omp_dir(), paths.clink_dir()];
     let roots = runtime_roots(sys, paths);
     if let Some((own, _)) = roots.get(1) {
@@ -1667,7 +1729,7 @@ pub fn prune_old_runtimes(sys: System<'_>, paths: &Paths, keep: &[PathBuf]) -> V
             }
         }
     }
-    removed
+    Ok(removed)
 }
 
 /// Step 4 for the ProgramData folders: the user's own, worked out from the known folder and the
@@ -4502,7 +4564,7 @@ mod tests {
         m.fs.fail_removes_of(r"C:\d\runtime\clink-1.8.9");
         // state.json names clink-1.9.0 under the data folder: kept this time.
         let keep = vec![PathBuf::from(r"C:\d\runtime\clink-1.9.0")];
-        let removed = prune_old_runtimes(m.system(), &paths, &keep);
+        let removed = prune_old_runtimes(m.system(), &paths, &keep).unwrap();
         assert_eq!(
             removed,
             [
@@ -4524,7 +4586,7 @@ mod tests {
             "the pinned ProgramData folder stays"
         );
         // Nothing names 1.9.0 any more: it goes; the held one stays again, without an error.
-        let removed = prune_old_runtimes(m.system(), &paths, &[]);
+        let removed = prune_old_runtimes(m.system(), &paths, &[]).unwrap();
         assert_eq!(removed, [PathBuf::from(r"C:\d\runtime\clink-1.9.0")]);
         assert!(m.fs.exists(Path::new(r"C:\d\runtime\clink-1.8.9")));
         // No runtime folder at all: nothing to do, nothing made.
@@ -4532,7 +4594,7 @@ mod tests {
             data: PathBuf::from(r"C:\e"),
         };
         assert_eq!(
-            prune_old_runtimes(m.system(), &empty, &[]),
+            prune_old_runtimes(m.system(), &empty, &[]).unwrap(),
             Vec::<PathBuf>::new()
         );
         assert!(!m.fs.exists(Path::new(r"C:\e")));
@@ -4651,7 +4713,7 @@ mod tests {
         };
         let keep = runtime_dirs_named_by(&state, &paths);
         assert_eq!(
-            prune_old_runtimes(m.system(), &paths, &keep),
+            prune_old_runtimes(m.system(), &paths, &keep).unwrap(),
             Vec::<PathBuf>::new()
         );
         assert!(m.fs.exists(&old) && m.fs.exists(&paths.runtime_root().join("omp-31.4.0")));
@@ -4663,15 +4725,23 @@ mod tests {
             unreachable!("the state above has a ShortPath launch");
         };
         let naive: Vec<PathBuf> = exe.parent().map(Path::to_path_buf).into_iter().collect();
-        assert!(prune_old_runtimes(m.system(), &paths, &naive).contains(&old));
+        assert!(prune_old_runtimes(m.system(), &paths, &naive)
+            .unwrap()
+            .contains(&old));
     }
 
-    /// A cmd window holds a file of an old runtime open: on Windows a delete would remove the
-    /// other files first and fail, leaving a runtime a running window needs half gone. The prune
-    /// renames first, so the held folder stays whole, with every file, and is met again later.
-    /// Tombstones left by an earlier run go, best effort; ProgramData holds `clink-*` only.
+    /// Final review I1: a cmd window is open (it holds Clink's DLL of 1.8.9, and runs Oh My Posh
+    /// from `omp-31.4.0` at its next prompt, which nothing holds between prompts). Nothing at all
+    /// is pruned, tombstones included: `cmd-open`; a process list that cannot be read is
+    /// `noprocesses`, and nothing goes either.
+    ///
+    /// Once no cmd runs, a file still held (a process other than cmd, or a window that opened
+    /// after the look) is the rename's case: on Windows a delete would remove the other files
+    /// first and fail, leaving a runtime half gone. The prune renames first, so the held folder
+    /// stays whole, with every file, and is met again later. Tombstones left by an earlier run
+    /// go, best effort; ProgramData holds `clink-*` only.
     #[test]
-    fn a_held_old_runtime_stays_whole_and_tombstones_go() {
+    fn an_open_cmd_window_skips_the_prune_and_a_held_folder_stays_whole() {
         use crate::adapters::Fs;
         let m = FakeMachine::new();
         let paths = Paths {
@@ -4682,15 +4752,29 @@ mod tests {
         for f in ["a.lua", "clink_dll_x64.dll", "z.lua"] {
             m.fs.put(held.join(f), b"x");
         }
-        m.fs.put(r"C:\d\runtime\omp-31.4.0\oh-my-posh.exe", b"x");
-        m.fs.put(r"C:\d\runtime\.omp-31.3.0.removing-deadbeef\x", b"x");
+        let omp = PathBuf::from(r"C:\d\runtime\omp-31.4.0");
+        let tomb = PathBuf::from(r"C:\d\runtime\.omp-31.3.0.removing-deadbeef");
+        m.fs.put(omp.join("oh-my-posh.exe"), b"x");
+        m.fs.put(tomb.join("x"), b"x");
         m.fs.put(pd.join("omp-1.0.0").join("x"), b"x");
         let lock =
             m.fs.try_lock(&held.join("clink_dll_x64.dll"))
                 .unwrap()
                 .unwrap();
-        let removed = prune_old_runtimes(m.system(), &paths, &[]);
-        assert_eq!(removed, [PathBuf::from(r"C:\d\runtime\omp-31.4.0")]);
+        m.host.cmd_running.set(true);
+        assert_eq!(prune_old_runtimes(m.system(), &paths, &[]), Err("cmd-open"));
+        m.host.cmd_running.set(false);
+        m.host.process_list_fails.set(true);
+        assert_eq!(
+            prune_old_runtimes(m.system(), &paths, &[]),
+            Err("noprocesses")
+        );
+        for dir in [&held, &omp, &tomb] {
+            assert!(m.fs.exists(dir), "{} must still be there", dir.display());
+        }
+        m.host.process_list_fails.set(false);
+        let removed = prune_old_runtimes(m.system(), &paths, &[]).unwrap();
+        assert_eq!(removed, [omp]);
         for f in ["a.lua", "clink_dll_x64.dll", "z.lua"] {
             assert!(m.fs.exists(&held.join(f)), "{f} must still be there");
         }
@@ -4704,9 +4788,55 @@ mod tests {
         // Let go of the file: the next prune removes it.
         drop(lock);
         assert_eq!(
-            prune_old_runtimes(m.system(), &paths, &[]),
+            prune_old_runtimes(m.system(), &paths, &[]).unwrap(),
             std::slice::from_ref(&held)
         );
         assert!(!m.fs.exists(&held));
+    }
+
+    /// Final review I2: an Undo or a Restore puts state.json and AutoRun back byte for byte, so
+    /// a runtime folder a stored restore point names must still be there. The theme on
+    /// `omp-31.4.0` (an older build's pin) is applied again on this build's pins: that restore
+    /// point holds the old state.json, which names `omp-31.4.0`, so the prune keeps it, by its
+    /// long path; a folder no restore point names goes. The undo then gives a state.json whose
+    /// Oh My Posh folder is there. A restore point that cannot be read names nothing (it cannot
+    /// be undone or restored), and the others still count.
+    #[test]
+    fn a_runtime_folder_a_restore_point_names_is_kept() {
+        let (m, ctx) = machine();
+        apply(&m, &ctx, Target::All);
+        let mut older = state(&m, &ctx);
+        older.applied.as_mut().unwrap().omp_version = "31.4.0".into();
+        m.fs.put(ctx.paths.state_file(), older.to_bytes().unwrap());
+        let old = ctx.paths.runtime_root().join("omp-31.4.0");
+        let stray = ctx.paths.runtime_root().join("omp-31.3.0");
+        m.fs.put(old.join("oh-my-posh.exe"), b"x");
+        m.fs.put(stray.join("oh-my-posh.exe"), b"x");
+        let reapply = apply_id(&m, &later(&ctx, 5), Target::All);
+        assert_eq!(
+            state(&m, &ctx).applied.unwrap().omp_version,
+            crate::plan::OMP_VERSION
+        );
+
+        let named = runtime_dirs_named_by_restore_points(&m.fs, &ctx.paths);
+        assert!(named.contains(&old), "{named:?}");
+        assert!(!named.contains(&stray), "{named:?}");
+        let mut keep = runtime_dirs_named_by(&state(&m, &ctx), &ctx.paths);
+        keep.extend(named);
+        assert_eq!(
+            prune_old_runtimes(m.system(), &ctx.paths, &keep).unwrap(),
+            std::slice::from_ref(&stray)
+        );
+        assert!(m.fs.exists(&old));
+
+        let journal = ctx.paths.snapshots().join(&reapply).join("journal.json");
+        m.fs.fail_reads_of(&journal);
+        assert!(!runtime_dirs_named_by_restore_points(&m.fs, &ctx.paths).contains(&old));
+        m.fs.stop_failing(&journal);
+
+        undo(m.system(), &later(&ctx, 10)).unwrap();
+        let back = state(&m, &ctx).applied.unwrap();
+        assert_eq!(back.omp_version, "31.4.0");
+        assert!(m.fs.exists(&old), "the undone state's Oh My Posh is there");
     }
 }

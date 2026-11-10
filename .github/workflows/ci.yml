@@ -274,6 +274,19 @@ jobs:
             cp "$installer.sig" stage/installer/
           fi
           (cd stage/installer && sha256sum -- *.exe > SHA256SUMS.txt && cat SHA256SUMS.txt)
+      # The updater runs with `requireSignedVersion: true` (tauri.conf.json): it refuses, silently
+      # by design, a signature whose trusted comment does not name the version latest.json offers
+      # in a tab-separated `version:<v>` field. So a signed run proves the .sig it made names the
+      # version being built, before the artifact is uploaded (phase 4b final review I3); the
+      # script base64-decodes the .sig and looks for that exact field. The trusted comment is
+      # public: nothing secret is read or printed. An unsigned run has no .sig and skips this.
+      - name: The updater's signature names the version being built
+        if: inputs.sign
+        shell: bash
+        run: |
+          version="$(awk '/^\[workspace\.package\]/{t=1;next} /^\[/{t=0} t && /^version = /{gsub(/^version = "|"$/,""); print; exit}' Cargo.toml)"
+          test -n "$version"
+          bash ./scripts/check-signed-version.sh "target/release/bundle/nsis/CMD Studio_${version}_x64-setup.exe.sig" "$version"
       # For the VM check of phase 4a (install, uninstall; docs/spikes/phase4-install/protocol.md).
       - uses: actions/upload-artifact@v4
         with:
@@ -347,6 +360,8 @@ jobs:
             jq -s '.[0] * .[1]' src-tauri/tauri.bundle.conf.json "$RUNNER_TEMP/spike$n.override.json" > "$RUNNER_TEMP/spike$n.conf.json"
             npm run tauri -- build --config "$RUNNER_TEMP/spike$n.conf.json"
             cp "../target/release/bundle/nsis/CMD Studio_${v}_x64-setup.exe" "../target/release/bundle/nsis/CMD Studio_${v}_x64-setup.exe.sig" ../spike/
+            # As on a signed run: the .sig names this build's version (final review I3).
+            bash ../scripts/check-signed-version.sh "../spike/CMD Studio_${v}_x64-setup.exe.sig" "$v"
           done
           when="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           sig2="$(tr -d '\r\n' < "../spike/CMD Studio_0.1.0-spike.2_x64-setup.exe.sig")"

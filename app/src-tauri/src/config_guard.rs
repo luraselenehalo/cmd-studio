@@ -651,3 +651,45 @@ fn the_release_workflow_signs_through_ci_yml_uploads_latest_json_and_is_not_a_pr
         );
     }
 }
+
+/// Phase 4b final review I3: `requireSignedVersion: true` refuses, silently by design, a
+/// signature whose trusted comment names no `version:<v>` field or another version. So a signed
+/// run checks the .sig it made (a step under `inputs.sign` only, after the installer's listing),
+/// and the updater spike checks both of its .sig files, through one script that base64-decodes
+/// the .sig and looks for the exact tab-separated field in its trusted comment.
+#[test]
+fn a_signed_build_proves_its_signature_names_the_version() {
+    let ci = include_str!("../../../.github/workflows/ci.yml");
+    let script = include_str!("../../../scripts/check-signed-version.sh");
+    let step = "      - name: The updater's signature names the version being built\n        if: inputs.sign\n        shell: bash\n";
+    assert!(ci.contains(step), "the step, on a signed run only");
+    let signed = ci.split(step).nth(1).unwrap_or_default();
+    let signed = signed.split("\n      - ").next().unwrap_or_default();
+    assert!(
+        signed.contains(
+            r#"bash ./scripts/check-signed-version.sh "target/release/bundle/nsis/CMD Studio_${version}_x64-setup.exe.sig" "$version""#
+        ),
+        "{signed}"
+    );
+    before(
+        ci,
+        "- name: The installer holds both exes, the resources and the licenses",
+        step,
+    );
+    before(ci, step, "          name: cmdstudio-installer\n");
+    assert!(
+        ci.contains(
+            r#"bash ../scripts/check-signed-version.sh "../spike/CMD Studio_${v}_x64-setup.exe.sig" "$v""#
+        ),
+        "the spike checks both of its .sig files"
+    );
+    for needle in [
+        "base64 -d",
+        "s/^trusted comment: //p",
+        "IFS=$'\\t'",
+        "= \"version:$version\" ]",
+        "exit 1",
+    ] {
+        assert!(script.contains(needle), "the script lacks {needle}");
+    }
+}

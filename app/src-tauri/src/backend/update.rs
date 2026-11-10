@@ -13,7 +13,10 @@ use crate::error::AppError;
 use crate::settings::UpdateMode;
 use crate::update::{Available, Updater};
 use cmdstudio_core::adapters::FsLock;
-use cmdstudio_core::cleanup::{prune_old_runtimes, runtime_dirs_named_by, runtime_dirs_named_in};
+use cmdstudio_core::cleanup::{
+    prune_old_runtimes, runtime_dirs_named_by, runtime_dirs_named_by_restore_points,
+    runtime_dirs_named_in,
+};
 use cmdstudio_core::plan::{runtime_changed, CLINK_VERSION, OMP_VERSION};
 use cmdstudio_core::recovery::read_pause;
 use cmdstudio_core::resources::sha256_hex;
@@ -470,8 +473,9 @@ impl<M: Machine> Backend<M> {
     }
 
     /// At close (spec §6.2's primary; `lib.rs` on `RunEvent::Exit`, after `end_run`): when a
-    /// verified download is ready, this run is its own, the exit is not `app_restart`'s, no
-    /// installer was started in this run yet (review I1), and the lock is free, the record is
+    /// verified download is ready, this run is its own, the exit is not `app_restart`'s, the mode
+    /// read now is Auto (Notify: `postponed=notify`, Off: `postponed=off`; final review Minor 1),
+    /// no installer was started in this run yet (review I1), and the lock is free, the record is
     /// written and the file started with `spawn` (no relaunch); the lock is let go when this
     /// returns, which is after the start. Busy (the lock, or an "Update now" that still runs), a
     /// lock file that cannot be opened, a record that cannot be written, or a restart postpone
@@ -527,6 +531,14 @@ impl<M: Machine> Backend<M> {
         };
         if restarting {
             return postponed("restart");
+        }
+        // The mode as settings.json holds it now (final review Minor 1, spec §2.1): a choice the
+        // user made after the download is kept. Only Auto installs at close; in Notify only
+        // "Update now" installs; Off installs nothing.
+        match self.settings_or_default().updates {
+            UpdateMode::Auto => {}
+            UpdateMode::Notify => return postponed("notify"),
+            UpdateMode::Off => return postponed("off"),
         }
         let _lock = match self.sys().fs.try_lock(&self.paths().lock_file()) {
             Ok(Some(lock)) => lock,
@@ -765,12 +777,17 @@ impl<M: Machine> Backend<M> {
     }
 
     /// Spec §6.2 step 3, the prune's one place (Q17): the runtime folders of other versions than
-    /// this build's, except the ones state.json names and the ones the user's or the machine's
-    /// AutoRun names (review I2: cmd runs what AutoRun says), under the lock of spec §5.5. `Err`
+    /// this build's, except the ones state.json names, the ones the user's or the machine's
+    /// AutoRun names (review I2: cmd runs what AutoRun says) and the ones a stored restore point
+    /// names (final review I2: an Undo or a Restore puts state.json and AutoRun back byte for
+    /// byte, so the prune lags the restore points), under the lock of spec §5.5. `Err`
     /// is the log's word, and nothing is pruned: `busy` (another change holds the lock, or the
     /// lock file cannot be opened: the next start tries again), `safemode` (entered in this run,
     /// Q17), `nostate` (state.json is not there or cannot be read: what AutoRun runs is not known
-    /// then), `noautorun` (an AutoRun value that cannot be read, or is not text).
+    /// then), `noautorun` (an AutoRun value that cannot be read, or is not text), and the core's
+    /// `cmd-open` (a cmd window is open: it may run the old Oh My Posh at its next prompt, final
+    /// review I1; the next start without cmd windows prunes) or `noprocesses` (the process list
+    /// cannot be read).
     pub(crate) fn prune_runtimes(&self) -> Result<usize, &'static str> {
         let Ok(Some(_lock)) = self.sys().fs.try_lock(&self.paths().lock_file()) else {
             return Err("busy");
@@ -795,7 +812,8 @@ impl<M: Machine> Backend<M> {
         }
         let mut keep = runtime_dirs_named_by(&state, self.paths());
         keep.extend(runtime_dirs_named_in(self.sys(), self.paths(), &texts));
-        Ok(prune_old_runtimes(self.sys(), self.paths(), &keep).len())
+        keep.extend(runtime_dirs_named_by_restore_points(fs, self.paths()));
+        prune_old_runtimes(self.sys(), self.paths(), &keep).map(|removed| removed.len())
     }
 
     /// The prune with its log line: always after a re-apply (`always`), else only when something
@@ -817,6 +835,7 @@ impl<M: Machine> Backend<M> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::apply::UndoStatus;
     use crate::backend::run::GuiStart;
     use crate::backend::testing::{apply_terracotta, fake_process};
     use crate::backend::testing::{backend, fake_fs, fake_host};
@@ -1326,6 +1345,59 @@ mod tests {
         assert_eq!(record(&b), None);
     }
 
+    /// Final review Minor 1 (re-graded, spec §2.1): the install at close reads the mode again.
+    /// A download made in Auto, then the mode set to Off: nothing starts at close
+    /// (`update postponed=off`); set to Notify: nothing starts at close either
+    /// (`update postponed=notify`), only "Update now" installs. No record is written.
+    #[test]
+    fn a_mode_changed_after_the_download_is_kept_at_close() {
+        for (mode, word) in [(UpdateMode::Off, "off"), (UpdateMode::Notify, "notify")] {
+            let b = started();
+            b.update_after_start("0.1.0");
+            let fake = FakeUpdater::offering("0.2.0");
+            assert_eq!(
+                b.update_check_and_download(&fake),
+                UpdateState::Ready {
+                    version: "0.2.0".into()
+                }
+            );
+            set_mode(&b, mode);
+            b.end_run();
+            let spawned = RefCell::new(Vec::new());
+            let spawn = |f: &Path, relaunch: bool| {
+                spawned.borrow_mut().push((f.to_path_buf(), relaunch));
+                Ok(())
+            };
+            b.update_at_exit(&spawn);
+            assert!(
+                spawned.borrow().is_empty(),
+                "{word}: nothing starts at close"
+            );
+            assert_eq!(record(&b), None, "{word}");
+            assert_eq!(
+                update_lines(&b).last().cloned(),
+                Some(format!("update postponed={word}"))
+            );
+            assert_eq!(
+                b.update_status().unwrap().state,
+                UpdateState::Postponed {
+                    version: "0.2.0".into(),
+                    reason: word.into()
+                }
+            );
+            if mode == UpdateMode::Notify {
+                // "Update now" still installs, with the relaunch.
+                let b = started();
+                b.update_after_start("0.1.0");
+                b.update_check_and_download(&fake);
+                set_mode(&b, mode);
+                b.update_install(&fake, &spawn).unwrap();
+                let file = b.paths().updates_dir().join("cmdstudio-0.2.0-setup.exe");
+                assert_eq!(*spawned.borrow(), [(file, true)]);
+            }
+        }
+    }
+
     /// The check runs once per run: a second app_ready (a reload) asks the updater nothing more.
     #[test]
     fn the_check_runs_once_per_run() {
@@ -1508,12 +1580,17 @@ mod tests {
     }
 
     /// Spec §6.2 steps 2-3: the theme on an old runtime is applied again, once, through a
-    /// transaction; state.json then names this build's pins, the old folder goes, and the notice
-    /// carries no failure.
+    /// transaction; state.json then names this build's pins, a folder nothing names goes, and the
+    /// notice carries no failure. Final review I2: the old folder stays, since the re-apply's
+    /// restore point holds the old state.json; so "Undo" right after gives a theme whose Oh My
+    /// Posh folder is there.
     #[test]
     fn a_changed_runtime_pin_re_applies_the_theme_once() {
         let b = started();
         applied_on_an_old_omp(&b);
+        let old = b.paths().runtime_root().join("omp-31.4.0");
+        let stray = b.paths().runtime_root().join("omp-31.3.0");
+        fake_fs(&b).put(stray.join("oh-my-posh.exe"), b"older");
         fake_fs(&b).put(
             b.paths().update_file(),
             br#"{"version":1,"from":"0.1.0","to":"0.2.0","notesUrl":"https://github.com/luraselenehalo/cmd-studio/releases/tag/v0.2.0"}"#,
@@ -1522,10 +1599,8 @@ mod tests {
         assert!(b.update_needs_reapply());
         b.update_reapply();
         assert_eq!(omp_version_applied(&b), OMP_VERSION);
-        assert!(!b
-            .sys()
-            .fs
-            .exists(&b.paths().runtime_root().join("omp-31.4.0")));
+        assert!(!b.sys().fs.exists(&stray), "named by nothing: gone");
+        assert!(b.sys().fs.exists(&old), "named by a restore point: kept");
         assert!(b.sys().fs.exists(&b.paths().omp_dir()));
         let lines = update_lines(&b);
         assert!(
@@ -1537,6 +1612,45 @@ mod tests {
         assert!(!b.update_needs_reapply(), "once");
         // A restore point was taken, as for every apply (spec §5.5).
         assert!(b.snapshots_list().unwrap().points.len() >= 2);
+        // Undo of the re-apply: state.json names omp-31.4.0 again, and it is there.
+        assert_eq!(b.undo_last().unwrap().status, UndoStatus::Committed);
+        assert_eq!(omp_version_applied(&b), "31.4.0");
+        assert!(b.sys().fs.exists(&old.join("oh-my-posh.exe")));
+    }
+
+    /// Final review I1: while a cmd window is open (it runs Oh My Posh from its runtime folder at
+    /// every prompt), nothing is pruned, after a re-apply or at a start, and the log says
+    /// `update pruned=cmd-open`; the next start without cmd windows prunes. A process list that
+    /// cannot be read is `pruned=noprocesses`, and nothing goes either.
+    #[test]
+    fn an_open_cmd_window_leaves_the_prune_to_a_start_without_one() {
+        let b = started();
+        applied_on_an_old_omp(&b);
+        let stray = b.paths().runtime_root().join("clink-1.9.0");
+        fake_fs(&b).put(stray.join("clink_dll_x64.dll"), b"old");
+        fake_host(&b).cmd_running.set(true);
+        b.update_after_start("0.1.0");
+        b.update_reapply();
+        assert_eq!(omp_version_applied(&b), OMP_VERSION);
+        b.prune_at_start();
+        assert!(b.sys().fs.exists(&stray));
+        fake_host(&b).cmd_running.set(false);
+        fake_host(&b).process_list_fails.set(true);
+        b.prune_at_start();
+        assert!(b.sys().fs.exists(&stray));
+        fake_host(&b).process_list_fails.set(false);
+        b.prune_at_start();
+        assert!(!b.sys().fs.exists(&stray));
+        assert_eq!(
+            update_lines(&b),
+            [
+                "update reapply=ok",
+                "update pruned=cmd-open",
+                "update pruned=cmd-open",
+                "update pruned=noprocesses",
+                "update pruned=1"
+            ]
+        );
     }
 
     /// Equal pins, or no theme, or state.json that cannot be read: nothing to re-apply; a by-hand

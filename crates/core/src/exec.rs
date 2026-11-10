@@ -3702,6 +3702,9 @@ mod tests {
         fn process_created_at(&self, pid: u32) -> Result<Option<u64>, AdapterError> {
             self.0.process_created_at(pid)
         }
+        fn cmd_running(&self) -> Result<bool, AdapterError> {
+            self.0.cmd_running()
+        }
     }
 
     #[test]

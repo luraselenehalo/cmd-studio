@@ -343,6 +343,12 @@ pub trait Host {
     /// When the process `pid` was created, or `None` when there is no process with that id now.
     /// An id that is there but cannot be opened is an error, never "gone".
     fn process_created_at(&self, pid: u32) -> Result<Option<u64>, AdapterError>;
+    /// Whether a `cmd.exe` process runs in this process's Windows session (this user's logon;
+    /// an elevated window of the user's included). A `cmd.exe` whose session cannot be read is
+    /// counted as running. `Err` when the process list cannot be read: a caller never takes
+    /// that for "none" (phase 4b final review I1: an open cmd window runs Oh My Posh from its
+    /// runtime folder at every prompt, and nothing holds that folder between prompts).
+    fn cmd_running(&self) -> Result<bool, AdapterError>;
 }
 
 /// One "Application Error" event (ID 1000) of Windows' Application log: a program that crashed,
