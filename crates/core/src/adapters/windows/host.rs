@@ -641,6 +641,85 @@ impl Host for WinHost {
     fn process_created_at(&self, pid: u32) -> Result<Option<u64>, AdapterError> {
         process_created_at(pid)
     }
+    fn cmd_running(&self) -> Result<bool, AdapterError> {
+        cmd_running_in_this_session()
+    }
+}
+
+/// Whether a `cmd.exe` process runs in this process's session: a Toolhelp snapshot of the
+/// processes, each one named `cmd.exe` (any ASCII case) asked for its session
+/// (`ProcessIdToSessionId`). One that is gone by then (`ERROR_INVALID_PARAMETER`) does not count;
+/// one whose session cannot be read for another reason counts, so the answer errs toward
+/// "running". A snapshot that cannot be made or walked to its end is an error.
+pub fn cmd_running_in_this_session() -> Result<bool, AdapterError> {
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, ERROR_INVALID_PARAMETER, ERROR_NO_MORE_FILES, INVALID_HANDLE_VALUE,
+    };
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+    use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
+    // The session of `pid`; `Ok(None)` when no process has that id now; `Err` otherwise.
+    let session_of = |pid: u32| -> Result<Option<u32>, ()> {
+        let mut session = 0u32;
+        // SAFETY: a plain pid and a pointer to a stack `u32` that outlives the call.
+        if unsafe { ProcessIdToSessionId(pid, &mut session) } != 0 {
+            return Ok(Some(session));
+        }
+        // SAFETY: reads the calling thread's last error code; no arguments.
+        if unsafe { GetLastError() } == ERROR_INVALID_PARAMETER {
+            return Ok(None);
+        }
+        Err(())
+    };
+    let Ok(Some(mine)) = session_of(current_pid()) else {
+        return Err(last_error("ProcessIdToSessionId"));
+    };
+    // SAFETY: two plain values; it returns a handle or INVALID_HANDLE_VALUE.
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return Err(last_error("CreateToolhelp32Snapshot"));
+    }
+    let mut entry = PROCESSENTRY32W {
+        dwSize: u32::try_from(std::mem::size_of::<PROCESSENTRY32W>()).unwrap_or(0),
+        ..Default::default()
+    };
+    let mut found = false;
+    // SAFETY: `snapshot` is open (above) and `entry` is a stack `PROCESSENTRY32W` whose `dwSize`
+    // is set, as the call requires; it outlives the call.
+    let mut more = unsafe { Process32FirstW(snapshot, &mut entry) } != 0;
+    while more {
+        let name: Vec<u16> = entry
+            .szExeFile
+            .iter()
+            .copied()
+            .take_while(|&c| c != 0)
+            .collect();
+        if String::from_utf16_lossy(&name).eq_ignore_ascii_case("cmd.exe") {
+            match session_of(entry.th32ProcessID) {
+                Ok(None) => {}
+                Ok(Some(session)) if session != mine => {}
+                Ok(Some(_)) | Err(()) => {
+                    found = true;
+                    break;
+                }
+            }
+        }
+        // SAFETY: as for `Process32FirstW` above.
+        more = unsafe { Process32NextW(snapshot, &mut entry) } != 0;
+    }
+    // Read before `CloseHandle`, which may set the thread's last error.
+    // SAFETY: reads the calling thread's last error code; no arguments.
+    let error = (!found && unsafe { GetLastError() } != ERROR_NO_MORE_FILES)
+        .then(|| last_error("Process32NextW"));
+    // SAFETY: `snapshot` came from the successful `CreateToolhelp32Snapshot` above and is closed
+    // once, here.
+    unsafe { CloseHandle(snapshot) };
+    match error {
+        Some(e) => Err(e),
+        None => Ok(found),
+    }
 }
 
 /// When the process `pid` was created, in milliseconds since 1970 (`GetProcessTimes`), or `None`
@@ -1636,5 +1715,24 @@ mod process_stamp_tests {
             "exited, held open: gone"
         );
         drop(child);
+    }
+
+    /// Phase 4b final review I1: a cmd of this session is seen. The child is cmd waiting for a
+    /// key on a pipe this test holds, with `/d` (no AutoRun) and no window, as above. That no cmd
+    /// runs cannot be pinned here: a window of the person at this PC may be open.
+    #[test]
+    fn a_cmd_of_this_session_is_running() {
+        let mut child = std::process::Command::new("cmd")
+            .args(["/d", "/c", "pause"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .unwrap();
+        let running = cmd_running_in_this_session();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(running.unwrap(), "the child cmd is in this session");
     }
 }

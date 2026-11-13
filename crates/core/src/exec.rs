@@ -166,7 +166,7 @@ pub(crate) fn same_path(a: &Path, b: &Path) -> bool {
 }
 
 /// A sibling name in the same folder: `.<name>.<what>-<8 hex>`.
-fn sibling(dir: &Path, what: &str) -> PathBuf {
+pub(crate) fn sibling(dir: &Path, what: &str) -> PathBuf {
     let name = dir
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -3701,6 +3701,9 @@ mod tests {
         }
         fn process_created_at(&self, pid: u32) -> Result<Option<u64>, AdapterError> {
             self.0.process_created_at(pid)
+        }
+        fn cmd_running(&self) -> Result<bool, AdapterError> {
+            self.0.cmd_running()
         }
     }
 

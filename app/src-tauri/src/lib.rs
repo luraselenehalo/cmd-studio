@@ -17,6 +17,7 @@ pub mod logs;
 pub mod machine;
 pub mod open;
 pub mod settings;
+pub mod update;
 #[cfg(windows)]
 pub mod webview_watch;
 
@@ -44,9 +45,17 @@ pub fn run_gui(how: backend::run::GuiStart) {
             std::process::exit(1);
         }
     };
+    // The built config, read once: the version the updater compares and records is this one
+    // (Cargo's, or a --config override's in the spike), never a second constant.
+    let context = tauri::generate_context!();
+    let app_version = context.package_info().version.to_string();
     // The run's record, before the window (recovery spec §5.1); `--recovery`'s own steps run on
     // a thread once the window is up, so a slow rollback never delays the window.
     let decided = backend.start_run(how);
+    // The record of an update (spec §6.2, phase 4b), before the window: the first app_status has
+    // the notice. The last run's download goes here too. Nothing for an instance whose record is
+    // another process's (start_run's "still-running").
+    backend.update_after_start(&app_version);
     if how == GuiStart::Restarted {
         // The change `app_restart` cut off is put back now, as its dialog promised (recovery
         // spec §6.3): under the lock, one log line, bounded by the core's timeouts.
@@ -70,9 +79,14 @@ pub fn run_gui(how: backend::run::GuiStart) {
                 }
             },
         ))
+        // The updater (spec §6.2, phase 4b), used from Rust only (update.rs) for the check and
+        // the download; the window gets none of its commands.
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(backend)
         .invoke_handler(ipc::handler())
         .setup(move |app| {
+            let updater = update::TauriUpdater::new(app.handle().clone());
+            app.manage(std::sync::Arc::new(updater));
             // Said and ended here, not returned: Tauri would turn the error into a panic.
             if let Err(why) = open_main_window(app, for_window.paths().webview()) {
                 // Recovery spec §5.4: Yes undoes everything through the backend, under the lock
@@ -126,13 +140,29 @@ pub fn run_gui(how: backend::run::GuiStart) {
                 // Recovery mode starts no crash check (recovery spec §4.3).
                 start_crash_check(&for_window);
             }
+            // Spec §6.2 steps 2-3 (phase 4b): after an update the theme applied on the old
+            // runtime is applied again, on a thread of its own, under its own busy name, so the
+            // first app_status waits for it, and the old runtime folders go after it; a start
+            // that needs no re-apply prunes them here, the prune's one other place. Not in safe
+            // mode, which changes nothing on the machine by itself.
+            if decided.safe_mode.is_none() {
+                if for_window.update_needs_reapply() {
+                    spawn_update_reapply(&for_window);
+                } else {
+                    for_window.prune_at_start();
+                }
+            }
             Ok(())
         })
-        .build(tauri::generate_context!());
+        .build(context);
     match built {
         Ok(app) => app.run(move |_, event| {
             if let tauri::RunEvent::Exit = event {
+                // The run's record ends first (Q7: the installer's Restart Manager may end this
+                // process before the exit code runs on), then the automatic install when a
+                // verified download waits and the lock is free (spec §6.2's primary).
                 for_exit.end_run();
+                for_exit.update_at_exit(&update::start_installer);
             }
         }),
         Err(e) => {
@@ -213,6 +243,27 @@ fn run_recovery_entry<M: backend::Machine>(
 #[cfg(windows)]
 fn start_recovery_entry(backend: &std::sync::Arc<backend::Backend<machine::RealMachine>>) {
     spawn_recovery_entry(backend, || {});
+}
+
+/// The re-apply after an update (spec §6.2) on a thread of its own, marked busy before the
+/// thread exists (a UI that asks in between does not find it idle) and cleared by the guard on
+/// every exit of the work, a panic included; a thread that cannot start clears the mark and is
+/// one log line, and the next start tries again.
+#[cfg(windows)]
+fn spawn_update_reapply(backend: &std::sync::Arc<backend::Backend<machine::RealMachine>>) {
+    use backend::update::UPDATE_REAPPLY_BUSY;
+    let b = backend.clone();
+    backend.busy_mark(UPDATE_REAPPLY_BUSY);
+    let spawned = std::thread::Builder::new()
+        .name("update-reapply".to_string())
+        .spawn(move || {
+            let _busy = b.busy_until_dropped(UPDATE_REAPPLY_BUSY);
+            b.update_reapply();
+        });
+    if let Err(e) = spawned {
+        backend.busy_clear(UPDATE_REAPPLY_BUSY);
+        backend.note_line(&format!("update reapply=thread {e}"));
+    }
 }
 
 /// A second start with `--recovery` while this one runs (recovery spec §4.4): the entry, then
@@ -780,6 +831,107 @@ mod tests {
             "on the restarted start only"
         );
         assert_eq!(text.matches(".restart_rollback()").count(), 1);
+    }
+
+    /// Spec §6.2 (phase 4b): the record of an update is read right after the run record and
+    /// before the window (so the first app_status has the notice), with the version the built
+    /// config says; the plugin is registered after single-instance and the updater is Tauri
+    /// state; at exit the run record ends first and the automatic install follows (Q7: the
+    /// installer's Restart Manager may end this process before the exit code runs on).
+    #[test]
+    fn the_update_record_is_read_after_the_run_record_and_the_install_follows_the_runs_end() {
+        let text = production();
+        let context = text
+            .find("let context = tauri::generate_context!()")
+            .unwrap();
+        let version = text
+            .find("context.package_info().version.to_string()")
+            .unwrap();
+        let record = text.find("backend.start_run(how)").unwrap();
+        let read = text
+            .find("backend.update_after_start(&app_version)")
+            .unwrap();
+        let window = text.find("open_main_window(app, ").unwrap();
+        assert!(
+            context < version && version < record,
+            "the version comes from the context"
+        );
+        assert!(
+            record < read && read < window,
+            "after the run record, before the window"
+        );
+        let single = text.find("tauri_plugin_single_instance::init(").unwrap();
+        let updater = text
+            .find("tauri_plugin_updater::Builder::new().build()")
+            .unwrap();
+        assert!(
+            single < updater,
+            "single-instance first, as its plugin asks"
+        );
+        // Two lines: on one, rustfmt would break the call over three.
+        let made = text
+            .find("let updater = update::TauriUpdater::new(app.handle().clone());")
+            .unwrap();
+        let managed = text
+            .find("app.manage(std::sync::Arc::new(updater));")
+            .unwrap();
+        let setup = text.find(".setup(move |app| {").unwrap();
+        assert!(
+            setup < made && made < managed && managed < window,
+            "the updater is Tauri state from the first lines of setup, before the window"
+        );
+        let exit = text.find("tauri::RunEvent::Exit").unwrap();
+        let ended = text.find("for_exit.end_run()").unwrap();
+        let install = text
+            .find("for_exit.update_at_exit(&update::start_installer)")
+            .unwrap();
+        assert!(
+            exit < ended && ended < install,
+            "the record's end, then the install"
+        );
+        assert_eq!(text.matches(".build(context)").count(), 1);
+    }
+
+    /// Spec §6.2 steps 2-3 (phase 4b, Q17): the re-apply after an update runs on its own thread
+    /// once the window is up, marked busy before the thread exists (the first app_status waits
+    /// for it) and cleared by a guard; outside safe mode only, and a normal start that needs no
+    /// re-apply prunes in the one place instead; the prune follows the re-apply inside it.
+    #[test]
+    fn the_re_apply_is_marked_before_its_thread_and_the_prune_has_one_place_outside_safe_mode() {
+        let body = body_of("fn spawn_update_reapply(");
+        let marked = body.find(".busy_mark(UPDATE_REAPPLY_BUSY)").unwrap();
+        let spawned = body.find(".spawn(").unwrap();
+        let guard = body
+            .find(".busy_until_dropped(UPDATE_REAPPLY_BUSY)")
+            .unwrap();
+        let work = body.find(".update_reapply()").unwrap();
+        let failed = body.find("if let Err(e) = spawned").unwrap();
+        let cleared = body.find(".busy_clear(UPDATE_REAPPLY_BUSY)").unwrap();
+        assert!(
+            marked < spawned && spawned < guard && guard < work,
+            "marked, then the guarded work"
+        );
+        assert!(
+            failed < cleared,
+            "cleared only when the thread could not start"
+        );
+        assert!(body.contains("update reapply=thread"));
+        let text = production();
+        let window = text.find("open_main_window(app, ").unwrap();
+        let safe = text.rfind("decided.safe_mode.is_none()").unwrap();
+        let needs = text.find("for_window.update_needs_reapply()").unwrap();
+        let call = text.find("spawn_update_reapply(&for_window)").unwrap();
+        let prune = text.find("for_window.prune_at_start()").unwrap();
+        assert!(
+            window < safe && safe < needs && needs < call && call < prune,
+            "after the window, outside safe mode: the re-apply when needed, else the prune"
+        );
+        assert_eq!(
+            text.matches("prune_at_start()").count(),
+            1,
+            "the prune's one call site at a start"
+        );
+        assert_eq!(text.matches("spawn_update_reapply(&for_window)").count(), 1);
     }
 }
 

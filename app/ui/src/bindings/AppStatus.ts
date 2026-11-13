@@ -2,6 +2,7 @@
 import type { CrashNotice } from "./CrashNotice";
 import type { RecoveryEntry } from "./RecoveryEntry";
 import type { SafeModeReason } from "./SafeModeReason";
+import type { Updated } from "./Updated";
 
 /**
  * `app_status` (recovery spec §8, §6.3).
@@ -10,4 +11,8 @@ export type AppStatus = {
 /**
  * The command that changes the machine and runs now (`command_names::CHANGES_MACHINE`).
  */
-busy: string | null, safeMode: boolean, safeModeReason: SafeModeReason | null, crashNotice: CrashNotice | null, recoveryEntry: RecoveryEntry | null, };
+busy: string | null, safeMode: boolean, safeModeReason: SafeModeReason | null, crashNotice: CrashNotice | null, recoveryEntry: RecoveryEntry | null, 
+/**
+ * The last run's update went through (spec §2.1): the notice, until closed.
+ */
+updated: Updated | null, };

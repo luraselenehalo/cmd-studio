@@ -59,6 +59,17 @@ impl Paths {
     }
 }
 
+/// Whether the theme applied now runs on runtime folders of other versions than this build pins
+/// (spec §6.2 "after an update", phase 4b): then the apply must run again, so that AutoRun and
+/// the generated files point at `runtime\omp-<OMP_VERSION>` and `clink-<CLINK_VERSION>`. No theme
+/// applied: nothing to re-apply.
+pub fn runtime_changed(state: &crate::state::State) -> bool {
+    state
+        .applied
+        .as_ref()
+        .is_some_and(|a| a.omp_version != OMP_VERSION || a.clink_version != CLINK_VERSION)
+}
+
 /// What the planner needs to know about the machine. Filled by `detect` (Phase 1b).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Machine {
@@ -1503,5 +1514,42 @@ mod tests {
             p.settings_file(),
             PathBuf::from(format!(r"{DATA}\settings.json"))
         );
+    }
+
+    /// Spec §6.2 "after an update": the theme is re-applied only when the applied theme runs on
+    /// runtime folders of other versions than this build pins; no theme, nothing to re-apply.
+    #[test]
+    fn runtime_changed_only_when_a_pin_differs() {
+        use crate::state::{Applied, Launch, State};
+        let applied = |omp: &str, clink: &str| Applied {
+            theme_id: uuid::Uuid::nil(),
+            theme_name: "Terracotta".into(),
+            target: Target::All,
+            set_default: true,
+            launch: Launch::Direct {
+                exe: PathBuf::from(format!(r"C:\d\runtime\clink-{clink}\clink_x64.exe")),
+            },
+            omp_version: omp.into(),
+            clink_version: clink.into(),
+            generated: Default::default(),
+            wt_font: None,
+            clink_log_len: 0,
+            snapshot_id: "1791694709000-0123abcd".into(),
+            applied_at_ms: 1_791_694_709_000,
+        };
+        let with = |a: Option<Applied>| State {
+            applied: a,
+            ..State::default()
+        };
+        assert!(!runtime_changed(&with(None)));
+        assert!(!runtime_changed(&with(Some(applied(
+            OMP_VERSION,
+            CLINK_VERSION
+        )))));
+        assert!(runtime_changed(&with(Some(applied(
+            "31.4.0",
+            CLINK_VERSION
+        )))));
+        assert!(runtime_changed(&with(Some(applied(OMP_VERSION, "1.9.0")))));
     }
 }

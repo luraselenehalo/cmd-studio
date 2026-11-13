@@ -13,8 +13,6 @@ const SAME_IN_BOTH = new Set<string>([
   "app.name",
   "language.en",
   "language.th",
-  "home.update.placeholder",
-  "recovery.update.placeholder",
   "home.restore.latest",
   "editor.prompt.layout.powerline",
   "help.credits.signpath",
@@ -35,9 +33,8 @@ describe("the two dictionaries", () => {
     }
   });
 
-  it("have no empty text except the reserved update notice", () => {
+  it("have no empty text", () => {
     for (const [key, text] of Object.entries(en)) {
-      if (key === "home.update.placeholder" || key === "recovery.update.placeholder") continue;
       expect(text.trim(), key).not.toBe("");
       expect(th[key as keyof typeof th].trim(), key).not.toBe("");
     }
@@ -112,6 +109,17 @@ describe("the two dictionaries", () => {
     expect(th["recovery.entry.didSkip"]).toBe("ตอนเปิด CMD Studio ได้ย้อนการเปลี่ยนแปลงที่ค้างอยู่ ไม่ได้หยุดธีม:");
     expect(en).not.toHaveProperty("recovery.entry.did");
     expect(en).not.toHaveProperty("recovery.entry.skipped");
+  });
+
+  it("say what each update mode does, and name the version an update brought (phase 4b)", () => {
+    expect(en["settings.updates.note"]).toBe(
+      "CMD Studio checks for a new version each time it starts. Automatic downloads it in the background and installs it when you close CMD Studio; Tell me first shows it on the home page and waits for you; Off never checks. After an update, CMD Studio says which version it is now.",
+    );
+    expect(th["settings.updates.note"]).toMatch(/^CMD Studio ตรวจหาเวอร์ชันใหม่ทุกครั้งที่เริ่มทำงาน /);
+    expect(en["start.updated"]).toBe("Updated to v{version}.");
+    expect(en["home.update.now"]).toBe("Update now");
+    expect(en).not.toHaveProperty("home.update.placeholder");
+    expect(en).not.toHaveProperty("recovery.update.placeholder");
   });
 
   // Spot checks of buttons, not a proof for every text: these buttons start with a verb.

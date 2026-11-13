@@ -20,25 +20,29 @@ use crate::actions::{
     begin, delete_pending, delete_pending_and_save, latest_record, latest_record_or_why, next_id,
     rebuilt_incomplete, record_incomplete, ActionError, Ctx, StartReport,
 };
-use crate::adapters::{program_data_dir, DirEntry, DirState, RegText, RegValue, System};
+use crate::adapters::{program_data_dir, DirEntry, DirState, Fs, RegText, RegValue, System};
 use crate::exec::{
-    font_target, same_path, same_state, FixByHand, SystemExecutor, COMMAND_PROCESSOR_KEY, FONTS_KEY,
+    font_target, same_path, same_state, sibling, FixByHand, SystemExecutor, COMMAND_PROCESSOR_KEY,
+    FONTS_KEY,
 };
 use crate::generate::wt::CMD_PROFILE_GUID;
 use crate::plan::autorun::{is_foreign, remove_ours, scan};
-use crate::plan::{Op, Paths, PlanError, AUTORUN_NOT_TEXT, AUTORUN_NOT_TEXT_TH, NERD_FONT_FAMILY};
+use crate::plan::{
+    Op, Paths, PlanError, AUTORUN_NOT_TEXT, AUTORUN_NOT_TEXT_TH, CLINK_VERSION, NERD_FONT_FAMILY,
+};
 use crate::snapshot::{
     Incomplete, Manifest, SetAside, SnapshotKind, SnapshotStore, UnreadableKind, Unrestored, KEEP,
 };
 use crate::state::{
-    AutoRunRecord, Baseline, FontRecord, RegValueRecord, State, StateError, Was, WtFileBaseline,
+    AutoRunRecord, Baseline, FontRecord, Launch, RegValueRecord, State, StateError, Was,
+    WtFileBaseline,
 };
 use crate::txn::{self, Executor, Failure, Outcome};
 use crate::verify::SystemVerifier;
 use crate::wt_edit::{holds_ours, read_value, revert, WtError, WtKey, WT_TEMPLATE};
 use serde_json::{Map, Value};
 use std::fmt::Display;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// One step's result, for the report and the exit code.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1548,6 +1552,184 @@ fn pending_font_files(sys: System<'_>, ctx: &Ctx, state: &mut State, report: &mu
             Some(held_file_by_hand(file)),
         );
     }
+}
+
+/// The runtime folders `state.json` names, which a prune keeps whatever their version (phase
+/// 4b): the applied theme's `runtime\omp-<its version>` and `runtime\clink-<its version>` by
+/// their long paths under the data folder (AutoRun may run the Clink exe by its 8.3 path, spec
+/// §5.4 and G19, which the string compare of `same_path` would never match against the long
+/// folder `list_dir` lists), or the ProgramData folder the launch names. None without a theme.
+pub fn runtime_dirs_named_by(state: &State, paths: &Paths) -> Vec<PathBuf> {
+    let Some(applied) = &state.applied else {
+        return Vec::new();
+    };
+    let root = paths.runtime_root();
+    let clink = match &applied.launch {
+        Launch::Direct { .. } | Launch::ShortPath { .. } => {
+            root.join(format!("clink-{}", applied.clink_version))
+        }
+        Launch::ProgramData { dir } => dir.clone(),
+    };
+    vec![root.join(format!("omp-{}", applied.omp_version)), clink]
+}
+
+/// The runtime folders a stored restore point names (phase 4b final review I2), by their long
+/// paths: an Undo or a Restore puts state.json and AutoRun back byte for byte, and a folder
+/// either of them names must then still be there. For each restore point: the folders its ops
+/// install (`InstallRuntime`), and the folders ([`runtime_dirs_named_by`]) of the state.json it
+/// wrote and of the state.json it holds as the prior state, the one an undo puts back. A
+/// restore point that cannot be read names nothing: it cannot be undone or restored (an undo
+/// stops at it until it is set aside). A store that cannot be listed names nothing either: no
+/// undo can find a restore point in it then.
+pub fn runtime_dirs_named_by_restore_points(fs: &dyn Fs, paths: &Paths) -> Vec<PathBuf> {
+    let root = paths.snapshots();
+    let store = SnapshotStore::new(fs, &root);
+    let state_file = paths.state_file();
+    let mut named = Vec::new();
+    let add_state = |bytes: &[u8], named: &mut Vec<PathBuf>| {
+        if let Ok(state) = serde_json::from_slice::<State>(bytes) {
+            named.extend(runtime_dirs_named_by(&state, paths));
+        }
+    };
+    for id in store.ids().unwrap_or_default() {
+        let Ok(journal) = store.journal(&id) else {
+            continue;
+        };
+        for (index, op) in journal.ops.iter().enumerate() {
+            match op {
+                Op::InstallRuntime { dir, .. } => named.push(dir.clone()),
+                Op::WriteFile { path, contents } if same_path(path, &state_file) => {
+                    add_state(contents.as_bytes(), &mut named);
+                    let prior = journal
+                        .snapshots
+                        .iter()
+                        .find(|s| s.op_index == index)
+                        .and_then(|s| s.prior.as_deref());
+                    if let Some(prior) = prior {
+                        add_state(prior, &mut named);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    named.sort();
+    named.dedup();
+    named
+}
+
+/// The roots a runtime folder may be in, each with the prefixes it may hold: `runtime\` of the
+/// data folder (`omp-`, `clink-`), then the user's own ProgramData folder (`clink-` only), when
+/// it can be worked out.
+fn runtime_roots(sys: System<'_>, paths: &Paths) -> Vec<(PathBuf, Vec<&'static str>)> {
+    let mut roots = vec![(paths.runtime_root(), vec!["omp-", "clink-"])];
+    if let (Ok(pd), Ok(sid)) = (sys.host.program_data(), sys.host.user_sid()) {
+        roots.push((program_data_dir(&pd, &sid), vec!["clink-"]));
+    }
+    roots
+}
+
+/// The runtime folders (as [`prune_old_runtimes`] meets them) that one of `texts` (the AutoRun
+/// values) names, by the folder's long path or by its 8.3 path (`Host::short_path`: AutoRun
+/// may run Clink by it, spec §5.4 and G19), without regard to ASCII case, as a whole path (what
+/// follows it in the text is a separator, a quote, a space, `&`, `;`, `|` or the end). A prune
+/// keeps these whatever state.json says (phase 4b Task 5, review I2): cmd runs what AutoRun
+/// says.
+pub fn runtime_dirs_named_in(sys: System<'_>, paths: &Paths, texts: &[String]) -> Vec<PathBuf> {
+    let texts: Vec<String> = texts.iter().map(|t| t.to_ascii_lowercase()).collect();
+    let named = |p: &Path| {
+        let p = p.display().to_string().to_ascii_lowercase();
+        texts.iter().any(|t| {
+            t.match_indices(&p).any(|(at, _)| {
+                t.get(at + p.len()..)
+                    .and_then(|rest| rest.chars().next())
+                    .is_none_or(|c| matches!(c, '\\' | '/' | '"' | '\'' | ' ' | '&' | ';' | '|'))
+            })
+        })
+    };
+    let mut found = Vec::new();
+    for (root, prefixes) in runtime_roots(sys, paths) {
+        let Ok(entries) = sys.fs.list_dir(&root) else {
+            continue;
+        };
+        for entry in entries {
+            let Some(name) = entry.path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let lower = name.to_ascii_lowercase();
+            if !entry.is_dir || !prefixes.iter().any(|p| lower.starts_with(p)) {
+                continue;
+            }
+            let short = sys.host.short_path(&entry.path).ok();
+            if named(&entry.path) || short.as_deref().is_some_and(named) {
+                found.push(entry.path);
+            }
+        }
+    }
+    found
+}
+
+/// Deletes the runtime folders of other versions than this build pins (spec §6.2 step 3, phase
+/// 4b), best effort: every folder directly in `runtime\` named `omp-*` or `clink-*`, and every
+/// `clink-*` (only) directly in the user's own ProgramData folder, that is neither the pinned one
+/// nor in `keep` (what state.json, AutoRun and the restore points name: [`runtime_dirs_named_by`],
+/// [`runtime_dirs_named_in`], [`runtime_dirs_named_by_restore_points`]; the caller runs the prune
+/// with a loaded state, after a successful re-apply). A folder is renamed to its `.removing`
+/// form first, as `restore_runtime` does: the rename fails cleanly while a cmd window holds a
+/// file inside, and then the folder is skipped, whole, and met again at the next start; only a
+/// successful rename is followed by the (best effort) delete, and counts as removed. Leftover
+/// `.<name>.removing-…` folders of earlier runs are deleted best effort and not counted. A root
+/// that cannot be listed, or is not there, is skipped; nothing is created. Names compare
+/// without ASCII case, as Windows does. Returns the folders removed, in the order met.
+///
+/// Phase 4b final review I1: an open cmd window runs Oh My Posh from its runtime folder at every
+/// prompt (`init.lua` names the exe by its full path), and nothing holds that folder between
+/// prompts, so the rename above would succeed under it. So nothing at all is pruned while a
+/// `cmd.exe` runs in this session (`Host::cmd_running`): `Err("cmd-open")`, or
+/// `Err("noprocesses")` when the process list cannot be read; the next start without cmd
+/// windows prunes.
+pub fn prune_old_runtimes(
+    sys: System<'_>,
+    paths: &Paths,
+    keep: &[PathBuf],
+) -> Result<Vec<PathBuf>, &'static str> {
+    match sys.host.cmd_running() {
+        Ok(false) => {}
+        Ok(true) => return Err("cmd-open"),
+        Err(_) => return Err("noprocesses"),
+    }
+    let mut pinned = vec![paths.omp_dir(), paths.clink_dir()];
+    let roots = runtime_roots(sys, paths);
+    if let Some((own, _)) = roots.get(1) {
+        pinned.push(own.join(format!("clink-{CLINK_VERSION}")));
+    }
+    let mut removed = Vec::new();
+    for (root, prefixes) in roots {
+        let Ok(entries) = sys.fs.list_dir(&root) else {
+            continue;
+        };
+        for entry in entries {
+            let Some(name) = entry.path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let lower = name.to_ascii_lowercase();
+            if entry.is_dir && lower.starts_with('.') && lower.contains(".removing-") {
+                let _ = sys.fs.remove_dir_all(&entry.path);
+                continue;
+            }
+            let runtime = entry.is_dir && prefixes.iter().any(|p| lower.starts_with(p));
+            let kept = pinned.iter().chain(keep).any(|k| same_path(k, &entry.path));
+            if !runtime || kept {
+                continue;
+            }
+            let tomb = sibling(&entry.path, "removing");
+            if sys.fs.rename(&entry.path, &tomb).is_ok() {
+                let _ = sys.fs.remove_dir_all(&tomb);
+                removed.push(entry.path);
+            }
+        }
+    }
+    Ok(removed)
 }
 
 /// Step 4 for the ProgramData folders: the user's own, worked out from the known folder and the
@@ -4352,5 +4534,309 @@ mod tests {
                 assert!(fix.en.contains("cannot be read"), "{}", fix.en);
             }
         }
+    }
+
+    /// Spec §6.2 step 3 (phase 4b): the runtime folders of other versions go, best effort; the
+    /// pinned ones, the ones state.json names (AutoRun still runs them until the re-apply), a
+    /// folder held open, and anything not named like a runtime stay.
+    #[test]
+    fn old_runtime_folders_go_and_held_ones_stay() {
+        let m = FakeMachine::new();
+        let paths = Paths {
+            data: PathBuf::from(r"C:\d"),
+        };
+        let pd = program_data_dir(&m.host.program_data, &m.host.sid);
+        for dir in [
+            r"C:\d\runtime\omp-31.5.0",
+            r"C:\d\runtime\omp-31.4.0",
+            r"C:\d\runtime\clink-1.9.34",
+            r"C:\d\runtime\clink-1.9.0",
+            r"C:\d\runtime\clink-1.8.9",
+            r"C:\d\runtime\notes",
+        ] {
+            m.fs.create_dir_all(Path::new(dir)).unwrap();
+        }
+        m.fs.put(r"C:\d\runtime\clink-1.9.0\clink_dll_x64.dll", b"x");
+        m.fs.put(r"C:\d\runtime\clink-1.8.9\clink_dll_x64.dll", b"x");
+        m.fs.put(pd.join("clink-1.9.0").join("clink_x64.exe"), b"x");
+        m.fs.put(pd.join("clink-1.9.34").join("clink_x64.exe"), b"x");
+        // A cmd window still holds the DLL of 1.8.9: the folder cannot be removed.
+        m.fs.fail_removes_of(r"C:\d\runtime\clink-1.8.9");
+        // state.json names clink-1.9.0 under the data folder: kept this time.
+        let keep = vec![PathBuf::from(r"C:\d\runtime\clink-1.9.0")];
+        let removed = prune_old_runtimes(m.system(), &paths, &keep).unwrap();
+        assert_eq!(
+            removed,
+            [
+                PathBuf::from(r"C:\d\runtime\omp-31.4.0"),
+                pd.join("clink-1.9.0")
+            ]
+        );
+        for kept in [
+            r"C:\d\runtime\omp-31.5.0",
+            r"C:\d\runtime\clink-1.9.34",
+            r"C:\d\runtime\clink-1.9.0",
+            r"C:\d\runtime\clink-1.8.9",
+            r"C:\d\runtime\notes",
+        ] {
+            assert!(m.fs.exists(Path::new(kept)), "{kept}");
+        }
+        assert!(
+            m.fs.exists(&pd.join("clink-1.9.34")),
+            "the pinned ProgramData folder stays"
+        );
+        // Nothing names 1.9.0 any more: it goes; the held one stays again, without an error.
+        let removed = prune_old_runtimes(m.system(), &paths, &[]).unwrap();
+        assert_eq!(removed, [PathBuf::from(r"C:\d\runtime\clink-1.9.0")]);
+        assert!(m.fs.exists(Path::new(r"C:\d\runtime\clink-1.8.9")));
+        // No runtime folder at all: nothing to do, nothing made.
+        let empty = Paths {
+            data: PathBuf::from(r"C:\e"),
+        };
+        assert_eq!(
+            prune_old_runtimes(m.system(), &empty, &[]).unwrap(),
+            Vec::<PathBuf>::new()
+        );
+        assert!(!m.fs.exists(Path::new(r"C:\e")));
+    }
+
+    /// What a prune must keep whatever its version: the applied theme's OMP and Clink folders by
+    /// their long paths under the data folder (AutoRun may hold the 8.3 form for a Thai user
+    /// name, G19, which the string compare of `same_path` never matches), or the ProgramData
+    /// folder the launch names; none without a theme.
+    #[test]
+    fn the_runtime_folders_state_json_names_are_kept() {
+        use crate::state::{Applied, Launch};
+        let paths = Paths {
+            data: PathBuf::from(r"C:\Users\ผู้ทดสอบ ไทย\AppData\Local\ai.resincore.cmdstudio"),
+        };
+        let applied = |launch: Launch| Applied {
+            theme_id: uuid::Uuid::nil(),
+            theme_name: "Terracotta".into(),
+            target: Target::All,
+            set_default: true,
+            launch,
+            omp_version: "31.4.0".into(),
+            clink_version: "1.9.0".into(),
+            generated: Default::default(),
+            wt_font: None,
+            clink_log_len: 0,
+            snapshot_id: "1791694709000-0123abcd".into(),
+            applied_at_ms: 1_791_694_709_000,
+        };
+        let long_omp = paths.runtime_root().join("omp-31.4.0");
+        let long_clink = paths.runtime_root().join("clink-1.9.0");
+        let direct = State {
+            applied: Some(applied(Launch::Direct {
+                exe: long_clink.join("clink_x64.exe"),
+            })),
+            ..State::default()
+        };
+        assert_eq!(
+            runtime_dirs_named_by(&direct, &paths),
+            [long_omp.clone(), long_clink.clone()]
+        );
+        // The 8.3 form AutoRun holds for this user (spec §5.4): the long path is kept all the same.
+        let short = State {
+            applied: Some(applied(Launch::ShortPath {
+                exe: PathBuf::from(
+                    r"C:\Users\3607~1\AppData\Local\AIRESI~1.CMD\runtime\clink-1.9.0\clink_x64.exe",
+                ),
+            })),
+            ..State::default()
+        };
+        assert_eq!(
+            runtime_dirs_named_by(&short, &paths),
+            [long_omp.clone(), long_clink.clone()]
+        );
+        let program_data = State {
+            applied: Some(applied(Launch::ProgramData {
+                dir: PathBuf::from(
+                    r"C:\ProgramData\ai.resincore.cmdstudio-S-1-5-21-1-2-3-1001\clink-1.9.0",
+                ),
+            })),
+            ..State::default()
+        };
+        assert_eq!(
+            runtime_dirs_named_by(&program_data, &paths),
+            [
+                long_omp,
+                PathBuf::from(
+                    r"C:\ProgramData\ai.resincore.cmdstudio-S-1-5-21-1-2-3-1001\clink-1.9.0"
+                )
+            ]
+        );
+        assert_eq!(
+            runtime_dirs_named_by(&State::default(), &paths),
+            Vec::<PathBuf>::new()
+        );
+    }
+
+    /// Review Focus 5, G19: a prune keeps the applied Clink folder when AutoRun names it in its
+    /// 8.3 form, since the folder `list_dir` lists is the long one.
+    #[test]
+    fn a_short_path_launch_keeps_its_long_folder() {
+        use crate::state::{Applied, Launch};
+        let m = FakeMachine::new();
+        let paths = Paths {
+            data: PathBuf::from(r"C:\Users\ผู้ทดสอบ ไทย\AppData\Local\ai.resincore.cmdstudio"),
+        };
+        let old = paths.runtime_root().join("clink-1.9.0");
+        m.fs.put(old.join("clink_dll_x64.dll"), b"x");
+        m.fs.put(
+            paths
+                .runtime_root()
+                .join("omp-31.4.0")
+                .join("oh-my-posh.exe"),
+            b"x",
+        );
+        let state = State {
+            applied: Some(Applied {
+                theme_id: uuid::Uuid::nil(),
+                theme_name: "Terracotta".into(),
+                target: Target::All,
+                set_default: true,
+                launch: Launch::ShortPath {
+                    exe: PathBuf::from(
+                        r"C:\Users\3607~1\AppData\Local\AIRESI~1.CMD\runtime\clink-1.9.0\clink_x64.exe",
+                    ),
+                },
+                omp_version: "31.4.0".into(),
+                clink_version: "1.9.0".into(),
+                generated: Default::default(),
+                wt_font: None,
+                clink_log_len: 0,
+                snapshot_id: "1791694709000-0123abcd".into(),
+                applied_at_ms: 1_791_694_709_000,
+            }),
+            ..State::default()
+        };
+        let keep = runtime_dirs_named_by(&state, &paths);
+        assert_eq!(
+            prune_old_runtimes(m.system(), &paths, &keep).unwrap(),
+            Vec::<PathBuf>::new()
+        );
+        assert!(m.fs.exists(&old) && m.fs.exists(&paths.runtime_root().join("omp-31.4.0")));
+        // The premise: state.json names the folder only by its 8.3 form, so a keep taken from the
+        // launch exe (what a Direct launch allows) would not protect it and the prune would
+        // delete the folder AutoRun runs. This is what the test pins.
+        let Some(Launch::ShortPath { exe }) = state.applied.as_ref().map(|a| a.launch.clone())
+        else {
+            unreachable!("the state above has a ShortPath launch");
+        };
+        let naive: Vec<PathBuf> = exe.parent().map(Path::to_path_buf).into_iter().collect();
+        assert!(prune_old_runtimes(m.system(), &paths, &naive)
+            .unwrap()
+            .contains(&old));
+    }
+
+    /// Final review I1: a cmd window is open (it holds Clink's DLL of 1.8.9, and runs Oh My Posh
+    /// from `omp-31.4.0` at its next prompt, which nothing holds between prompts). Nothing at all
+    /// is pruned, tombstones included: `cmd-open`; a process list that cannot be read is
+    /// `noprocesses`, and nothing goes either.
+    ///
+    /// Once no cmd runs, a file still held (a process other than cmd, or a window that opened
+    /// after the look) is the rename's case: on Windows a delete would remove the other files
+    /// first and fail, leaving a runtime half gone. The prune renames first, so the held folder
+    /// stays whole, with every file, and is met again later. Tombstones left by an earlier run
+    /// go, best effort; ProgramData holds `clink-*` only.
+    #[test]
+    fn an_open_cmd_window_skips_the_prune_and_a_held_folder_stays_whole() {
+        use crate::adapters::Fs;
+        let m = FakeMachine::new();
+        let paths = Paths {
+            data: PathBuf::from(r"C:\d"),
+        };
+        let pd = program_data_dir(&m.host.program_data, &m.host.sid);
+        let held = PathBuf::from(r"C:\d\runtime\clink-1.8.9");
+        for f in ["a.lua", "clink_dll_x64.dll", "z.lua"] {
+            m.fs.put(held.join(f), b"x");
+        }
+        let omp = PathBuf::from(r"C:\d\runtime\omp-31.4.0");
+        let tomb = PathBuf::from(r"C:\d\runtime\.omp-31.3.0.removing-deadbeef");
+        m.fs.put(omp.join("oh-my-posh.exe"), b"x");
+        m.fs.put(tomb.join("x"), b"x");
+        m.fs.put(pd.join("omp-1.0.0").join("x"), b"x");
+        let lock =
+            m.fs.try_lock(&held.join("clink_dll_x64.dll"))
+                .unwrap()
+                .unwrap();
+        m.host.cmd_running.set(true);
+        assert_eq!(prune_old_runtimes(m.system(), &paths, &[]), Err("cmd-open"));
+        m.host.cmd_running.set(false);
+        m.host.process_list_fails.set(true);
+        assert_eq!(
+            prune_old_runtimes(m.system(), &paths, &[]),
+            Err("noprocesses")
+        );
+        for dir in [&held, &omp, &tomb] {
+            assert!(m.fs.exists(dir), "{} must still be there", dir.display());
+        }
+        m.host.process_list_fails.set(false);
+        let removed = prune_old_runtimes(m.system(), &paths, &[]).unwrap();
+        assert_eq!(removed, [omp]);
+        for f in ["a.lua", "clink_dll_x64.dll", "z.lua"] {
+            assert!(m.fs.exists(&held.join(f)), "{f} must still be there");
+        }
+        assert!(!m
+            .fs
+            .exists(Path::new(r"C:\d\runtime\.omp-31.3.0.removing-deadbeef")));
+        assert!(
+            m.fs.exists(&pd.join("omp-1.0.0")),
+            "only clink-* is pruned in ProgramData"
+        );
+        // Let go of the file: the next prune removes it.
+        drop(lock);
+        assert_eq!(
+            prune_old_runtimes(m.system(), &paths, &[]).unwrap(),
+            std::slice::from_ref(&held)
+        );
+        assert!(!m.fs.exists(&held));
+    }
+
+    /// Final review I2: an Undo or a Restore puts state.json and AutoRun back byte for byte, so
+    /// a runtime folder a stored restore point names must still be there. The theme on
+    /// `omp-31.4.0` (an older build's pin) is applied again on this build's pins: that restore
+    /// point holds the old state.json, which names `omp-31.4.0`, so the prune keeps it, by its
+    /// long path; a folder no restore point names goes. The undo then gives a state.json whose
+    /// Oh My Posh folder is there. A restore point that cannot be read names nothing (it cannot
+    /// be undone or restored), and the others still count.
+    #[test]
+    fn a_runtime_folder_a_restore_point_names_is_kept() {
+        let (m, ctx) = machine();
+        apply(&m, &ctx, Target::All);
+        let mut older = state(&m, &ctx);
+        older.applied.as_mut().unwrap().omp_version = "31.4.0".into();
+        m.fs.put(ctx.paths.state_file(), older.to_bytes().unwrap());
+        let old = ctx.paths.runtime_root().join("omp-31.4.0");
+        let stray = ctx.paths.runtime_root().join("omp-31.3.0");
+        m.fs.put(old.join("oh-my-posh.exe"), b"x");
+        m.fs.put(stray.join("oh-my-posh.exe"), b"x");
+        let reapply = apply_id(&m, &later(&ctx, 5), Target::All);
+        assert_eq!(
+            state(&m, &ctx).applied.unwrap().omp_version,
+            crate::plan::OMP_VERSION
+        );
+
+        let named = runtime_dirs_named_by_restore_points(&m.fs, &ctx.paths);
+        assert!(named.contains(&old), "{named:?}");
+        assert!(!named.contains(&stray), "{named:?}");
+        let mut keep = runtime_dirs_named_by(&state(&m, &ctx), &ctx.paths);
+        keep.extend(named);
+        assert_eq!(
+            prune_old_runtimes(m.system(), &ctx.paths, &keep).unwrap(),
+            std::slice::from_ref(&stray)
+        );
+        assert!(m.fs.exists(&old));
+
+        let journal = ctx.paths.snapshots().join(&reapply).join("journal.json");
+        m.fs.fail_reads_of(&journal);
+        assert!(!runtime_dirs_named_by_restore_points(&m.fs, &ctx.paths).contains(&old));
+        m.fs.stop_failing(&journal);
+
+        undo(m.system(), &later(&ctx, 10)).unwrap();
+        let back = state(&m, &ctx).applied.unwrap();
+        assert_eq!(back.omp_version, "31.4.0");
+        assert!(m.fs.exists(&old), "the undone state's Oh My Posh is there");
     }
 }

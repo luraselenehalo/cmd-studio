@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The main window may call exactly the IPC commands of spec §5.7 (with preview_render, open_external, advanced_read, recovery_status, theme_pause, theme_resume, app_ready, app_status, crash_dismiss, crash_report_read, settings_reset, log_ui_error and app_restart) and listen for the apply-progress event. Nothing else: no plugin command, no shell, no file system (spec §5.10).",
+  "description": "The main window may call exactly the IPC commands of spec §5.7 (with preview_render, open_external, advanced_read, recovery_status, theme_pause, theme_resume, app_ready, app_status, crash_dismiss, crash_report_read, settings_reset, log_ui_error, app_restart, update_status and update_install) and listen for the apply-progress event. Nothing else: no plugin command, no shell, no file system (spec §5.10).",
   "windows": ["main"],
   "permissions": [
     "core:event:allow-listen",
@@ -42,6 +42,8 @@
     "allow-crash-report-read",
     "allow-settings-reset",
     "allow-log-ui-error",
-    "allow-app-restart"
+    "allow-app-restart",
+    "allow-update-status",
+    "allow-update-install"
   ]
 }

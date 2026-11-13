@@ -1,6 +1,6 @@
 //! Guards over `tauri.conf.json` (tests only). No cargo build enables `tauri/custom-protocol`, so
 //! every exe is a "dev build" to tauri-codegen, which loads `build.devUrl` instead of the embedded
-//! assets when the key is set: whatever served that port would then hold the IPC of all 37
+//! assets when the key is set: whatever served that port would then hold the IPC of all 39
 //! commands. The config must not have it, must carry the CSP of the Global Constraints and
 //! nothing else under `app.security`, and must not create the window at startup (Task 15 builds
 //! it with a data directory).
@@ -88,7 +88,8 @@ const RESULT_CHECK: &str = "${If} $0 == \"error\"\n${OrIf} $0 == \"timeout\"\n${
 /// Spec §6.1, §6.3, G10, G-CFG: the bundle file is a per-user NSIS installer with the hooks
 /// file, the resources with their licenses and the app's LICENSE (two entries, no more: the
 /// console exe is bundled by Tauri under its cargo name), one Start-menu folder, Tauri's default
-/// WebView2 bootstrapper, no updater artifacts until 4b; the committed config keeps the bundle
+/// WebView2 bootstrapper, no updater artifacts in the committed file (release.yml turns them on
+/// through ci.yml's `sign` input); the committed config keeps the bundle
 /// off and names no resource; the two merged are a config Tauri accepts.
 #[test]
 fn the_bundle_file_is_a_per_user_nsis_installer_and_the_committed_config_stays_buildable() {
@@ -103,7 +104,7 @@ fn the_bundle_file_is_a_per_user_nsis_installer_and_the_committed_config_stays_b
     assert_eq!(bundle.get("targets"), Some(&serde_json::json!(["nsis"])));
     assert!(
         bundle.get("createUpdaterArtifacts").is_none(),
-        "4b turns the updater artifacts on"
+        "createUpdaterArtifacts comes through ci.yml's sign input for a release run only (phase 4b): a pull request's CI needs no signing secret"
     );
     let resources = bundle.get("resources").and_then(Value::as_object).unwrap();
     assert_eq!(resources.len(), 2);
@@ -510,4 +511,185 @@ fn the_main_binary_is_the_default_run_of_the_app_crate() {
     );
     let config: Value = serde_json::from_str(CONFIG).unwrap();
     assert_eq!(config["mainBinaryName"], "cmdstudio");
+}
+
+/// Spec §6.2, §5.10 (phase 4b): the updater's config, exactly: the one endpoint (GitHub's
+/// "latest" download, which serves the newest published release), a quiet install, the founder's
+/// minisign public key (Task 6; one base64 line, never empty again: TauriUpdater refuses to check
+/// with an empty one), `requireSignedVersion` (the Tauri CLI 2.12.3's `tauri build` writes the
+/// app's version into the signature's trusted comment, which the signature covers, and the
+/// plugin then refuses a latest.json whose version is not the signed one: no downgrade to an
+/// older signed installer under a newer number), and no dangerous switch (the spike sets
+/// `dangerousInsecureTransportProtocol` through --config only).
+#[test]
+fn the_updater_config_is_the_one_endpoint_quiet_and_without_dangerous_switches() {
+    let config: Value = serde_json::from_str(CONFIG).unwrap();
+    let updater = config
+        .pointer("/plugins/updater")
+        .and_then(Value::as_object)
+        .unwrap();
+    // serde_json's map is ordered by key, not by the file: sorted names, exactly these four.
+    let mut keys: Vec<&str> = updater.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        ["endpoints", "pubkey", "requireSignedVersion", "windows"]
+    );
+    assert_eq!(
+        updater.get("requireSignedVersion"),
+        Some(&Value::Bool(true)),
+        "the signed version must be the announced one (Task 6)"
+    );
+    assert_eq!(
+        updater.get("endpoints"),
+        Some(&serde_json::json!([
+            "https://github.com/luraselenehalo/cmd-studio/releases/latest/download/latest.json"
+        ]))
+    );
+    assert_eq!(
+        updater.get("windows"),
+        Some(&serde_json::json!({ "installMode": "quiet" }))
+    );
+    let pubkey = updater.get("pubkey").and_then(Value::as_str).unwrap();
+    assert!(
+        pubkey
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '='),
+        "base64: {pubkey:?}"
+    );
+    assert!(
+        pubkey.len() >= 64 && !pubkey.contains(char::is_whitespace),
+        "the founder's minisign public key, one base64 line (Task 6): {pubkey:?}"
+    );
+    assert_eq!(
+        config
+            .pointer("/plugins")
+            .and_then(Value::as_object)
+            .map(|p| p.len()),
+        Some(1),
+        "the updater is the only plugin with a config"
+    );
+    assert!(
+        !CONFIG.contains("dangerous"),
+        "no dangerous switch in the committed config"
+    );
+    // The plugin's own reading of the block: a misspelt key would deserialize too (its Config
+    // does not deny unknown fields), so the switch is read back from the plugin's struct.
+    let plugin: tauri_plugin_updater::Config =
+        serde_json::from_value(Value::Object(updater.clone())).unwrap();
+    assert!(plugin.require_signed_version);
+    assert_eq!(plugin.pubkey, pubkey);
+    let merged: tauri::utils::config::Config = serde_json::from_value(config).unwrap();
+    assert!(merged.plugins.0.contains_key("updater"));
+}
+
+/// Spec §6.4 (phase 4b), 4a's rulings and the ledger's: the release workflow signs through
+/// ci.yml's `sign` input (the secrets handed to the called workflow; a pull request's CI never
+/// needs them), uploads the installer under the hyphenated asset name with its .sig and
+/// latest.json (the updater's manifest, whose url is that asset under the release's tag), and
+/// makes a draft that is not flagged pre-release (GitHub's "latest" download skips flagged
+/// ones; the title and the notes keep the words). ci.yml merges createUpdaterArtifacts and sets
+/// the signing env only under the input, and copies the .sig only then. Both workflows read the
+/// version under [workspace.package] and nowhere else (4a's M6).
+#[test]
+fn the_release_workflow_signs_through_ci_yml_uploads_latest_json_and_is_not_a_prerelease() {
+    let release = include_str!("../../../.github/workflows/release.yml");
+    let ci = include_str!("../../../.github/workflows/ci.yml");
+    assert!(
+        release.contains("    with:\n      sign: true\n"),
+        "release.yml asks ci.yml to sign"
+    );
+    assert!(
+        release.contains("    secrets: inherit\n"),
+        "the signing key reaches ci.yml"
+    );
+    assert!(
+        !release.contains("--prerelease"),
+        "not flagged: the endpoint is releases/latest"
+    );
+    assert!(
+        release.contains("--draft"),
+        "still a draft the founder publishes"
+    );
+    for needle in [
+        "CMD-Studio_${version}_x64-setup.exe.sig",
+        "release/latest.json",
+        "releases/download/v${version}/CMD-Studio_${version}_x64-setup.exe",
+        "\"windows-x86_64\"",
+    ] {
+        assert!(release.contains(needle), "release.yml lacks {needle}");
+    }
+    assert!(
+        ci.contains("  workflow_call:\n    inputs:\n      sign:\n"),
+        "the input"
+    );
+    assert!(ci.contains(
+        "TAURI_SIGNING_PRIVATE_KEY: ${{ inputs.sign && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}"
+    ));
+    assert!(ci.contains("TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ inputs.sign && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}"));
+    assert!(
+        ci.contains("if [ \"${{ inputs.sign }}\" = \"true\" ]; then"),
+        "the merge and the .sig are under the input"
+    );
+    assert!(
+        ci.contains("'{\"bundle\":{\"createUpdaterArtifacts\":true}}'"),
+        "merged for the signed run only"
+    );
+    assert!(
+        ci.contains("cp \"$installer.sig\" stage/installer/"),
+        "the .sig travels with the installer"
+    );
+    let awk = r#"awk '/^\[workspace\.package\]/{t=1;next} /^\[/{t=0} t && /^version = /{gsub(/^version = "|"$/,""); print; exit}' Cargo.toml"#;
+    for (name, text) in [("ci.yml", ci), ("release.yml", release)] {
+        assert!(
+            text.contains(awk),
+            "{name} reads the version under [workspace.package]"
+        );
+        assert!(
+            !text.contains("grep -m1 '^version = '"),
+            "{name} still greps the first version line"
+        );
+    }
+}
+
+/// Phase 4b final review I3: `requireSignedVersion: true` refuses, silently by design, a
+/// signature whose trusted comment names no `version:<v>` field or another version. So a signed
+/// run checks the .sig it made (a step under `inputs.sign` only, after the installer's listing),
+/// and the updater spike checks both of its .sig files, through one script that base64-decodes
+/// the .sig and looks for the exact tab-separated field in its trusted comment.
+#[test]
+fn a_signed_build_proves_its_signature_names_the_version() {
+    let ci = include_str!("../../../.github/workflows/ci.yml");
+    let script = include_str!("../../../scripts/check-signed-version.sh");
+    let step = "      - name: The updater's signature names the version being built\n        if: inputs.sign\n        shell: bash\n";
+    assert!(ci.contains(step), "the step, on a signed run only");
+    let signed = ci.split(step).nth(1).unwrap_or_default();
+    let signed = signed.split("\n      - ").next().unwrap_or_default();
+    assert!(
+        signed.contains(
+            r#"bash ./scripts/check-signed-version.sh "target/release/bundle/nsis/CMD Studio_${version}_x64-setup.exe.sig" "$version""#
+        ),
+        "{signed}"
+    );
+    before(
+        ci,
+        "- name: The installer holds both exes, the resources and the licenses",
+        step,
+    );
+    before(ci, step, "          name: cmdstudio-installer\n");
+    assert!(
+        ci.contains(
+            r#"bash ../scripts/check-signed-version.sh "../spike/CMD Studio_${v}_x64-setup.exe.sig" "$v""#
+        ),
+        "the spike checks both of its .sig files"
+    );
+    for needle in [
+        "base64 -d",
+        "s/^trusted comment: //p",
+        "IFS=$'\\t'",
+        "= \"version:$version\" ]",
+        "exit 1",
+    ] {
+        assert!(script.contains(needle), "the script lacks {needle}");
+    }
 }

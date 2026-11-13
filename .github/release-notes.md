@@ -6,6 +6,8 @@ CMD Studio @VERSION@ — a pre-release for testers.
 
 **Uninstalling** puts everything back (AutoRun, Windows Terminal's settings, the font, your Path) and keeps your themes unless you tick the box to delete the app's data.
 
+**Updating:** CMD Studio checks for a new version each time it starts (Settings > Updates: Automatic, Tell me first, or Off), installs it when you close the app, and tells you which version it is now. To upgrade by hand instead, run the new installer and, on its "Already Installed" page, choose **Do not uninstall**: your theme and your settings stay. "Uninstall before installing", the default, puts everything back first, and the setup wizard runs again.
+
 **Bundled:** Clink 1.9.34 (GPL-3.0; source: https://github.com/chrisant996/clink/tree/v1.9.34), Oh My Posh 31.5.0 (MIT), CaskaydiaCove Nerd Font from Nerd Fonts 3.5.1 (SIL OFL 1.1). CMD Studio itself is MIT. The credits page in the app lists the color schemes.
 
 SHA-256 of the installer: `@SHA256@`

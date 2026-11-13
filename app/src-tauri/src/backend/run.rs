@@ -100,6 +100,8 @@ pub struct AppStatus {
     pub safe_mode_reason: Option<SafeModeReason>,
     pub crash_notice: Option<CrashNotice>,
     pub recovery_entry: Option<RecoveryEntry>,
+    /// The last run's update went through (spec §2.1): the notice, until closed.
+    pub updated: Option<super::update::Updated>,
 }
 
 /// The newest crash note, for the Report tab (recovery spec §5.3).
@@ -265,6 +267,11 @@ impl<M: Machine> Backend<M> {
         self.note_line(&format!("run start rollback={did}"));
     }
 
+    /// Whether this run is in safe mode now: from its start, or entered since (`enter_safe_mode`).
+    pub(crate) fn in_safe_mode(&self) -> bool {
+        self.run.with(|r| r.safe_mode.is_some())
+    }
+
     /// Safe mode from now on, for a `--recovery` that reached a running app (recovery spec §4.4).
     pub fn enter_safe_mode(&self, reason: SafeModeReason) {
         let mine = self.run.with(|r| {
@@ -303,6 +310,21 @@ impl<M: Machine> Backend<M> {
     /// When this run started, as its record says; `None` before `start_run`.
     pub(crate) fn run_started_at(&self) -> Option<u64> {
         self.run.with(|r| r.mine.as_ref().map(|m| m.started_at))
+    }
+
+    /// Whether this process wrote the run's record (`start_run` found no live earlier run): only
+    /// then does it read the updater's record, check, or install. An instance that
+    /// single-instance is about to end does none of it (Q8).
+    pub(crate) fn run_is_ours(&self) -> bool {
+        self.run.with(|r| r.mine.is_some())
+    }
+
+    /// Writes this run's record again after `end_run` took it away for an install that then did
+    /// not start (Q16): the run goes on and must be noticed if it ends abnormally.
+    pub(crate) fn rewrite_run_record(&self) {
+        if let Some(mine) = self.run.with(|r| r.mine.clone()) {
+            self.write_record(&mine);
+        }
     }
 
     /// The newest crash note, for the Report tab (recovery spec §5.3): its file name, its time,
@@ -441,6 +463,7 @@ impl<M: Machine> Backend<M> {
         if let Some(mine) = mine {
             self.write_record(&mine);
         }
+        self.update_record_consumed();
         Ok(())
     }
 
@@ -473,12 +496,14 @@ impl<M: Machine> Backend<M> {
     }
 
     pub fn app_status(&self) -> Result<AppStatus, AppError> {
+        let updated = self.updated();
         Ok(self.run.with(|r| AppStatus {
             busy: r.busy.last().map(|n| (*n).to_string()),
             safe_mode: r.safe_mode.is_some(),
             safe_mode_reason: r.safe_mode,
             crash_notice: r.crash_notice,
             recovery_entry: r.recovery_entry.clone(),
+            updated,
         }))
     }
 
@@ -954,6 +979,18 @@ mod tests {
             let _: Result<(), AppError> = b.logged(APPLY, |_| panic!("a bug"));
         }));
         assert_eq!(b.app_status().unwrap().busy, None);
+        // The notice of an update rides on the same status (spec §2.1); only a run that is this
+        // process's own reads update.json.
+        b.start_run(GuiStart::Normal);
+        fake_fs(&b).put(
+            b.paths().update_file(),
+            br#"{"version":1,"from":"0.1.0","to":"0.2.0","notesUrl":"https://github.com/luraselenehalo/cmd-studio/releases/tag/v0.2.0"}"#,
+        );
+        b.update_after_start("0.2.0");
+        assert_eq!(
+            b.app_status().unwrap().updated.map(|u| u.to),
+            Some("0.2.0".to_string())
+        );
     }
 
     /// K12: the `--recovery` entry is busy under its own name for its whole duration, so the

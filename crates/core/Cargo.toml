@@ -39,6 +39,8 @@ winreg = "=0.56.0"
 # (FormatMessageW) and System_LibraryLoader (GetModuleHandleW for ntdll), for Windows' error
 # text in English. eventlog.rs: System_EventLog (EvtQuery, EvtNext, EvtRender, EvtClose) and
 # Foundation (GetLastError), for cmd's crashes in Windows' Application log (recovery spec §4.3).
+# host.rs's cmd_running: System_Diagnostics_ToolHelp (CreateToolhelp32Snapshot, Process32FirstW,
+# Process32NextW) and System_RemoteDesktop (ProcessIdToSessionId), phase 4b final review I1.
 windows-sys = { version = "=0.61.2", features = [
     "Win32_Foundation",
     "Win32_Globalization",
@@ -49,8 +51,10 @@ windows-sys = { version = "=0.61.2", features = [
     "Win32_Storage_Packaging_Appx",
     "Win32_System_Com",
     "Win32_System_Diagnostics_Debug",
+    "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_EventLog",
     "Win32_System_LibraryLoader",
+    "Win32_System_RemoteDesktop",
     "Win32_System_SystemInformation",
     "Win32_System_SystemServices",
     "Win32_System_Threading",

@@ -30,6 +30,7 @@ pub mod preview;
 pub mod recovery;
 pub mod run;
 pub mod system;
+pub mod update;
 
 /// What the backend runs on: the real adapters (`crate::machine::RealMachine`) or the core's
 /// `FakeMachine` in tests.
@@ -83,6 +84,8 @@ pub struct Backend<M> {
     crash: recovery::CrashSlot,
     /// This run: the record, safe mode, the crash notice, what runs now (recovery spec §5).
     run: run::RunState,
+    /// The updater's state of this run (spec §6.2, phase 4b).
+    update: update::UpdateSlot,
 }
 
 impl<M: Machine> Backend<M> {
@@ -110,6 +113,7 @@ impl<M: Machine> Backend<M> {
             sample,
             crash: recovery::CrashSlot::new(),
             run: run::RunState::new(),
+            update: update::UpdateSlot::new(),
         }
     }
 
@@ -545,6 +549,13 @@ pub(crate) mod testing {
     /// The fake crash reports under the backend (see [`fake_fs`]).
     pub(crate) fn fake_events(b: &Backend<FakeMachine>) -> &FakeEventLog {
         &b.machine.event_log
+    }
+
+    /// The fake programs under the backend (see [`fake_fs`]): a test makes Oh My Posh fail.
+    pub(crate) fn fake_process(
+        b: &Backend<FakeMachine>,
+    ) -> &cmdstudio_core::adapters::fake::FakeProcess {
+        &b.machine.process
     }
 
     /// The id of the Terracotta preset.

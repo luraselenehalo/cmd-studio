@@ -3,7 +3,7 @@
 // nothing is given up after a minute with E_TIMEOUT and its late answer dropped; one that
 // changes the machine is never given up (its transaction must end), but after three minutes
 // the bar offers "Restart CMD Studio". The two commands that wait for the user's file dialog
-// are shown but never timed; the restart itself is neither timed nor shown. One list says what each command is.
+// are shown but never timed; the restart and Update now are neither timed nor shown. One list says what each command is.
 import type { Key } from "../i18n/types";
 import { IpcError, type Ipc } from "./types";
 
@@ -53,9 +53,11 @@ export const KINDS: Record<keyof Ipc, Kind> = {
   settingsReset: "read",
   logUiError: "read",
   appRestart: "exit",
+  updateStatus: "read",
+  updateInstall: "exit",
 };
 
-/** The bar's words for each command (recovery spec §6.1): fifteen tasks. */
+/** The bar's words for each command (recovery spec §6.1): sixteen tasks. */
 export const TASK: Record<keyof Ipc, Key> = {
   systemDetect: "work.reading",
   themesList: "work.readingThemes",
@@ -94,6 +96,8 @@ export const TASK: Record<keyof Ipc, Key> = {
   settingsReset: "work.settings",
   logUiError: "work.noting",
   appRestart: "work.restarting",
+  updateStatus: "work.reading",
+  updateInstall: "work.updating",
 };
 
 /** The E_TIMEOUT row of spec §5.9, as `MEANINGS` in app/src-tauri/src/error.rs has it (a test

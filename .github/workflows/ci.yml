@@ -8,8 +8,23 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
-  # release.yml calls this workflow on a tag: the same gates and the same installer, never a copy (spec §6.4)
+    inputs:
+      # Phase 4b Task 1: two spike installers signed with an ephemeral key, and a latest.json for
+      # the VM. Off by default; a push or a pull request never builds them.
+      updater_spike:
+        description: 'Also build the updater spike (two versions, an ephemeral key, latest.json)'
+        type: boolean
+        default: false
+  # release.yml calls this workflow on a tag: the same gates and the same installer, never a copy
+  # (spec §6.4). With `sign` the installer is signed for the updater (phase 4b): the bundler gets
+  # createUpdaterArtifacts for that run and the founder's key from the secrets the caller hands
+  # over. A push, a pull request or a fork never signs: their CI needs no secret.
   workflow_call:
+    inputs:
+      sign:
+        description: 'Sign the installer with the updater key and keep its .sig (release.yml only)'
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -35,6 +50,12 @@ jobs:
           cargo --version
       - name: Format
         run: cargo fmt --all -- --check
+      # The upstream watch's script (phase 4b) in fixture mode: no network, nothing of the repo
+      # written, under Windows PowerShell 5.1 as on the dev PC (upstream-watch.yml runs it under
+      # PowerShell 7 on Linux too).
+      - name: Upstream watch script (fixture mode)
+        shell: powershell
+        run: ./scripts/upstream-watch.test.ps1 -Work "$env:RUNNER_TEMP\upstream-test"
       # The fake adapters sit behind the core's `fake` feature, which only the CLI's
       # dev-dependency turns on. So the first run below lints the core WITH the fakes (a
       # workspace build unifies the feature), the second WITHOUT them, as a release build
@@ -198,11 +219,26 @@ jobs:
       # `npm run tauri --` runs the Tauri CLI that package-lock.json locks (node_modules/.bin) and
       # nothing else: npm run never downloads a package, while `npx` fetches a missing one (a try
       # with npm 11: `npx --no-install <unknown package>` still asked the registry). bash, so
-      # that the `--` reaches npm as written.
+      # that the `--` reaches npm as written. A signed run (`inputs.sign`, release.yml) merges
+      # `createUpdaterArtifacts` into that config for the run.
       - name: Tauri build (with the NSIS bundle)
         shell: bash
         working-directory: app
-        run: npm run tauri -- build --config src-tauri/tauri.bundle.conf.json
+        # The updater's signature (spec §6.2, §6.4, phase 4b) on a signed run only: the founder's
+        # key from the repository's secrets, handed over by release.yml; empty otherwise, and the
+        # bundler then makes no updater artifact (createUpdaterArtifacts is merged in below only
+        # under the input, never committed). Never printed.
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ inputs.sign && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ inputs.sign && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+        run: |
+          config=src-tauri/tauri.bundle.conf.json
+          if [ "${{ inputs.sign }}" = "true" ]; then
+            printf '%s' '{"bundle":{"createUpdaterArtifacts":true}}' > "$RUNNER_TEMP/sign.override.json"
+            jq -s '.[0] * .[1]' "$config" "$RUNNER_TEMP/sign.override.json" > "$RUNNER_TEMP/sign.conf.json"
+            config="$RUNNER_TEMP/sign.conf.json"
+          fi
+          npm run tauri -- build --config "$config"
       # The same search again, now that `tauri build` has built the UI once more: the exe embeds
       # the dist as this build left it, so this is the gate on what ships.
       - name: The UI the exe embeds holds no mock data and no preset file
@@ -213,21 +249,44 @@ jobs:
       # files inside are checked here without running it: both binaries (the console one under
       # its cargo name; the installer's hook renames it to cmdstudio.com, G-BIN), the runtimes'
       # manifest, the three licenses and Clink's source notice, the app's LICENSE. Its size is
-      # printed for the spec's §6.1 (20–30 MB estimated). SHA256SUMS.txt goes with it.
+      # printed for the spec's §6.1 (20–30 MB estimated). SHA256SUMS.txt goes with it, and, on a
+      # signed run, the updater's .sig (phase 4b).
       - name: The installer holds both exes, the resources and the licenses
         shell: bash
         run: |
-          version="$(grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')"
+          # The one version: the line under [workspace.package] and no other (4a's M6).
+          version="$(awk '/^\[workspace\.package\]/{t=1;next} /^\[/{t=0} t && /^version = /{gsub(/^version = "|"$/,""); print; exit}' Cargo.toml)"
+          test -n "$version"
           installer="target/release/bundle/nsis/CMD Studio_${version}_x64-setup.exe"
           test -f "$installer"
           ls -l "$installer"
+          if [ "${{ inputs.sign }}" = "true" ]; then
+            test -f "$installer.sig"
+            ls -l "$installer.sig"
+          fi
           7z l "$installer" > installer-files.txt
           for f in cmdstudio.exe cmdstudio-cli.exe 'resources\manifest.json' 'resources\omp\oh-my-posh.exe' 'resources\clink\clink_x64.exe' 'resources\clink\clink_dll_x64.dll' 'resources\fonts\CaskaydiaCoveNerdFont-Regular.ttf' 'resources\LICENSES\oh-my-posh-MIT.txt' 'resources\LICENSES\clink-GPL-3.0.txt' 'resources\LICENSES\clink-SOURCE.txt' 'resources\LICENSES\CaskaydiaCove-NF-OFL-1.1.txt' LICENSE.txt; do
             grep -q -F -- "$f" installer-files.txt || { echo "::error::$f is not in the installer"; exit 1; }
           done
           mkdir -p stage/installer
           cp "$installer" stage/installer/
+          if [ "${{ inputs.sign }}" = "true" ]; then
+            cp "$installer.sig" stage/installer/
+          fi
           (cd stage/installer && sha256sum -- *.exe > SHA256SUMS.txt && cat SHA256SUMS.txt)
+      # The updater runs with `requireSignedVersion: true` (tauri.conf.json): it refuses, silently
+      # by design, a signature whose trusted comment does not name the version latest.json offers
+      # in a tab-separated `version:<v>` field. So a signed run proves the .sig it made names the
+      # version being built, before the artifact is uploaded (phase 4b final review I3); the
+      # script base64-decodes the .sig and looks for that exact field. The trusted comment is
+      # public: nothing secret is read or printed. An unsigned run has no .sig and skips this.
+      - name: The updater's signature names the version being built
+        if: inputs.sign
+        shell: bash
+        run: |
+          version="$(awk '/^\[workspace\.package\]/{t=1;next} /^\[/{t=0} t && /^version = /{gsub(/^version = "|"$/,""); print; exit}' Cargo.toml)"
+          test -n "$version"
+          bash ./scripts/check-signed-version.sh "target/release/bundle/nsis/CMD Studio_${version}_x64-setup.exe.sig" "$version"
       # For the VM check of phase 4a (install, uninstall; docs/spikes/phase4-install/protocol.md).
       - uses: actions/upload-artifact@v4
         with:
@@ -269,4 +328,53 @@ jobs:
         with:
           name: cmdstudio-exe
           path: stage/cmdstudio
+          if-no-files-found: error
+      # Phase 4b Task 1's spike (docs/spikes/phase4-update/protocol.md part A), only on a
+      # workflow_dispatch with updater_spike: an ephemeral minisign key made here under
+      # $RUNNER_TEMP and never uploaded (its .pub is), two builds of this same code at the
+      # versions 0.1.0-spike.1 and 0.1.0-spike.2, each signed, with the updater pointed at a
+      # server inside the VM (http://127.0.0.1:8765, served by spikes/vm/guest/update-server.ps1;
+      # dangerousInsecureTransportProtocol, which the committed config forbids: config_guard),
+      # and a latest.json that offers spike.2, one that offers spike.1 again (U5: equal), and one
+      # that is not JSON (U5: malformed). jq merges the bundle file with the override (`*` is
+      # jq's recursive merge), so one --config is passed as always. Mixed path separators from
+      # $RUNNER_TEMP are fine in Git Bash. The key is made with --ci and no -p, so it has no
+      # password: the Tauri CLI (2.12.3) reads an absent password as an empty one, and the empty
+      # TAURI_SIGNING_PRIVATE_KEY_PASSWORD below says the same explicitly. The CLI takes
+      # TAURI_SIGNING_PRIVATE_KEY as the key's text or a path to it for `build`.
+      - name: Updater spike builds (ephemeral key, two versions, latest.json)
+        if: github.event_name == 'workflow_dispatch' && inputs.updater_spike
+        shell: bash
+        working-directory: app
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ runner.temp }}/spike.key
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
+        run: |
+          npm run tauri -- signer generate -w "$RUNNER_TEMP/spike.key" --ci
+          pub="$(tr -d '\r\n' < "$RUNNER_TEMP/spike.key.pub")"
+          test -n "$pub"
+          mkdir -p ../spike
+          for n in 1 2; do
+            v="0.1.0-spike.$n"
+            jq -n --arg v "$v" --arg pub "$pub" '{version: $v, plugins: {updater: {pubkey: $pub, endpoints: ["http://127.0.0.1:8765/latest.json"], dangerousInsecureTransportProtocol: true, windows: {installMode: "quiet"}}}, bundle: {createUpdaterArtifacts: true}}' > "$RUNNER_TEMP/spike$n.override.json"
+            jq -s '.[0] * .[1]' src-tauri/tauri.bundle.conf.json "$RUNNER_TEMP/spike$n.override.json" > "$RUNNER_TEMP/spike$n.conf.json"
+            npm run tauri -- build --config "$RUNNER_TEMP/spike$n.conf.json"
+            cp "../target/release/bundle/nsis/CMD Studio_${v}_x64-setup.exe" "../target/release/bundle/nsis/CMD Studio_${v}_x64-setup.exe.sig" ../spike/
+            # As on a signed run: the .sig names this build's version (final review I3).
+            bash ../scripts/check-signed-version.sh "../spike/CMD Studio_${v}_x64-setup.exe.sig" "$v"
+          done
+          when="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          sig2="$(tr -d '\r\n' < "../spike/CMD Studio_0.1.0-spike.2_x64-setup.exe.sig")"
+          sig1="$(tr -d '\r\n' < "../spike/CMD Studio_0.1.0-spike.1_x64-setup.exe.sig")"
+          jq -n --arg sig "$sig2" --arg when "$when" '{version: "0.1.0-spike.2", notes: "the updater spike", pub_date: $when, platforms: {"windows-x86_64": {signature: $sig, url: "http://127.0.0.1:8765/CMD%20Studio_0.1.0-spike.2_x64-setup.exe"}}}' > ../spike/latest.json
+          jq -n --arg sig "$sig1" --arg when "$when" '{version: "0.1.0-spike.1", notes: "the updater spike", pub_date: $when, platforms: {"windows-x86_64": {signature: $sig, url: "http://127.0.0.1:8765/CMD%20Studio_0.1.0-spike.1_x64-setup.exe"}}}' > ../spike/latest.same.json
+          printf '{ "version": "0.1.0-spike.2", not json' > ../spike/latest.bad.json
+          cp "$RUNNER_TEMP/spike.key.pub" ../spike/
+          test ! -e ../spike/spike.key
+          ls -l ../spike
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'workflow_dispatch' && inputs.updater_spike
+        with:
+          name: cmdstudio-updater-spike
+          path: spike
           if-no-files-found: error

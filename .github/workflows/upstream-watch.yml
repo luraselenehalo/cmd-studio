@@ -1,0 +1,70 @@
+# The upstream watch (spec §6.2, §6.4, phase 4b): every day, the newest releases of Oh My Posh,
+# Clink and Nerd Fonts; when one is newer than scripts/fetch-resources.ps1 pins, the script
+# rewrites the pins and this workflow opens one pull request with what a person finishes. It
+# never merges, never tags, never pushes to main. A pull request's checks run only when the push
+# came from a person's token: GITHUB_TOKEN's pushes start no workflow, so without the founder's
+# fine-grained UPSTREAM_WATCH_TOKEN (contents: write, pull requests: write, this repository) the
+# PR is opened all the same and the founder closes and reopens it to run CI (with GITHUB_TOKEN
+# the repository setting "Allow GitHub Actions to create and approve pull requests" must be on).
+# The token is referenced as a secret only and never printed.
+name: upstream-watch
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+permissions:
+  contents: write
+  pull-requests: write
+concurrency:
+  group: upstream-watch
+  cancel-in-progress: false
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.UPSTREAM_WATCH_TOKEN || github.token }}
+      # The script's own test first (fixture mode: no network, nothing of the repo written), so a
+      # script that would half-rewrite the pins never runs against the real releases.
+      - name: The script's own test (fixture mode, no network)
+        shell: pwsh
+        run: ./scripts/upstream-watch.test.ps1 -Work "$env:RUNNER_TEMP/upstream-test"
+      - name: Rewrite the pins when upstream is newer
+        shell: pwsh
+        run: ./scripts/upstream-watch.ps1 -Work "$env:RUNNER_TEMP/upstream-watch"
+      - name: One pull request, unless one for these versions is open
+        env:
+          GH_TOKEN: ${{ secrets.UPSTREAM_WATCH_TOKEN || github.token }}
+        shell: bash
+        run: |
+          if git diff --quiet -- scripts/fetch-resources.ps1; then
+            echo "nothing newer upstream"
+            exit 0
+          fi
+          # The three versions, from the release download URLs (the exe, the Clink zip, the font).
+          versions="$(grep -o -E "releases/download/v[^/']+" scripts/fetch-resources.ps1 | sed 's#releases/download/v##' | tr '\n' ' ' | sed 's/ $//')"
+          title="upstream: $versions"
+          if [ -n "$(gh pr list --state open --search "\"$title\" in:title" --json number --jq '.[].number')" ]; then
+            echo "a pull request for these versions is open already: $title"
+            exit 0
+          fi
+          branch="upstream/$(date -u +%Y-%m-%d)"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git add -- scripts/fetch-resources.ps1
+          git commit -m "scripts: upstream pins ($versions)"
+          git push --set-upstream origin "$branch"
+          cat > body.md <<'EOF'
+          The daily upstream watch found a newer release of a bundled add-on and rewrote the pins (the URLs and every SHA-256) in `scripts/fetch-resources.ps1`. This pull request is not mergeable as it is: CI fails until a person finishes what the script cannot:
+
+          - [ ] `OMP_VERSION` and `CLINK_VERSION` in `crates/core/src/plan.rs`, `NERD_FONTS_VERSION` in `crates/core/src/resources.rs`
+          - [ ] the versions in `app/ui/src/screens/credits.ts`, `docs/credits.md`, `.github/release-notes.md` and `README.md`
+          - [ ] the parity test (`crates/core/tests/parity.rs`) against the new Oh My Posh: fix the preview's simulator, never lower the test (spec §6.4)
+          - [ ] the doctor's reading of `oh-my-posh version` (D2) if its output changed
+
+          Nothing is merged or tagged by this workflow; the founder reviews, merges, and releases through `release.yml`.
+          EOF
+          gh pr create --title "$title" --body-file body.md --base main --head "$branch"
