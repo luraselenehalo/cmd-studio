@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
   Fills resources\ with the runtimes CMD Studio ships (spec sections 5.1, 6.1, 6.6):
-  Oh My Posh 31.5.0, Clink 1.9.34 (x64 files only), the CaskaydiaCove NF font
+  Oh My Posh 32.0.0, Clink 1.9.36 (x64 files only), the CaskaydiaCove NF font
   from Nerd Fonts 3.5.1, and their licenses. Writes resources\manifest.json
   with the SHA-256 of every file, which the app checks (doctor D1).
 .DESCRIPTION
@@ -38,22 +38,22 @@ $Destination = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFrom
 #  - clink zip: GitHub's asset digest and a local download agree (Clink publishes a .cat catalog, not a checksum file).
 #  - CascadiaCode.zip: publisher's SHA-256.txt, GitHub's asset digest, a local download and spike G12 agree.
 $Downloads = @(
-  @{ Name = 'posh-windows-amd64.exe'; Url = 'https://github.com/JanDeDobbeleer/oh-my-posh/releases/download/v31.5.0/posh-windows-amd64.exe'; Sha256 = '9dd2c1297d5ae89f23f19b02f74a25510fcb56d84da5139fa3c3ca6e6d008a73' },
-  @{ Name = 'oh-my-posh-COPYING'; Url = 'https://raw.githubusercontent.com/JanDeDobbeleer/oh-my-posh/v31.5.0/COPYING'; Sha256 = 'a5308c4e51268229a039ec4ec9a251a4cdb89d9380383e6e13aeba64a74f19ad' },
-  @{ Name = 'clink.1.9.34.4e8ae4.zip'; Url = 'https://github.com/chrisant996/clink/releases/download/v1.9.34/clink.1.9.34.4e8ae4.zip'; Sha256 = '50f6ee0474e3bd02b48ce8c8f63ed933a14aee5127fc7072cb976ce10a43ce23' },
+  @{ Name = 'posh-windows-amd64.exe'; Url = 'https://github.com/JanDeDobbeleer/oh-my-posh/releases/download/v32.0.0/posh-windows-amd64.exe'; Sha256 = 'd34b1866860ca82b9349f0321aedcf40b5ad7edecd569d7c8d05c24512a4411c' },
+  @{ Name = 'oh-my-posh-COPYING'; Url = 'https://raw.githubusercontent.com/JanDeDobbeleer/oh-my-posh/v32.0.0/COPYING'; Sha256 = 'a5308c4e51268229a039ec4ec9a251a4cdb89d9380383e6e13aeba64a74f19ad' },
+  @{ Name = 'clink.1.9.36.af9152.zip'; Url = 'https://github.com/chrisant996/clink/releases/download/v1.9.36/clink.1.9.36.af9152.zip'; Sha256 = '1eb57b2511cdc6b97b002f198fea8596f28c445eaafa4507c2215a53261357c9' },
   @{ Name = 'CascadiaCode.zip'; Url = 'https://github.com/ryanoasis/nerd-fonts/releases/download/v3.5.1/CascadiaCode.zip'; Sha256 = '1298bf92698afa06185cf1d05e6ae05f2d8a1e8c3cb45ddf4c3035168ab342a1' }
 )
 # Files taken out of the archives (computed 2026-10-11 from the archives above).
 $Pinned = @{
-  'omp\oh-my-posh.exe'                        = '9dd2c1297d5ae89f23f19b02f74a25510fcb56d84da5139fa3c3ca6e6d008a73'
-  'clink\clink_x64.exe'                       = 'becacc801270b8282c4cdff9378dc40f061bfe1b76bb87ca621c4bc572c2d8eb'
-  'clink\clink_dll_x64.dll'                   = '889b712037886dfde205e4b637a021848734ed218ee21c5718e2bf23a9e9d8f2'
+  'omp\oh-my-posh.exe'                        = 'd34b1866860ca82b9349f0321aedcf40b5ad7edecd569d7c8d05c24512a4411c'
+  'clink\clink_x64.exe'                       = '9e2b993cc4c46a7bf17f688b1898dfa30302d7c50f2b1eebb827a451558f6862'
+  'clink\clink_dll_x64.dll'                   = '4a09e781eac112beac41fd87a043c270f57b029b3d7c1ea120ca32cda581edb7'
   'fonts\CaskaydiaCoveNerdFont-Regular.ttf'   = 'fae37ce4fdc965ba5d3caea122b856418dc5dec2e4e638a024c49d681ffce5e9'
   'LICENSES\oh-my-posh-MIT.txt'               = 'a5308c4e51268229a039ec4ec9a251a4cdb89d9380383e6e13aeba64a74f19ad'
   'LICENSES\clink-GPL-3.0.txt'                = '5f631fae467c82b8cd28fd1ec425c816895a35f9d94e36bee0e0164570e8e0f6'
   'LICENSES\CaskaydiaCove-NF-OFL-1.1.txt'     = '82c05d6c53dfa0c9025985c19e371810020b74ed2c61d51d370f2a8ab2506d52'
 }
-$ClinkSource = "Clink 1.9.34 is GPL-3.0. Its source code for this exact release:`nhttps://github.com/chrisant996/clink/tree/v1.9.34`n"
+$ClinkSource = "Clink 1.9.36 is GPL-3.0. Its source code for this exact release:`nhttps://github.com/chrisant996/clink/tree/v1.9.36`n"
 
 function Hash([string] $Path) { (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
 function NewDir([string] $Parent) {
@@ -69,7 +69,7 @@ function Manifest([hashtable] $files) {
         '      "{0}": "{1}"' -f $_.Substring($prefix.Length + 1), $files[$_] })
     "    `"version`": `"$version`",`n    `"files`": {`n" + ($lines -join ",`n") + "`n    }"
   }
-  "{`n  `"omp`": {`n" + (& $bundle '31.5.0' 'omp') + "`n  },`n  `"clink`": {`n" + (& $bundle '1.9.34' 'clink') +
+  "{`n  `"omp`": {`n" + (& $bundle '32.0.0' 'omp') + "`n  },`n  `"clink`": {`n" + (& $bundle '1.9.36' 'clink') +
     "`n  },`n  `"fonts`": {`n" + (& $bundle '3.5.1' 'fonts') + "`n  }`n}`n"
 }
 function Complete([string] $Dir) {
@@ -121,7 +121,7 @@ try {
     $got[$d.Name] = $file
   }
   $clinkX = NewDir $work
-  Expand-Archive -LiteralPath $got['clink.1.9.34.4e8ae4.zip'] -DestinationPath $clinkX
+  Expand-Archive -LiteralPath $got['clink.1.9.36.af9152.zip'] -DestinationPath $clinkX
   $fontX = NewDir $work
   Expand-Archive -LiteralPath $got['CascadiaCode.zip'] -DestinationPath $fontX
 
